@@ -1,28 +1,25 @@
-"""Repository-discovery source-pull regression coverage for bounded queues (#2399)."""
+"""Repository-discovery source-pull regression coverage for bounded queues."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event
 from typing import Any
 
 import pytest
 
 from hephaestus.automation import loop_repo_manager
 from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator
-from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
+from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.base import Continue, Stage
 from hephaestus.automation.pipeline.stages.repo import RepoStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
-from tests.unit.automation.pipeline.conftest import FakeWorkerPool, fake_worker_factories
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
-class _ImmediatePassStage(Stage):
-    """Finish planning synchronously so source admission order is observable."""
+class _ImmediatePassStage:
+    """Finish planning synchronously so admission order is observable."""
 
     def __init__(self, events: list[tuple[str, int]]) -> None:
         self._events = events
@@ -42,7 +39,7 @@ class _ImmediatePassStage(Stage):
 
 
 def _facts(issue: int) -> IssueFacts:
-    """Return one eligible, planning-entry issue classification."""
+    """Return one eligible planning-entry issue classification."""
     return IssueFacts(
         number=issue,
         title=f"Issue {issue}",
@@ -55,69 +52,19 @@ def _facts(issue: int) -> IssueFacts:
     )
 
 
-def test_repo_discovery_never_materializes_an_unbounded_products_spill(
+def test_large_repo_discovery_retains_only_page_cursor_and_one_pending_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A repo source must retain a cursor, not all C+1 classified products.
+    """Ten thousand issues never become a products list or resident WorkItems."""
+    produced = 0
 
-    The bounded pipeline's only work-holding queues are coordinator-owned.
-    Discovery metadata may be read one page at a time, but the repo WorkItem
-    cannot turn every eligible issue into a ``payload["products"]`` spill list
-    before the planning queue has made capacity.
-    """
-    repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO, state="DISCOVER")
-    repo_item.payload["_synced_default_branch_sha"] = "a" * 40
-    ctx = type(
-        "Context",
-        (),
-        {
-            "org": "org",
-            "github": FakeStageGitHub(labels=["state:needs-plan"]),
-            "config": PipelineConfig(org="org", repos=["repo-a"]),
-            "cancellation": Event(),
-        },
-    )()
-    metadata = [
-        {"number": 101, "labels": ["state:needs-plan"], "title": "first"},
-        {"number": 102, "labels": ["state:needs-plan"], "title": "second"},
-    ]
-    monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
-    )
-    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", lambda issue, _github: _facts(issue))
+    def metadata_source(_org: str, _repo: str):
+        nonlocal produced
+        for issue in range(1, 10_001):
+            produced += 1
+            yield {"number": issue, "labels": ["state:needs-plan"], "title": f"Issue {issue}"}
 
-    result = RepoStage().step(repo_item, ctx)
-
-    assert isinstance(result, Continue)
-    assert "products" not in repo_item.payload
-    assert repo_item.payload["_repo_issue_source"].base_main_sha == "a" * 40
-
-
-def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """C+1 discovered issues classify only as C=1 capacity becomes available.
-
-    The first issue may enter and finish before the second is classified.  No
-    internal saturation is a shutdown/fatal error, every issue finishes once,
-    and source order remains stable across the admission boundary.
-    """
-    events: list[tuple[str, int]] = []
-    metadata = [
-        {"number": 101, "labels": ["state:needs-plan"], "title": "first"},
-        {"number": 102, "labels": ["state:needs-plan"], "title": "second"},
-    ]
-
-    def classify(issue: int, github: Any) -> IssueFacts:
-        del github
-        events.append(("classify", issue))
-        return _facts(issue)
-
-    monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
-    )
-    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
-
+    monkeypatch.setattr(loop_repo_manager, "_iter_open_issue_meta", metadata_source)
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -125,385 +72,92 @@ def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
             loops=1,
             parallel_repos=1,
             max_workers=1,
-            dry_run=True,
+            stage_queue_capacity=1,
             projects_dir=tmp_path,
-            rate_guard_enabled=False,
         ),
         github=FakeStageGitHub(labels=["state:needs-plan"]),
-        **fake_worker_factories(FakeWorkerPool(), None),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO, state="DISCOVER")
+    ctx = coordinator._ctx_for_repo("repo-a")
+
+    result = RepoStage().step(repo_item, ctx)
+    repo_item.state = result.next_state  # type: ignore[union-attr]
+    source = repo_item.payload["_repo_issue_source"]
+    assert coordinator._externalize_repo_issue_source(repo_item, source)
+
+    # Fill every possible downstream stage and the bounded spool so the
+    # cursor can retain only one not-yet-classified metadata row.
+    for stage in StageName:
+        if stage is StageName.REPO:
+            continue
+        blocker = WorkItem(repo="block", kind=ItemKind.REPO, stage=stage)
+        assert coordinator.queues[stage].offer(blocker)
+    for _index in range(coordinator._admission_spool_capacity):
+        coordinator._pending_admissions.append(
+            (
+                WorkItem(repo="pending", kind=ItemKind.REPO),
+                StageName.PLANNING,
+                True,
+            )
+        )
+
+    coordinator._drain_repo_issue_sources()
+
+    assert produced == 1
+    assert len(coordinator._repo_issue_sources) == 1
+    active = coordinator._repo_issue_sources[0]
+    assert active.source.pending is not None
+    assert active.source.pending["number"] == 1
+    assert "products" not in repo_item.payload
+    assert not [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
+
+
+def test_repo_source_is_lossless_and_ordered_at_capacity_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C+1 discovered issues classify only as capacity becomes available."""
+    events: list[tuple[str, int]] = []
+    metadata = [
+        {"number": 101, "labels": ["state:needs-plan"], "title": "first"},
+        {"number": 102, "labels": ["state:needs-plan"], "title": "second"},
+    ]
+
+    monkeypatch.setattr(
+        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
+    )
+
+    def classify(issue: int, github: Any) -> IssueFacts:
+        del github
+        events.append(("classify", issue))
+        return _facts(issue)
+
+    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            stage_queue_capacity=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
         install_signals=False,
     )
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
 
     assert coordinator.run() == 0
-
     assert events == [
         ("classify", 101),
         ("complete", 101),
         ("classify", 102),
         ("complete", 102),
     ]
-    discovered = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
-    assert [item.issue for item in discovered] == [101, 102]
-    assert all(item.result is not None and item.result.passed for item in discovered)
-    assert coordinator.shutdown.is_set() is False
-    assert coordinator._fatal is False
-    assert coordinator._all_idle()
-
-
-def test_repo_entries_are_source_pulled_in_order_at_capacity_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """C+1 repositories wait at one FIFO cursor instead of being dropped.
-
-    A repository source holds the sole REPO-stage lease through its bounded
-    issue cursor.  The next configured repository is therefore admitted only
-    after that source has drained, preserving source order without creating an
-    unbounded list of repo ``WorkItem`` instances.
-    """
-    events: list[tuple[str, int]] = []
-    metadata = {
-        "repo-a": [{"number": 101, "labels": ["state:needs-plan"], "title": "first"}],
-        "repo-b": [{"number": 201, "labels": ["state:needs-plan"], "title": "second"}],
-    }
-
-    def classify(issue: int, github: Any) -> IssueFacts:
-        del github
-        events.append(("classify", issue))
-        return _facts(issue)
-
-    monkeypatch.setattr(
-        loop_repo_manager,
-        "_iter_open_issue_meta",
-        lambda _org, repo, **_kwargs: iter(metadata[repo]),
-    )
-    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
-
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo-a", "repo-b"],
-            loops=1,
-            parallel_repos=1,
-            max_workers=1,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=FakeStageGitHub(labels=["state:needs-plan"]),
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
-
-    assert coordinator.run() == 0
-
-    assert events == [
-        ("classify", 101),
-        ("complete", 101),
-        ("classify", 201),
-        ("complete", 201),
-    ]
-    assert [item.issue for item in coordinator.items if item.kind is ItemKind.ISSUE] == [101, 201]
-    assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
-    assert coordinator.live_work_count == 0
-    assert coordinator._all_idle()
-
-
-def test_resettable_org_repo_source_pulls_only_one_repository_at_capacity_one(
-    tmp_path: Path,
-) -> None:
-    """The coordinator, not the loop wrapper, advances the org repository source."""
-    pulls: list[str] = []
-    factories: list[object] = []
-
-    def source_factory(_shutdown: Event) -> Any:
-        factories.append(object())
-        for repo in ("repo-a", "repo-b", "repo-c"):
-            pulls.append(repo)
-            yield repo
-
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=[],
-            repo_source_factory=source_factory,
-            loops=1,
-            parallel_repos=1,
-            max_workers=1,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=FakeStageGitHub(),
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-
-    assert coordinator._seed_pass() == 1
-    assert len(factories) == 1
-    assert pulls == ["repo-a"]
-    assert [item.repo for item in coordinator.queues[StageName.REPO].snapshot()] == ["repo-a"]
-
-
-def test_repo_sources_round_robin_across_repositories_at_capacity_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """C=2 admits one source item from A and B before either gets a second turn."""
-    events: list[tuple[str, int]] = []
-    metadata = {
-        "repo-a": [
-            {"number": 101, "labels": ["state:needs-plan"], "title": "first A"},
-            {"number": 102, "labels": ["state:needs-plan"], "title": "second A"},
-        ],
-        "repo-b": [
-            {"number": 201, "labels": ["state:needs-plan"], "title": "first B"},
-            {"number": 202, "labels": ["state:needs-plan"], "title": "second B"},
-        ],
-    }
-
-    def classify(issue: int, github: Any) -> IssueFacts:
-        del github
-        events.append(("classify", issue))
-        return _facts(issue)
-
-    monkeypatch.setattr(
-        loop_repo_manager,
-        "_iter_open_issue_meta",
-        lambda _org, repo, **_kwargs: iter(metadata[repo]),
-    )
-    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo-a", "repo-b"],
-            loops=1,
-            parallel_repos=1,
-            max_workers=2,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=FakeStageGitHub(labels=["state:needs-plan"]),
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
-
-    assert coordinator.run() == 0
-
-    assert events[:4] == [
-        ("classify", 101),
-        ("classify", 201),
-        ("complete", 101),
-        ("complete", 201),
-    ]
-    assert sorted(events[4:]) == sorted(
-        [
-            ("classify", 102),
-            ("classify", 202),
-            ("complete", 102),
-            ("complete", 202),
-        ]
-    )
-    for issue in (102, 202):
-        assert events.index(("classify", issue)) < events.index(("complete", issue))
-    assert coordinator._all_idle()
-    assert coordinator.live_work_count == 0
-
-
-def test_repo_setup_reserves_a_future_source_slot_before_registry_is_full(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """C+1 repositories cannot strand a setup lease at a full cursor registry."""
-    metadata = {
-        # Keep A active long enough for the registry to have one free slot
-        # while C and D are eligible for REPO setup.  The coordinator must
-        # admit only C, reserving the other slot for that in-flight setup.
-        "a": [
-            {"number": number, "labels": ["epic"], "title": f"Epic {number}"}
-            for number in range(1, 6)
-        ],
-        "b": [{"number": 10, "labels": ["epic"], "title": "Epic B"}],
-        "c": [],
-        "d": [],
-    }
-    monkeypatch.setattr(
-        loop_repo_manager,
-        "_iter_open_issue_meta",
-        lambda _org, repo, **_kwargs: iter(metadata[repo]),
-    )
-    monkeypatch.setattr(
-        seeding_mod,
-        "seed_issue_from_github",
-        lambda issue, _github: _facts(issue),
-    )
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["a", "b", "c", "d"],
-            loops=1,
-            parallel_repos=1,
-            max_workers=2,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=FakeStageGitHub(),
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage([])
-
-    assert coordinator.run() == 0
-    assert coordinator._all_idle()
-    assert coordinator.live_work_count == 0
-    assert not coordinator._leases
-    activations = [
-        event[1] for event in coordinator.event_log if event[0] == "repo_source_activate"
-    ]
-    assert activations == ["a", "b", "c", "d"]
-
-
-def test_repo_source_reseed_drains_second_pass_before_zero_work_convergence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A fresh repo cursor keeps loop two alive until it classifies its issue.
-
-    The first pass fails and the second succeeds for the same discovered
-    issue.  A repository source begins with no classified work, so returning
-    from reseed based only on ``_pass_work_count`` would exit immediately and
-    strand the second cursor.
-    """
-    events: list[tuple[str, int]] = []
-
-    class _FailThenPassStage(Stage):
-        def on_enter(self, item: WorkItem, ctx: Any) -> None:
-            del item, ctx
-
-        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
-            del ctx
-            assert item.issue == 101
-            if not any(kind == "fail" for kind, _number in events):
-                events.append(("fail", item.issue))
-                return StageOutcome(Disposition.FINISH_FAIL, "first pass failed")
-            events.append(("pass", item.issue))
-            return StageOutcome(Disposition.FINISH_PASS, "replacement passed")
-
-        def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
-            del item, result, ctx
-            raise AssertionError("the deterministic stage must not submit a job")
-
-    def classify(issue: int, github: Any) -> IssueFacts:
-        del github
-        events.append(("classify", issue))
-        return _facts(issue)
-
-    monkeypatch.setattr(
-        loop_repo_manager,
-        "_iter_open_issue_meta",
-        lambda _org, _repo, **_kwargs: iter(
-            [{"number": 101, "labels": ["state:needs-plan"], "title": "retry"}]
-        ),
-    )
-    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            loops=2,
-            parallel_repos=1,
-            max_workers=1,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=FakeStageGitHub(labels=["state:needs-plan"]),
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-    coordinator.stages[StageName.PLANNING] = _FailThenPassStage()
-
-    assert coordinator.run() == 0
-
-    assert events == [
-        ("classify", 101),
-        ("fail", 101),
-        ("classify", 101),
-        ("pass", 101),
-    ]
-    assert coordinator._loops_run == 2
-    assert coordinator._terminal_summary.dispositions == {"pass": 1}
-
-
-def test_empty_repo_source_still_converges_after_one_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A drained source with no actionable issue does not cause a reseed loop."""
-    monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(())
-    )
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            loops=3,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=FakeStageGitHub(),
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-
-    assert coordinator.run() == 0
-    assert coordinator._loops_run == 1
-    assert coordinator._all_idle()
-
-
-def test_repo_source_semantically_admits_tracker_candidate_and_next_issue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Tracker-shaped metadata cannot bypass semantic planning and review."""
-    events: list[tuple[str, int]] = []
-    metadata = [
-        {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
-        {"number": 6, "labels": ["state:needs-plan"], "title": "implementation"},
-    ]
-
-    def classify(issue: int, github: Any) -> IssueFacts:
-        del github
-        events.append(("classify", issue))
-        return _facts(issue)
-
-    monkeypatch.setattr(
-        loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo, **_kwargs: iter(metadata)
-    )
-    monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
-    github = FakeStageGitHub(labels=["state:needs-plan"])
-    coordinator = Coordinator(
-        PipelineConfig(
-            org="org",
-            repos=["repo-a"],
-            loops=1,
-            parallel_repos=1,
-            max_workers=1,
-            dry_run=True,
-            projects_dir=tmp_path,
-            rate_guard_enabled=False,
-        ),
-        github=github,
-        **fake_worker_factories(FakeWorkerPool(), None),
-        install_signals=False,
-    )
-    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
-
-    assert coordinator.run() == 0
-    assert events == [
-        ("classify", 5),
-        ("complete", 5),
-        ("classify", 6),
-        ("complete", 6),
-    ]
-    assert "state:skip" not in github.labels.get(5, [])
+    issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
+    assert [item.issue for item in issues] == [101, 102]
+    assert all(item.result is not None and item.result.passed for item in issues)

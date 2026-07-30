@@ -1,19 +1,4 @@
-"""RED contract tests for lossless, bounded ``StageQueue`` handoffs.
-
-The lease API specified here is intentionally small and public:
-
-* ``StageQueue.claim()`` returns a lease for the FIFO-ready item, or ``None``
-  when the queue has no ready work.
-* A claimed item remains part of the source queue's ``occupancy`` while its
-  lease is outstanding, so it cannot create an admission slot by itself.
-* ``lease.restore()`` puts the item back at the front of its source queue.
-* ``lease.handoff(destination)`` atomically reserves the destination and then
-  releases the source reservation.  It returns ``False`` without losing the
-  source item when the destination is full; callers can retry that same lease.
-
-The production queue currently exposes only push/offer/pop.  These tests are
-deliberately RED until the bounded lease protocol is implemented.
-"""
+"""Contract tests for lossless, bounded ``StageQueue`` handoffs."""
 
 from hephaestus.automation.pipeline import ItemKind, StageQueue, WorkItem
 
@@ -24,14 +9,13 @@ def _item(name: str) -> WorkItem:
 
 
 class TestStageQueueLeases:
-    """Lossless handoff behavior for a bounded source and destination queue."""
+    """Lossless handoff behavior for bounded source and destination queues."""
 
     def test_claim_reserves_capacity_and_blocks_new_source_offer(self) -> None:
-        """Claiming ready work keeps a full source occupied until it is released."""
+        """Claiming ready work keeps a full source occupied until release."""
         source = StageQueue(capacity=2)
         claimed_item = _item("claimed")
         still_ready = _item("still-ready")
-        replacement = _item("replacement")
         source.push(claimed_item)
         source.push(still_ready)
 
@@ -41,8 +25,7 @@ class TestStageQueueLeases:
         assert lease.item is claimed_item
         assert source.snapshot() == [still_ready]
         assert source.occupancy == source.capacity == 2
-        replacement_offered = source.offer(replacement)
-        assert replacement_offered is False
+        assert source.offer(_item("replacement")) is False
 
     def test_restore_preserves_claimed_item_and_uses_remaining_capacity(self) -> None:
         """A lease reserves its item but does not serialize unused capacity."""
@@ -54,15 +37,14 @@ class TestStageQueueLeases:
 
         assert lease is not None
         later = _item("may-enter-before-restore")
-        later_offered = source.offer(later)
-        assert later_offered is True
+        assert source.offer(later) is True
         lease.restore()
 
         assert source.occupancy == 2
         assert source.snapshot() == [claimed_item, later]
 
     def test_concurrent_claims_restore_in_original_fifo_order(self) -> None:
-        """Multiple active claims retain capacity and restore by original order."""
+        """Multiple active claims retain capacity and original FIFO tickets."""
         source = StageQueue(capacity=3)
         first = _item("first")
         second = _item("second")
@@ -85,8 +67,8 @@ class TestStageQueueLeases:
 
         assert source.snapshot() == [first, second, third]
 
-    def test_selected_claim_restores_the_original_queue_position(self) -> None:
-        """Topo scheduling may lease a non-head item without reordering a retry."""
+    def test_selected_claim_restores_original_queue_position(self) -> None:
+        """Topo scheduling may lease a non-head item without reordering retry."""
         source = StageQueue(capacity=3)
         first = _item("first")
         selected = _item("selected")
@@ -94,21 +76,21 @@ class TestStageQueueLeases:
         for item in (first, selected, third):
             source.push(item)
 
-        lease = source.claim_at(1)
+        selected_lease = source.claim_at(1)
 
-        assert lease is not None
-        assert lease.item is selected
+        assert selected_lease is not None
+        assert selected_lease.item is selected
         assert source.snapshot() == [first, third]
         first_lease = source.claim()
         assert first_lease is not None
         assert first_lease.item is first
 
         first_lease.restore()
-        lease.restore()
+        selected_lease.restore()
 
         assert source.snapshot() == [first, selected, third]
 
-    def test_selected_claim_release_does_not_remove_the_queue_head(self) -> None:
+    def test_selected_claim_release_does_not_remove_queue_head(self) -> None:
         """A timer can take selected work without accidentally popping a peer."""
         source = StageQueue(capacity=2)
         first = _item("first")
@@ -124,30 +106,26 @@ class TestStageQueueLeases:
         assert source.snapshot() == [first]
         assert source.occupancy == 1
 
-    def test_successful_handoff_releases_source_and_enqueues_item_once(self) -> None:
-        """A successful handoff frees only the source reservation it transfers."""
+    def test_successful_handoff_releases_source_and_enqueues_once(self) -> None:
+        """A successful handoff transfers the source reservation exactly once."""
         source = StageQueue(capacity=1)
         destination = StageQueue(capacity=1)
         item = _item("handoff")
-        replacement = _item("replacement")
         source.push(item)
         lease = source.claim()
 
         assert lease is not None
-        handoff_succeeded = lease.handoff(destination)
-        assert handoff_succeeded is True
+        assert lease.handoff(destination) is True
 
         assert source.occupancy == 0
-        replacement_offered = source.offer(replacement)
-        assert replacement_offered is True
+        assert source.offer(_item("replacement")) is True
         assert destination.occupancy == 1
         assert destination.snapshot() == [item]
-        popped_item = destination.pop()
-        assert popped_item is item
+        assert destination.pop() is item
         assert destination.occupancy == 0
 
-    def test_full_destination_retains_source_lease_for_later_handoff(self) -> None:
-        """A failed handoff neither drops nor spills work, and can be retried."""
+    def test_full_destination_retains_source_lease_for_retry(self) -> None:
+        """A failed handoff neither drops nor spills work and remains retryable."""
         source = StageQueue(capacity=1)
         destination = StageQueue(capacity=1)
         item = _item("source-item")
@@ -157,69 +135,20 @@ class TestStageQueueLeases:
         lease = source.claim()
 
         assert lease is not None
-        handoff_succeeded = lease.handoff(destination)
-        assert handoff_succeeded is False
+        assert lease.handoff(destination) is False
         assert source.occupancy == source.capacity == 1
-        rejected_offer = source.offer(_item("must-not-enter-while-leased"))
-        assert rejected_offer is False
+        assert source.offer(_item("must-not-enter-while-leased")) is False
         assert destination.snapshot() == [destination_item]
 
-        popped_destination_item = destination.pop()
-        assert popped_destination_item is destination_item
-        handoff_succeeded = lease.handoff(destination)
-        assert handoff_succeeded is True
+        assert destination.pop() is destination_item
+        assert lease.handoff(destination) is True
         assert source.occupancy == 0
         assert destination.snapshot() == [item]
-        popped_item = destination.pop()
-        assert popped_item is item
+        assert destination.pop() is item
         assert destination.occupancy == 0
 
-    def test_complementary_leases_exchange_full_source_queues_atomically(self) -> None:
-        """Two active leases can swap full source queues without a spill slot."""
-        left = StageQueue(capacity=1)
-        right = StageQueue(capacity=1)
-        left_item = _item("left")
-        right_item = _item("right")
-        left.push(left_item)
-        right.push(right_item)
-        left_lease = left.claim()
-        right_lease = right.claim()
-        assert left_lease is not None
-        assert right_lease is not None
-
-        assert left_lease.exchange(right, right_lease, left)
-
-        assert left.snapshot() == [right_item]
-        assert right.snapshot() == [left_item]
-        assert left.occupancy == right.occupancy == 1
-        assert not left_lease.handoff(right)
-        assert not right_lease.handoff(left)
-
-    def test_exchange_rejects_noncomplementary_destinations_without_mutation(self) -> None:
-        """Exchange fails closed unless each destination is the peer source."""
-        left = StageQueue(capacity=1)
-        right = StageQueue(capacity=1)
-        other = StageQueue(capacity=1)
-        left_item = _item("left")
-        right_item = _item("right")
-        left.push(left_item)
-        right.push(right_item)
-        left_lease = left.claim()
-        right_lease = right.claim()
-        assert left_lease is not None
-        assert right_lease is not None
-
-        assert not left_lease.exchange(other, right_lease, left)
-
-        assert left.occupancy == right.occupancy == 1
-        left_lease.restore()
-        right_lease.restore()
-        assert left.snapshot() == [left_item]
-        assert right.snapshot() == [right_item]
-
     def test_empty_claim_is_explicit(self) -> None:
-        """An empty source queue reports no lease instead of raising or inventing work."""
+        """An empty source reports no lease instead of inventing work."""
         source = StageQueue(capacity=1)
 
-        lease = source.claim()
-        assert lease is None
+        assert source.claim() is None

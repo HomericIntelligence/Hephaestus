@@ -586,6 +586,9 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         run_thread.start()
         assert harness.legitimate_ready.wait(timeout=5.0)
         assert consumer_paused.wait(timeout=5.0)
+        # Establish that the coordinator is parked before either worker wave
+        # may publish, so subsequent high-water marks cannot race a drain.
+        assert stalled.completion_q.paused_publication_state() == (0, 0, 0, 0, 0, False)
 
         # The coordinator owns C legitimate handles. Queue a separate C+1
         # publication burst through the same real pool while all workers are
