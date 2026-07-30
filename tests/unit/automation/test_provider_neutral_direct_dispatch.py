@@ -29,11 +29,12 @@ DIRECT_PROVIDER_ONLY_NAMES = {
     "codex_json_stdout",
     "run_pi_text",
     "run_pi_session",
+    "run_pi_smoke_session",
     "resume_pi_session",
 }
 
 DIRECT_PROVIDER_ADAPTER_EXCEPTIONS = {
-    "scripts/pi_smoke.py": {"run_pi_session"},
+    "scripts/pi_smoke.py": {"run_pi_smoke_session"},
 }
 
 
@@ -81,10 +82,29 @@ def _provider_adapter_violations(
             offenders = (imported & DIRECT_PROVIDER_ONLY_NAMES) - allowed
             if offenders:
                 violations.append(f"line {node.lineno}: imports {sorted(offenders)}")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if node.value is None:
+                continue
+            name = _node_name(node.value)
+            if name in DIRECT_PROVIDER_ONLY_NAMES and name not in allowed:
+                violations.append(f"line {node.lineno}: aliases {name}")
         elif isinstance(node, ast.Call):
             name = _node_name(node.func)
             if name in DIRECT_PROVIDER_ONLY_NAMES and name not in allowed:
                 violations.append(f"line {node.lineno}: calls {name}()")
+            elif (
+                name == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and isinstance(node.args[1].value, str)
+                and node.args[1].value in DIRECT_PROVIDER_ONLY_NAMES
+                and node.args[1].value not in allowed
+            ):
+                violations.append(f"line {node.lineno}: looks up {node.args[1].value}()")
+            elif name in {"run", "Popen", "call", "check_call", "check_output"} and any(
+                isinstance(item, ast.Constant) and item.value == "pi" for item in ast.walk(node)
+            ):
+                violations.append(f"line {node.lineno}: runs pi subprocess")
     return violations
 
 
@@ -99,6 +119,36 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
     tree = ast.parse("from hephaestus.agents.runtime import run_pi_session as invoke_pi_session\n")
 
     assert _provider_adapter_violations(tree) == ["line 1: imports ['run_pi_session']"]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "import hephaestus.agents.runtime as runtime\n"
+            "invoke = runtime.run_pi_session\n"
+            "invoke('prompt')\n",
+            "line 2: aliases run_pi_session",
+        ),
+        (
+            "import hephaestus.agents.runtime as runtime\n"
+            "getattr(runtime, 'run_pi_session')('prompt')\n",
+            "line 2: looks up run_pi_session()",
+        ),
+        (
+            "import subprocess\nsubprocess.run(['pi', '--mode', 'json'])\n",
+            "line 2: runs pi subprocess",
+        ),
+    ],
+)
+def test_direct_provider_guard_rejects_indirect_pi_execution(
+    source: str,
+    expected: str,
+) -> None:
+    """Provider adapters cannot evade the guard through aliases or raw execution."""
+    tree = ast.parse(source)
+
+    assert _provider_adapter_violations(tree) == [expected]
 
 
 def test_direct_provider_guard_detects_membership_style_provider_branches() -> None:

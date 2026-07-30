@@ -26,7 +26,7 @@ from hephaestus.agents.runtime import (
     missing_pi_alias_env,
     pi_private_redaction_tokens,
     redact_pi_private_values,
-    run_pi_session,
+    run_pi_smoke_session,
 )
 
 DEFAULT_PROMPT = "Reply with exactly: OK"
@@ -89,12 +89,11 @@ def main(argv: list[str] | None = None) -> int:
     model = os.environ.get(PI_MODEL_ENV, "").strip()
     redaction_tokens = pi_private_redaction_tokens(args.cwd, model)
     try:
-        result = run_pi_session(
+        result = run_pi_smoke_session(
             args.prompt,
             cwd=args.cwd,
             timeout=args.timeout,
             model=model,
-            sandbox="read-only",
         )
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr or exc.stdout or f"Pi smoke failed with exit {exc.returncode}"

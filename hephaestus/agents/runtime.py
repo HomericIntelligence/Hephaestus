@@ -922,43 +922,16 @@ def run_pi_text(
     )
 
 
-def run_pi_session(
+def _invoke_pi_session(
     prompt: str,
     *,
     cwd: Path,
     timeout: int,
-    model: str = "",
-    sandbox: str = "workspace-write",
-    approval: str = "never",
+    model: str,
+    sandbox: str,
+    session_id: str | None = None,
 ) -> AgentRunResult:
-    """Run a new Pi JSON-mode session and capture its id."""
-    del approval
-    cmd = _pi_base_cmd()
-    result = _run_pi_command(
-        cmd,
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        sandbox=sandbox,
-        model=model,
-    )
-    session_id, event_message = _parse_pi_json_events(result.stdout or "")
-    stdout = (event_message or result.stdout or "").strip()
-    return AgentRunResult(stdout=stdout, stderr=result.stderr or "", session_id=session_id)
-
-
-def resume_pi_session(
-    session_id: str,
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-    sandbox: str = "workspace-write",
-    approval: str = "never",
-) -> AgentRunResult:
-    """Resume a Pi JSON-mode session by id."""
-    del approval
+    """Execute Pi and preserve a new or resumed opaque session identity."""
     cmd = _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
@@ -974,6 +947,67 @@ def resume_pi_session(
         stdout=stdout,
         stderr=result.stderr or "",
         session_id=parsed_session_id or session_id,
+    )
+
+
+def run_pi_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> AgentRunResult:
+    """Run a new Pi JSON-mode session and capture its id."""
+    _require_pi_automation_admission()
+    del approval
+    return _invoke_pi_session(
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox=sandbox,
+    )
+
+
+def run_pi_smoke_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+) -> AgentRunResult:
+    """Run the explicit operator smoke seam with a fixed read-only Pi scope."""
+    return _invoke_pi_session(
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox="read-only",
+    )
+
+
+def resume_pi_session(
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> AgentRunResult:
+    """Resume a Pi JSON-mode session by id."""
+    _require_pi_automation_admission()
+    del approval
+    return _invoke_pi_session(
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox=sandbox,
+        session_id=session_id,
     )
 
 

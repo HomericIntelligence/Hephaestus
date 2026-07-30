@@ -36,14 +36,14 @@ test is the machine-checkable companion to this record.
 | Class | Capability | Pi contract | Failure behavior |
 | --- | --- | --- | --- |
 | Base CLI | Read, write, shell, search | Built-in `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls` tools | Do not start when the CLI probe fails. |
-| Base CLI | Sessions and resume | JSON event stream supplies an opaque session ID; resume preserves that ID when no new ID is emitted | Treat malformed JSON/session output as an actionable provider failure. |
+| Base CLI | Sessions and resume | JSON event stream supplies an opaque session ID; a post-admission resume must validate a worktree-local identity | Normal automation is blocked today. #2518 must reject malformed events, missing identities, and cross-worktree resume/fork prompts rather than treating them as success. |
 | Base CLI | Skills | Pi can load an explicit skill file or directory | Do not claim Athena discovery until the Athena package probe succeeds. |
 | Base CLI | Tool allowlist | `--tools` limits model-visible built-in and package tools | Do not call it an OS sandbox. |
 | Required package | Athena | Native Athena package, pinned source/ref, and canonical skill resources | Block Pi stages requiring Athena skills until discovery proves `advise`, `learn`, and `pr-review`. |
 | Required package | Delegation | `npm:pi-subagents@0.37.2` supplies the `subagent` tool | Block roles that require `Agent`/delegation when absent. |
 | Required package | Web evidence | `npm:pi-web-access@0.15.0` supplies named web tools | Block roles that require `WebFetch` when absent. |
 | Repository dependency | Mnemosyne | Canonical checkout at `~/.agent_brain/knowledge` under Athena's dependency-resolution contract | Never install or model Mnemosyne as a Pi package; resolution or trust failure blocks the skill. |
-| Unavailable | Interactive action approval | Pi project trust is not the Claude/Codex approval-policy contract | Reject a request that requires interactive approval instead of silently ignoring it. |
+| Unavailable | Interactive action approval | Pi project trust is not the Claude/Codex approval-policy contract | Normal automation is blocked today; #2518 must reject a request that requires interactive approval instead of silently ignoring it. |
 | Unavailable | OS sandbox | Pi has no built-in OS sandbox | Reject Pi for a stage requiring an OS-enforced sandbox unless an external enforcement adapter is verified. |
 
 The pin values are owned by the Pi bootstrap/update policy introduced in #2516.
@@ -72,7 +72,7 @@ is descriptive; Hephaestus owns the enforcement boundary passed to Pi.
 | Direct `run_agent_session` and `resume_agent_session` callers (`agent_stage`, implementation, CI-fix, follow-up, learn, and post-merge flows) | Opaque session ID, resume, timeout, process lifecycle, and redacted diagnostics | The shared runner rejects Pi before dispatch until its admission prerequisites exist. Session lifecycle has executable runtime tests; process tracking is completed in #2518. |
 | `repo` | No model job | Safe tested N/A; it performs repository and GitHub discovery only. |
 | `planning` | Athena `advise` plus planner read/search scope | Requires canonical Mnemosyne resolution and Athena discovery. |
-| `plan_review` | Read-only plan-review scope | No write, merge, CI mutation, delegation, or web capability. |
+| `plan_review` | Read-only reviewer analysis, planner amendment, and a separate Mnemosyne learning subpath | The reviewer remains read-only. `LEARN_WAIT` is Pi N/A until #2517 proves Athena-equivalent learning semantics and #2518 separately scopes its PR-producing workflow. |
 | `implementation` | Isolated worktree and write/edit/shell scope | Delegation is opt-in and preflighted, never ambient. |
 | `pr_review` | Read-only review; Athena `pr-review` may require explicitly preflighted skill/delegation/web capabilities | No write, merge, CI mutation, or unrestricted network capability. |
 | `merge_wait` | No provider authority to merge; `learn` needs a verified Mnemosyne PR workflow | A successful local edit is not learn evidence. |
@@ -93,10 +93,15 @@ arguments. #2518 owns applying the verified selection, role-derived tool grants,
 and lifecycle parity. Those later stages must keep prompts and private aliases
 out of publishable diagnostics.
 
-The Pi adapter uses JSON mode and explicit non-interactive execution.  A
-timeout, unavailable tool, missing command, malformed event, or absent session
-identity is a provider error with an actionable diagnostic; it is never
-downgraded to a Claude/Codex fallback mid-stage.
+Normal Pi automation does not currently execute. After #2516 admits a verified
+package/configuration inventory, #2518 must apply Pi's non-interactive JSON
+mode, reject unsupported approval requests, bind resume to a verified
+worktree-local session identity, and fail on malformed events or absent session
+headers. A timeout, unavailable tool, missing command, malformed event, or
+absent session identity must be an actionable provider failure; it must never
+downgrade to a Claude/Codex fallback mid-stage. The current read-only operator
+smoke seam is transport/redaction evidence only, not evidence of those
+post-admission contracts.
 
 ### Evidence boundary
 
@@ -124,8 +129,9 @@ pipeline verdict or widen a tool grant.
   selection preflight; it cannot advance until #2515 has an accepted,
   security-cleared artifact.
 - #2517 replaces legacy Mnemosyne handling with Athena-equivalent semantics.
-- #2518 implements the tool-scope translation, direct-adapter lifecycle, and
-  complete stage coverage described here.
+- #2518 implements the tool-scope translation, explicit approval rejection,
+  worktree-local session/resume lifecycle, and complete stage coverage described
+  here.
 - #2519 provides live conformance evidence; #2520 owns CI, compatibility, and
   operator rollout documentation.
 

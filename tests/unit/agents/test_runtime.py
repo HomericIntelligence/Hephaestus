@@ -50,7 +50,10 @@ def test_pi_capability_contract_separates_native_packages_and_unsupported_contro
         | capabilities.package_capabilities
         | capabilities.unavailable_capabilities
     ) == frozenset(agent_runtime.AgentCapability)
+    assert capabilities.direct_runner is True
+    assert capabilities.supports_approval is False
     assert capabilities.supports_sandbox is False
+    assert capabilities.supports_sessions is True
 
 
 def _write_pi_models_config(home: Path) -> None:
@@ -656,8 +659,78 @@ def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_pat
     assert 'approval_policy="never"' in captured_cmd
 
 
-def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> None:
-    """Pi stage execution should consume JSONL and preserve the session id."""
+def test_run_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
+    """A public Pi session runner cannot bypass the automation admission gate."""
+    with patch("subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            ["pi", "--mode", "json"],
+            0,
+            stdout='{"type":"session","id":"pi-session-789"}',
+            stderr="",
+        )
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_pi_session("prompt", cwd=tmp_path, timeout=30)
+
+    run.assert_not_called()
+
+
+def test_run_pi_text_rejects_unadmitted_execution(tmp_path: Path) -> None:
+    """A public Pi text runner cannot bypass the automation admission gate."""
+    with patch("hephaestus.agents.runtime._run_pi_command") as run:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_pi_text("prompt", cwd=tmp_path, timeout=30)
+
+    run.assert_not_called()
+
+
+def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
+    """A public Pi resume runner cannot bypass the automation admission gate."""
+    with patch("subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            ["pi", "--mode", "json", "--session", "pi-session-789"],
+            0,
+            stdout='{"type":"session","id":"pi-session-789"}',
+            stderr="",
+        )
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.resume_pi_session(
+                "pi-session-789",
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+            )
+
+    run.assert_not_called()
+
+
+def test_run_pi_smoke_session_forces_read_only_scope(tmp_path: Path) -> None:
+    """The only unadmitted Pi seam is a separately named read-only smoke API."""
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"type":"session","id":"pi-session-789"}',
+            stderr="",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="local-alias",
+        )
+
+    tools_index = captured_cmd.index("--tools")
+    assert captured_cmd[tools_index + 1] == agent_runtime.PI_READ_ONLY_TOOLS
+    assert result.session_id == "pi-session-789"
+
+
+def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path) -> None:
+    """The constrained smoke seam should consume JSONL and preserve its session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(
         [
@@ -679,7 +752,7 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
         patch("subprocess.run", side_effect=fake_run),
     ):
-        result = agent_runtime.run_pi_session(
+        result = agent_runtime.run_pi_smoke_session(
             "private prompt content",
             cwd=tmp_path,
             timeout=30,
@@ -688,7 +761,8 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
 
     assert result.session_id == "pi-session-789"
     assert result.stdout == "pi output"
-    assert captured["cmd"][:-1] == ["pi", "--mode", "json"]
+    assert captured["cmd"][:3] == ["pi", "--mode", "json"]
+    assert captured["cmd"][3:5] == ["--tools", agent_runtime.PI_READ_ONLY_TOOLS]
     assert captured["cmd"][-1].startswith("@")
     assert "--model" not in captured["cmd"]
     assert "private-alias" not in captured["cmd"]
@@ -703,7 +777,7 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
 
-def test_run_pi_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
     """Pi subprocess failure diagnostics should not leak local aliases or tokens."""
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\n",
@@ -720,7 +794,7 @@ def test_run_pi_session_redacts_private_values_from_failures(tmp_path: Path) -> 
 
     with patch("subprocess.run", side_effect=fake_run):
         with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            agent_runtime.run_pi_session(
+            agent_runtime.run_pi_smoke_session(
                 "prompt",
                 cwd=tmp_path,
                 timeout=30,
@@ -734,7 +808,7 @@ def test_run_pi_session_redacts_private_values_from_failures(tmp_path: Path) -> 
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
 
 
-def test_run_pi_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
     """Pi timeout diagnostics should redact cmd, partial stdout, and stderr."""
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\n",
@@ -751,7 +825,7 @@ def test_run_pi_session_redacts_private_values_from_timeouts(tmp_path: Path) -> 
 
     with patch("subprocess.run", side_effect=fake_run):
         with pytest.raises(subprocess.TimeoutExpired) as exc_info:
-            agent_runtime.run_pi_session(
+            agent_runtime.run_pi_smoke_session(
                 "prompt",
                 cwd=tmp_path,
                 timeout=30,
@@ -782,8 +856,8 @@ def test_redact_pi_private_values_replaces_all_tokens() -> None:
     )
 
 
-def test_run_pi_session_read_only_restricts_tools(tmp_path: Path) -> None:
-    """Read-only Pi stages should request a read-only tool surface."""
+def test_run_pi_smoke_session_restricts_tools(tmp_path: Path) -> None:
+    """The unadmitted smoke seam should request its fixed read-only tool surface."""
     captured_cmd: list[str] = []
     stdout = "\n".join(
         [
@@ -800,11 +874,10 @@ def test_run_pi_session_read_only_restricts_tools(tmp_path: Path) -> None:
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
         patch("subprocess.run", side_effect=fake_run),
     ):
-        result = agent_runtime.run_pi_session(
+        result = agent_runtime.run_pi_smoke_session(
             "review prompt",
             cwd=tmp_path,
             timeout=30,
-            sandbox="read-only",
         )
 
     assert result.stdout == "pi output"
@@ -833,6 +906,7 @@ def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Pa
 
     with (
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
         patch("subprocess.run", side_effect=fake_run),
     ):
         result = agent_runtime.resume_pi_session(

@@ -37,7 +37,8 @@ def test_runs_pi_with_env_aliases_model_via_kwarg_not_argv(
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr="", session_id="pi-smoke"))
-    monkeypatch.setattr(_mod, "run_pi_session", run_pi)
+    assert hasattr(_mod, "run_pi_smoke_session")
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
 
     assert (
         _mod.main(
@@ -55,7 +56,6 @@ def test_runs_pi_with_env_aliases_model_via_kwarg_not_argv(
 
     kwargs = run_pi.call_args.kwargs
     assert kwargs["cwd"] == tmp_path
-    assert kwargs["sandbox"] == "read-only"
     assert kwargs["model"] == "private-model-alias"
     assert "provider" not in kwargs
     assert run_pi.call_args.args == ("Say OK",)
@@ -86,7 +86,7 @@ def test_failure_output_redacts_private_values(
         output="PRIVATE_ENDPOINT_TOKEN",
         stderr="private-test-alias PRIVATE_ENDPOINT_TOKEN",
     )
-    monkeypatch.setattr(_mod, "run_pi_session", Mock(side_effect=err))
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=err))
 
     assert _mod.main(["--cwd", str(tmp_path)]) == 9
 
@@ -113,7 +113,7 @@ def test_success_output_redacts_private_values(
             session_id=None,
         )
     )
-    monkeypatch.setattr(_mod, "run_pi_session", run_pi)
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
 
     assert _mod.main(["--cwd", str(tmp_path)]) == 0
 
@@ -132,7 +132,7 @@ def test_reports_pi_runtime_contract_error(
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     run_pi = Mock(side_effect=RuntimeError("missing session id"))
-    monkeypatch.setattr(_mod, "run_pi_session", run_pi)
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
 
     assert _mod.main(["--cwd", str(tmp_path)]) == 1
     assert "missing session id" in capsys.readouterr().err
