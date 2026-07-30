@@ -82,13 +82,17 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.constants import read_timeout_env
 from hephaestus.github.client import gh_call
-from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 logger = logging.getLogger(__name__)
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})\b", re.MULTILINE)
+_IMPLEMENTATION_REPLY_REVIEW_BODY_RE = re.compile(
+    r"\AImplementation responses for [1-9]\d* review thread\(s\)\.\n\n"
+    r"<!-- hephaestus-implementation-review:[0-9a-f]{24} -->\Z"
+)
 
 
 def _parse_included_http_response(
@@ -968,14 +972,23 @@ class PipelineGitHub:
             f"<!-- hephaestus-implementation-review:{marker} -->"
         )
 
-    def _find_implementation_reply_review(  # noqa: C901 - paginated GraphQL proof is fail-closed
-        self, pr_number: int, expected_head_sha: str, review_body: str
-    ) -> tuple[str, tuple[str, str] | None] | None:
-        """Find the current actor's durable batch review for an exact PR head.
+    @staticmethod
+    def _is_implementation_reply_review_body(body: object) -> bool:
+        """Return whether ``body`` is a coordinator-owned batch marker."""
+        return (
+            isinstance(body, str)
+            and _IMPLEMENTATION_REPLY_REVIEW_BODY_RE.fullmatch(body) is not None
+        )
 
-        The pending review is the restart-safe receipt for an interrupted
-        implementation-reply pass.  A matching submitted review proves that a
-        prior call completed after its transport response was lost.
+    def _implementation_reply_review_inventory(  # noqa: C901 - paginated GraphQL proof is fail-closed
+        self, pr_number: int, expected_head_sha: str, review_body: str
+    ) -> tuple[str, tuple[str, str] | None, tuple[str, ...], bool] | None:
+        """Return the exact batch review plus stale and conflicting pending drafts.
+
+        Only a viewer-owned pending review carrying the opaque implementation
+        marker and an *older* commit is eligible for automatic discard.  A
+        manual or malformed pending review is a conflict: leave it untouched
+        and fail closed rather than taking ownership of another actor's work.
         """
         query = (
             "query($owner:String!,$name:String!,$number:Int!,$after:String){"
@@ -985,6 +998,8 @@ class PipelineGitHub:
         )
         expected_pr_id: str | None = None
         matches: list[tuple[str, str]] = []
+        stale_pending_ids: list[str] = []
+        has_pending_conflict = False
         seen_cursors: set[str] = set()
         after: str | None = None
         while True:
@@ -1014,17 +1029,36 @@ class PipelineGitHub:
             for review in reviews["nodes"]:
                 if not isinstance(review, dict):
                     return None
-                if review.get("body") != review_body or review.get("viewerDidAuthor") is not True:
+                if review.get("viewerDidAuthor") is not True:
                     continue
                 review_id = review.get("id")
                 state = review.get("state")
+                body = review.get("body")
                 commit = review.get("commit")
                 commit_oid = commit.get("oid") if isinstance(commit, dict) else None
+                if not isinstance(review_id, str) or not review_id or not isinstance(state, str):
+                    return None
+                if state == "PENDING":
+                    if (
+                        body == review_body
+                        and isinstance(commit_oid, str)
+                        and commit_oid == expected_head_sha
+                    ):
+                        matches.append((review_id, state))
+                    elif (
+                        self._is_implementation_reply_review_body(body)
+                        and isinstance(commit_oid, str)
+                        and re.fullmatch(r"[0-9a-f]{40}", commit_oid) is not None
+                        and commit_oid != expected_head_sha
+                    ):
+                        stale_pending_ids.append(review_id)
+                    else:
+                        has_pending_conflict = True
+                    continue
+                if body != review_body:
+                    continue
                 if (
-                    not isinstance(review_id, str)
-                    or not review_id
-                    or not isinstance(state, str)
-                    or state not in {"PENDING", "COMMENTED"}
+                    state != "COMMENTED"
                     or not isinstance(commit_oid, str)
                     or commit_oid != expected_head_sha
                 ):
@@ -1044,7 +1078,31 @@ class PipelineGitHub:
             after = next_cursor
         if expected_pr_id is None or len(matches) > 1:
             return None
-        return expected_pr_id, matches[0] if matches else None
+        return (
+            expected_pr_id,
+            matches[0] if matches else None,
+            tuple(sorted(set(stale_pending_ids))),
+            has_pending_conflict,
+        )
+
+    def _find_implementation_reply_review(
+        self, pr_number: int, expected_head_sha: str, review_body: str
+    ) -> tuple[str, tuple[str, str] | None] | None:
+        """Find the current actor's durable batch review for an exact PR head.
+
+        The pending review is the restart-safe receipt for an interrupted
+        implementation-reply pass.  A matching submitted review proves that a
+        prior call completed after its transport response was lost.
+        """
+        inventory = self._implementation_reply_review_inventory(
+            pr_number, expected_head_sha, review_body
+        )
+        if inventory is None:
+            return None
+        pr_id, review, stale_pending_ids, has_pending_conflict = inventory
+        if stale_pending_ids or has_pending_conflict:
+            return None
+        return pr_id, review
 
     def _create_implementation_reply_review(
         self, pr_id: str, expected_head_sha: str, review_body: str
@@ -1111,6 +1169,87 @@ class PipelineGitHub:
             and review.get("id") == review_id
             and review.get("state") == "COMMENTED"
             and review.get("body") == review_body
+        )
+
+    def _delete_implementation_reply_review(self, review_id: str) -> bool:
+        """Delete one proven coordinator-owned pending review draft."""
+        query = (
+            "mutation($reviewId:ID!,$clientMutationId:String!){"
+            "deletePullRequestReview(input:{pullRequestReviewId:$reviewId,"
+            "clientMutationId:$clientMutationId}){pullRequestReview{id}}}"
+        )
+        data = self._graphql(
+            query,
+            reviewId=review_id,
+            clientMutationId=hashlib.sha256(
+                f"{review_id}:discard-implementation-replies".encode()
+            ).hexdigest(),
+        )
+        response_data = data.get("data") if isinstance(data, dict) else None
+        mutation = (
+            response_data.get("deletePullRequestReview")
+            if isinstance(response_data, dict)
+            else None
+        )
+        review = mutation.get("pullRequestReview") if isinstance(mutation, dict) else None
+        return bool(isinstance(review, dict) and review.get("id") == review_id)
+
+    def _reconcile_implementation_reply_reviews(
+        self, pr_number: int, expected_head_sha: str, review_body: str
+    ) -> tuple[str, tuple[str, str] | None, bool] | None:
+        """Discard only proven stale drafts and return the current batch state.
+
+        The review inventory is reread before every deletion, so a head move
+        or a new manual pending review turns into a retry instead of deleting
+        a draft whose identity is no longer proved.  A PENDING review for the
+        current head but another body is intentionally left alone.
+        """
+        while True:
+            inventory = self._implementation_reply_review_inventory(
+                pr_number, expected_head_sha, review_body
+            )
+            if inventory is None:
+                return None
+            pr_id, review, stale_pending_ids, has_pending_conflict = inventory
+            if not stale_pending_ids:
+                return pr_id, review, has_pending_conflict
+            stale_review_id = stale_pending_ids[0]
+            if not self._delete_implementation_reply_review(stale_review_id):
+                # GitHub may have applied the delete before losing its response.
+                # The next inventory read is the only safe recovery proof.
+                recovered = self._implementation_reply_review_inventory(
+                    pr_number, expected_head_sha, review_body
+                )
+                if recovered is None or stale_review_id in recovered[2]:
+                    return None
+
+    def _discard_current_implementation_reply_review(
+        self,
+        pr_number: int,
+        expected_head_sha: str,
+        review_body: str,
+        pr_id: str,
+        review_id: str,
+    ) -> bool:
+        """Abort a current batch which cannot atomically cover every thread."""
+        current = self._reconcile_implementation_reply_reviews(
+            pr_number, expected_head_sha, review_body
+        )
+        if current is None:
+            return False
+        current_pr_id, review, has_pending_conflict = current
+        if current_pr_id != pr_id or has_pending_conflict or review != (review_id, "PENDING"):
+            return False
+        if self._delete_implementation_reply_review(review_id):
+            return True
+        recovered = self._reconcile_implementation_reply_reviews(
+            pr_number, expected_head_sha, review_body
+        )
+        return bool(
+            recovered is not None
+            and recovered[0] == pr_id
+            and recovered[1] is None
+            and not recovered[2]
         )
 
     @staticmethod
@@ -1482,7 +1621,97 @@ class PipelineGitHub:
             return None
         return second[0]
 
-    def post_implementation_thread_replies(  # noqa: C901
+    def _implementation_reply_lock_path(self, pr_number: int) -> Path:
+        """Return the cross-process lock for one repository PR reply batch."""
+        repo_key = hashlib.sha256((self._repo_slug or self.org).encode("utf-8")).hexdigest()[:16]
+        return (
+            ensure_state_dir(self._repo_root)
+            / "locks"
+            / (f"implementation-replies-{repo_key}-{pr_number}.lock")
+        )
+
+    def post_implementation_thread_replies(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+    ) -> ImplementationThreadReplyResult:
+        """Serialize one repository-local implementation reply batch per PR.
+
+        GitHub's client mutation id is a tracing field rather than a
+        compare-and-swap primitive.  Cooperating loop processes therefore
+        hold one PR-scoped lock across discovery, draft creation, replies, and
+        submission.  The adapter fails closed on platforms without an
+        exclusive lock instead of risking duplicate draft reviews.
+        """
+        candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
+        if self._skip(
+            f"post {len(candidate_ids)} implementation review-thread replies on PR #{pr_number}"
+        ):
+            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+        try:
+            with file_lock(self._implementation_reply_lock_path(pr_number), require_exclusive=True):
+                return self._post_implementation_thread_replies_locked(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                )
+        except (LockUnavailableError, OSError) as error:
+            logger.warning("Implementation reply batch lock failed on PR #%s: %s", pr_number, error)
+            return ImplementationThreadReplyResult(
+                retryable_thread_ids=candidate_ids,
+                retryable=True,
+            )
+
+    def discard_stale_implementation_thread_reply_batch(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        current_head_sha: str,
+        replies: dict[str, str],
+    ) -> bool:
+        """Discard verified old-head drafts after a handoff becomes stale.
+
+        The review stage calls this only after it has proved the PR remains
+        open and unarmed at ``current_head_sha``.  It never deletes a current
+        manual pending review; those are returned as a conflict by the
+        inventory and left for an operator.
+        """
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+            or not re.fullmatch(r"[0-9a-f]{40}", current_head_sha)
+            or expected_head_sha == current_head_sha
+            or not replies
+        ):
+            return False
+        bodies: dict[str, str] = {}
+        for thread_id, reply in replies.items():
+            if not isinstance(thread_id, str) or not thread_id:
+                return False
+            safe_reply = self._safe_thread_reply(reply)
+            if safe_reply is None:
+                return False
+            bodies[thread_id] = self._implementation_thread_reply_body(
+                pr_number, expected_head_sha, thread_id, safe_reply
+            )
+        review_body = self._implementation_reply_review_body(pr_number, expected_head_sha, bodies)
+        try:
+            with file_lock(self._implementation_reply_lock_path(pr_number), require_exclusive=True):
+                reconciled = self._reconcile_implementation_reply_reviews(
+                    pr_number, current_head_sha, review_body
+                )
+        except (LockUnavailableError, OSError) as error:
+            logger.warning(
+                "Stale implementation reply draft lock failed on PR #%s: %s", pr_number, error
+            )
+            return False
+        return reconciled is not None
+
+    def _post_implementation_thread_replies_locked(  # noqa: C901
         self,
         pr_number: int,
         *,
@@ -1497,10 +1726,6 @@ class PipelineGitHub:
         performs a fresh review and owns that decision.
         """
         candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
-        if self._skip(
-            f"post {len(candidate_ids)} implementation review-thread replies on PR #{pr_number}"
-        ):
-            return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
         if not candidate_ids or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
         snapshots: dict[str, dict[str, Any]] = {}
@@ -1530,19 +1755,21 @@ class PipelineGitHub:
             for thread_id in candidate_ids:
                 reply = self._safe_thread_reply(replies.get(thread_id))
                 snapshot = snapshots[thread_id]
-                live = self._review_thread_snapshot(pr_number, thread_id)
-                if (
-                    reply is None
-                    or not isinstance(live, dict)
-                    or live.get("isResolved") is not False
-                    or not self._pr_is_current_open_head(live.get("pr_state"), expected_head_sha)
-                ):
+                if reply is None:
                     blocked.append(thread_id)
                     continue
                 body = self._implementation_thread_reply_body(
                     pr_number, expected_head_sha, thread_id, reply
                 )
                 reply_bodies[thread_id] = body
+                live = self._review_thread_snapshot(pr_number, thread_id)
+                if (
+                    not isinstance(live, dict)
+                    or live.get("isResolved") is not False
+                    or not self._pr_is_current_open_head(live.get("pr_state"), expected_head_sha)
+                ):
+                    blocked.append(thread_id)
+                    continue
                 # A prior transport failure may have applied this exact reply.
                 # Recover its host proof before treating the saved snapshot as
                 # stale or attempting a duplicate mutation.
@@ -1555,38 +1782,56 @@ class PipelineGitHub:
                     continue
                 prepared.append((thread_id, snapshot, body))
 
-            if blocked:
-                return ImplementationThreadReplyResult(
-                    replied_thread_ids=tuple(sorted(recovered)),
-                    blocked_thread_ids=tuple(blocked),
-                    receipts=tuple(recovered[thread_id] for thread_id in sorted(recovered)),
+            review_body = (
+                self._implementation_reply_review_body(pr_number, expected_head_sha, reply_bodies)
+                if len(reply_bodies) == len(candidate_ids)
+                else None
+            )
+            current_batch = (
+                self._reconcile_implementation_reply_reviews(
+                    pr_number, expected_head_sha, review_body
                 )
-
-            review_body = self._implementation_reply_review_body(
-                pr_number, expected_head_sha, reply_bodies
+                if review_body is not None
+                else None
             )
-            found_review = self._find_implementation_reply_review(
-                pr_number, expected_head_sha, review_body
-            )
-            if found_review is None:
+            if review_body is None or current_batch is None:
                 return ImplementationThreadReplyResult(
                     retryable_thread_ids=candidate_ids,
                     retryable=True,
                 )
-            pr_id, existing_review = found_review
-            if existing_review is None:
-                # A fully recovered old-format response predates batched
-                # reviews.  Never duplicate a valid host-owned reply merely
-                # to rewrite its historic review association.
-                if not prepared:
-                    return ImplementationThreadReplyResult(
-                        replied_thread_ids=candidate_ids,
-                        receipts=tuple(recovered[thread_id] for thread_id in candidate_ids),
+            pr_id, existing_review, has_pending_conflict = current_batch
+            if has_pending_conflict:
+                return ImplementationThreadReplyResult(
+                    retryable_thread_ids=candidate_ids,
+                    retryable=True,
+                )
+            if blocked:
+                # A PENDING review is not a receipt.  Abort the exact
+                # coordinator draft if any target changed, rather than
+                # reporting a hidden partial batch as delivered.
+                if (
+                    existing_review is not None
+                    and existing_review[1] == "PENDING"
+                    and not self._discard_current_implementation_reply_review(
+                        pr_number,
+                        expected_head_sha,
+                        review_body,
+                        pr_id,
+                        existing_review[0],
                     )
-                # Some old-format replies plus new replies cannot be made one
-                # atomic review.  Preserve the existing comments and let the
-                # caller obtain a fresh implementation pass instead of
-                # publishing a misleading partial batch.
+                ):
+                    return ImplementationThreadReplyResult(
+                        retryable_thread_ids=candidate_ids,
+                        retryable=True,
+                    )
+                return ImplementationThreadReplyResult(
+                    blocked_thread_ids=tuple(sorted(blocked)),
+                )
+            if existing_review is None:
+                # A reply from an old per-comment review is not a successful
+                # batch receipt.  Do not duplicate it by creating a new batch
+                # over the same thread; a fresh review pass must establish a
+                # coherent current handoff.
                 if recovered:
                     return ImplementationThreadReplyResult(
                         retryable_thread_ids=candidate_ids,

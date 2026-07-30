@@ -298,6 +298,22 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def discard_stale_implementation_thread_reply_batch(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        current_head_sha: str,
+        replies: dict[str, str],
+    ) -> bool:
+        """Discard only a verified old-head implementation reply draft.
+
+        This recovery hook runs when a durable handoff becomes stale before a
+        retry.  It must never delete a current or manually authored pending
+        review, and returns False when the stale draft cannot be proved.
+        """
+        ...
+
     def reviewer_validation_receipts(
         self,
         pr_number: int,

@@ -4248,6 +4248,10 @@ class TestRealCommitGate:
         assert stage.step(item, ctx) == Continue(next_state="REVIEW_WAIT")
         assert github.reply_attempts == 0
         assert "pending_implementation_reply_handoff" not in item.payload
+        assert github.mutation_log[-1] == (
+            "discard_stale_implementation_thread_reply_batch",
+            (1001, "a" * 40, "b" * 40, ("thread-1",)),
+        )
 
     def test_stale_reply_handoff_restarts_fresh_review_without_retrying(
         self, make_ctx: Any, make_work_item: Any

@@ -1774,6 +1774,40 @@ class PrReviewStage(Stage):
         return None
 
     @staticmethod
+    def _discard_stale_implementation_reply_draft(
+        item: WorkItem,
+        ctx: StageContext,
+        *,
+        expected_head_sha: str,
+        current_state: object,
+        replies: dict[str, str],
+    ) -> None:
+        """Best-effort cleanup after a saved implementation head was replaced."""
+        if not (
+            isinstance(current_state, dict)
+            and current_state.get("state") == "OPEN"
+            and current_state.get("autoMergeRequest") is None
+            and isinstance(current_state.get("headRefOid"), str)
+            and is_full_commit_sha(current_state["headRefOid"])
+            and current_state["headRefOid"] != expected_head_sha
+            and item.pr is not None
+        ):
+            return
+        try:
+            ctx.github.discard_stale_implementation_thread_reply_batch(
+                item.pr,
+                expected_head_sha=expected_head_sha,
+                current_head_sha=current_state["headRefOid"],
+                replies=replies,
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not discard stale implementation reply draft (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+
+    @staticmethod
     def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
         """Retry one exact post-push reply batch without invoking an agent.
 
@@ -1828,6 +1862,13 @@ class PrReviewStage(Stage):
                             IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP,
                         )
                         return "visibility_wait"
+                PrReviewStage._discard_stale_implementation_reply_draft(
+                    item,
+                    ctx,
+                    expected_head_sha=head_sha,
+                    current_state=state,
+                    replies=replies,
+                )
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
                 item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
