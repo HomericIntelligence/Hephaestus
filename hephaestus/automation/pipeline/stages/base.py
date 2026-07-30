@@ -361,7 +361,6 @@ class StageGitHub(Protocol):
         self,
         pr_number: int,
         threads: list[dict[str, Any]],
-        summary: str,
         *,
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:

@@ -125,7 +125,6 @@ from hephaestus.automation.review_audit import (
     ReviewAudit,
     has_reserved_finding_control,
     parse_review_audit,
-    render_review_audit,
 )
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
@@ -1614,23 +1613,24 @@ class PrReviewStage(Stage):
             publication_guard = self._require_reviewed_unarmed(item, ctx)
             if publication_guard is not None:
                 return publication_guard
-        try:
-            post_receipts = list(
-                ctx.github.post_review_threads(
-                    item.pr,
-                    list(threads),
-                    self._final_review_comment(audit),
-                    expected_head_sha=reviewed_head,
+        post_receipts: list[dict[str, Any]] = []
+        if threads:
+            try:
+                post_receipts = list(
+                    ctx.github.post_review_threads(
+                        item.pr,
+                        list(threads),
+                        expected_head_sha=reviewed_head,
+                    )
                 )
-            )
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: review finding publication failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%s: review finding publication failed (%s)",
+                    item.issue,
+                    type(error).__name__,
+                )
+                item.payload["review_audit_failure"] = True
+                return Continue(next_state=EVAL)
         if len(post_receipts) != len(threads):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
@@ -2553,8 +2553,3 @@ class PrReviewStage(Stage):
         if postwrite_outcome is not None:
             return postwrite_outcome
         return StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-
-    @staticmethod
-    def _final_review_comment(audit: ReviewAudit) -> str:
-        """Build an audit-only review comment; labels carry eligibility."""
-        return render_review_audit(audit)

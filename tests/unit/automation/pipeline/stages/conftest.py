@@ -397,13 +397,12 @@ class FakeStageGitHub(FakeGitHub):
         self,
         pr_number: int,
         threads: list[dict[str, Any]],
-        summary: str,
         *,
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:
         """Mirror a post-time immutable receipt returned by the coordinator."""
         del expected_head_sha
-        ids = self.gh_pr_review_post(pr_number, threads, summary)
+        ids = self.gh_pr_review_post(pr_number, threads, "")
         self._posted_thread_ids[pr_number] = list(ids)
         review_id = f"review-{pr_number}-{len(self.reviews.get(pr_number, []))}"
         return [

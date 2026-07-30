@@ -504,6 +504,80 @@ class TestAllThreadReplyAndReviewerResolution:
         ]
         assert reply_calls == [first["id"], second["id"]]
 
+    def test_linked_worktrees_share_one_reply_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Separate worktree roots serialize direct replies through common Git metadata."""
+        common_git_dir = tmp_path / "repository" / ".git"
+        first_root = tmp_path / "worktree-first"
+        second_root = tmp_path / "worktree-second"
+        for root, name in ((first_root, "first"), (second_root, "second")):
+            root.mkdir()
+            git_dir = common_git_dir / "worktrees" / name
+            git_dir.mkdir(parents=True)
+            (root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+        first_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=first_root)
+        second_adapter = PipelineGitHubForTest("org", repo="repo-a", repo_root=second_root)
+        assert first_adapter._implementation_reply_lock_path(7) == (
+            second_adapter._implementation_reply_lock_path(7)
+        )
+
+        thread = _external_reviewer_thread("thread-one")
+        live = thread
+        reply_calls: list[str] = []
+
+        def snapshot(_pr: int, _thread_id: str) -> dict[str, Any]:
+            return _open_thread_snapshot(live)
+
+        def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            nonlocal live
+            assert "addPullRequestReviewThreadReply" in query
+            reply_calls.append(str(fields["body"]))
+            sleep(0.05)
+            live = {
+                **live,
+                "comments": [
+                    *live["comments"],
+                    {
+                        "id": "implementation-comment",
+                        "author": "hephaestus[bot]",
+                        "body": fields["body"],
+                        "viewer_did_author": True,
+                    },
+                ],
+            }
+            return {
+                "data": {
+                    "addPullRequestReviewThreadReply": {"comment": {"id": "implementation-comment"}}
+                }
+            }
+
+        for candidate in (first_adapter, second_adapter):
+            monkeypatch.setattr(candidate, "_review_thread_snapshot", snapshot)
+            monkeypatch.setattr(candidate, "_graphql", graphql)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [
+                pool.submit(
+                    candidate.post_implementation_thread_replies,
+                    7,
+                    expected_head_sha="a" * 40,
+                    threads=[thread],
+                    replies={thread["id"]: "Fixed the finding."},
+                    batch_nonce=batch_nonce,
+                )
+                for candidate, batch_nonce in (
+                    (first_adapter, "c" * 32),
+                    (second_adapter, "d" * 32),
+                )
+            ]
+            resolved = [result.result() for result in results]
+
+        assert len(reply_calls) == 1
+        assert sum(result.replied_thread_ids == (thread["id"],) for result in resolved) == 1
+        assert sum(result.blocked_thread_ids == (thread["id"],) for result in resolved) == 1
+
     def test_external_thread_is_replied_to_then_resolved_by_fresh_reviewer(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3115,15 +3189,15 @@ class TestRepoScoping:
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        posted = adapter.post_review_threads(7, [], "summary", expected_head_sha="a" * 40)
+        posted = adapter.post_review_threads(7, [], expected_head_sha="a" * 40)
 
         assert posted == []
         assert calls == []
 
-    def test_repo_scoped_review_post_omits_the_unanchored_summary_body(
+    def test_repo_scoped_review_post_has_no_review_level_response_parameter(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A source-anchored finding must not carry a review-level body."""
+        """A source-anchored finding has no review-level response pathway."""
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
         review_payloads: list[dict[str, object]] = []
 
@@ -3151,7 +3225,6 @@ class TestRepoScoping:
         adapter.post_review_threads(
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
-            "This summary must never become a general review comment.",
             expected_head_sha="a" * 40,
         )
 
@@ -3198,7 +3271,6 @@ class TestRepoScoping:
                     {"path": "a.py", "line": 1, "side": "RIGHT", "body": "valid"},
                     {"path": "a.py", "line": 2, "side": "RIGHT", "body": "stale"},
                 ],
-                "summary",
                 expected_head_sha="a" * 40,
             )
 
@@ -3237,7 +3309,6 @@ class TestRepoScoping:
             adapter.post_review_threads(
                 7,
                 [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
-                "summary",
                 expected_head_sha="a" * 40,
             )
 
@@ -3303,7 +3374,6 @@ class TestRepoScoping:
             posted = adapter.post_review_threads(
                 7,
                 [{"path": "a.py", "line": 1, "body": "x"}],
-                "summary",
                 expected_head_sha="a" * 40,
             )
 
@@ -3376,7 +3446,6 @@ class TestRepoScoping:
         posted = adapter.post_review_threads(
             7,
             [{"path": "a.py", "line": 1, "side": "RIGHT", "severity": "major", "body": "finding"}],
-            "summary",
             expected_head_sha="a" * 40,
         )
 

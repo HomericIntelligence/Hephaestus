@@ -795,10 +795,10 @@ class TestPrReviewStageStep:
         assert item.payload["posted_thread_ids"] == ["thread-1001-0", "thread-1001-1"]
         assert item.payload["unresolved_threads_before_address"] == 2
 
-    def test_post_with_zero_open_automation_threads_skips_to_eval(
+    def test_post_with_zero_open_automation_threads_is_a_publication_no_op(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A zero-finding review still posts its final structured audit."""
+        """A zero-finding review emits no unanchored review-level response."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -815,9 +815,8 @@ class TestPrReviewStageStep:
 
         assert isinstance(result, Continue)
         assert result.next_state == "EVAL"
-        assert github.mutation_log == [("gh_pr_review_post", (1001, "COMMENT"))]
-        assert github.reviews[1001][0]["comments"] == []
-        assert "Total grade: A" in github.reviews[1001][0]["summary"]
+        assert github.mutation_log == []
+        assert 1001 not in github.reviews
 
     @pytest.mark.parametrize("existing_pr", [False, True], ids=["fresh-pr", "existing-pr"])
     def test_empty_audit_addresses_pre_existing_live_blocking_thread(
@@ -844,7 +843,7 @@ class TestPrReviewStageStep:
         post_result = stage.step(item, ctx)
 
         assert post_result == Continue(next_state="DIFFICULTY_WAIT")
-        assert github.reviews[1001][0]["comments"] == []
+        assert 1001 not in github.reviews
         remediation = [
             {
                 "thread_id": "live-thread-1001-0",
@@ -1725,11 +1724,10 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary, expected_head_sha
+                del expected_head_sha
                 self.posted_batches.append([dict(thread) for thread in threads])
                 thread_ids: list[str] = []
                 for thread in threads:
@@ -1878,13 +1876,12 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
                 self.posted_batches.append([dict(thread) for thread in threads])
                 return super().post_review_threads(
-                    pr_number, threads, summary, expected_head_sha=expected_head_sha
+                    pr_number, threads, expected_head_sha=expected_head_sha
                 )
 
         github = CapturePostsGitHub()
@@ -1907,7 +1904,7 @@ class TestReviewThreadLifecycle:
         result = PrReviewStage().step(item, make_ctx(github=github))
 
         assert result == Continue(next_state="EVAL")
-        assert github.posted_batches == [[]]
+        assert github.posted_batches == []
 
     def test_validation_receives_all_live_thread_facts(
         self, make_ctx: Any, make_work_item: Any
@@ -1961,11 +1958,10 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary, expected_head_sha
+                del expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -2024,11 +2020,10 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del summary, expected_head_sha
+                del expected_head_sha
                 self.posted = [dict(thread) for thread in threads]
                 posted_ids = [f"reopened-{index}" for index, _ in enumerate(threads)]
                 for thread_id, thread in zip(posted_ids, threads, strict=True):
@@ -2188,7 +2183,6 @@ class TestReviewThreadLifecycle:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
@@ -2391,22 +2385,6 @@ class TestEvalVerdicts:
 
         assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
-
-    def test_final_comment_contains_audit_only(self) -> None:
-        """The durable review comment contains no textual decision field."""
-        body = PrReviewStage._final_review_comment(
-            ReviewAudit(
-                grade="A",
-                summary="Safe summary",
-                findings=(),
-                raw_feedback="Private reviewer detail",
-                valid=True,
-            )
-        )
-
-        assert "Total grade: A" in body
-        assert "Safe summary" in body
-        assert "private reviewer detail" not in body
 
     def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
@@ -3691,7 +3669,7 @@ class TestFullWalks:
         assert item.attempts["pr_review_iter"] == 1  # only the fresh-head round counts
         assert not any(name == "mark_pr_implementation_no_go" for name, _ in github.mutation_log)
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
-        assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 2
+        assert github.mutation_log.count(("gh_pr_review_post", (1001, "COMMENT"))) == 0
 
     def test_unresolved_thread_walk_exhausts_without_terminal_handoff(
         self, make_ctx: Any, make_work_item: Any
@@ -4649,11 +4627,10 @@ class TestAuditPublication:
                 self,
                 pr_number: int,
                 threads: list[dict[str, Any]],
-                summary: str,
                 *,
                 expected_head_sha: str,
             ) -> list[dict[str, Any]]:
-                del pr_number, threads, summary, expected_head_sha
+                del pr_number, threads, expected_head_sha
                 self.publish_calls += 1
                 pytest.fail("fresh-audit publication must verify the reviewed PR head first")
 

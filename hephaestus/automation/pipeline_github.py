@@ -1364,13 +1364,38 @@ class PipelineGitHub:
         return second[0]
 
     def _implementation_reply_lock_path(self, pr_number: int) -> Path:
-        """Return the cross-process lock for one repository PR reply batch."""
+        """Return a local worktree-shared lock for one repository PR reply batch.
+
+        A linked worktree has a ``.git`` file pointing at the common
+        repository's ``.git/worktrees/<name>`` directory.  Reply publication
+        must use the common directory rather than the worktree-local state
+        directory, otherwise separate loop processes can both pass the
+        snapshot read and attach duplicate responses.  A standalone checkout
+        retains its repository-local state fallback.
+        """
         repo_key = hashlib.sha256((self._repo_slug or self.org).encode("utf-8")).hexdigest()[:16]
-        return (
-            ensure_state_dir(self._repo_root)
-            / "locks"
-            / (f"implementation-replies-{repo_key}-{pr_number}.lock")
-        )
+        git_metadata = self._repo_root / ".git"
+        lock_root = ensure_state_dir(self._repo_root) / "locks"
+        try:
+            if git_metadata.is_dir():
+                lock_root = git_metadata / "hephaestus-automation-locks"
+            elif git_metadata.is_file():
+                first_line = git_metadata.read_text(encoding="utf-8").splitlines()[0]
+                prefix, separator, raw_git_dir = first_line.partition(":")
+                if prefix == "gitdir" and separator and raw_git_dir.strip():
+                    git_dir = Path(raw_git_dir.strip())
+                    if not git_dir.is_absolute():
+                        git_dir = git_metadata.parent / git_dir
+                    if git_dir.parent.name == "worktrees":
+                        lock_root = git_dir.parent.parent / "hephaestus-automation-locks"
+                    else:
+                        lock_root = git_dir / "hephaestus-automation-locks"
+        except (IndexError, OSError, UnicodeDecodeError):
+            logger.warning(
+                "could not read Git metadata for implementation reply lock at %s",
+                git_metadata,
+            )
+        return lock_root / f"implementation-replies-{repo_key}-{pr_number}.lock"
 
     def post_implementation_thread_replies(
         self,
@@ -1385,8 +1410,8 @@ class PipelineGitHub:
 
         GitHub's client mutation id is a tracing field rather than a
         compare-and-swap primitive.  Cooperating loop processes therefore
-        hold one PR-scoped lock across discovery, draft creation, replies, and
-        submission.  The adapter fails closed on platforms without an
+        hold one worktree-shared PR-scoped lock across discovery and direct
+        thread replies.  The adapter fails closed on platforms without an
         exclusive lock instead of risking duplicate thread replies.
         """
         candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
@@ -2347,7 +2372,6 @@ class PipelineGitHub:
         self,
         pr_number: int,
         threads: list[dict[str, Any]],
-        summary: str,
         *,
         expected_head_sha: str,
     ) -> list[dict[str, Any]]:
