@@ -6,12 +6,20 @@ from pathlib import Path
 from hephaestus.validation.markdown import extract_markdown_links, validate_relative_link
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPECTED_CLAUDE_MD = (
+    "# Claude Code guidance\n"
+    "\n"
+    "Follow [`AGENTS.md`](AGENTS.md). "
+    "It is the sole authoritative agent contract for this repository.\n"
+)
 
 
-def test_claude_md_links_to_canonical_contract() -> None:
-    """The legacy file provides a resolvable link to the canonical contract."""
+def test_claude_md_is_exact_compatibility_pointer() -> None:
+    """The legacy file is the exact required pointer to the canonical contract."""
     claude_md = REPO_ROOT / "CLAUDE.md"
     content = claude_md.read_text(encoding="utf-8")
+    assert content == EXPECTED_CLAUDE_MD
+
     links = extract_markdown_links(content)
 
     contract_links = [link for link in links if link[0] == "AGENTS.md"]
