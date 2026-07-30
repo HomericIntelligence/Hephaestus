@@ -164,7 +164,13 @@ class TestJsonFormat:
         payload = json.loads(next(line for line in lines if line.startswith("{")))
         assert payload["message"] == "Ready 2"
         assert payload["request_id"] == "abc"
-        assert {"timestamp", "level", "logger", "message"} <= payload.keys()
+        assert set(payload) == {
+            "timestamp",
+            "level",
+            "logger",
+            "message",
+            "request_id",
+        }
 
 
 class TestLocalizationLifecycle:
