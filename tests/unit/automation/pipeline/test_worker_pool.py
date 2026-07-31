@@ -627,6 +627,14 @@ class TestWorkerPoolSubmitComplete:
             "1 failed, 6199 passed, 26 skipped in 121.30s\n",
             "",
         )
+        assert _confirmed_pytest_failure(
+            1,
+            "=========================== short test summary info ============================\n"
+            "FAILED tests/unit/test_example.py::test_example - assert False\n"
+            "1 failed, 6199 passed, 26 skipped, 64 deselected, 83 warnings in 100.48s "
+            "(0:01:40)\n",
+            "",
+        )
         assert not _confirmed_pytest_failure(
             1,
             "uv bootstrap error: 1 failed to prepare environment",
