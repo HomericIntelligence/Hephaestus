@@ -227,7 +227,7 @@ addopts = [
     "-v",
     "--strict-markers",
     "-m",
-    "not performance",
+    "not performance and not nightly",
     "--cov=hephaestus",
     "--cov-report=term-missing",
 ]
@@ -236,6 +236,7 @@ markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "unit: marks tests as unit tests",
     "performance: bounded capacity, latency, and sustained-concurrency tests",
+    "nightly: high-cost functional tests run by the scheduled nightly workflow",
     "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
 ]
 

@@ -248,7 +248,7 @@ jobs:
         # entry-point checks must never skip here (#2173).
         env:
           HEPHAESTUS_REQUIRE_CLI: "1"
-        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers
+        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
 
   type-check:
     runs-on: ubuntu-24.04

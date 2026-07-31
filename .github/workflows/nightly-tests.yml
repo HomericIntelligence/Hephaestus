@@ -1,0 +1,33 @@
+name: Nightly Tests
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+      - name: Run nightly tests
+        run: >
+          uv run pytest tests/unit tests/integration
+          --override-ini="addopts=" -v --strict-markers -m "nightly"
