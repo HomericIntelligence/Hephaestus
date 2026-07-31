@@ -123,12 +123,18 @@ from hephaestus.automation.pipeline.stages.repo import (
     _drive_green_pr_is_in_scope,
     product_to_work_item,
 )
-from hephaestus.automation.pipeline.summary import RunStats, latest_logical_items, print_summary
+from hephaestus.automation.pipeline.summary import (
+    RunStats,
+    SummaryItem,
+    latest_logical_items,
+    print_summary,
+)
 from hephaestus.automation.pipeline.work_item import (
     ItemKind,
     ItemResult,
     PreservedWorktree,
     WorkItem,
+    WorkItemSummary,
 )
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -471,7 +477,12 @@ class Coordinator:
         self.inflight_per_repo: Counter[str] = Counter()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
+        # ``items`` owns only live, payload-bearing work. Terminal items are
+        # retired immediately into compact scalar summaries so streamed runs
+        # never retain O(total discovered work) issue bodies/plans/reviews.
         self.items: list[WorkItem] = []
+        self.item_summaries: list[WorkItemSummary] = []
+        self._terminal_pr_keys: set[tuple[str, int]] = set()
         self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         self._journal_failure = False
@@ -915,9 +926,25 @@ class Coordinator:
                     self._metrics_server.stop()
         return exit_code
 
-    def _effective_items(self) -> list[WorkItem]:
-        """Return latest logical items, collapsing superseded re-seed attempts."""
-        return latest_logical_items(self.items)
+    def _effective_items(self) -> list[SummaryItem]:
+        """Return latest logical active/terminal items for reporting."""
+        return latest_logical_items([*self.item_summaries, *self.items])
+
+    def _retire_terminal_item(self, item: WorkItem) -> None:
+        """Drop a completed payload-bearing item after saving its compact summary."""
+        item_id = id(item)
+        tracked_index = next(
+            (index for index, candidate in enumerate(self.items) if candidate is item),
+            None,
+        )
+        if tracked_index is None and item_id not in self._seen_item_ids:
+            return
+        self.item_summaries.append(WorkItemSummary.from_item(item))
+        if item.pr is not None:
+            self._terminal_pr_keys.add((item.repo, item.pr))
+        if tracked_index is not None:
+            del self.items[tracked_index]
+        self._seen_item_ids.discard(item_id)
 
     def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
         """Return preserved worktrees for latest failed items that still exist."""
@@ -1615,10 +1642,12 @@ class Coordinator:
             )
             return False
 
-        # Issue discovery runs first. Its WorkItems remain in ``items`` after
-        # terminalization, so this constant-space lookup prevents the PR cursor
-        # from producing a second item for an already-covered pull request.
-        if any(item.repo == active.repo and item.pr == pr_number for item in self.items):
+        # Issue discovery runs first. Check both bounded live ownership and the
+        # compact terminal-key index so the PR cursor cannot produce a second
+        # item for an already-covered pull request.
+        if (active.repo, pr_number) in self._terminal_pr_keys or any(
+            item.repo == active.repo and item.pr == pr_number for item in self.items
+        ):
             source.pending_pr = None
             self._record_event("repo_pr_source_covered", active.repo, pr_number)
             self._progress = True
@@ -1662,7 +1691,7 @@ class Coordinator:
         item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.FINISHED)
         item.result = ItemResult(passed=False, reason=reason, final_stage=StageName.REPO)
         item.payload["entry_stage"] = StageName.REPO.value
-        self.items.append(item)
+        self.item_summaries.append(WorkItemSummary.from_item(item))
         self.ledger.append(item.result)
         self._fatal = True
 
@@ -1990,6 +2019,7 @@ class Coordinator:
             self._record_event("done", self._item_key(item), outcome.note)
             self._release_source_lease(item)
             self._release_work_permit(item)
+            self._retire_terminal_item(item)
             return
 
         if disposition is Disposition.ADVANCE:
@@ -2079,6 +2109,7 @@ class Coordinator:
                 item.payload["_recorded"] = True
             self._release_source_lease(item)
             self._release_work_permit(item)
+            self._retire_terminal_item(item)
             return
         self._handoff_item(item, StageName.FINISHED, enter=True, result=result)
 

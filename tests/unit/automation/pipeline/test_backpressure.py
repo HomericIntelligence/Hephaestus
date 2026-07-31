@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import time
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -389,14 +391,16 @@ def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     coordinator.stages[StageName.PLANNING] = _RecoveringStage()
 
     assert coordinator.run() == 0
-    assert [item.issue for item in coordinator.items] == [1, 2]
-    assert len(coordinator.items) == 2
+    summaries = coordinator._effective_items()
+    assert [item.issue for item in summaries] == [1, 2]
+    assert coordinator.items == []
+    assert len(coordinator.items) <= coordinator._work_window
+    assert len(coordinator.item_summaries) == 2
     assert len(coordinator.ledger) == 2
     assert not coordinator._pending_admissions
-    assert all(item.result is not None and item.result.passed for item in coordinator.items)
-    assert all(
-        item.payload["entry_stage"] == StageName.PLANNING.value for item in coordinator.items
-    )
+    assert all(item.result is not None and item.result.passed for item in summaries)
+    assert all(item.entry_stage == StageName.PLANNING.value for item in coordinator.item_summaries)
+    assert all(not hasattr(item, "payload") for item in coordinator.item_summaries)
     records = [json.loads(line) for line in event_log.read_text().splitlines()]
     deferred = [record for record in records if record["event"] == "queue_deferred"]
     assert deferred == []
@@ -411,11 +415,87 @@ def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
     retry.stages[StageName.PLANNING] = _RecoveringStage()
 
     assert retry.run() == 0
-    assert [item.issue for item in retry.items] == [1, 2]
-    assert len(retry.items) == 2
+    retry_summaries = retry._effective_items()
+    assert [item.issue for item in retry_summaries] == [1, 2]
+    assert retry.items == []
+    assert len(retry.items) <= retry._work_window
+    assert len(retry.item_summaries) == 2
     assert len(retry.ledger) == 2
     assert not retry._pending_admissions
-    assert all(item.result is not None and item.result.passed for item in retry.items)
+    assert all(item.result is not None and item.result.passed for item in retry_summaries)
+
+
+def test_completed_issue_payload_retention_stays_bounded_by_work_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completing more than C issues retains summaries, not full WorkItems."""
+    issue_count = 5
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        max_workers=1,
+        parallel_repos=1,
+        stage_queue_capacity=1,
+        projects_dir=tmp_path,
+    )
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_from_cli",
+        lambda repos, issues, prs: (
+            seeding_mod.SeedEntry(
+                kind="issue",
+                identifier=issue,
+                stage=StageName.PLANNING,
+                reason="seed",
+            )
+            for issue in range(1, issue_count + 1)
+        ),
+    )
+    coordinator = Coordinator(
+        config,
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(size=1, completion_q=CompletionQueue(capacity=1)),
+        install_signals=False,
+    )
+    observed_live_counts: list[int] = []
+
+    class _IssuePayload:
+        """Weak-referenceable stand-in for a large GitHub issue payload."""
+
+        def __init__(self) -> None:
+            self.body = "payload" * 10_000
+
+    payload_refs: list[weakref.ReferenceType[_IssuePayload]] = []
+
+    class PayloadStage:
+        """Attach a representative large payload, then complete immediately."""
+
+        def on_enter(self, item: WorkItem, ctx: Any) -> None:
+            payload = _IssuePayload()
+            payload_refs.append(weakref.ref(payload))
+            item.payload["issue_body"] = payload
+
+        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+            observed_live_counts.append(len(coordinator.items))
+            return StageOutcome(Disposition.FINISH_PASS, "done")
+
+        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+            """No jobs are submitted by this stage."""
+
+    coordinator.stages[StageName.PLANNING] = PayloadStage()
+
+    assert coordinator.run() == 0
+    assert issue_count > coordinator._work_window
+    assert max(observed_live_counts) <= coordinator._work_window
+    assert coordinator.items == []
+    assert len(coordinator.item_summaries) == issue_count
+    assert len(coordinator.ledger) == issue_count
+    assert [item.issue for item in coordinator._effective_items()] == list(
+        range(1, issue_count + 1)
+    )
+    assert all(not hasattr(item, "payload") for item in coordinator.item_summaries)
+    gc.collect()
+    assert all(payload_ref() is None for payload_ref in payload_refs)
 
 
 def test_c_plus_one_products_stop_at_global_permit_bound(
@@ -576,8 +656,8 @@ def test_completion_rejection_recovers_from_the_same_seed(
     second.stages[StageName.PLANNING] = _RecoveringStage()
 
     assert second.run() == 0
-    assert second.items[0].result is not None
-    assert second.items[0].result.passed is True
+    assert second.items == []
+    assert second.item_summaries[0].result.passed is True
 
 
 def test_completion_saturation_blocks_follow_on_submission_from_accepted_result(

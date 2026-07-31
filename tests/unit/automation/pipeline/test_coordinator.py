@@ -211,8 +211,10 @@ class TestQuiescence:
         )
 
         assert coordinator.run() == 0
-        assert [item.issue for item in coordinator.items] == [1850]
-        assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
+        effective_items = coordinator._effective_items()
+        assert [item.issue for item in effective_items] == [1850]
+        assert coordinator.items == []
+        assert all(item.kind is not ItemKind.REPO for item in effective_items)
 
     def test_repo_products_flow_to_finished(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1944,7 +1946,7 @@ class TestPipelineScopeWiring:
         assert result.passed
         assert result.final_stage is StageName.FINISHED
         # The item never entered an out-of-scope IMPLEMENTATION stage.
-        assert all(item.stage is StageName.FINISHED for item in coordinator.items)
+        assert all(item.stage is StageName.FINISHED for item in coordinator._effective_items())
 
     def test_force_reroutes_plan_go_issue_to_planning(self, tmp_path: Path) -> None:
         """--force re-routes an at-or-past-plan-go issue back to the scope's first stage."""

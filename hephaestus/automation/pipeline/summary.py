@@ -16,11 +16,20 @@ import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TypeAlias, TypeVar
 
-from hephaestus.automation.pipeline.work_item import ItemKind, PreservedWorktree, WorkItem
+from hephaestus.automation.pipeline.work_item import (
+    ItemKind,
+    PreservedWorktree,
+    WorkItem,
+    WorkItemSummary,
+)
 from hephaestus.cli.utils import emit_json_status
 
 logger = logging.getLogger(__name__)
+
+SummaryItem: TypeAlias = WorkItem | WorkItemSummary
+_SummaryItemT = TypeVar("_SummaryItemT", bound=SummaryItem)
 
 
 @dataclass(frozen=True)
@@ -71,7 +80,7 @@ def format_preserved_worktrees(preserved: Sequence[PreservedWorktree], script: s
     return lines
 
 
-def _logical_item_key(item: WorkItem) -> tuple[object, ...]:
+def _logical_item_key(item: SummaryItem) -> tuple[object, ...]:
     """Return the stable logical identity for a potentially re-seeded item."""
     if item.kind is ItemKind.REPO:
         return (item.repo, "repo")
@@ -82,9 +91,9 @@ def _logical_item_key(item: WorkItem) -> tuple[object, ...]:
     return (item.repo, item.kind.value, id(item))
 
 
-def latest_logical_items(items: Sequence[WorkItem]) -> list[WorkItem]:
+def latest_logical_items(items: Sequence[_SummaryItemT]) -> list[_SummaryItemT]:
     """Return only the latest queued item for each logical issue/PR/repo."""
-    latest: dict[tuple[object, ...], WorkItem] = {}
+    latest: dict[tuple[object, ...], _SummaryItemT] = {}
     for item in items:
         key = _logical_item_key(item)
         latest.pop(key, None)
@@ -92,7 +101,7 @@ def latest_logical_items(items: Sequence[WorkItem]) -> list[WorkItem]:
     return list(latest.values())
 
 
-def _disposition(item: WorkItem) -> str:
+def _disposition(item: SummaryItem) -> str:
     """Classify one item's summary disposition cell."""
     result = item.result
     if result is None:
@@ -108,7 +117,7 @@ def _disposition(item: WorkItem) -> str:
     return f"FAIL:{result.reason}"
 
 
-def _disposition_bucket(item: WorkItem) -> str:
+def _disposition_bucket(item: SummaryItem) -> str:
     """Aggregate-count bucket for one item (pass/fail/skip/blocked/resumable)."""
     cell = _disposition(item)
     return cell.split(":")[0].split(" ")[0].lower()
@@ -123,12 +132,17 @@ def _json_message(exit_code: int) -> str:
     return "pipeline failed"
 
 
-def _item_row(item: WorkItem) -> str:
+def _item_row(item: SummaryItem) -> str:
     """Format one per-item summary row."""
     issue = f"#{item.issue}" if item.issue else "-"
     pr = f"!{item.pr}" if item.pr else "-"
-    entry = str(item.payload.get("entry_stage", item.stage.value))
-    attempts = ",".join(f"{k}={v}" for k, v in sorted(item.attempts.items()) if v) or "-"
+    if isinstance(item, WorkItemSummary):
+        entry = item.entry_stage
+        attempt_items = item.attempts
+    else:
+        entry = str(item.payload.get("entry_stage", item.stage.value))
+        attempt_items = tuple(sorted((key, value) for key, value in item.attempts.items() if value))
+    attempts = ",".join(f"{key}={value}" for key, value in attempt_items) or "-"
     elapsed_s = (item.updated_at - item.created_at).total_seconds()
     return (
         f"  {item.repo:<28} {issue:>7} {pr:>7} {entry:<15} "
@@ -137,7 +151,7 @@ def _item_row(item: WorkItem) -> str:
 
 
 def print_summary(
-    items: list[WorkItem],
+    items: Sequence[SummaryItem],
     stats: RunStats,
     preserved: list[PreservedWorktree],
     *,
@@ -146,7 +160,7 @@ def print_summary(
     """Log the end-of-run summary; emit the JSON envelope when requested.
 
     Args:
-        items: Every work item the run ever queued (results attached).
+        items: Effective active items and compact terminal summaries.
         stats: Aggregate run statistics (exit code, loops, agent time, wall).
         preserved: ``(repo, issue_number, worktree_path)`` tuples for failed items.
         json_out: Emit the machine-readable ``emit_json_status`` envelope.

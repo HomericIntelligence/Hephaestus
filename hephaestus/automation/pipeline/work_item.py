@@ -58,6 +58,45 @@ class ItemResult:
     final_stage: StageName
 
 
+@dataclass(frozen=True)
+class WorkItemSummary:
+    """Compact terminal projection used for accounting and end-of-run output.
+
+    The coordinator must not retain completed :class:`WorkItem` instances:
+    their payloads can contain issue/PR bodies, plans, review text, and session
+    caches. This projection keeps only the scalar fields the summary needs.
+    """
+
+    repo: str
+    kind: ItemKind
+    issue: int | None
+    pr: int | None
+    stage: StageName
+    entry_stage: str
+    attempts: tuple[tuple[str, int], ...]
+    created_at: datetime
+    updated_at: datetime
+    result: ItemResult
+
+    @classmethod
+    def from_item(cls, item: WorkItem) -> WorkItemSummary:
+        """Capture the summary-relevant terminal state of *item*."""
+        if item.result is None:
+            raise ValueError("cannot summarize a work item without a terminal result")
+        return cls(
+            repo=item.repo,
+            kind=item.kind,
+            issue=item.issue,
+            pr=item.pr,
+            stage=item.stage,
+            entry_stage=str(item.payload.get("entry_stage", item.stage.value)),
+            attempts=tuple(sorted((key, value) for key, value in item.attempts.items() if value)),
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+            result=item.result,
+        )
+
+
 @dataclass
 class WorkItem:
     """A unit of work flowing through the pipeline.

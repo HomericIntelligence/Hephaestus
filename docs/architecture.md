@@ -315,12 +315,17 @@ errors: a signal means the run did not complete.
 
 ### Effective-item rule
 
-The summary uses `latest_logical_items(self.items)` from
-[`summary.py`](hephaestus/automation/pipeline/summary.py) so a re-seeded
+The summary uses `latest_logical_items([*self.item_summaries, *self.items])`
+from [`summary.py`](hephaestus/automation/pipeline/summary.py) so a re-seeded
 item's superseded attempts are collapsed before per-row / exit-code /
-preserved-worktree calculation. The current item's own failed, skipped or blocked result still counts; an old failed attempt that was superseded
-by a later passing attempt does not. Pull requests already merged/closed are
-terminalized before summary collapse so stale attempts cannot re-enter the queue.
+preserved-worktree calculation. `self.items` owns only bounded live
+`WorkItem`s; the finished sink retires each completed item into an immutable
+scalar-only `WorkItemSummary`, releasing issue/PR bodies, plans, histories,
+and session caches immediately. The current item's own failed, skipped or
+blocked result still counts; an old failed attempt that was superseded by a
+later passing attempt does not. Pull requests already merged/closed are
+terminalized before summary collapse so stale attempts cannot re-enter the
+queue.
 
 ### Rate-budget gate
 

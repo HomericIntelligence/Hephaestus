@@ -684,9 +684,10 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     ):
         assert recovered.run() == 0
 
-    assert len(recovered.items) == workers
-    assert {item.issue for item in recovered.items} == expected_issues
-    assert all(item.result is not None and item.result.passed for item in recovered.items)
+    assert recovered.items == []
+    assert len(recovered.item_summaries) == workers
+    assert {item.issue for item in recovered.item_summaries} == expected_issues
+    assert all(item.result.passed for item in recovered.item_summaries)
 
 
 @pytest.mark.performance

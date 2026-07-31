@@ -229,7 +229,7 @@ def test_repo_source_is_lossless_and_ordered_at_capacity_one(
     ]
     assert Counter(issue for event, issue in events if event == "classify") == Counter({1: 1, 2: 1})
     assert Counter(issue for event, issue in events if event == "complete") == Counter({1: 1, 2: 1})
-    issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
+    issues = [item for item in coordinator._effective_items() if item.kind is ItemKind.ISSUE]
     assert [item.issue for item in issues] == [1, 2]
     assert all(item.result is not None and item.result.passed for item in issues)
 
@@ -356,7 +356,7 @@ def test_repo_source_deduplicates_metadata_after_completed_work_at_capacity_one(
     ]
     assert Counter(issue for event, issue in events if event == "classify") == Counter({1: 1, 2: 1})
     assert Counter(issue for event, issue in events if event == "complete") == Counter({1: 1, 2: 1})
-    issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
+    issues = [item for item in coordinator._effective_items() if item.kind is ItemKind.ISSUE]
     assert [item.issue for item in issues] == [1, 2]
     assert all(item.result is not None and item.result.passed for item in issues)
 
@@ -437,7 +437,7 @@ def test_drive_green_pr_source_is_filtered_lossless_and_capacity_controlled(
 
     assert produced == [31, 32, 33, 34, 35]
     assert reviewed == [31, 32]
-    prs = [item for item in coordinator.items if item.kind is ItemKind.PR]
+    prs = [item for item in coordinator.item_summaries if item.kind is ItemKind.PR]
     assert [item.pr for item in prs] == [31, 32]
     assert all(item.issue == 901 for item in prs)
     assert all(item.result is not None and item.result.passed for item in prs)
