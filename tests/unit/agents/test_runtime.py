@@ -849,6 +849,48 @@ def test_run_pi_smoke_session_redacts_generated_session_from_diagnostics(
     assert agent_runtime.PI_PRIVATE_REDACTION in result.stderr
 
 
+def test_run_pi_smoke_session_redacts_every_observed_session_from_diagnostics(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """A multi-event response must not retain an earlier generated session id."""
+    first_session_id = "pi-session-first"
+    final_session_id = "pi-session-final"
+    stdout = "\n".join(
+        [
+            f'{{"type":"session","id":"{first_session_id}"}}',
+            f'{{"type":"session","id":"{final_session_id}"}}',
+            (
+                '{"type":"message_end","message":{"role":"assistant","content":'
+                f'"completed {first_session_id} and {final_session_id}"}}}}'
+            ),
+        ]
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=stdout,
+            stderr=f"diagnostics {first_session_id} and {final_session_id}",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert result.session_id is None
+    assert first_session_id not in result.stdout
+    assert first_session_id not in result.stderr
+    assert final_session_id not in result.stdout
+    assert final_session_id not in result.stderr
+    assert result.stdout.count(agent_runtime.PI_PRIVATE_REDACTION) == 2
+    assert result.stderr.count(agent_runtime.PI_PRIVATE_REDACTION) == 2
+
+
 def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(
     tmp_path: Path,
     private_pi_temp: Path,

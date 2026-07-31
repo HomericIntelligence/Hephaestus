@@ -1374,6 +1374,7 @@ def _invoke_pi_session(
     session_id: str | None = None,
     base_cmd: list[str] | None = None,
     require_json_event: bool = False,
+    redact_observed_session_ids: bool = False,
     _internal_admission_token: object | None = None,
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
@@ -1390,15 +1391,20 @@ def _invoke_pi_session(
         _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
     raw_stdout = result.stdout or ""
+    observed_session_ids = _pi_json_session_ids(raw_stdout)
     if require_json_event and not _has_pi_json_event(raw_stdout):
         raise RuntimeError("Pi smoke did not emit a JSON event")
     parsed_session_id, event_message = _parse_pi_json_events(raw_stdout)
     if require_json_event and not event_message:
         raise RuntimeError("Pi smoke did not emit a terminal assistant JSON event")
     stdout = (event_message or raw_stdout).strip()
+    stderr = result.stderr or ""
+    if redact_observed_session_ids:
+        stdout = redact_pi_private_values(stdout, observed_session_ids)
+        stderr = redact_pi_private_values(stderr, observed_session_ids)
     return AgentRunResult(
         stdout=stdout,
-        stderr=result.stderr or "",
+        stderr=stderr,
         session_id=parsed_session_id or session_id,
     )
 
@@ -1441,6 +1447,7 @@ def run_pi_smoke_session(
         sandbox="no-tools",
         base_cmd=_pi_smoke_base_cmd(),
         require_json_event=True,
+        redact_observed_session_ids=True,
         _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
     session_tokens = (result.session_id,) if result.session_id else ()
