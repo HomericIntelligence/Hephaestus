@@ -18,7 +18,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stages.base import JobRequest
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -504,6 +504,28 @@ def test_completed_issue_payload_retention_stays_bounded_by_work_window(
     assert not hasattr(coordinator, "_terminal_pr_keys")
     gc.collect()
     assert all(payload_ref() is None for payload_ref in payload_refs)
+
+
+def test_fail_then_pass_reseed_uses_latest_terminal_disposition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A passing reseed replaces an earlier failed logical attempt."""
+    coordinator = _coordinator(tmp_path, monkeypatch)
+    failed = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=42, stage=StageName.PLANNING)
+    failed.result = ItemResult(
+        passed=False, reason="first attempt failed", final_stage=StageName.PLANNING
+    )
+    passed = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=42, stage=StageName.FINISHED)
+    passed.result = ItemResult(passed=True, reason="reseed passed", final_stage=StageName.FINISHED)
+
+    coordinator._seen_item_ids.update((id(failed), id(passed)))
+    coordinator.items.extend((failed, passed))
+    coordinator._record_terminal_summary(failed)
+    coordinator._record_terminal_summary(passed)
+
+    assert coordinator._terminal_item_count == 1
+    assert coordinator._terminal_dispositions == {"pass": 1}
+    assert coordinator._exit_code() == 0
 
 
 def test_c_plus_one_products_stop_at_global_permit_bound(

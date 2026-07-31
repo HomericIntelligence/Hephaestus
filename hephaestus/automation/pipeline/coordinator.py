@@ -525,6 +525,10 @@ class Coordinator:
         self._terminal_item_count = 0
         self._terminal_dispositions: Counter[str] = Counter()
         self._terminal_per_stage: Counter[str] = Counter()
+        # Aggregates represent the latest terminal attempt for each logical
+        # item, rather than every retired reseed attempt.  This keeps a
+        # fail->pass reseed from leaving the run failed after collapse.
+        self._terminal_latest: dict[tuple[object, ...], tuple[str, str]] = {}
         self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         self._journal_failure = False
@@ -996,9 +1000,33 @@ class Coordinator:
         """Retain one bounded terminal row and update complete aggregates."""
         summary = WorkItemSummary.from_item(item)
         self.item_summaries.append(summary)
-        self._terminal_item_count += 1
-        self._terminal_dispositions[self._terminal_disposition_bucket(summary.result)] += 1
+        key = self._logical_item_key(summary)
+        disposition = self._terminal_disposition_bucket(summary.result)
+        previous = self._terminal_latest.get(key)
+        if previous is None:
+            self._terminal_item_count += 1
+        else:
+            old_disposition, old_stage = previous
+            self._terminal_dispositions[old_disposition] -= 1
+            self._terminal_per_stage[old_stage] -= 1
+            if self._terminal_dispositions[old_disposition] == 0:
+                del self._terminal_dispositions[old_disposition]
+            if self._terminal_per_stage[old_stage] == 0:
+                del self._terminal_per_stage[old_stage]
+        self._terminal_latest[key] = (disposition, summary.stage.value)
+        self._terminal_dispositions[disposition] += 1
         self._terminal_per_stage[summary.stage.value] += 1
+
+    @staticmethod
+    def _logical_item_key(item: SummaryItem) -> tuple[object, ...]:
+        """Return the stable identity used to collapse reseeded attempts."""
+        if item.kind is ItemKind.REPO:
+            return (item.repo, "repo")
+        if item.kind is ItemKind.ISSUE:
+            return (item.repo, "issue", item.issue)
+        if item.kind is ItemKind.PR:
+            return (item.repo, "pr", item.pr)
+        return (item.repo, item.kind.value, item.issue, item.pr)
 
     @staticmethod
     def _terminal_disposition_bucket(result: ItemResult) -> str:
