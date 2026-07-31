@@ -580,6 +580,49 @@ def test_completion_rejection_recovers_from_the_same_seed(
     assert second.items[0].result.passed is True
 
 
+def test_completion_saturation_blocks_follow_on_submission_from_accepted_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After saturation, accepted completions are parked but cannot admit new work."""
+    completion_q = CompletionQueue(capacity=1)
+    pool = FakeWorkerPool(size=1, completion_q=completion_q)
+    coordinator = _coordinator(tmp_path, monkeypatch, pool=pool)
+
+    class SubmittingOnDoneStage(_JobRequestingStage):
+        def __init__(self) -> None:
+            self.job_done_calls = 0
+
+        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+            self.job_done_calls += 1
+            item.payload["accepted_completion_processed"] = True
+            coordinator._submit(item, JobRequest(_job(300), on_done_state="VERIFY"))
+
+    stage = SubmittingOnDoneStage()
+    coordinator.stages[StageName.PLANNING] = stage
+    rejected_item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=10, stage=StageName.PLANNING)
+    accepted_item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=20, stage=StageName.PLANNING)
+    rejected_handle = JobHandle(job=_job(10), on_done_state="VERIFY")
+    accepted_handle = JobHandle(job=_job(20), on_done_state="VERIFY")
+    coordinator.in_flight[rejected_handle] = rejected_item
+    coordinator.in_flight[accepted_handle] = accepted_item
+    coordinator.inflight_per_repo["repo-a"] = 2
+
+    assert completion_q.offer((accepted_handle, JobResult(ok=True)))
+    assert completion_q.offer((rejected_handle, JobResult(ok=True))) is False
+
+    coordinator._drain_completions()
+
+    assert coordinator.shutdown.is_set()
+    assert stage.job_done_calls == 1
+    assert pool.submitted == []
+    assert coordinator.in_flight == {}
+    assert rejected_item.result is not None
+    assert rejected_item.result.reason.startswith("resumable at planning")
+    assert accepted_item.payload["accepted_completion_processed"] is True
+    assert accepted_item.result is not None
+    assert accepted_item.result.reason.startswith("resumable at planning")
+
+
 def test_rejection_mailbox_overflow_parks_all_live_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

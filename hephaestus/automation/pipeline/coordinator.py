@@ -1917,6 +1917,14 @@ class Coordinator:
         sanctioned fallback).
         """
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
+        if self.shutdown.is_set():
+            # Completion/admission saturation begins graceful shutdown while
+            # accepted completions may still be drained for durability.  The
+            # submit chokepoint must therefore fail closed even if a caller
+            # reaches it after shutdown was requested.
+            self._record_event("submit_rejected", self._item_key(item), item.stage.value)
+            self._park_resumable(item, reason="submission rejected during shutdown")
+            return
         job = request.job
         if isinstance(job, AgentJob):
             ok, delay = self._rate_budget_ok()

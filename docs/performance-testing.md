@@ -40,11 +40,10 @@ from normal pytest collection:
 uv run pytest tests/performance --override-ini="addopts=" -v --strict-markers --load-duration-s=30 --load-max-jobs=50000 --load-workers=8 --load-max-in-flight=64 --load-service-ms=5 --load-p95-budget-ms=500 --load-report=build/performance/worker-pool.json
 ```
 
-The stalled-consumer recovery regression is performance-marked and is not
-covered by the default unit-suite command (`pyproject.toml` deselects
+The stalled-consumer recovery regression is performance-marked and is
+deselected by the default unit-suite command (`pyproject.toml` excludes
 `performance`). A successful unit-suite run therefore does not validate this
-regression and must not be reported as evidence for it. Re-execute the test
-explicitly when validating that behavior:
+regression; run the test explicitly when reporting evidence for that behavior:
 
 ```bash
 uv run pytest tests/performance/test_worker_pool_load.py::test_worker_pool_stalled_consumer_preserves_and_recovers --override-ini="addopts=" -m performance --strict-markers -v
