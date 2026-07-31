@@ -30,8 +30,9 @@ links to the full section below.
    transition by readback. `merge_wait` then revalidates the in-memory
    reviewed-head proof and conditionally squash-merges that exact head without
    mutating native auto-merge. Normal review may collect CI/CD evidence as
-   context, but the loop does not change CI/CD and CI itself never independently
-   authorizes it. Do not enable auto-merge manually.
+   context, but the loop does not change CI/CD. Required CI/CD checks are the
+   merge contract; review prose and the advisory auto-merge policy do not
+   independently authorize a merge. Do not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.
@@ -293,9 +294,9 @@ grades, and decision-shaped output are audit evidence, not authorization.
 reviewed-head proof and conditionally squash-merges that exact head; it does
 not create, disable, adopt, or poll an auto-merge request. A restart has no
 proof and returns the PR to review without mutating labels. Normal review may
-collect CI/CD evidence as context, but the loop does not change CI/CD and no
-CI check independently authorizes it; the advisory `auto-merge-policy` is not
-the authorization mechanism.
+collect CI/CD evidence as context, but the loop does not change CI/CD. Required
+CI/CD checks are the merge contract; the advisory `auto-merge-policy` is not a
+required check or authorization mechanism.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass

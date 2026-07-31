@@ -118,7 +118,7 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  `--allowedTools`, scoped worktrees, fenced untrusted GitHub content
  via `_fence_untrusted` in
  [`prompts/_shared.py`](../hephaestus/automation/prompts/_shared.py) and
- admin-free human-gated merge.
+ admin-free CI/CD-gated merge.
 
 ---
 
