@@ -112,6 +112,109 @@ def _call_uses_pi_command(node: ast.Call, command_names: set[str]) -> bool:
     )
 
 
+def _mapping_key(node: ast.AST) -> str | None:
+    """Return a string mapping key when the AST node is a literal string."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _neutral_runtime_name(
+    node: ast.AST,
+    aliases: dict[str, str],
+    mappings: dict[tuple[str, str], str],
+) -> str:
+    """Resolve a neutral runtime helper through a direct, alias, or mapping reference."""
+    name = _node_name(node)
+    if name in NEUTRAL_RUNTIME_CALL_NAMES:
+        return name
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, "")
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        key = _mapping_key(node.slice)
+        if key is not None:
+            return mappings.get((node.value.id, key), "")
+    return ""
+
+
+def _neutral_runtime_import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Return imports that bind a neutral runtime helper to a local name."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.module != "hephaestus.agents.runtime":
+            continue
+        for imported in node.names:
+            if imported.name in NEUTRAL_RUNTIME_CALL_NAMES:
+                aliases[imported.asname or imported.name] = imported.name
+    return aliases
+
+
+def _update_neutral_runtime_bindings(
+    assignments: list[ast.Assign | ast.AnnAssign],
+    aliases: dict[str, str],
+    mappings: dict[tuple[str, str], str],
+) -> bool:
+    """Resolve one fixed-point pass of neutral runtime aliases and mapping entries."""
+    changed = False
+    for assignment in assignments:
+        value = assignment.value
+        assert value is not None
+        targets = _assignment_target_names(assignment)
+        name = _neutral_runtime_name(value, aliases, mappings)
+        if name:
+            for target in targets:
+                if aliases.get(target) != name:
+                    aliases[target] = name
+                    changed = True
+        if not isinstance(value, ast.Dict):
+            continue
+        for key_node, value_node in zip(value.keys, value.values, strict=True):
+            if key_node is None:
+                continue
+            key = _mapping_key(key_node)
+            name = _neutral_runtime_name(value_node, aliases, mappings)
+            if key is None or not name:
+                continue
+            for target in targets:
+                mapping_key = (target, key)
+                if mappings.get(mapping_key) != name:
+                    mappings[mapping_key] = name
+                    changed = True
+    return changed
+
+
+def _neutral_runtime_bindings(tree: ast.AST) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
+    """Return aliases and literal mapping entries bound to neutral runtime helpers."""
+    aliases = _neutral_runtime_import_aliases(tree)
+    mappings: dict[tuple[str, str], str] = {}
+    assignments: list[ast.Assign | ast.AnnAssign] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
+    ]
+    while _update_neutral_runtime_bindings(assignments, aliases, mappings):
+        pass
+    return aliases, mappings
+
+
+def _uses_neutral_runtime_call(tree: ast.AST) -> bool:
+    """Return whether code invokes a neutral runtime helper through a safe binding."""
+    aliases, mappings = _neutral_runtime_bindings(tree)
+    return any(
+        isinstance(node, ast.Call) and _neutral_runtime_name(node.func, aliases, mappings)
+        for node in ast.walk(tree)
+    )
+
+
+def _direct_provider_adapter_name(node: ast.AST) -> str:
+    """Return a direct provider adapter referenced anywhere in an expression."""
+    for item in ast.walk(node):
+        name = _node_name(item)
+        if name in DIRECT_PROVIDER_ONLY_NAMES:
+            return name
+    return ""
+
+
 def _provider_neutral_runtime_files() -> list[str]:
     """Discover every non-adapter source file that invokes the neutral runtime.
 
@@ -126,10 +229,7 @@ def _provider_neutral_runtime_files() -> list[str]:
             if path == runtime_path:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            if any(
-                isinstance(node, ast.Call) and _node_name(node.func) in NEUTRAL_RUNTIME_CALL_NAMES
-                for node in ast.walk(tree)
-            ):
+            if _uses_neutral_runtime_call(tree):
                 paths.append(path.relative_to(REPO_ROOT).as_posix())
     return paths
 
@@ -158,7 +258,7 @@ def _provider_adapter_violations(
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             if node.value is None:
                 continue
-            name = _node_name(node.value)
+            name = _direct_provider_adapter_name(node.value)
             if name in DIRECT_PROVIDER_ONLY_NAMES and name not in allowed:
                 violations.append(f"line {node.lineno}: aliases {name}")
         elif isinstance(node, ast.Call):
@@ -233,6 +333,12 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
             "getattr(runtime, '_run_pi_command')('prompt')\n",
             "line 2: looks up _run_pi_command()",
         ),
+        (
+            "import hephaestus.agents.runtime as runtime\n"
+            "handlers = {'invoke': runtime._invoke_pi_session}\n"
+            "handlers['invoke']('prompt')\n",
+            "line 2: aliases _invoke_pi_session",
+        ),
     ],
 )
 def test_direct_provider_guard_rejects_indirect_pi_execution(
@@ -253,6 +359,26 @@ def test_direct_provider_guard_detects_membership_style_provider_branches() -> N
     assert isinstance(comparison, ast.If)
     assert isinstance(comparison.test, ast.Compare)
     assert _direct_provider_string_compare(comparison.test)
+
+
+def test_direct_agent_dispatch_guard_discovers_mapping_runtime_callers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mapped neutral calls must be guarded against provider-specific branches."""
+    source_root = tmp_path / "hephaestus"
+    source_root.mkdir()
+    (source_root / "caller.py").write_text(
+        "import hephaestus.agents.runtime as runtime\n"
+        "handlers = {'run': runtime.run_agent_session}\n"
+        "if agent == 'pi':\n"
+        "    handlers['run']('prompt')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "SOURCE_ROOTS", (source_root,))
+
+    assert _provider_neutral_runtime_files() == ["hephaestus/caller.py"]
 
 
 @pytest.mark.parametrize("relative_path", _provider_neutral_runtime_files())

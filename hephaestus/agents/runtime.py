@@ -732,6 +732,20 @@ def _parse_pi_json_events(text: str) -> tuple[str | None, str]:
     return session_id, final_message.strip()
 
 
+def _has_pi_json_event(text: str) -> bool:
+    """Return whether Pi JSON-mode output contains at least one event object."""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("type"), str) and event["type"].strip():
+            return True
+    return False
+
+
 def run_codex_session(
     prompt: str,
     *,
@@ -895,20 +909,31 @@ def _run_pi_command(
         except subprocess.CalledProcessError as exc:
             tokens = pi_private_redaction_tokens(cwd, model)
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
+            redacted_output = redact_pi_private_values(exc.stdout or "", tokens)
+            redacted_stderr = redact_pi_private_values(exc.stderr or "", tokens)
+            exc.cmd = redacted_cmd
+            exc.output = redacted_output
+            exc.stderr = redacted_stderr
             raise subprocess.CalledProcessError(
                 exc.returncode,
                 redacted_cmd,
-                output=redact_pi_private_values(exc.stdout or "", tokens),
-                stderr=redact_pi_private_values(exc.stderr or "", tokens),
-            ) from exc
+                output=redacted_output,
+                stderr=redacted_stderr,
+            ) from None
         except subprocess.TimeoutExpired as exc:
             tokens = pi_private_redaction_tokens(cwd, model)
+            redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
+            redacted_output = redact_pi_private_values(_coerce_timeout_output(exc.output), tokens)
+            redacted_stderr = redact_pi_private_values(_coerce_timeout_output(exc.stderr), tokens)
+            exc.cmd = redacted_cmd
+            exc.output = redacted_output
+            exc.stderr = redacted_stderr.encode()
             raise subprocess.TimeoutExpired(
-                _redact_pi_command_args(exc.cmd, tokens),
+                redacted_cmd,
                 exc.timeout,
-                output=redact_pi_private_values(_coerce_timeout_output(exc.output), tokens),
-                stderr=redact_pi_private_values(_coerce_timeout_output(exc.stderr), tokens),
-            ) from exc
+                output=redacted_output,
+                stderr=redacted_stderr,
+            ) from None
     finally:
         if prompt_path is not None:
             with contextlib.suppress(OSError):
@@ -944,6 +969,7 @@ def _invoke_pi_session(
     sandbox: str,
     session_id: str | None = None,
     base_cmd: list[str] | None = None,
+    require_json_event: bool = False,
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
     cmd = list(base_cmd) if base_cmd is not None else _pi_base_cmd(session_id=session_id)
@@ -955,8 +981,11 @@ def _invoke_pi_session(
         sandbox=sandbox,
         model=model,
     )
-    parsed_session_id, event_message = _parse_pi_json_events(result.stdout or "")
-    stdout = (event_message or result.stdout or "").strip()
+    raw_stdout = result.stdout or ""
+    if require_json_event and not _has_pi_json_event(raw_stdout):
+        raise RuntimeError("Pi smoke did not emit a JSON event")
+    parsed_session_id, event_message = _parse_pi_json_events(raw_stdout)
+    stdout = (event_message or raw_stdout).strip()
     return AgentRunResult(
         stdout=stdout,
         stderr=result.stderr or "",
@@ -1000,6 +1029,7 @@ def run_pi_smoke_session(
         model=model,
         sandbox="no-tools",
         base_cmd=_pi_smoke_base_cmd(),
+        require_json_event=True,
     )
 
 

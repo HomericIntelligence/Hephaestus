@@ -791,6 +791,49 @@ def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
 
+@pytest.mark.parametrize("stdout", ["not Pi JSON output", "{}"])
+def test_run_pi_smoke_session_rejects_non_event_stdout(tmp_path: Path, stdout: str) -> None:
+    """The smoke seam must fail closed when Pi does not honor JSON mode."""
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    with (
+        patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(RuntimeError, match="JSON event"),
+    ):
+        agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+
+def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
+    """Structured exception chains must not retain unredacted Pi diagnostics."""
+    assert exc.__cause__ is None
+    for chained in (exc.__cause__, exc.__context__):
+        if chained is None:
+            continue
+        diagnostics = " ".join(
+            [
+                str(chained),
+                repr(chained.args),
+                *(
+                    str(getattr(chained, attribute, ""))
+                    for attribute in ("cmd", "output", "stdout", "stderr")
+                ),
+            ]
+        )
+        for private_value in (
+            "private-provider-alias",
+            "private-test-alias",
+            "PRIVATE_ENDPOINT_TOKEN",
+        ):
+            assert private_value not in diagnostics
+
+
 def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
     """Pi subprocess failure diagnostics should not leak local aliases or tokens."""
     (tmp_path / ".heph-private-denylist").write_text(
@@ -834,6 +877,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Pat
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
+    _assert_pi_exception_chain_is_redacted(exc)
 
 
 def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
@@ -885,6 +929,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Pat
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.output or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
+    _assert_pi_exception_chain_is_redacted(exc)
 
 
 def test_redact_pi_private_values_replaces_all_tokens() -> None:

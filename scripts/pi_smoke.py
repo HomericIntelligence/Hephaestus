@@ -17,11 +17,11 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from hephaestus.agents.runtime import (
     PI_MODEL_ENV,
-    REQUIRED_ALIAS_ENVS,
     AgentRunResult,
     missing_pi_alias_env,
     pi_private_redaction_tokens,
@@ -48,17 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _redact_alias_values(text: str) -> str:
-    """Replace operator-local alias values before writing smoke logs."""
-    redacted = text
-    for name in REQUIRED_ALIAS_ENVS:
-        value = os.environ.get(name, "").strip()
-        if value:
-            redacted = redacted.replace(value, f"<redacted:{name}>")
-    return redacted
-
-
-def _write_smoke_log(log_dir: Path, result: AgentRunResult) -> Path:
+def _write_smoke_log(
+    log_dir: Path,
+    result: AgentRunResult,
+    redaction_tokens: Iterable[str],
+) -> Path:
     """Write the local Pi smoke result log and return its path.
 
     Each run produces a distinct artifact named with a nanosecond epoch suffix
@@ -69,12 +63,14 @@ def _write_smoke_log(log_dir: Path, result: AgentRunResult) -> Path:
     log_path = log_dir / f"pi-smoke-local-{epoch_ns}.log"
     print(f"NOTE: writing smoke log to {log_path}", file=sys.stderr)
     lines = [
-        f"session_id: {result.session_id or ''}",
-        f"stdout: {_redact_alias_values(result.stdout)}",
-        f"stderr: {_redact_alias_values(result.stderr)}",
+        f"session_id: {redact_pi_private_values(result.session_id or '', redaction_tokens)}",
+        f"stdout: {redact_pi_private_values(result.stdout, redaction_tokens)}",
+        f"stderr: {redact_pi_private_values(result.stderr, redaction_tokens)}",
         "",
     ]
-    log_path.write_text("\n".join(lines), encoding="utf-8")
+    file_descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as log_file:
+        log_file.write("\n".join(lines))
     return log_path
 
 
@@ -103,9 +99,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: Pi smoke timed out after {exc.timeout}s", file=sys.stderr)
         return 124
     except RuntimeError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"ERROR: {redact_pi_private_values(str(exc), redaction_tokens)}", file=sys.stderr)
         return 1
-    log_path = _write_smoke_log(args.log_dir, result)
+    except OSError as exc:
+        detail = redact_pi_private_values(str(exc), redaction_tokens)
+        print(f"ERROR: Pi smoke could not start: {detail}", file=sys.stderr)
+        return 1
+    try:
+        log_path = _write_smoke_log(args.log_dir, result, redaction_tokens)
+    except OSError as exc:
+        detail = redact_pi_private_values(str(exc), redaction_tokens)
+        print(f"ERROR: could not write Pi smoke log: {detail}", file=sys.stderr)
+        return 1
     print(redact_pi_private_values(result.stdout, redaction_tokens))
     if result.session_id:
         print(f"SESSION_ID={result.session_id}", file=sys.stderr)

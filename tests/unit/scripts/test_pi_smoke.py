@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
@@ -118,7 +119,49 @@ def test_success_output_redacts_private_values(
 
     assert _mod.main(["--cwd", str(tmp_path)]) == 0
 
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
+    output = captured.out
+    assert "private-test-alias" not in output
+    assert "PRIVATE_ENDPOINT_TOKEN" not in output
+    assert "<redacted-pi-private-value>" in output
+    log_file_line = next(line for line in captured.err.splitlines() if line.startswith("LOG_FILE="))
+    log_path = Path(log_file_line.split("LOG_FILE=", 1)[1])
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "private-provider-alias" not in log_text
+    assert "private-test-alias" not in log_text
+    assert "PRIVATE_ENDPOINT_TOKEN" not in log_text
+    assert "<redacted-pi-private-value>" in log_text
+    assert stat.S_IMODE(log_path.stat().st_mode) & 0o077 == 0
+
+
+def test_missing_pi_binary_is_a_sanitized_smoke_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing Pi executable must be a deterministic redacted CLI failure."""
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
+    (tmp_path / ".heph-private-denylist").write_text(
+        "PRIVATE_ENDPOINT_TOKEN\n",
+        encoding="utf-8",
+    )
+    missing_pi = FileNotFoundError(
+        2,
+        "PRIVATE_ENDPOINT_TOKEN private-provider-alias",
+        "private-test-alias",
+    )
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=missing_pi))
+
+    try:
+        result = _mod.main(["--cwd", str(tmp_path)])
+    except OSError:
+        pytest.fail("Pi startup errors must be converted to a smoke CLI failure")
+
+    assert result == 1
+    output = capsys.readouterr().err
+    assert "ERROR: Pi smoke could not start" in output
+    assert "private-provider-alias" not in output
     assert "private-test-alias" not in output
     assert "PRIVATE_ENDPOINT_TOKEN" not in output
     assert "<redacted-pi-private-value>" in output
