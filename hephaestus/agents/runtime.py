@@ -54,6 +54,8 @@ PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
+PI_PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
+PI_DENYLIST_FILENAMES = (PI_PROJECT_DENYLIST_FILENAME, PI_PRIVATE_DENYLIST_FILENAME)
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
 _PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
@@ -368,10 +370,11 @@ def _read_pi_private_denylist(
     *,
     require_readable: bool,
 ) -> tuple[str, ...] | None:
-    """Read one local denylist, returning ``None`` when it is absent."""
+    """Read one Pi privacy-policy file, returning ``None`` when it is absent."""
     try:
-        if not denylist.exists():
-            return None
+        denylist.lstat()
+    except FileNotFoundError:
+        return None
     except OSError as exc:
         if require_readable:
             raise OSError("Unable to inspect Pi private denylist") from exc
@@ -418,18 +421,22 @@ def pi_private_redaction_tokens(
         if resolved_root is None:
             continue
         for parent in (resolved_root, *resolved_root.parents):
-            denylist = parent / PI_PRIVATE_DENYLIST_FILENAME
-            if denylist in seen_denylists:
-                continue
-            seen_denylists.add(denylist)
-            denylist_tokens = _read_pi_private_denylist(
-                denylist,
-                require_readable=require_readable,
-            )
-            if denylist_tokens is None:
-                continue
-            tokens.extend(denylist_tokens)
-            break
+            found_policy = False
+            for filename in PI_DENYLIST_FILENAMES:
+                denylist = parent / filename
+                if denylist in seen_denylists:
+                    continue
+                seen_denylists.add(denylist)
+                denylist_tokens = _read_pi_private_denylist(
+                    denylist,
+                    require_readable=require_readable,
+                )
+                if denylist_tokens is None:
+                    continue
+                tokens.extend(denylist_tokens)
+                found_policy = True
+            if found_policy:
+                break
 
     return tuple(dict.fromkeys(tokens))
 
@@ -953,6 +960,35 @@ def _pi_env(*, model: str = "") -> dict[str, str]:
     return env
 
 
+def _pi_json_session_ids(text: str) -> tuple[str, ...]:
+    """Return every opaque Pi session ID present in JSONL diagnostic output."""
+    session_ids: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "session" and isinstance(event.get("id"), str):
+            session_ids.append(event["id"])
+    return tuple(dict.fromkeys(session_ids))
+
+
+def _pi_failure_redaction_tokens(
+    cwd: Path,
+    model: str,
+    *diagnostics: str,
+) -> tuple[str, ...]:
+    """Combine configured values with session IDs observed before Pi failed."""
+    tokens = list(pi_private_redaction_tokens(cwd, model))
+    for diagnostic in diagnostics:
+        tokens.extend(_pi_json_session_ids(diagnostic))
+    return tuple(dict.fromkeys(tokens))
+
+
 def _run_pi_command(
     cmd: list[str],
     *,
@@ -991,10 +1027,12 @@ def _run_pi_command(
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
-            tokens = pi_private_redaction_tokens(cwd, model)
+            raw_stdout = exc.stdout or ""
+            raw_stderr = exc.stderr or ""
+            tokens = _pi_failure_redaction_tokens(cwd, model, raw_stdout, raw_stderr)
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
-            redacted_output = redact_pi_private_values(exc.stdout or "", tokens)
-            redacted_stderr = redact_pi_private_values(exc.stderr or "", tokens)
+            redacted_output = redact_pi_private_values(raw_stdout, tokens)
+            redacted_stderr = redact_pi_private_values(raw_stderr, tokens)
             redacted_exception = subprocess.CalledProcessError(
                 exc.returncode,
                 redacted_cmd,
@@ -1009,10 +1047,12 @@ def _run_pi_command(
             exc.args = redacted_exception.args
             raise redacted_exception from None
         except subprocess.TimeoutExpired as exc:
-            tokens = pi_private_redaction_tokens(cwd, model)
+            raw_output = _coerce_timeout_output(exc.output)
+            raw_stderr = _coerce_timeout_output(exc.stderr)
+            tokens = _pi_failure_redaction_tokens(cwd, model, raw_output, raw_stderr)
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
-            redacted_output = redact_pi_private_values(_coerce_timeout_output(exc.output), tokens)
-            redacted_stderr = redact_pi_private_values(_coerce_timeout_output(exc.stderr), tokens)
+            redacted_output = redact_pi_private_values(raw_output, tokens)
+            redacted_stderr = redact_pi_private_values(raw_stderr, tokens)
             redacted_timeout = subprocess.TimeoutExpired(
                 redacted_cmd,
                 exc.timeout,

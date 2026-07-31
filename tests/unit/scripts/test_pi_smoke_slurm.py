@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
@@ -25,6 +26,9 @@ def test_submit_uses_export_names_without_alias_values(
     monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     monkeypatch.setenv("GH_TOKEN", "github-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(mode=0o755)
+    log_dir.chmod(0o755)
     run = Mock(
         return_value=subprocess.CompletedProcess(
             ["sbatch"],
@@ -35,20 +39,26 @@ def test_submit_uses_export_names_without_alias_values(
     )
     monkeypatch.setattr(_mod.subprocess, "run", run)
 
-    assert _mod.main(["--log-dir", str(tmp_path), "--sbatch", "sbatch"]) == 0
+    assert _mod.main(["--log-dir", str(log_dir), "--sbatch", "sbatch"]) == 0
 
     cmd = run.call_args.args[0]
     cmd_text = "\0".join(cmd)
     assert f"--export={','.join(_mod.EXPORT_NAMES)}" in cmd
     assert "ALL" not in _mod.EXPORT_NAMES
-    assert f"--output={tmp_path / 'pi-smoke-%j.out'}" in cmd
-    assert f"--error={tmp_path / 'pi-smoke-%j.err'}" in cmd
+    assert f"--output={log_dir / 'pi-smoke-%j.out'}" in cmd
+    assert f"--error={log_dir / 'pi-smoke-%j.err'}" in cmd
     assert "private-provider-alias" not in cmd_text
     assert "private-model-alias" not in cmd_text
     assert "github-secret" not in cmd_text
     assert "aws-secret" not in cmd_text
-    assert run.call_args.kwargs["env"]["HEPH_PI_SMOKE_LOG_DIR"] == str(tmp_path)
-    assert tmp_path.is_dir()
+    submission_env = run.call_args.kwargs["env"]
+    assert submission_env["HEPH_PI_SMOKE_LOG_DIR"] == str(log_dir)
+    assert "GH_TOKEN" not in submission_env
+    assert "AWS_SECRET_ACCESS_KEY" not in submission_env
+    assert "github-secret" not in submission_env.values()
+    assert "aws-secret" not in submission_env.values()
+    assert set(submission_env).issubset(_mod.EXPORT_NAMES)
+    assert stat.S_IMODE(log_dir.stat().st_mode) & 0o077 == 0
 
 
 def test_missing_alias_env_blocks_submission(
@@ -64,3 +74,65 @@ def test_missing_alias_env_blocks_submission(
     assert _mod.main(["--log-dir", str(tmp_path)]) == 2
 
     run.assert_not_called()
+
+
+def test_submit_fails_closed_without_user_only_log_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Slurm submission must not run when its scheduler logs cannot be protected."""
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setattr(_mod, "_private_smoke_log_permissions_supported", lambda: False)
+    run = Mock()
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+
+    assert _mod.main(["--log-dir", str(tmp_path / "logs")]) == 1
+
+    run.assert_not_called()
+
+
+def test_submit_redacts_sbatch_failure_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Scheduler failures must use the same private denylist redaction boundary."""
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    (repository_root / ".heph-private-denylist").write_text(
+        "PRIVATE_SCHEDULER_TOKEN\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setattr(
+        _mod.subprocess,
+        "run",
+        Mock(
+            side_effect=subprocess.CalledProcessError(
+                9,
+                ["sbatch"],
+                output="PRIVATE_SCHEDULER_TOKEN",
+                stderr="private-provider-alias private-model-alias PRIVATE_SCHEDULER_TOKEN",
+            )
+        ),
+    )
+
+    assert _mod.main(["--log-dir", str(tmp_path / "logs")]) == 9
+
+    diagnostics = capsys.readouterr().err
+    assert "private-provider-alias" not in diagnostics
+    assert "private-model-alias" not in diagnostics
+    assert "PRIVATE_SCHEDULER_TOKEN" not in diagnostics
+
+
+def test_default_template_has_a_minimal_export_and_no_scheduler_artifact() -> None:
+    """Direct sbatch use must not inherit ambient credentials or shared logs."""
+    template = _SCRIPT.parent / "slurm" / "pi_smoke.sbatch"
+    text = template.read_text(encoding="utf-8")
+
+    assert f"#SBATCH --export={','.join(_mod.EXPORT_NAMES)}" in text
+    assert "#SBATCH --output=/dev/null" in text
+    assert "#SBATCH --error=/dev/null" in text

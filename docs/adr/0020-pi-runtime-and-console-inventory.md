@@ -88,7 +88,7 @@ stage contract above; no command may introduce a second Pi path.
 | `hephaestus-fleet-sync` | Safe N/A for Pi until #2518: its conflict resolver currently rejects direct-runtime providers rather than using a scoped shared adapter. |
 | `hephaestus-tidy` | Shared direct adapter with the cleanup role's explicit grant. |
 | `python scripts/pi_smoke.py` | Explicit operator-only tool-free, non-interactive, ephemeral adapter smoke; it is not normal automation admission. |
-| `python scripts/pi_smoke_slurm.py` / `sbatch scripts/slurm/pi_smoke.sbatch` | The default template submits the operator-only smoke seam without queue or merge authority. An explicit `--template` is an operator-controlled scheduler submission and is not smoke or Pi-admission evidence. |
+| `python scripts/pi_smoke_slurm.py` / `sbatch scripts/slurm/pi_smoke.sbatch` | The default wrapper and template submit the operator-only smoke seam with a fixed environment export. The wrapper confines scheduler artifacts to an owner-only directory; direct-template scheduler output is suppressed and Pi writes only its private diagnostic artifact. Neither path has queue or merge authority. An explicit `--template` is an operator-controlled scheduler submission and is not smoke or Pi-admission evidence. |
 
 The remaining `project.scripts` entries do not invoke an agent and are safe
 provider N/A boundaries:

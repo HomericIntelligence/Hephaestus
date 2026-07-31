@@ -5,15 +5,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.agents.runtime import REQUIRED_ALIAS_ENVS, missing_pi_alias_env
+from hephaestus.agents.runtime import (
+    REQUIRED_ALIAS_ENVS,
+    missing_pi_alias_env,
+    pi_private_redaction_tokens,
+    redact_pi_private_values,
+)
 
 DEFAULT_LOG_DIR = Path("pi-smoke-logs")
 DEFAULT_TEMPLATE = Path("scripts/slurm/pi_smoke.sbatch")
 LOG_DIR_ENV = "HEPH_PI_SMOKE_LOG_DIR"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EXPORT_NAMES = (
     "PATH",
     "HOME",
@@ -28,6 +35,31 @@ EXPORT_NAMES = (
     *REQUIRED_ALIAS_ENVS,
     LOG_DIR_ENV,
 )
+
+
+def _private_smoke_log_permissions_supported() -> bool:
+    """Return whether this platform can establish the required private log mode."""
+    return os.name != "nt"
+
+
+def _prepare_private_log_dir(log_dir: Path) -> None:
+    """Create or tighten the owner-only directory used for Slurm artifacts."""
+    if not _private_smoke_log_permissions_supported():
+        raise OSError("Pi smoke requires user-only log permissions on this platform")
+    log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if log_dir.is_symlink() or not log_dir.is_dir():
+        raise OSError("Pi smoke log path must be a regular directory")
+    log_dir.chmod(0o700)
+    if stat.S_IMODE(log_dir.stat().st_mode) & 0o077:
+        raise OSError("Pi smoke log directory is not user-only")
+
+
+def _submission_env(log_dir: Path) -> dict[str, str]:
+    """Return the minimal environment needed by the local ``sbatch`` process."""
+    env = {name: value for name in EXPORT_NAMES if (value := os.environ.get(name))}
+    env.setdefault("PATH", os.defpath)
+    env[LOG_DIR_ENV] = str(log_dir)
+    return env
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,9 +91,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: missing required env vars: {', '.join(missing)}", file=sys.stderr)
         return 2
 
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env[LOG_DIR_ENV] = str(args.log_dir)
+    try:
+        redaction_tokens = pi_private_redaction_tokens(
+            Path.cwd(),
+            additional_roots=(REPOSITORY_ROOT,),
+            require_readable=True,
+        )
+    except OSError:
+        print("ERROR: unable to load Pi private denylist safely", file=sys.stderr)
+        return 1
+    try:
+        _prepare_private_log_dir(args.log_dir)
+    except OSError as exc:
+        detail = redact_pi_private_values(str(exc), redaction_tokens)
+        print(f"ERROR: {detail}", file=sys.stderr)
+        return 1
     cmd = build_sbatch_cmd(args)
     try:
         result = subprocess.run(
@@ -69,16 +113,21 @@ def main(argv: list[str] | None = None) -> int:
             check=True,
             capture_output=True,
             text=True,
-            env=env,
+            env=_submission_env(args.log_dir),
         )
     except subprocess.CalledProcessError as exc:
-        print(exc.stderr or exc.stdout or str(exc), file=sys.stderr)
+        detail = exc.stderr or exc.stdout or str(exc)
+        print(redact_pi_private_values(detail, redaction_tokens), file=sys.stderr)
         return exc.returncode
+    except OSError as exc:
+        detail = redact_pi_private_values(str(exc), redaction_tokens)
+        print(f"ERROR: Pi smoke Slurm submission could not start: {detail}", file=sys.stderr)
+        return 1
 
     if result.stdout:
-        print(result.stdout, end="")
+        print(redact_pi_private_values(result.stdout, redaction_tokens), end="")
     if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+        print(redact_pi_private_values(result.stderr, redaction_tokens), end="", file=sys.stderr)
     return result.returncode
 
 

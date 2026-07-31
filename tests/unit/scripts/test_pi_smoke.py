@@ -203,6 +203,45 @@ def test_repository_denylist_redacts_values_when_cwd_is_outside_checkout(
     assert "ROOT_PRIVATE_TOKEN" not in log_text
 
 
+def test_repository_project_denylist_redacts_values_when_cwd_is_outside_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The committed project denylist protects smoke artifacts as well."""
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    (repository_root / ".heph-project-denylist").write_text(
+        "PROJECT_DENYLIST_TOKEN\n",
+        encoding="utf-8",
+    )
+    outside_cwd = tmp_path / "outside"
+    outside_cwd.mkdir()
+    log_dir = outside_cwd / "logs"
+    monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setattr(
+        _mod,
+        "run_pi_smoke_session",
+        Mock(
+            return_value=AgentRunResult(
+                stdout="PROJECT_DENYLIST_TOKEN",
+                stderr="PROJECT_DENYLIST_TOKEN",
+            )
+        ),
+    )
+
+    assert _mod.main(["--cwd", str(outside_cwd), "--log-dir", str(log_dir)]) == 0
+
+    captured = capsys.readouterr()
+    diagnostics = f"{captured.out}\n{captured.err}"
+    assert "PROJECT_DENYLIST_TOKEN" not in diagnostics
+    log_paths = list(log_dir.glob("pi-smoke-local-*.log"))
+    assert len(log_paths) == 1
+    assert "PROJECT_DENYLIST_TOKEN" not in log_paths[0].read_text(encoding="utf-8")
+
+
 def test_unreadable_repository_denylist_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

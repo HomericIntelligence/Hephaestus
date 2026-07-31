@@ -44,12 +44,20 @@ telemetry preference; it forces `PI_TELEMETRY=0` and
 printed or written to the diagnostic artifact.
 
 The smoke command writes a local diagnostic artifact and requires user-only
-file permissions for it. It loads `.heph-private-denylist` from both its
-working-directory ancestry and the checkout ancestry, fails closed if a found
-denylist cannot be read, and redacts matching values from displayed log paths.
-On Windows it fails closed before invoking Pi until a user-only ACL
-implementation is available; do not work around that guard by redirecting
-output to a shared path.
+file permissions for it. It loads both `.heph-project-denylist` and
+`.heph-private-denylist` from its working-directory ancestry and the checkout
+ancestry, fails closed if a found policy file cannot be read, and redacts
+matching values from displayed log paths. On Windows it fails closed before
+invoking Pi until a user-only ACL implementation is available; do not work
+around that guard by redirecting output to a shared path.
+
+For Slurm, use `python3 scripts/pi_smoke_slurm.py`. The wrapper invokes
+`sbatch` with a minimized environment, writes scheduler artifacts only inside
+an owner-only log directory, and redacts scheduler diagnostics. The default
+`scripts/slurm/pi_smoke.sbatch` template uses the same fixed export list and
+suppresses scheduler stdout/stderr; inspect the private Pi smoke artifact for
+the result. An operator-supplied `--template` remains outside this smoke
+conformance boundary.
 
 Create `.heph-private-denylist` at the repository root on machines that know
 private values. Add one fixed string per line, including any private alias,

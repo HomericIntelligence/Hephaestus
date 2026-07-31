@@ -1056,6 +1056,107 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Pat
     _assert_pi_exception_chain_is_redacted(exc)
 
 
+def test_run_pi_smoke_session_redacts_generated_session_from_nonzero_failure(
+    tmp_path: Path,
+) -> None:
+    """A failed smoke command must not disclose a just-created Pi session id."""
+    session_id = "generated-pi-session-id"
+    partial_stdout = f'{{"type":"session","id":"{session_id}"}}\n{{"type":"error"}}'
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            7,
+            cmd,
+            output=partial_stdout,
+            stderr=f"provider failed after {session_id}",
+        )
+
+    with (
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.CalledProcessError) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session("prompt", cwd=tmp_path, timeout=30)
+
+    diagnostics = " ".join(
+        str(value)
+        for value in (
+            exc_info.value,
+            exc_info.value.args,
+            exc_info.value.cmd,
+            exc_info.value.output,
+            exc_info.value.stderr,
+        )
+    )
+    assert session_id not in diagnostics
+    assert agent_runtime.PI_PRIVATE_REDACTION in diagnostics
+
+
+def test_run_pi_smoke_session_redacts_generated_session_from_timeout(
+    tmp_path: Path,
+) -> None:
+    """A timed-out smoke command must not disclose a just-created Pi session id."""
+    session_id = "generated-pi-session-id"
+    partial_stdout = f'{{"type":"session","id":"{session_id}"}}\n{{"type":"error"}}'
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd,
+            7,
+            output=partial_stdout,
+            stderr=f"provider timed out after {session_id}",
+        )
+
+    with (
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.TimeoutExpired) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session("prompt", cwd=tmp_path, timeout=30)
+
+    diagnostics = " ".join(
+        str(value)
+        for value in (
+            exc_info.value,
+            exc_info.value.args,
+            exc_info.value.cmd,
+            exc_info.value.output,
+            exc_info.value.stderr,
+        )
+    )
+    assert session_id not in diagnostics
+    assert agent_runtime.PI_PRIVATE_REDACTION in diagnostics
+
+
+def test_pi_private_redaction_tokens_merge_project_and_local_denylists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The committed policy and local policy must both protect Pi diagnostics."""
+    monkeypatch.delenv("HEPH_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("HEPH_PI_MODEL", raising=False)
+    (tmp_path / ".heph-project-denylist").write_text(
+        "PROJECT_DENYLIST_TOKEN\nSHARED_DENYLIST_TOKEN\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".heph-private-denylist").write_text(
+        "LOCAL_DENYLIST_TOKEN\nSHARED_DENYLIST_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    tokens = agent_runtime.pi_private_redaction_tokens(tmp_path)
+
+    assert "PROJECT_DENYLIST_TOKEN" in tokens
+    assert "LOCAL_DENYLIST_TOKEN" in tokens
+    assert tokens.count("SHARED_DENYLIST_TOKEN") == 1
+
+
+def test_pi_private_redaction_tokens_fail_closed_on_broken_policy_link(tmp_path: Path) -> None:
+    """A configured-but-unreadable privacy policy cannot silently disable redaction."""
+    (tmp_path / ".heph-project-denylist").symlink_to("missing-policy-file")
+
+    with pytest.raises(OSError, match="not a regular file"):
+        agent_runtime.pi_private_redaction_tokens(tmp_path, require_readable=True)
+
+
 def test_redact_pi_private_values_replaces_all_tokens() -> None:
     """The standalone redactor should replace each configured private value."""
     text = "private-test-alias uses PRIVATE_ENDPOINT_TOKEN"
