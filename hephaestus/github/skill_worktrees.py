@@ -45,6 +45,12 @@ def reject_symlinks_below(trust_root: Path, target: Path) -> None:
     for component in (*reversed(lexical_target.parents), lexical_target):
         if component.is_symlink():
             raise RuntimeError(f"worktree path component is a symlink: {component}")
+    resolved_root = lexical_root.resolve()
+    resolved_target = lexical_target.resolve()
+    try:
+        resolved_target.relative_to(resolved_root)
+    except ValueError as error:
+        raise RuntimeError(f"worktree path escapes trusted root {resolved_root}") from error
 
 
 def select_worktree_path(

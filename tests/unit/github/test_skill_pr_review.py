@@ -130,6 +130,23 @@ def test_collect_evidence_keeps_pending_checks_and_paginated_paths(
     assert payload["checks"] == [{"name": "checks", "state": "PENDING"}]
 
 
+@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.github.skill_pr_review.gh_call")
+def test_collect_evidence_reports_github_failures_as_json(
+    mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
+) -> None:
+    """Evidence collection keeps GitHub failures machine-readable."""
+    mock_gh_call.return_value = _completed(stderr="authentication required", returncode=1)
+
+    assert collect_pr_evidence_main(["9", "--json"]) == 1
+
+    assert json.loads(capsys.readouterr().out) == {
+        "exit_code": 1,
+        "message": "authentication required",
+        "status": "error",
+    }
+
+
 @patch("hephaestus.github.skill_pr_review.run_git")
 def test_diff_context_uses_the_supplied_base_for_both_lenses(
     mock_run_git: MagicMock, capsys
@@ -153,6 +170,20 @@ def test_diff_context_uses_the_supplied_base_for_both_lenses(
         "current_base_range": "base..head",
     }
     assert mock_run_git.call_args_list[0].args[0] == ["rev-parse", "--verify", "base^{commit}"]
+
+
+@patch("hephaestus.github.skill_pr_review.run_git")
+def test_diff_context_reports_invalid_refs_as_json(mock_run_git: MagicMock, capsys) -> None:
+    """Diff context keeps invalid Git references machine-readable."""
+    mock_run_git.return_value = _completed(stderr="unknown revision", returncode=128)
+
+    assert pr_diff_context_main(["missing", "head", "--json"]) == 1
+
+    assert json.loads(capsys.readouterr().out) == {
+        "exit_code": 1,
+        "message": "unknown revision",
+        "status": "error",
+    }
 
 
 @patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")

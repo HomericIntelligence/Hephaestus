@@ -97,6 +97,39 @@ def test_prepare_worktree_rejects_a_symlinked_path_component(
     assert "symlink" in capsys.readouterr().err
 
 
+def test_prepare_worktree_rejects_path_traversal_outside_path_root(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The declared path root cannot be escaped with a parent traversal."""
+    repository = tmp_path / "repo"
+    approved_root = tmp_path / "approved"
+    escaped_worktree = tmp_path / "escaped"
+    _initialize_repository(repository)
+    start_sha = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+
+    try:
+        assert (
+            prepare_worktree_main(
+                [
+                    "skill/review",
+                    "--path",
+                    str(approved_root / ".." / "escaped"),
+                    "--path-root",
+                    str(approved_root),
+                    "--start-point",
+                    start_sha,
+                ]
+            )
+            == 1
+        )
+    finally:
+        if escaped_worktree.exists():
+            _git(repository, "worktree", "remove", "--force", str(escaped_worktree))
+
+    assert "escapes trusted root" in capsys.readouterr().err
+
+
 def test_audit_worktrees_reports_a_computable_inventory(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -112,6 +145,22 @@ def test_audit_worktrees_reports_a_computable_inventory(
     assert records[0]["path"] == str(repository.resolve())
     assert records[0]["clean"] is True
     assert records[0]["head"] == _git(repository, "rev-parse", "HEAD")
+
+
+def test_audit_worktrees_reports_git_failures_as_json(monkeypatch, capsys) -> None:
+    """The audit CLI returns its standard JSON error envelope on Git failure."""
+    failure = subprocess.CompletedProcess(["git"], 1, stdout="", stderr="not a repository")
+    monkeypatch.setattr(
+        "hephaestus.github.skill_worktrees.run_git", lambda *_args, **_kwargs: failure
+    )
+
+    assert audit_worktrees_main(["--json"]) == 1
+
+    assert json.loads(capsys.readouterr().out) == {
+        "exit_code": 1,
+        "message": "not a repository",
+        "status": "error",
+    }
 
 
 def test_remove_worktree_requires_a_clean_expected_head(
