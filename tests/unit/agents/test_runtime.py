@@ -699,6 +699,29 @@ def test_run_pi_text_rejects_unadmitted_execution(tmp_path: Path) -> None:
     run.assert_not_called()
 
 
+def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
+    """Reflective private-helper access cannot bypass the Pi admission boundary."""
+    with patch("subprocess.run") as run:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime._invoke_pi_session(
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+                model="",
+                sandbox="no-tools",
+            )
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime._run_pi_command(
+                ["pi", "--mode", "json"],
+                prompt="prompt",
+                cwd=tmp_path,
+                timeout=30,
+                sandbox="no-tools",
+            )
+
+    run.assert_not_called()
+
+
 def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
     """A public Pi resume runner cannot bypass the automation admission gate."""
     with patch("subprocess.run") as run:
@@ -722,13 +745,19 @@ def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
 def test_run_pi_smoke_session_is_noninteractive_and_tool_free(tmp_path: Path) -> None:
     """The only unadmitted Pi seam is fixed, ephemeral, and tool-free."""
     captured_cmd: list[str] = []
+    stdout = "\n".join(
+        [
+            '{"type":"session","id":"pi-session-789"}',
+            '{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+        ]
+    )
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         captured_cmd.extend(cmd)
         return subprocess.CompletedProcess(
             cmd,
             0,
-            stdout='{"type":"session","id":"pi-session-789"}',
+            stdout=stdout,
             stderr="",
         )
 
@@ -742,6 +771,7 @@ def test_run_pi_smoke_session_is_noninteractive_and_tool_free(tmp_path: Path) ->
 
     assert captured_cmd[:-1] == PI_SMOKE_COMMAND_PREFIX
     assert result.session_id == "pi-session-789"
+    assert result.stdout == "OK"
 
 
 def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path) -> None:
@@ -791,9 +821,22 @@ def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
 
-@pytest.mark.parametrize("stdout", ["not Pi JSON output", "{}"])
-def test_run_pi_smoke_session_rejects_non_event_stdout(tmp_path: Path, stdout: str) -> None:
-    """The smoke seam must fail closed when Pi does not honor JSON mode."""
+@pytest.mark.parametrize(
+    ("stdout", "error"),
+    [
+        ("not Pi JSON output", "JSON event"),
+        ("{}", "JSON event"),
+        ('{"type":"session","id":"pi-session-789"}', "terminal assistant JSON event"),
+        ('{"type":"error","message":"provider failed"}', "terminal assistant JSON event"),
+        ('{"type":"message_end","message":null}', "terminal assistant JSON event"),
+    ],
+)
+def test_run_pi_smoke_session_rejects_incomplete_event_stdout(
+    tmp_path: Path,
+    stdout: str,
+    error: str,
+) -> None:
+    """The smoke seam must receive a terminal assistant response, not arbitrary JSON."""
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
@@ -801,7 +844,7 @@ def test_run_pi_smoke_session_rejects_non_event_stdout(tmp_path: Path, stdout: s
     with (
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
         patch("subprocess.run", side_effect=fake_run),
-        pytest.raises(RuntimeError, match="JSON event"),
+        pytest.raises(RuntimeError, match=error),
     ):
         agent_runtime.run_pi_smoke_session(
             "smoke prompt",
@@ -830,6 +873,7 @@ def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
             "private-provider-alias",
             "private-test-alias",
             "PRIVATE_ENDPOINT_TOKEN",
+            "private-session-id",
         ):
             assert private_value not in diagnostics
 
@@ -837,14 +881,14 @@ def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
 def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
     """Pi subprocess failure diagnostics should not leak local aliases or tokens."""
     (tmp_path / ".heph-private-denylist").write_text(
-        "PRIVATE_ENDPOINT_TOKEN\n",
+        "PRIVATE_ENDPOINT_TOKEN\nprivate-session-id\n",
         encoding="utf-8",
     )
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.CalledProcessError(
             7,
-            cmd,
+            [*cmd, "private-session-id"],
             output="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
             stderr="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
         )
@@ -876,6 +920,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Pat
     assert "private-test-alias" not in (exc.stderr or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
+    assert "private-session-id" not in str(exc.cmd)
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
     _assert_pi_exception_chain_is_redacted(exc)
 
@@ -883,13 +928,13 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Pat
 def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
     """Pi timeout diagnostics should redact cmd, partial stdout, and stderr."""
     (tmp_path / ".heph-private-denylist").write_text(
-        "PRIVATE_ENDPOINT_TOKEN\n",
+        "PRIVATE_ENDPOINT_TOKEN\nprivate-session-id\n",
         encoding="utf-8",
     )
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(
-            cmd,
+            [*cmd, "private-session-id"],
             7,
             output="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
             stderr="PRIVATE_ENDPOINT_TOKEN private-test-alias private-provider-alias",
@@ -927,6 +972,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Pat
     assert "private-provider-alias" not in (exc.stderr or "")
     assert "private-test-alias" not in (exc.stderr or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
+    assert "private-session-id" not in str(exc.cmd)
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.output or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
     _assert_pi_exception_chain_is_redacted(exc)

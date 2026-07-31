@@ -21,7 +21,8 @@ Only the shared runtime adapter may select a direct provider. The rows below
 are a reviewed source audit of every current non-adapter caller. The static
 contract test independently discovers `resolve_agent`, `direct_agent_model`,
 `uses_direct_agent_runner`, `run_agent_text`, `run_agent_session`,
-`resume_agent_session`, and `session_agent_matches` callers to enforce the
+`resume_agent_session`, `session_agent_matches`, and
+`agent_supports_model_reasoning_effort` callers to enforce the
 provider-neutral branch/direct-adapter guard; it does not mechanically
 reconcile this prose matrix. Future call-site changes therefore require an
 explicit inventory review or a superseding ADR. Except for an explicit N/A row,
@@ -32,6 +33,7 @@ blocks Pi until #2516 and #2518 deliver their prerequisites.
 | --- | --- | --- |
 | `resolve_agent` | `automation/agent_stage.py`, `automation/audit_reviewer.py`, `automation/ci_driver.py`, `automation/implementer.py`, `automation/loop_runner.py`, `automation/plan_reviewer.py`, `automation/planner.py`, `automation/pr_reviewer.py`, `automation/pipeline/worker_pool.py`, `github/fleet_sync/cli.py`, `github/tidy.py` | Resolve once at the neutral boundary. Pi fails closed for normal automation until #2516 verifies its package/capability inventory and #2518 enforces lifecycle and tool scopes; it never falls back to another provider. |
 | `direct_agent_model` | `automation/_implement_phase.py`, `automation/audit_reviewer.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/comment_difficulty.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/plan_reviewer.py`, `automation/post_merge_processor.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `github/tidy.py` | Select a model only through the shared adapter. Normal Pi automation remains blocked; #2516 owns environment-aware configuration discovery and preflight, while #2518 owns applying a verified provider/model selection through Pi's native invocation and redacting values. |
+| `agent_supports_model_reasoning_effort` | `automation/pipeline/stages/base.py` | Keep provider-specific reasoning-selector syntax in the shared runtime adapter. Pi receives no Codex-style suffix; normal Pi automation remains fail-closed. |
 | `uses_direct_agent_runner` | `automation/_followup_phase.py`, `automation/_implement_phase.py`, `automation/agent_stage.py`, `automation/audit_reviewer.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/comment_difficulty.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/plan_reviewer.py`, `automation/post_merge_processor.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `automation/prompts/advise.py`, `github/fleet_sync/conflict_resolver.py`, `github/tidy.py` | Choose the shared direct-runner behavior without testing a provider name. Fleet conflict resolution is a safe Pi N/A until #2518 because it rejects direct runners today. |
 | `run_agent_text` | `automation/_implement_phase.py`, `automation/audit_reviewer.py`, `automation/comment_difficulty.py`, `automation/plan_reviewer.py`, `automation/pr_manager.py`, `automation/pr_review_core.py`, `github/tidy.py` | Post-admission native non-interactive Pi invocation with the role-derived tool grant. The caller may not branch on `codex` or `pi`. |
 | `run_agent_session` | `automation/_implement_phase.py`, `automation/agent_stage.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/pipeline/worker_pool.py`, `automation/post_merge_processor.py` | After #2518, preserve cwd, timeout, output, and a validated opaque session identity through the shared adapter. Managed process tracking is a required boundary. |
@@ -43,9 +45,10 @@ blocks Pi until #2516 and #2518 deliver their prerequisites.
 
 `pipeline.stages.base.stage_model` resolves both `AgentJob.model` and
 `CompactJob.model` values for model-driven pipeline work. It is a pipeline
-configuration boundary, not a second direct-provider adapter: it currently
-adds a reasoning-effort suffix only for Codex and leaves Pi model values
-unchanged. Its callers are the model-driven paths in `planning`, `plan_review`,
+configuration boundary, not a second direct-provider adapter: it asks the
+shared runtime whether an agent accepts a reasoning-effort suffix, so only
+Codex receives one and Pi model values remain unchanged. Its callers are the
+model-driven paths in `planning`, `plan_review`,
 `implementation`, `pr_review`, and `merge_wait`; `pr_review` also creates
 `CompactJob` instances that compact persisted reviewer/writer sessions. `repo`
 and `finished` have no model job. Pi remains fail-closed at the generic runner

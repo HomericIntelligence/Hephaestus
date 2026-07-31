@@ -33,6 +33,17 @@ DEFAULT_PROMPT = "Reply with exactly: OK"
 DEFAULT_LOG_DIR = Path("pi-smoke-logs")
 
 
+def _private_smoke_log_permissions_supported() -> bool:
+    """Return whether this platform can establish the required private log mode."""
+    return os.name != "nt"
+
+
+def _require_private_smoke_log_permissions() -> None:
+    """Fail closed where this script cannot establish a user-only log ACL."""
+    if not _private_smoke_log_permissions_supported():
+        raise OSError("Pi smoke requires user-only log permissions on this platform")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the Pi smoke parser."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -58,6 +69,7 @@ def _write_smoke_log(
     Each run produces a distinct artifact named with a nanosecond epoch suffix
     so consecutive smoke runs never silently overwrite one another.
     """
+    _require_private_smoke_log_permissions()
     log_dir.mkdir(parents=True, exist_ok=True)
     epoch_ns = time.time_ns()
     log_path = log_dir / f"pi-smoke-local-{epoch_ns}.log"
@@ -84,6 +96,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     model = os.environ.get(PI_MODEL_ENV, "").strip()
     redaction_tokens = pi_private_redaction_tokens(args.cwd, model)
+    try:
+        _require_private_smoke_log_permissions()
+    except OSError as exc:
+        detail = redact_pi_private_values(str(exc), redaction_tokens)
+        print(f"ERROR: {detail}", file=sys.stderr)
+        return 1
     try:
         result = run_pi_smoke_session(
             args.prompt,
@@ -113,7 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(redact_pi_private_values(result.stdout, redaction_tokens))
     if result.session_id:
-        print(f"SESSION_ID={result.session_id}", file=sys.stderr)
+        session_id = redact_pi_private_values(result.session_id, redaction_tokens)
+        print(f"SESSION_ID={session_id}", file=sys.stderr)
     print(f"LOG_FILE={log_path}", file=sys.stderr)
     return 0
 

@@ -78,7 +78,7 @@ def test_failure_output_redacts_private_values(
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     (tmp_path / ".heph-private-denylist").write_text(
-        "PRIVATE_ENDPOINT_TOKEN\n",
+        "PRIVATE_ENDPOINT_TOKEN\nPRIVATE_SESSION_TOKEN\n",
         encoding="utf-8",
     )
     err = subprocess.CalledProcessError(
@@ -105,14 +105,14 @@ def test_success_output_redacts_private_values(
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     (tmp_path / ".heph-private-denylist").write_text(
-        "PRIVATE_ENDPOINT_TOKEN\n",
+        "PRIVATE_ENDPOINT_TOKEN\nPRIVATE_SESSION_TOKEN\n",
         encoding="utf-8",
     )
     run_pi = Mock(
         return_value=AgentRunResult(
             stdout="private-test-alias PRIVATE_ENDPOINT_TOKEN",
             stderr="",
-            session_id=None,
+            session_id="PRIVATE_SESSION_TOKEN",
         )
     )
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
@@ -123,7 +123,9 @@ def test_success_output_redacts_private_values(
     output = captured.out
     assert "private-test-alias" not in output
     assert "PRIVATE_ENDPOINT_TOKEN" not in output
+    assert "PRIVATE_SESSION_TOKEN" not in captured.err
     assert "<redacted-pi-private-value>" in output
+    assert "SESSION_ID=<redacted-pi-private-value>" in captured.err
     log_file_line = next(line for line in captured.err.splitlines() if line.startswith("LOG_FILE="))
     log_path = Path(log_file_line.split("LOG_FILE=", 1)[1])
     log_text = log_path.read_text(encoding="utf-8")
@@ -132,6 +134,24 @@ def test_success_output_redacts_private_values(
     assert "PRIVATE_ENDPOINT_TOKEN" not in log_text
     assert "<redacted-pi-private-value>" in log_text
     assert stat.S_IMODE(log_path.stat().st_mode) & 0o077 == 0
+
+
+def test_rejects_smoke_when_user_only_log_permissions_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The smoke seam must fail before execution if it cannot protect its log artifact."""
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
+    run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr=""))
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
+    monkeypatch.setattr(_mod, "_private_smoke_log_permissions_supported", lambda: False)
+
+    assert _mod.main(["--cwd", str(tmp_path)]) == 1
+
+    run_pi.assert_not_called()
+    assert "user-only log permissions" in capsys.readouterr().err
 
 
 def test_missing_pi_binary_is_a_sanitized_smoke_failure(

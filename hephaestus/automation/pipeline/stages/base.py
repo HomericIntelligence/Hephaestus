@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
-from hephaestus.agents.runtime import DEFAULT_AGENT
+from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import (
     SKIP_REASON_MARKER,
@@ -584,7 +584,7 @@ def stage_model(
     catch_all = getattr(ctx.config, "model", "")
     model = str(phase_value or catch_all or fallback())
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
-    if reasoning_effort and (provider or agent_provider(ctx)) == "codex":
+    if reasoning_effort and agent_supports_model_reasoning_effort(provider or agent_provider(ctx)):
         base_model, separator, current_effort = model.rpartition(":")
         if separator and current_effort in {"default", "low", "medium", "high", "xhigh"}:
             model = base_model

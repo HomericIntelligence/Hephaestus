@@ -36,6 +36,11 @@ tools, project approval/context, and extension, skill, prompt-template, and
 theme discovery. #2516 owns configuration discovery and preflight; #2518 owns
 native selection and scoped pipeline admission.
 
+The smoke command writes a local diagnostic artifact and requires user-only
+file permissions for it. On Windows it fails closed before invoking Pi until a
+user-only ACL implementation is available; do not work around that guard by
+redirecting output to a shared path.
+
 Create `.heph-private-denylist` at the repository root on machines that know
 private values. Add one fixed string per line, including any private alias,
 hostname, endpoint, checkpoint, or model identifier. The file is gitignored.

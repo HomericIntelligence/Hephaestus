@@ -18,6 +18,7 @@ NEUTRAL_RUNTIME_CALL_NAMES = {
     "resume_agent_session",
     "session_agent_matches",
     "uses_direct_agent_runner",
+    "agent_supports_model_reasoning_effort",
 }
 
 DIRECT_PROVIDER_ONLY_NAMES = {
@@ -34,6 +35,7 @@ DIRECT_PROVIDER_ONLY_NAMES = {
     "_invoke_pi_session",
     "_run_pi_command",
 }
+DIRECT_RUNNER_BINARIES = ("pi", "codex")
 
 SUBPROCESS_EXECUTION_NAMES = {
     "run",
@@ -64,14 +66,17 @@ def _node_name(node: ast.AST) -> str:
     return ""
 
 
-def _is_pi_command_literal(node: ast.AST) -> bool:
-    """Return whether a literal command expression invokes the Pi binary."""
+def _direct_runner_command_literal(node: ast.AST) -> str | None:
+    """Return the direct-runner binary invoked by a literal command expression."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         value = node.value.strip()
-        return value == "pi" or value.startswith("pi ") or value.endswith("/pi")
+        for binary in DIRECT_RUNNER_BINARIES:
+            if value == binary or value.startswith(f"{binary} ") or value.endswith(f"/{binary}"):
+                return binary
+        return None
     if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
-        return _is_pi_command_literal(node.elts[0])
-    return False
+        return _direct_runner_command_literal(node.elts[0])
+    return None
 
 
 def _assignment_target_names(node: ast.Assign | ast.AnnAssign) -> set[str]:
@@ -80,16 +85,14 @@ def _assignment_target_names(node: ast.Assign | ast.AnnAssign) -> set[str]:
     return {target.id for target in targets if isinstance(target, ast.Name)}
 
 
-def _pi_command_names(tree: ast.AST) -> set[str]:
-    """Discover simple variables assigned a literal Pi command."""
-    names: set[str] = set()
+def _direct_runner_command_names(tree: ast.AST) -> dict[str, str]:
+    """Discover simple variables assigned a literal direct-runner command."""
+    names: dict[str, str] = {}
     for node in ast.walk(tree):
-        if (
-            isinstance(node, (ast.Assign, ast.AnnAssign))
-            and node.value is not None
-            and _is_pi_command_literal(node.value)
-        ):
-            names.update(_assignment_target_names(node))
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            binary = _direct_runner_command_literal(node.value)
+            if binary:
+                names.update(dict.fromkeys(_assignment_target_names(node), binary))
     return names
 
 
@@ -103,13 +106,18 @@ def _execution_aliases(tree: ast.AST, module: str, names: set[str]) -> set[str]:
     return aliases
 
 
-def _call_uses_pi_command(node: ast.Call, command_names: set[str]) -> bool:
-    """Return whether a process-execution call receives a known Pi command."""
-    return any(
-        _is_pi_command_literal(argument)
-        or (isinstance(argument, ast.Name) and argument.id in command_names)
-        for argument in [*node.args, *(keyword.value for keyword in node.keywords)]
-    )
+def _call_direct_runner_command(
+    node: ast.Call,
+    command_names: dict[str, str],
+) -> str | None:
+    """Return the direct-runner binary passed to a process-execution call."""
+    for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+        binary = _direct_runner_command_literal(argument)
+        if binary:
+            return binary
+        if isinstance(argument, ast.Name) and argument.id in command_names:
+            return command_names[argument.id]
+    return None
 
 
 def _mapping_key(node: ast.AST) -> str | None:
@@ -128,6 +136,10 @@ def _neutral_runtime_name(
     name = _node_name(node)
     if name in NEUTRAL_RUNTIME_CALL_NAMES:
         return name
+    if isinstance(node, ast.Call) and _node_name(node.func) == "getattr" and len(node.args) >= 2:
+        getattr_name = _mapping_key(node.args[1])
+        if getattr_name in NEUTRAL_RUNTIME_CALL_NAMES:
+            return getattr_name
     if isinstance(node, ast.Name):
         return aliases.get(node.id, "")
     if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
@@ -149,6 +161,69 @@ def _neutral_runtime_import_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
+def _update_neutral_aliases(
+    targets: set[str],
+    value: ast.AST,
+    aliases: dict[str, str],
+    mappings: dict[tuple[str, str], str],
+) -> bool:
+    """Bind simple aliases to their resolved neutral runtime helper."""
+    name = _neutral_runtime_name(value, aliases, mappings)
+    if not name:
+        return False
+    changed = False
+    for target in targets:
+        if aliases.get(target) != name:
+            aliases[target] = name
+            changed = True
+    return changed
+
+
+def _copy_neutral_mapping_aliases(
+    targets: set[str],
+    value: ast.AST,
+    mappings: dict[tuple[str, str], str],
+) -> bool:
+    """Copy literal mapping bindings when a mapping name is assigned to an alias."""
+    if not isinstance(value, ast.Name):
+        return False
+    changed = False
+    for (mapping_name, mapping_key), mapping_value in tuple(mappings.items()):
+        if mapping_name != value.id:
+            continue
+        for target in targets:
+            alias_key = (target, mapping_key)
+            if mappings.get(alias_key) != mapping_value:
+                mappings[alias_key] = mapping_value
+                changed = True
+    return changed
+
+
+def _update_literal_neutral_mapping_entries(
+    targets: set[str],
+    value: ast.AST,
+    aliases: dict[str, str],
+    mappings: dict[tuple[str, str], str],
+) -> bool:
+    """Bind literal dictionary entries to neutral runtime helpers."""
+    if not isinstance(value, ast.Dict):
+        return False
+    changed = False
+    for key_node, value_node in zip(value.keys, value.values, strict=True):
+        if key_node is None:
+            continue
+        literal_key = _mapping_key(key_node)
+        name = _neutral_runtime_name(value_node, aliases, mappings)
+        if literal_key is None or not name:
+            continue
+        for target in targets:
+            mapping_key = (target, literal_key)
+            if mappings.get(mapping_key) != name:
+                mappings[mapping_key] = name
+                changed = True
+    return changed
+
+
 def _update_neutral_runtime_bindings(
     assignments: list[ast.Assign | ast.AnnAssign],
     aliases: dict[str, str],
@@ -160,26 +235,9 @@ def _update_neutral_runtime_bindings(
         value = assignment.value
         assert value is not None
         targets = _assignment_target_names(assignment)
-        name = _neutral_runtime_name(value, aliases, mappings)
-        if name:
-            for target in targets:
-                if aliases.get(target) != name:
-                    aliases[target] = name
-                    changed = True
-        if not isinstance(value, ast.Dict):
-            continue
-        for key_node, value_node in zip(value.keys, value.values, strict=True):
-            if key_node is None:
-                continue
-            key = _mapping_key(key_node)
-            name = _neutral_runtime_name(value_node, aliases, mappings)
-            if key is None or not name:
-                continue
-            for target in targets:
-                mapping_key = (target, key)
-                if mappings.get(mapping_key) != name:
-                    mappings[mapping_key] = name
-                    changed = True
+        changed |= _update_neutral_aliases(targets, value, aliases, mappings)
+        changed |= _copy_neutral_mapping_aliases(targets, value, mappings)
+        changed |= _update_literal_neutral_mapping_entries(targets, value, aliases, mappings)
     return changed
 
 
@@ -206,9 +264,27 @@ def _uses_neutral_runtime_call(tree: ast.AST) -> bool:
     )
 
 
+def _reflective_provider_adapter_name(node: ast.AST) -> str:
+    """Return a provider adapter named by a literal reflective lookup."""
+    if isinstance(node, ast.Subscript):
+        key = _mapping_key(node.slice)
+        return key if key in DIRECT_PROVIDER_ONLY_NAMES else ""
+    if not isinstance(node, ast.Call):
+        return ""
+    lookup_name = _node_name(node.func)
+    key_index = 1 if lookup_name == "getattr" else 0 if lookup_name == "get" else None
+    if key_index is None or len(node.args) <= key_index:
+        return ""
+    key = _mapping_key(node.args[key_index])
+    return key if key in DIRECT_PROVIDER_ONLY_NAMES else ""
+
+
 def _direct_provider_adapter_name(node: ast.AST) -> str:
     """Return a direct provider adapter referenced anywhere in an expression."""
     for item in ast.walk(node):
+        reflective_name = _reflective_provider_adapter_name(item)
+        if reflective_name:
+            return reflective_name
         name = _node_name(item)
         if name in DIRECT_PROVIDER_ONLY_NAMES:
             return name
@@ -242,7 +318,7 @@ def _provider_adapter_violations(
     """Return imports or calls that bypass the shared runtime adapter."""
     allowed = allowed_names or set()
     violations: list[str] = []
-    pi_command_names = _pi_command_names(tree)
+    direct_runner_command_names = _direct_runner_command_names(tree)
     subprocess_execution_names = _execution_aliases(
         tree,
         "subprocess",
@@ -265,21 +341,16 @@ def _provider_adapter_violations(
             name = _node_name(node.func)
             if name in DIRECT_PROVIDER_ONLY_NAMES and name not in allowed:
                 violations.append(f"line {node.lineno}: calls {name}()")
-            elif (
-                name == "getattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and isinstance(node.args[1].value, str)
-                and node.args[1].value in DIRECT_PROVIDER_ONLY_NAMES
-                and node.args[1].value not in allowed
-            ):
-                violations.append(f"line {node.lineno}: looks up {node.args[1].value}()")
-            elif name in subprocess_execution_names and _call_uses_pi_command(
-                node, pi_command_names
-            ):
-                violations.append(f"line {node.lineno}: runs pi subprocess")
-            elif name in os_execution_names and _call_uses_pi_command(node, pi_command_names):
-                violations.append(f"line {node.lineno}: runs pi OS execution")
+            else:
+                reflective_name = _reflective_provider_adapter_name(node.func)
+                if reflective_name and reflective_name not in allowed:
+                    violations.append(f"line {node.lineno}: looks up {reflective_name}()")
+                    continue
+                binary = _call_direct_runner_command(node, direct_runner_command_names)
+                if name in subprocess_execution_names and binary:
+                    violations.append(f"line {node.lineno}: runs {binary} subprocess")
+                elif name in os_execution_names and binary:
+                    violations.append(f"line {node.lineno}: runs {binary} OS execution")
     return violations
 
 
@@ -287,6 +358,15 @@ def _direct_provider_string_compare(node: ast.Compare) -> bool:
     return any(
         isinstance(item, ast.Constant) and item.value in {"codex", "pi"} for item in ast.walk(node)
     )
+
+
+def _provider_specific_branch_violations(tree: ast.AST) -> list[str]:
+    """Return direct-provider comparisons that would fork orchestration."""
+    return [
+        f"line {node.lineno}: compares against a direct provider"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare) and _direct_provider_string_compare(node)
+    ]
 
 
 def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
@@ -315,6 +395,10 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
             "line 2: runs pi subprocess",
         ),
         (
+            "import subprocess\nsubprocess.run(['codex', 'exec'])\n",
+            "line 2: runs codex subprocess",
+        ),
+        (
             "from hephaestus.agents.runtime import _invoke_pi_session as invoke\n",
             "line 1: imports ['_invoke_pi_session']",
         ),
@@ -338,6 +422,11 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
             "handlers = {'invoke': runtime._invoke_pi_session}\n"
             "handlers['invoke']('prompt')\n",
             "line 2: aliases _invoke_pi_session",
+        ),
+        (
+            "import hephaestus.agents.runtime as runtime\n"
+            "runtime.__dict__['_invoke_pi_session']('prompt')\n",
+            "line 2: looks up _invoke_pi_session()",
         ),
     ],
 )
@@ -381,6 +470,54 @@ def test_direct_agent_dispatch_guard_discovers_mapping_runtime_callers(
     assert _provider_neutral_runtime_files() == ["hephaestus/caller.py"]
 
 
+def test_direct_agent_dispatch_guard_follows_mapping_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mapping aliases must retain neutral runtime bindings for branch checks."""
+    source_root = tmp_path / "hephaestus"
+    source_root.mkdir()
+    source = (
+        "import hephaestus.agents.runtime as runtime\n"
+        "handlers = {'run': runtime.run_agent_session}\n"
+        "dispatch = handlers\n"
+        "if agent == 'pi':\n"
+        "    dispatch['run']('prompt')\n"
+    )
+    (source_root / "caller.py").write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "SOURCE_ROOTS", (source_root,))
+
+    assert _provider_neutral_runtime_files() == ["hephaestus/caller.py"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import hephaestus.agents.runtime as runtime\n"
+        "invoke = getattr(runtime, 'run_agent_session')\n"
+        "if agent == 'pi':\n"
+        "    invoke('prompt')\n",
+        "import hephaestus.agents.runtime as runtime\n"
+        "if agent == 'pi':\n"
+        "    getattr(runtime, 'run_agent_session')('prompt')\n",
+    ],
+)
+def test_direct_agent_dispatch_guard_discovers_getattr_runtime_callers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Literal ``getattr`` bindings must not evade the provider branch guard."""
+    source_root = tmp_path / "hephaestus"
+    source_root.mkdir()
+    (source_root / "caller.py").write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "SOURCE_ROOTS", (source_root,))
+
+    assert _provider_neutral_runtime_files() == ["hephaestus/caller.py"]
+
+
 @pytest.mark.parametrize("relative_path", _provider_neutral_runtime_files())
 def test_direct_agent_dispatch_has_no_provider_specific_runtime_branches(
     relative_path: str,
@@ -405,6 +542,32 @@ def test_direct_agent_dispatch_guard_discovers_all_current_runtime_callers() -> 
     assert relative_paths
     assert "hephaestus/automation/ci_fix_flow.py" in relative_paths
     assert "hephaestus/automation/pipeline/worker_pool.py" in relative_paths
+
+
+def test_provider_specific_branch_guard_rejects_standalone_orchestration() -> None:
+    """Provider branches must be visible even before a runtime call is added."""
+    tree = ast.parse("if agent == 'pi':\n    configure_pi_scope()\n")
+
+    assert _provider_specific_branch_violations(tree) == [
+        "line 1: compares against a direct provider"
+    ]
+
+
+def test_provider_specific_branches_are_confined_to_runtime_adapter() -> None:
+    """Production orchestration cannot fork on direct provider names."""
+    runtime_path = REPO_ROOT / "hephaestus" / "agents" / "runtime.py"
+    violations: list[str] = []
+    for root in SOURCE_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            if path == runtime_path:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            violations.extend(
+                f"{path.relative_to(REPO_ROOT).as_posix()} {violation}"
+                for violation in _provider_specific_branch_violations(tree)
+            )
+
+    assert violations == []
 
 
 def test_direct_provider_adapters_are_confined_to_runtime() -> None:

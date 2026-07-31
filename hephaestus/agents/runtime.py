@@ -55,6 +55,7 @@ PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
+_PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
     "--mode",
@@ -311,6 +312,11 @@ def is_codex(agent: str) -> bool:
 def is_pi(agent: str) -> bool:
     """Return True when the selected provider is Pi."""
     return agent == "pi"
+
+
+def agent_supports_model_reasoning_effort(agent: str) -> bool:
+    """Return whether an agent accepts Codex-style model reasoning selectors."""
+    return is_codex(agent)
 
 
 def uses_direct_agent_runner(agent: str) -> bool:
@@ -880,8 +886,11 @@ def _run_pi_command(
     timeout: int,
     sandbox: str,
     model: str = "",
+    _internal_admission_token: object | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Pi with prompt content attached via an ephemeral file, not argv."""
+    if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
+        _require_pi_automation_admission()
     prompt_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -911,29 +920,35 @@ def _run_pi_command(
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
             redacted_output = redact_pi_private_values(exc.stdout or "", tokens)
             redacted_stderr = redact_pi_private_values(exc.stderr or "", tokens)
-            exc.cmd = redacted_cmd
-            exc.output = redacted_output
-            exc.stderr = redacted_stderr
-            raise subprocess.CalledProcessError(
+            redacted_exception = subprocess.CalledProcessError(
                 exc.returncode,
                 redacted_cmd,
                 output=redacted_output,
                 stderr=redacted_stderr,
-            ) from None
+            )
+            # ``raise ... from None`` hides the context when rendered, but the
+            # original exception remains introspectable.  Sanitize it too.
+            exc.cmd = redacted_cmd
+            exc.output = redacted_output
+            exc.stderr = redacted_stderr
+            exc.args = redacted_exception.args
+            raise redacted_exception from None
         except subprocess.TimeoutExpired as exc:
             tokens = pi_private_redaction_tokens(cwd, model)
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
             redacted_output = redact_pi_private_values(_coerce_timeout_output(exc.output), tokens)
             redacted_stderr = redact_pi_private_values(_coerce_timeout_output(exc.stderr), tokens)
-            exc.cmd = redacted_cmd
-            exc.output = redacted_output
-            exc.stderr = redacted_stderr.encode()
-            raise subprocess.TimeoutExpired(
+            redacted_timeout = subprocess.TimeoutExpired(
                 redacted_cmd,
                 exc.timeout,
                 output=redacted_output,
                 stderr=redacted_stderr,
-            ) from None
+            )
+            exc.cmd = redacted_cmd
+            exc.output = redacted_output
+            exc.stderr = redacted_stderr.encode()
+            exc.args = redacted_timeout.args
+            raise redacted_timeout from None
     finally:
         if prompt_path is not None:
             with contextlib.suppress(OSError):
@@ -970,8 +985,11 @@ def _invoke_pi_session(
     session_id: str | None = None,
     base_cmd: list[str] | None = None,
     require_json_event: bool = False,
+    _internal_admission_token: object | None = None,
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
+    if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
+        _require_pi_automation_admission()
     cmd = list(base_cmd) if base_cmd is not None else _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
@@ -980,11 +998,14 @@ def _invoke_pi_session(
         timeout=timeout,
         sandbox=sandbox,
         model=model,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
     raw_stdout = result.stdout or ""
     if require_json_event and not _has_pi_json_event(raw_stdout):
         raise RuntimeError("Pi smoke did not emit a JSON event")
     parsed_session_id, event_message = _parse_pi_json_events(raw_stdout)
+    if require_json_event and not event_message:
+        raise RuntimeError("Pi smoke did not emit a terminal assistant JSON event")
     stdout = (event_message or raw_stdout).strip()
     return AgentRunResult(
         stdout=stdout,
@@ -1011,6 +1032,7 @@ def run_pi_session(
         timeout=timeout,
         model=model,
         sandbox=sandbox,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
 
 
@@ -1030,6 +1052,7 @@ def run_pi_smoke_session(
         sandbox="no-tools",
         base_cmd=_pi_smoke_base_cmd(),
         require_json_event=True,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
 
 
@@ -1053,6 +1076,7 @@ def resume_pi_session(
         model=model,
         sandbox=sandbox,
         session_id=session_id,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
 
 
