@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeAlias, TypeVar
 
 from hephaestus.automation.pipeline.work_item import (
@@ -41,6 +41,9 @@ class RunStats:
     agent_job_count: int
     agent_job_time_s: float
     wall_s: float
+    terminal_item_count: int = 0
+    terminal_dispositions: dict[str, int] = field(default_factory=dict)
+    terminal_per_stage: dict[str, int] = field(default_factory=dict)
 
     @property
     def interrupted(self) -> bool:
@@ -179,15 +182,38 @@ def print_summary(
     for item in items:
         logger.info("%s", _item_row(item))
 
-    dispositions: dict[str, int] = {}
-    per_stage: dict[str, int] = {}
-    for item in items:
-        dispositions[_disposition_bucket(item)] = dispositions.get(_disposition_bucket(item), 0) + 1
-        per_stage[item.stage.value] = per_stage.get(item.stage.value, 0) + 1
+    if stats.terminal_item_count or stats.terminal_dispositions or stats.terminal_per_stage:
+        dispositions = dict(stats.terminal_dispositions)
+        per_stage = dict(stats.terminal_per_stage)
+        aggregate_items = stats.terminal_item_count
+        # Terminal WorkItemSummary rows are a bounded recent sample already
+        # represented in the terminal aggregates. Active WorkItems still need
+        # to contribute to the end-of-run counts.
+        for item in items:
+            if isinstance(item, WorkItemSummary):
+                continue
+            dispositions[_disposition_bucket(item)] = (
+                dispositions.get(_disposition_bucket(item), 0) + 1
+            )
+            per_stage[item.stage.value] = per_stage.get(item.stage.value, 0) + 1
+            aggregate_items += 1
+    else:
+        dispositions = {}
+        per_stage = {}
+        for item in items:
+            dispositions[_disposition_bucket(item)] = (
+                dispositions.get(_disposition_bucket(item), 0) + 1
+            )
+            per_stage[item.stage.value] = per_stage.get(item.stage.value, 0) + 1
+        aggregate_items = len(items)
 
     logger.info("")
     logger.info("=== Aggregates ===")
-    logger.info("  items: %d  dispositions: %s", len(items), dict(sorted(dispositions.items())))
+    logger.info(
+        "  items: %d  dispositions: %s",
+        aggregate_items,
+        dict(sorted(dispositions.items())),
+    )
     logger.info("  per-stage: %s", dict(sorted(per_stage.items())))
     logger.info(
         "  agent jobs: %d (%.1fs total)  loops: %d  wall: %.1fs  interrupted: %s",

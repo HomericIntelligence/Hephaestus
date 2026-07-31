@@ -428,14 +428,16 @@ def test_c_plus_one_seed_drains_and_recovery_reuses_the_same_seed(
 def test_completed_issue_payload_retention_stays_bounded_by_work_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Completing more than C issues retains summaries, not full WorkItems."""
+    """Completing more than C issues retains bounded terminal rows, not payloads."""
     issue_count = 5
+    terminal_capacity = 2
     config = PipelineConfig(
         org="org",
         repos=["repo-a"],
         max_workers=1,
         parallel_repos=1,
         stage_queue_capacity=1,
+        terminal_retention_capacity=terminal_capacity,
         projects_dir=tmp_path,
     )
     monkeypatch.setattr(
@@ -488,12 +490,18 @@ def test_completed_issue_payload_retention_stays_bounded_by_work_window(
     assert issue_count > coordinator._work_window
     assert max(observed_live_counts) <= coordinator._work_window
     assert coordinator.items == []
-    assert len(coordinator.item_summaries) == issue_count
-    assert len(coordinator.ledger) == issue_count
-    assert [item.issue for item in coordinator._effective_items()] == list(
-        range(1, issue_count + 1)
+    assert coordinator._terminal_item_count == issue_count
+    assert coordinator._terminal_dispositions == {"pass": issue_count}
+    assert len(coordinator.item_summaries) <= terminal_capacity
+    assert len(coordinator.ledger) <= terminal_capacity
+    assert len(coordinator.preserved) <= terminal_capacity
+    assert (
+        len(coordinator.item_summaries) + len(coordinator.ledger) + len(coordinator.preserved)
+        <= terminal_capacity * 3
     )
+    assert [item.issue for item in coordinator._effective_items()] == [4, 5]
     assert all(not hasattr(item, "payload") for item in coordinator.item_summaries)
+    assert not hasattr(coordinator, "_terminal_pr_keys")
     gc.collect()
     assert all(payload_ref() is None for payload_ref in payload_refs)
 

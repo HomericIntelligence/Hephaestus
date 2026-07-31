@@ -6,9 +6,9 @@ The universal sink. States: ENTER -> RECORD -> CLEANUP -> DONE.
 
 Steps:
 
-1. [M] RECORD: append the item's :class:`~..work_item.ItemResult` to the run
-   ledger (the coordinator injects its ledger list at construction — queue
-   and ledger ownership stay with the coordinator).
+1. [M] RECORD: append the item's :class:`~..work_item.ItemResult` to the
+   coordinator-owned recent ledger window. Complete aggregate accounting stays
+   with the coordinator when the terminal item is retired.
 2. [W:G] CLEANUP: remove the implementation worktree on pass; on fail, preserve that writer
    worktree for debugging and record it in the preserved list the end-of-run
    summary prints.
@@ -45,7 +45,7 @@ class FinishedStage(Stage):
     """Sink stage: record :class:`ItemResult` and clean up worktrees.
 
     Args:
-        ledger: The coordinator's run ledger; RECORD appends here.
+        ledger: The coordinator's bounded recent ledger; RECORD appends here.
         preserved: The coordinator's preserved-worktree list
             (``(repo, item_number, worktree_path)`` tuples) the summary prints.
             Failed issue items use the issue number; PR-only items use the PR

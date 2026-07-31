@@ -60,26 +60,3 @@ when a threshold fails.
 
 Measurements are runtime evidence only. Do not commit or hand-author report
 values; inspect the generated CI artifact instead.
-
-## Locally captured verification evidence
-
-The following commands were independently run on the reviewed head on
-2026-07-31. Their exit status was 0 in each case. The unit-suite result is
-reported separately from the performance-marked regression because the latter
-is excluded by the default unit-suite selection.
-
-Unit suite (the repository's stated unit-suite command):
-
-```text
-$ uv run pytest tests/unit -v
-Required test coverage of 83.0% reached. Total coverage: 85.01%
-================= 6380 passed, 6 skipped in 136.10s (0:02:16) ==================
-```
-
-Stalled-consumer recovery regression (the explicit command above):
-
-```text
-$ uv run pytest tests/performance/test_worker_pool_load.py::test_worker_pool_stalled_consumer_preserves_and_recovers --override-ini="addopts=" -m performance --strict-markers -v
-tests/performance/test_worker_pool_load.py::test_worker_pool_stalled_consumer_preserves_and_recovers PASSED [100%]
-============================== 1 passed in 0.30s ===============================
-```

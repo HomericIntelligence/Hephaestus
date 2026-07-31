@@ -85,7 +85,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, TypeVar
 
 from jinja2 import TemplateNotFound
 
@@ -166,6 +166,12 @@ _DEFAULT_STAGE_QUEUE_CAPACITY = 64
 #: The optional JSONL journal remains the durable complete event history.
 _DEFAULT_EVENT_LOG_CAPACITY = 1_024
 
+#: Maximum number of recent terminal rows retained in memory for diagnostics
+#: and end-of-run detail output. Aggregate accounting is maintained separately,
+#: so completed runs larger than this cap do not retain O(total work) terminal
+#: ``WorkItemSummary`` or ledger entries.
+_DEFAULT_TERMINAL_RETENTION_CAPACITY = 1_024
+
 #: Number of fully stalled idle ticks before the coordinator force-runs work.
 _STALL_TICKS_BEFORE_FORCE = 3
 
@@ -196,6 +202,7 @@ _DRAIN_ORDER: tuple[StageName, ...] = (
 )
 
 StageStepResult: TypeAlias = Continue | JobRequest | StageOutcome
+_T = TypeVar("_T")
 
 
 def _budget_lookup(name: str) -> int:
@@ -293,6 +300,9 @@ class PipelineConfig:
     # A bounded diagnostic view only; ``event_log_path`` is the durable event
     # history and is not truncated by this setting.
     event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY
+    # Bounded diagnostic terminal rows only. Aggregate accounting is retained
+    # separately and remains complete for the run.
+    terminal_retention_capacity: int = _DEFAULT_TERMINAL_RETENTION_CAPACITY
     event_log_path: Path | None = None
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
     # Optional exceptions to the normal ``projects_dir / repo`` checkout
@@ -375,6 +385,30 @@ class _PendingHandoff:
     result: ItemResult | None = None
 
 
+class _BoundedAppendList(list[_T]):
+    """List-compatible append-only ring used by coordinator-owned sinks.
+
+    ``FinishedStage`` receives the ledger through constructor injection and
+    calls ``append`` directly. Keeping this type list-compatible avoids pushing
+    retention policy into stage code while still enforcing a hard coordinator
+    memory bound.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        """Create an empty list retaining at most *capacity* recent entries."""
+        if capacity < 1:
+            raise ValueError("capacity must be positive")
+        super().__init__()
+        self.capacity = capacity
+
+    def append(self, item: _T) -> None:
+        """Append *item*, evicting the oldest rows past the retention cap."""
+        super().append(item)
+        overflow = len(self) - self.capacity
+        if overflow > 0:
+            del self[:overflow]
+
+
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
@@ -439,6 +473,8 @@ class Coordinator:
             raise ValueError("alert queue depth threshold must be between 0 and 100")
         if config.event_log_capacity < 1:
             raise ValueError("event log capacity must be positive")
+        if config.terminal_retention_capacity < 1:
+            raise ValueError("terminal retention capacity must be positive")
         self.completion_q = CompletionQueue(capacity=self._work_window)
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
@@ -475,14 +511,20 @@ class Coordinator:
         self._live_work_permit_ids: set[int] = set()
         self._seed_entries: Iterator[_seeding.SeedEntry] | None = None
         self.inflight_per_repo: Counter[str] = Counter()
-        self.ledger: list[ItemResult] = []
-        self.preserved: list[PreservedWorktree] = []
+        self.ledger: list[ItemResult] = _BoundedAppendList(config.terminal_retention_capacity)
+        self.preserved: list[PreservedWorktree] = _BoundedAppendList(
+            config.terminal_retention_capacity
+        )
         # ``items`` owns only live, payload-bearing work. Terminal items are
         # retired immediately into compact scalar summaries so streamed runs
         # never retain O(total discovered work) issue bodies/plans/reviews.
         self.items: list[WorkItem] = []
-        self.item_summaries: list[WorkItemSummary] = []
-        self._terminal_pr_keys: set[tuple[str, int]] = set()
+        self.item_summaries: list[WorkItemSummary] = _BoundedAppendList(
+            config.terminal_retention_capacity
+        )
+        self._terminal_item_count = 0
+        self._terminal_dispositions: Counter[str] = Counter()
+        self._terminal_per_stage: Counter[str] = Counter()
         self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         self._journal_failure = False
@@ -906,8 +948,14 @@ class Coordinator:
                 agent_job_count=self._agent_job_count,
                 agent_job_time_s=self._agent_job_time_s,
                 wall_s=time.monotonic() - started,
+                terminal_item_count=self._terminal_item_count,
+                terminal_dispositions=dict(self._terminal_dispositions),
+                terminal_per_stage=dict(self._terminal_per_stage),
             )
             summary_items = self._effective_items()
+            summary_item_count = self._terminal_item_count + sum(
+                1 for item in summary_items if not isinstance(item, WorkItemSummary)
+            )
             preserved = self._active_preserved_worktrees()
             try:
                 self._record_event(
@@ -915,7 +963,7 @@ class Coordinator:
                     {
                         "exit_code": exit_code,
                         "interrupted": stats.interrupted,
-                        "items": len(summary_items),
+                        "items": summary_item_count,
                         "agent_jobs": self._agent_job_count,
                         "wall_s": stats.wall_s,
                     },
@@ -939,12 +987,31 @@ class Coordinator:
         )
         if tracked_index is None and item_id not in self._seen_item_ids:
             return
-        self.item_summaries.append(WorkItemSummary.from_item(item))
-        if item.pr is not None:
-            self._terminal_pr_keys.add((item.repo, item.pr))
+        self._record_terminal_summary(item)
         if tracked_index is not None:
             del self.items[tracked_index]
         self._seen_item_ids.discard(item_id)
+
+    def _record_terminal_summary(self, item: WorkItem) -> None:
+        """Retain one bounded terminal row and update complete aggregates."""
+        summary = WorkItemSummary.from_item(item)
+        self.item_summaries.append(summary)
+        self._terminal_item_count += 1
+        self._terminal_dispositions[self._terminal_disposition_bucket(summary.result)] += 1
+        self._terminal_per_stage[summary.stage.value] += 1
+
+    @staticmethod
+    def _terminal_disposition_bucket(result: ItemResult) -> str:
+        """Return the aggregate disposition bucket used by summary output."""
+        if result.reason.startswith("resumable"):
+            return "resumable"
+        if result.passed:
+            return "pass"
+        if result.reason.startswith("skip"):
+            return "skip"
+        if result.reason.startswith("blocked"):
+            return "blocked"
+        return "fail"
 
     def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
         """Return preserved worktrees for latest failed items that still exist."""
@@ -974,8 +1041,16 @@ class Coordinator:
         if self._journal_failure:
             return 1
         effective_results = [item.result for item in self._effective_items() if item.result]
-        results = effective_results or self.ledger
-        if self.shutdown.is_set() or self._fatal or any(not result.passed for result in results):
+        retained_results = effective_results or self.ledger
+        has_nonpassing_terminal = any(
+            count for bucket, count in self._terminal_dispositions.items() if bucket != "pass"
+        )
+        if (
+            self.shutdown.is_set()
+            or self._fatal
+            or has_nonpassing_terminal
+            or any(not result.passed for result in retained_results)
+        ):
             return 1
         return 0
 
@@ -1642,12 +1717,11 @@ class Coordinator:
             )
             return False
 
-        # Issue discovery runs first. Check both bounded live ownership and the
-        # compact terminal-key index so the PR cursor cannot produce a second
-        # item for an already-covered pull request.
-        if (active.repo, pr_number) in self._terminal_pr_keys or any(
-            item.repo == active.repo and item.pr == pr_number for item in self.items
-        ):
+        # Issue discovery runs first. Check bounded live ownership before
+        # doing the more expensive PR hydration; terminal duplicate coverage
+        # is decided after PR→issue lookup using the source cursor's bounded
+        # ``seen_through_issue`` progress marker.
+        if any(item.repo == active.repo and item.pr == pr_number for item in self.items):
             source.pending_pr = None
             self._record_event("repo_pr_source_covered", active.repo, pr_number)
             self._progress = True
@@ -1671,6 +1745,14 @@ class Coordinator:
             )
             self._progress = True
             return True
+        if (
+            entry.issue_number is not None
+            and active.seen_through_issue is not None
+            and entry.issue_number <= active.seen_through_issue
+        ):
+            self._record_event("repo_pr_source_covered", active.repo, pr_number)
+            self._progress = True
+            return True
 
         new_item = self._entry_to_item(entry, active.repo)
         if new_item.stage is StageName.FINISHED and new_item.result is None:
@@ -1691,8 +1773,8 @@ class Coordinator:
         item = WorkItem(repo=repo, kind=ItemKind.REPO, stage=StageName.FINISHED)
         item.result = ItemResult(passed=False, reason=reason, final_stage=StageName.REPO)
         item.payload["entry_stage"] = StageName.REPO.value
-        self.item_summaries.append(WorkItemSummary.from_item(item))
         self.ledger.append(item.result)
+        self._record_terminal_summary(item)
         self._fatal = True
 
     def _drain_implementation(self) -> None:
