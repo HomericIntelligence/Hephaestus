@@ -31,8 +31,10 @@ python3 scripts/pi_smoke.py
 Both variables are required by the explicit smoke seam. They are not yet
 forwarded as Pi native provider/model selection arguments, so a successful
 smoke validates only the bounded adapter path, not a requested provider/model
-selection. #2516 owns configuration discovery and preflight; #2518 owns native
-selection and scoped pipeline admission.
+selection. That seam is non-interactive and ephemeral: it disables sessions,
+tools, project approval/context, and extension, skill, prompt-template, and
+theme discovery. #2516 owns configuration discovery and preflight; #2518 owns
+native selection and scoped pipeline admission.
 
 Create `.heph-private-denylist` at the repository root on machines that know
 private values. Add one fixed string per line, including any private alias,

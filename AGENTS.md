@@ -581,9 +581,9 @@ Codex, and the currently fail-closed Pi provider boundary. It provides:
 - `run_codex_*` and `run_agent_*` text/session/resume helpers invoke direct
   providers through the neutral boundary. Public `run_pi_*` execution helpers
   also reject unadmitted automation; only `run_pi_smoke_session` is the fixed
-  read-only operator smoke seam. Normal Pi automation remains blocked until its
-  package preflight and stage scope contracts are complete; the smoke seam is
-  not admission evidence. See ADR-0019 and ADR-0020.
+  tool-free, non-interactive operator smoke seam. Normal Pi automation remains
+  blocked until its package preflight and stage scope contracts are complete;
+  the smoke seam is not admission evidence. See ADR-0019 and ADR-0020.
 - Claude is normally invoked via `hephaestus.automation.claude_invoke.invoke_claude_with_session`;
   the library-only fleet-sync conflict fallback uses `claude_code_sdk` with the scoped call-site
   controls below.

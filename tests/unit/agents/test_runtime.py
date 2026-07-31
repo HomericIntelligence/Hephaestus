@@ -13,6 +13,22 @@ import pytest
 
 from hephaestus.agents import runtime as agent_runtime
 
+PI_SMOKE_COMMAND_PREFIX = [
+    "pi",
+    "--mode",
+    "json",
+    "--print",
+    "--no-session",
+    "--no-approve",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--offline",
+    "--no-tools",
+]
+
 
 def test_pi_capability_contract_separates_native_packages_and_unsupported_controls() -> None:
     """Pi's runtime boundary must expose its fail-closed parity contract."""
@@ -703,8 +719,8 @@ def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
     run.assert_not_called()
 
 
-def test_run_pi_smoke_session_forces_read_only_scope(tmp_path: Path) -> None:
-    """The only unadmitted Pi seam is a separately named read-only smoke API."""
+def test_run_pi_smoke_session_is_noninteractive_and_tool_free(tmp_path: Path) -> None:
+    """The only unadmitted Pi seam is fixed, ephemeral, and tool-free."""
     captured_cmd: list[str] = []
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
@@ -724,8 +740,7 @@ def test_run_pi_smoke_session_forces_read_only_scope(tmp_path: Path) -> None:
             model="local-alias",
         )
 
-    tools_index = captured_cmd.index("--tools")
-    assert captured_cmd[tools_index + 1] == agent_runtime.PI_READ_ONLY_TOOLS
+    assert captured_cmd[:-1] == PI_SMOKE_COMMAND_PREFIX
     assert result.session_id == "pi-session-789"
 
 
@@ -761,8 +776,7 @@ def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path
 
     assert result.session_id == "pi-session-789"
     assert result.stdout == "pi output"
-    assert captured["cmd"][:3] == ["pi", "--mode", "json"]
-    assert captured["cmd"][3:5] == ["--tools", agent_runtime.PI_READ_ONLY_TOOLS]
+    assert captured["cmd"][:-1] == PI_SMOKE_COMMAND_PREFIX
     assert captured["cmd"][-1].startswith("@")
     assert "--model" not in captured["cmd"]
     assert "private-alias" not in captured["cmd"]
@@ -788,21 +802,35 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Pat
         raise subprocess.CalledProcessError(
             7,
             cmd,
-            output="PRIVATE_ENDPOINT_TOKEN",
-            stderr="private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            output="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            stderr="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
         )
 
-    with patch("subprocess.run", side_effect=fake_run):
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            agent_runtime.run_pi_smoke_session(
-                "prompt",
-                cwd=tmp_path,
-                timeout=30,
-                model="private-test-alias",
-            )
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "HEPH_PI_PROVIDER": "private-provider-alias",
+                "HEPH_PI_MODEL": "private-test-alias",
+            },
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.CalledProcessError) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-test-alias",
+        )
 
     exc = exc_info.value
+    assert "private-provider-alias" not in str(exc.cmd)
     assert "private-test-alias" not in str(exc.cmd)
+    assert "private-provider-alias" not in (exc.stdout or "")
+    assert "private-test-alias" not in (exc.stdout or "")
+    assert "private-provider-alias" not in (exc.stderr or "")
+    assert "private-test-alias" not in (exc.stderr or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
@@ -819,24 +847,41 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Pat
         raise subprocess.TimeoutExpired(
             cmd,
             7,
-            output="private-test-alias PRIVATE_ENDPOINT_TOKEN",
-            stderr="PRIVATE_ENDPOINT_TOKEN private-test-alias",
+            output="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            stderr="PRIVATE_ENDPOINT_TOKEN private-test-alias private-provider-alias",
         )
 
-    with patch("subprocess.run", side_effect=fake_run):
-        with pytest.raises(subprocess.TimeoutExpired) as exc_info:
-            agent_runtime.run_pi_smoke_session(
-                "prompt",
-                cwd=tmp_path,
-                timeout=30,
-                model="private-test-alias",
-            )
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "HEPH_PI_PROVIDER": "private-provider-alias",
+                "HEPH_PI_MODEL": "private-test-alias",
+            },
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.TimeoutExpired) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-test-alias",
+        )
 
     exc = exc_info.value
+    assert "private-provider-alias" not in str(exc)
     assert "private-test-alias" not in str(exc)
+    assert "private-provider-alias" not in str(exc.cmd)
     assert "private-test-alias" not in str(exc.cmd)
+    assert "private-provider-alias" not in (exc.output or "")
+    assert "private-test-alias" not in (exc.output or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.output or "")
+    assert "private-provider-alias" not in (exc.stdout or "")
+    assert "private-test-alias" not in (exc.stdout or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
+    assert "private-provider-alias" not in (exc.stderr or "")
+    assert "private-test-alias" not in (exc.stderr or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.output or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
@@ -856,8 +901,8 @@ def test_redact_pi_private_values_replaces_all_tokens() -> None:
     )
 
 
-def test_run_pi_smoke_session_restricts_tools(tmp_path: Path) -> None:
-    """The unadmitted smoke seam should request its fixed read-only tool surface."""
+def test_run_pi_smoke_session_disables_tools(tmp_path: Path) -> None:
+    """The unadmitted smoke seam should disable every built-in and extension tool."""
     captured_cmd: list[str] = []
     stdout = "\n".join(
         [
@@ -881,8 +926,8 @@ def test_run_pi_smoke_session_restricts_tools(tmp_path: Path) -> None:
         )
 
     assert result.stdout == "pi output"
-    tools_index = captured_cmd.index("--tools")
-    assert captured_cmd[tools_index + 1] == agent_runtime.PI_READ_ONLY_TOOLS
+    assert "--no-tools" in captured_cmd
+    assert "--tools" not in captured_cmd
     assert captured_cmd[-1].startswith("@")
     assert "review prompt" not in captured_cmd
 

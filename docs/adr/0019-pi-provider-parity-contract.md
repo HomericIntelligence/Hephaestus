@@ -55,6 +55,12 @@ the provider's capability surface.
 Pi is given only named tools required by the selected role.  Athena frontmatter
 is descriptive; Hephaestus owns the enforcement boundary passed to Pi.
 
+The pre-admission `run_pi_smoke_session` exception is deliberately narrower
+than any stage role: it is non-interactive, ephemeral, tool-free, and disables
+project approval/context plus extension, skill, prompt-template, and theme
+discovery. It demonstrates transport and diagnostics only; it cannot establish
+that a role-derived Pi scope has been admitted.
+
 | Hephaestus capability | Pi grant | Notes |
 | --- | --- | --- |
 | `Read`, `Grep`, `Glob` | `read`, `grep`, `find`, `ls` | Review baseline; no `bash`, write, package, or web tool. |
@@ -73,11 +79,11 @@ is descriptive; Hephaestus owns the enforcement boundary passed to Pi.
 | `repo` | No model job | Safe tested N/A; it performs repository and GitHub discovery only. |
 | `planning` | Athena `advise` plus planner read/search scope | Requires canonical Mnemosyne resolution and Athena discovery. |
 | `plan_review` | Read-only reviewer analysis, planner amendment, and a separate Mnemosyne learning subpath | The reviewer remains read-only. `LEARN_WAIT` is Pi N/A until #2517 proves Athena-equivalent learning semantics and #2518 separately scopes its PR-producing workflow. |
-| `implementation` | Isolated worktree and write/edit/shell scope | Delegation is opt-in and preflighted, never ambient. |
-| `pr_review` | Read-only review; Athena `pr-review` may require explicitly preflighted skill/delegation/web capabilities | No write, merge, CI mutation, or unrestricted network capability. |
+| `implementation` | Default `ADVISE_WAIT` needs Athena `advise` with its canonical Mnemosyne resolution and a read/search/skill scope; dirty-worktree decisions and implementation use an isolated worktree with write/edit/shell scope | Pi is N/A for the whole stage until #2515–#2518 preflight both advice and implementation subpaths. Delegation is opt-in, never ambient. |
+| `pr_review` | Reviewer/validation work is read-only; Athena `pr-review` may require preflighted skill/delegation/web capabilities. Address work resumes an implementation role in an isolated worktree with write/edit/shell scope. | The host controls commit/push after address work and Pi has no merge or CI authority. Pi is N/A until #2515–#2518 separately preflight both role scopes. |
 | `merge_wait` | No provider authority to merge; `learn` needs a verified Mnemosyne PR workflow | A successful local edit is not learn evidence. |
 | `finished` | No model job | Safe tested N/A; it records terminal state and preserves or cleans worktrees. |
-| Console wrappers (`hephaestus-automation-loop`, plan, implement, review, and agent-stage) | Preserve the same stage requirements; wrappers do not invent a second Pi path | Provider selection and preflight are shared. |
+| Console wrappers (`hephaestus-automation-loop`, plan, implement, review, and agent-stage) | Preserve the exact stage requirements recorded in ADR-0020; wrappers do not invent a second Pi path | Provider selection and preflight are shared. |
 
 ### Authentication, configuration, and errors
 
@@ -99,7 +105,7 @@ mode, reject unsupported approval requests, bind resume to a verified
 worktree-local session identity, and fail on malformed events or absent session
 headers. A timeout, unavailable tool, missing command, malformed event, or
 absent session identity must be an actionable provider failure; it must never
-downgrade to a Claude/Codex fallback mid-stage. The current read-only operator
+downgrade to a Claude/Codex fallback mid-stage. The current tool-free operator
 smoke seam is transport/redaction evidence only, not evidence of those
 post-admission contracts.
 

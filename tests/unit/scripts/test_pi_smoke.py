@@ -84,13 +84,14 @@ def test_failure_output_redacts_private_values(
         9,
         ["pi"],
         output="PRIVATE_ENDPOINT_TOKEN",
-        stderr="private-test-alias PRIVATE_ENDPOINT_TOKEN",
+        stderr="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
     )
     monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=err))
 
     assert _mod.main(["--cwd", str(tmp_path)]) == 9
 
     output = capsys.readouterr().err
+    assert "private-provider-alias" not in output
     assert "private-test-alias" not in output
     assert "PRIVATE_ENDPOINT_TOKEN" not in output
     assert "<redacted-pi-private-value>" in output

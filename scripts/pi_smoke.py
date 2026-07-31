@@ -36,7 +36,7 @@ DEFAULT_LOG_DIR = Path("pi-smoke-logs")
 def build_parser() -> argparse.ArgumentParser:
     """Build the Pi smoke parser."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Read-only smoke prompt")
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Tool-free smoke prompt")
     parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="Working directory for Pi")
     parser.add_argument("--timeout", type=int, default=300, help="Pi subprocess timeout")
     parser.add_argument(

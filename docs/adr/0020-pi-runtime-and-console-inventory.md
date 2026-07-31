@@ -17,14 +17,16 @@ inventory rather than amending it.
 
 ### Direct runtime boundary
 
-Only the shared runtime adapter may select a direct provider. Every current
-non-adapter caller is listed below. The static contract test discovers these
-callers from their actual `resolve_agent`, `direct_agent_model`,
+Only the shared runtime adapter may select a direct provider. The rows below
+are a reviewed source audit of every current non-adapter caller. The static
+contract test independently discovers `resolve_agent`, `direct_agent_model`,
 `uses_direct_agent_runner`, `run_agent_text`, `run_agent_session`,
-`resume_agent_session`, and `session_agent_matches` calls, rather than relying
-on a manually maintained file list. Except for an explicit N/A row, the matrix
-states the required future contract: normal `resolve_agent` selection blocks
-Pi until #2516 and #2518 deliver their prerequisites.
+`resume_agent_session`, and `session_agent_matches` callers to enforce the
+provider-neutral branch/direct-adapter guard; it does not mechanically
+reconcile this prose matrix. Future call-site changes therefore require an
+explicit inventory review or a superseding ADR. Except for an explicit N/A row,
+the matrix states the required future contract: normal `resolve_agent` selection
+blocks Pi until #2516 and #2518 deliver their prerequisites.
 
 | Runtime entry point | Current non-adapter callers | Pi contract |
 | --- | --- | --- |
@@ -35,7 +37,7 @@ Pi until #2516 and #2518 deliver their prerequisites.
 | `run_agent_session` | `automation/_implement_phase.py`, `automation/agent_stage.py`, `automation/ci_fix_flow.py`, `automation/ci_fix_orchestrator.py`, `automation/pipeline/worker_pool.py`, `automation/post_merge_processor.py` | After #2518, preserve cwd, timeout, output, and a validated opaque session identity through the shared adapter. Managed process tracking is a required boundary. |
 | `resume_agent_session` | `automation/ci_fix_orchestrator.py`, `automation/follow_up.py`, `automation/learn.py`, `automation/pipeline/worker_pool.py` | After #2518, resume only a persisted, verified worktree-local identity; a missing, malformed, or cross-worktree identity is a provider error, not a new/forked session. |
 | `session_agent_matches` | `automation/_followup_phase.py`, `automation/_review_utils.py`, `automation/follow_up.py`, `automation/learn.py` | Keep a persisted session provider bound to its selected agent; #2518 owns fail-closed Pi session-identity enforcement. |
-| `run_pi_smoke_session` operator exception | `scripts/pi_smoke.py` | Explicit local, fixed read-only adapter smoke only. It has no queue, GitHub, worktree, or merge authority and is not evidence that Pi is admitted to automation. The default Slurm template submits this same smoke command; an operator-supplied `pi_smoke_slurm.py --template` is outside this conformance boundary. |
+| `run_pi_smoke_session` operator exception | `scripts/pi_smoke.py` | Explicit local, fixed tool-free, non-interactive, no-session/no-approval/no-context/no-discovery adapter smoke only. It has no queue, GitHub, worktree, or merge authority and is not evidence that Pi is admitted to automation. The default Slurm template submits this same smoke command; an operator-supplied `pi_smoke_slurm.py --template` is outside this conformance boundary. |
 
 ### Pipeline model resolution
 
@@ -61,8 +63,8 @@ fail-closed rather than receiving a provider-specific bypass.
 | `repo` | No model job; repository and GitHub discovery are provider N/A. | Existing behavior |
 | `planning` | Read/search scope plus Athena `advise`; canonical Mnemosyne resolution, package discovery, and #2518 stage-scope/lifecycle enforcement are required. | #2515–#2518 |
 | `plan_review` | Reviewer analysis is read-only, but amendment resumes the planner and `LEARN_WAIT` invokes the Mnemosyne PR workflow. Pi is N/A for the whole stage until those subpaths are separately preflighted. | #2515–#2518; #2517 owns learning semantics and #2518 owns scopes/lifecycle |
-| `implementation` | Isolated worktree plus explicitly scoped write/edit/shell tools; delegation is opt-in. | #2516, #2518 |
-| `pr_review` | Read-only review scope; Athena `pr-review`, delegation, and web capabilities require their own verified preflight. | #2515–#2518 |
+| `implementation` | Default `ADVISE_WAIT` needs Athena `advise`, canonical Mnemosyne resolution, and read/search/skill scope; dirty-worktree and implementation work use an isolated worktree with explicitly scoped write/edit/shell tools. Delegation is opt-in. | #2515–#2518 |
+| `pr_review` | Reviewer/validation work is read-only and Athena `pr-review`, delegation, and web capabilities require verified preflight. Address work runs an implementation role in an isolated worktree with write/edit/shell scope, then the host performs a verified commit/push; Pi has no merge authority. | #2515–#2518 |
 | `merge_wait` | No provider authority to merge; `learn` requires verified Mnemosyne PR evidence. | #2517, #2518 |
 | `finished` | No model job; terminal-state recording and worktree handling are provider N/A. | Existing behavior |
 
@@ -73,16 +75,16 @@ stage contract above; no command may introduce a second Pi path.
 
 | Command | Pi contract |
 | --- | --- |
-| `hephaestus-automation-loop` | Dispatches the queue stage matrix. |
-| `hephaestus-plan-issues` | Planning read/search and Athena `advise` prerequisites. |
-| `hephaestus-implement-issues` | Implementation worktree and scoped write tools. |
-| `hephaestus-review-prs` | Read-only PR review scope. |
+| `hephaestus-automation-loop` | Dispatches the full `repo` → `planning` → `plan_review` → `implementation` → `pr_review` → `merge_wait` → `finished` matrix, or an explicitly selected contiguous subset. |
+| `hephaestus-plan-issues` | Runs `planning` plus `plan_review`, including their advise, reviewer/amendment, and learning subpaths. |
+| `hephaestus-implement-issues` | Runs `implementation`, `pr_review`, and `merge_wait`, inheriting implementation advice/worktree, review/address/push, and learning boundaries. |
+| `hephaestus-review-prs` | Runs `pr_review` only: review/validation is read-only, while its bounded address/push lifecycle can use an isolated write-capable worktree; it never arms merge. |
 | `hephaestus-audit-prs` | Read-only direct review scope. |
-| `hephaestus-drive-prs-green` | Scoped CI-fix session path. |
+| `hephaestus-drive-prs-green` | Runs `pr_review` plus `merge_wait`; it inherits the same review/address/push and no-provider-merge boundaries, not a CI-fix session. |
 | `hephaestus-agent-stage` | Requested queue-stage contract; no standalone provider fork. |
 | `hephaestus-fleet-sync` | Safe N/A for Pi until #2518: its conflict resolver currently rejects direct-runtime providers rather than using a scoped shared adapter. |
 | `hephaestus-tidy` | Shared direct adapter with the cleanup role's explicit grant. |
-| `python scripts/pi_smoke.py` | Explicit operator-only read-only adapter smoke; it is not normal automation admission. |
+| `python scripts/pi_smoke.py` | Explicit operator-only tool-free, non-interactive, ephemeral adapter smoke; it is not normal automation admission. |
 | `python scripts/pi_smoke_slurm.py` / `sbatch scripts/slurm/pi_smoke.sbatch` | The default template submits the operator-only smoke seam without queue or merge authority. An explicit `--template` is an operator-controlled scheduler submission and is not smoke or Pi-admission evidence. |
 
 The remaining `project.scripts` entries do not invoke an agent and are safe
@@ -124,8 +126,10 @@ provider N/A boundaries:
 
 ## Alternatives considered
 
-- **Retain a hand-maintained direct-caller list.** Rejected because new session
-  or resume callers could silently evade the provider-neutral branch guard.
+- **Rely only on a hand-maintained direct-caller enforcement list.** Rejected
+  because new session or resume callers could silently evade the
+  provider-neutral branch guard. The ADR prose remains a reviewed point-in-time
+  inventory, while the static guard discovers production callers.
 - **Treat unlisted console commands as implicitly N/A.** Rejected because
   provider boundaries must remain reviewable when commands are added.
 - **Rewrite ADR-0019.** Rejected because accepted ADRs are immutable

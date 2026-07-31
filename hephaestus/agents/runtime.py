@@ -56,6 +56,19 @@ PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
+PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
+    "--mode",
+    "json",
+    "--print",
+    "--no-session",
+    "--no-approve",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--offline",
+)
 PI_AUTOMATION_PREFLIGHT_ERROR = (
     "Pi automation preflight is unavailable until #2516 verifies the required "
     "package/capability inventory and #2518 enforces lifecycle and tool scopes. "
@@ -232,12 +245,11 @@ def _pi_models_configured() -> bool:
 
 
 def _require_pi_automation_admission() -> None:
-    """Block Pi at every generic automation boundary until admission exists.
+    """Block every normal Pi automation entry point until admission exists.
 
-    The direct ``run_pi_*`` helpers remain the intentionally explicit
-    operator-smoke seam.  Normal callers must use a generic runner, where this
-    guard prevents a provider argument from bypassing the resolver.  #2516
-    replaces this temporary block with verified package-preflight evidence.
+    Only the explicitly named ``run_pi_smoke_session`` helper remains the
+    fixed tool-free, non-interactive operator-smoke seam. #2516 replaces this
+    temporary block with verified package-preflight evidence.
     """
     raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
 
@@ -338,9 +350,14 @@ def agent_display_name(agent: str) -> str:
 def pi_private_redaction_tokens(cwd: Path, model: str = "") -> tuple[str, ...]:
     """Return local Pi values that must be redacted from publishable diagnostics."""
     tokens: list[str] = []
-    resolved_model = (model or os.environ.get(PI_MODEL_ENV, "")).strip()
-    if resolved_model:
-        tokens.append(resolved_model)
+    for candidate in (
+        model,
+        os.environ.get(PI_MODEL_ENV, ""),
+        os.environ.get(PI_PROVIDER_ENV, ""),
+    ):
+        value = candidate.strip()
+        if value:
+            tokens.append(value)
 
     resolved_cwd = cwd.resolve()
     for parent in (resolved_cwd, *resolved_cwd.parents):
@@ -815,19 +832,15 @@ def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
     return cmd
 
 
-def _model_from_pi_cmd(cmd: list[str]) -> str:
-    """Extract the Pi model value from a command list when present."""
-    try:
-        model_index = cmd.index("--model")
-    except ValueError:
-        return ""
-    if model_index + 1 >= len(cmd):
-        return ""
-    return cmd[model_index + 1]
+def _pi_smoke_base_cmd() -> list[str]:
+    """Build the non-interactive, no-discovery Pi operator-smoke command."""
+    return ["pi", *PI_SMOKE_BASE_ARGS]
 
 
 def _pi_sandbox_args(sandbox: str) -> list[str]:
     """Return Pi tool restrictions for the requested sandbox mode."""
+    if sandbox == "no-tools":
+        return ["--no-tools"]
     if sandbox == "read-only":
         return ["--tools", PI_READ_ONLY_TOOLS]
     if sandbox in {"workspace-write", "danger-full-access"}:
@@ -880,7 +893,7 @@ def _run_pi_command(
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
-            tokens = pi_private_redaction_tokens(cwd, _model_from_pi_cmd(cmd))
+            tokens = pi_private_redaction_tokens(cwd, model)
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
             raise subprocess.CalledProcessError(
                 exc.returncode,
@@ -889,7 +902,7 @@ def _run_pi_command(
                 stderr=redact_pi_private_values(exc.stderr or "", tokens),
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            tokens = pi_private_redaction_tokens(cwd, _model_from_pi_cmd(cmd))
+            tokens = pi_private_redaction_tokens(cwd, model)
             raise subprocess.TimeoutExpired(
                 _redact_pi_command_args(exc.cmd, tokens),
                 exc.timeout,
@@ -930,9 +943,10 @@ def _invoke_pi_session(
     model: str,
     sandbox: str,
     session_id: str | None = None,
+    base_cmd: list[str] | None = None,
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
-    cmd = _pi_base_cmd(session_id=session_id)
+    cmd = list(base_cmd) if base_cmd is not None else _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
         prompt=prompt,
@@ -978,13 +992,14 @@ def run_pi_smoke_session(
     timeout: int,
     model: str = "",
 ) -> AgentRunResult:
-    """Run the explicit operator smoke seam with a fixed read-only Pi scope."""
+    """Run the explicit operator smoke seam with fixed tool-free Pi scope."""
     return _invoke_pi_session(
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
         model=model,
-        sandbox="read-only",
+        sandbox="no-tools",
+        base_cmd=_pi_smoke_base_cmd(),
     )
 
 
