@@ -1687,8 +1687,10 @@ class PipelineGitHub:
                     replied_thread_ids=candidate_ids,
                     receipts=tuple(recovered[thread_id] for thread_id in candidate_ids),
                 )
-            needs_envelope = len(candidate_ids) > 1 or pending_review_id is not None
-            if needs_envelope and pending_review_id is None:
+            # Every implementation pass, including a singleton reply, must be
+            # submitted as one GitHub review. The later comment-review handoff
+            # accepts only replies bound to that submitted review.
+            if pending_review_id is None:
                 pending_review_id = self._create_pending_implementation_review(
                     pull_request_id, expected_head_sha, batch_nonce
                 )
