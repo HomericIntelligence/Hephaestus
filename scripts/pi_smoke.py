@@ -25,6 +25,7 @@ from hephaestus.agents.runtime import (
     AgentRunResult,
     missing_pi_alias_env,
     pi_private_redaction_tokens,
+    prepare_pi_private_log_dir,
     redact_pi_private_values,
     run_pi_smoke_session,
 )
@@ -43,6 +44,12 @@ def _require_private_smoke_log_permissions() -> None:
     """Fail closed where this script cannot establish a user-only log ACL."""
     if not _private_smoke_log_permissions_supported():
         raise OSError("Pi smoke requires user-only log permissions on this platform")
+
+
+def _prepare_private_log_dir(log_dir: Path) -> Path:
+    """Create a unique private directory for this smoke run's artifact."""
+    _require_private_smoke_log_permissions()
+    return prepare_pi_private_log_dir(log_dir)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,8 +77,6 @@ def _write_smoke_log(
     Each run produces a distinct artifact named with a nanosecond epoch suffix
     so consecutive smoke runs never silently overwrite one another.
     """
-    _require_private_smoke_log_permissions()
-    log_dir.mkdir(parents=True, exist_ok=True)
     epoch_ns = time.time_ns()
     log_path = log_dir / f"pi-smoke-local-{epoch_ns}.log"
     display_path = redact_pi_private_values(str(log_path), redaction_tokens)
@@ -107,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: unable to load Pi private denylist safely", file=sys.stderr)
         return 1
     try:
-        _require_private_smoke_log_permissions()
+        private_log_dir = _prepare_private_log_dir(args.log_dir)
     except OSError as exc:
         detail = redact_pi_private_values(str(exc), redaction_tokens)
         print(f"ERROR: {detail}", file=sys.stderr)
@@ -134,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: Pi smoke could not start: {detail}", file=sys.stderr)
         return 1
     try:
-        log_path = _write_smoke_log(args.log_dir, result, redaction_tokens)
+        log_path = _write_smoke_log(private_log_dir, result, redaction_tokens)
     except OSError as exc:
         detail = redact_pi_private_values(str(exc), redaction_tokens)
         print(f"ERROR: could not write Pi smoke log: {detail}", file=sys.stderr)

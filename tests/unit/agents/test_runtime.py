@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -873,6 +874,30 @@ def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(tmp_path:
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
 
+def test_run_pi_smoke_session_detaches_parent_stdin(tmp_path: Path) -> None:
+    """The fixed smoke prompt must not absorb data piped to its parent process."""
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+            stderr="",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert result.stdout == "OK"
+    assert captured["kwargs"].get("stdin") is subprocess.DEVNULL
+
+
 def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1155,6 +1180,76 @@ def test_pi_private_redaction_tokens_fail_closed_on_broken_policy_link(tmp_path:
 
     with pytest.raises(OSError, match="not a regular file"):
         agent_runtime.pi_private_redaction_tokens(tmp_path, require_readable=True)
+
+
+def test_prepare_pi_private_log_dir_creates_unique_owner_only_run_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each smoke run must receive a distinct private directory below its safe root."""
+    assert hasattr(agent_runtime, "prepare_pi_private_log_dir")
+    verify_calls: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_verify_pi_private_acl",
+        lambda path, *, clear: verify_calls.append((path, clear)),
+    )
+    root = tmp_path / "logs"
+
+    first = agent_runtime.prepare_pi_private_log_dir(root)
+    second = agent_runtime.prepare_pi_private_log_dir(root)
+
+    assert first.parent == root
+    assert second.parent == root
+    assert first != second
+    assert first.name.startswith("pi-smoke-")
+    assert second.name.startswith("pi-smoke-")
+    assert stat.S_IMODE(first.stat().st_mode) & 0o077 == 0
+    assert stat.S_IMODE(second.stat().st_mode) & 0o077 == 0
+    assert (first, True) in verify_calls
+    assert (second, True) in verify_calls
+
+
+def test_prepare_pi_private_log_dir_accepts_a_sticky_ancestor_after_atomic_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sticky ancestor cannot replace a newly owned private run directory."""
+    assert hasattr(agent_runtime, "prepare_pi_private_log_dir")
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    sticky_parent = tmp_path / "sticky"
+    sticky_parent.mkdir()
+    sticky_parent.chmod(0o1777)
+
+    run_dir = agent_runtime.prepare_pi_private_log_dir(sticky_parent / "logs")
+
+    assert run_dir.parent == sticky_parent / "logs"
+    assert stat.S_IMODE(run_dir.stat().st_mode) & 0o077 == 0
+
+
+def test_prepare_pi_private_log_dir_rejects_nonsticky_writable_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An artifact root under a replaceable directory must fail before use."""
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    unsafe_parent = tmp_path / "unsafe"
+    unsafe_parent.mkdir()
+    unsafe_parent.chmod(0o777)
+
+    with pytest.raises(OSError, match="writable by another user"):
+        agent_runtime.prepare_pi_private_log_dir(unsafe_parent / "logs")
+
+
+def test_prepare_pi_private_log_dir_fails_closed_without_acl_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Private artifacts cannot be created when ACL grants cannot be verified."""
+    monkeypatch.setattr(agent_runtime, "_pi_private_log_permissions_supported", lambda: False)
+
+    with pytest.raises(OSError, match="requires verifiable private artifact permissions"):
+        agent_runtime.prepare_pi_private_log_dir(tmp_path / "logs")
 
 
 def test_redact_pi_private_values_replaces_all_tokens() -> None:

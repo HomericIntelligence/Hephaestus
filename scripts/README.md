@@ -99,7 +99,8 @@ through installed `hephaestus-*` console scripts.
 - **`pi_smoke.py`** — Run a tool-free Pi smoke prompt using
   `HEPH_PI_PROVIDER` and `HEPH_PI_MODEL` from the environment.
 - **`pi_smoke_slurm.py`** — Submit `scripts/slurm/pi_smoke.sbatch` with
-  `sbatch` using a minimized environment and owner-only scheduler log directory.
+  `sbatch` using a minimized environment and a fresh ACL-verified private
+  scheduler run directory.
 - **`slurm/pi_smoke.sbatch`** — Slurm batch template that invokes
   `pi_smoke.py` on a cluster node with a fixed export list and no shared
   scheduler artifact (copy and fill partition/account locally).

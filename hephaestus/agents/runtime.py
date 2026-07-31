@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -57,6 +60,7 @@ PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
 PI_DENYLIST_FILENAMES = (PI_PROJECT_DENYLIST_FILENAME, PI_PRIVATE_DENYLIST_FILENAME)
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
+PI_SMOKE_LOG_DIR_PREFIX = "pi-smoke-"
 _PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
@@ -390,6 +394,154 @@ def _read_pi_private_denylist(
             raise OSError("Unable to read Pi private denylist") from exc
         return ()
     return tuple(token for line in lines if (token := line.strip()) and not token.startswith("#"))
+
+
+def _pi_private_log_permissions_supported() -> bool:
+    """Return whether this platform can verify private smoke-artifact ACLs."""
+    return os.name == "posix" and (sys.platform == "darwin" or sys.platform.startswith("linux"))
+
+
+def _run_pi_private_acl_command(command: list[str]) -> str:
+    """Run a platform ACL command without accepting caller-controlled input."""
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise OSError("Unable to verify Pi smoke artifact ACLs") from exc
+    return result.stdout
+
+
+def _verify_pi_private_acl(path: Path, *, clear: bool) -> None:
+    """Clear or reject ACL grants that would make a smoke artifact non-private."""
+    if not _pi_private_log_permissions_supported():
+        raise OSError("Pi smoke requires verifiable private artifact permissions")
+    if sys.platform == "darwin":
+        if clear:
+            _run_pi_private_acl_command(["/bin/chmod", "-N", str(path)])
+        acl_listing = _run_pi_private_acl_command(["/bin/ls", "-lde", str(path)])
+        if len(acl_listing.splitlines()) != 1:
+            raise OSError("Pi smoke artifact path has an access ACL")
+        return
+
+    absent_errors = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
+    for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
+        if clear:
+            try:
+                os.removexattr(path, attribute, follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno not in absent_errors:
+                    raise OSError("Unable to clear Pi smoke artifact ACLs") from exc
+        try:
+            os.getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in absent_errors:
+                continue
+            raise OSError("Unable to verify Pi smoke artifact ACLs") from exc
+        raise OSError("Pi smoke artifact path has an access ACL")
+
+
+def _absolute_pi_log_path(path: Path) -> Path:
+    """Return an absolute, lexical Pi log path without resolving symlinks."""
+    return Path(os.path.abspath(path))
+
+
+def _pi_log_path_components(path: Path) -> tuple[Path, ...]:
+    """Return every lexical component from an absolute path's filesystem root."""
+    root = Path(path.anchor)
+    components = [root]
+    current = root
+    for part in path.parts[1:]:
+        current /= part
+        components.append(current)
+    return tuple(components)
+
+
+def _verify_pi_private_log_directory(
+    path: Path,
+    *,
+    require_current_owner: bool,
+    require_owner_only: bool,
+    clear_acl: bool,
+) -> None:
+    """Verify one no-symlink directory in the private artifact path chain."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi smoke artifact path") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("Pi smoke artifact path must be a directory, not a symlink")
+    current_uid = os.getuid()
+    if require_current_owner:
+        if metadata.st_uid != current_uid:
+            raise OSError("Pi smoke artifact path is not owned by the current user")
+    elif metadata.st_uid not in {0, current_uid}:
+        raise OSError("Pi smoke artifact ancestor is not owner-controlled")
+    mode = stat.S_IMODE(metadata.st_mode)
+    # A sticky directory cannot have another user's entry renamed or removed.
+    # Combined with atomic child creation and ownership verification below, it
+    # is safe as an ancestor (for example, the system temporary root).
+    if mode & 0o022 and not (metadata.st_mode & stat.S_ISVTX):
+        raise OSError("Pi smoke artifact path is writable by another user")
+    if clear_acl:
+        _verify_pi_private_acl(path, clear=True)
+        path.chmod(0o700)
+        metadata = path.lstat()
+    else:
+        _verify_pi_private_acl(path, clear=False)
+    if require_owner_only and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise OSError("Pi smoke artifact path is not user-only")
+
+
+def _ensure_pi_private_log_root(log_dir: Path) -> Path:
+    """Create or verify an owner-controlled root for smoke artifact run dirs."""
+    absolute_root = _absolute_pi_log_path(log_dir)
+    components = _pi_log_path_components(absolute_root)
+    for index, component in enumerate(components):
+        is_root = index == len(components) - 1
+        try:
+            component.lstat()
+        except FileNotFoundError:
+            try:
+                os.mkdir(component, 0o700)
+            except OSError as exc:
+                raise OSError("Unable to create Pi smoke artifact directory") from exc
+            _verify_pi_private_log_directory(
+                component,
+                require_current_owner=True,
+                require_owner_only=True,
+                clear_acl=True,
+            )
+            continue
+        _verify_pi_private_log_directory(
+            component,
+            require_current_owner=is_root,
+            require_owner_only=False,
+            clear_acl=False,
+        )
+    return absolute_root
+
+
+def prepare_pi_private_log_dir(log_dir: Path) -> Path:
+    """Create a unique ACL-verified private directory for one Pi smoke run."""
+    root = _ensure_pi_private_log_root(log_dir)
+    run_dir = Path(tempfile.mkdtemp(prefix=PI_SMOKE_LOG_DIR_PREFIX, dir=root))
+    try:
+        _verify_pi_private_log_directory(
+            run_dir,
+            require_current_owner=True,
+            require_owner_only=True,
+            clear_acl=True,
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            run_dir.rmdir()
+        raise
+    return run_dir
 
 
 def pi_private_redaction_tokens(
@@ -1022,6 +1174,7 @@ def _run_pi_command(
                 cwd=cwd,
                 text=True,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 timeout=timeout,
                 env=_pi_env(model=model),
                 check=True,

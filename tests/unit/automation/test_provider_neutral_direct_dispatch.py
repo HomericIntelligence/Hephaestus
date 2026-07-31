@@ -96,13 +96,94 @@ def _direct_runner_command_names(tree: ast.AST) -> dict[str, str]:
     return names
 
 
+def _module_import_aliases(tree: ast.AST, module: str) -> set[str]:
+    """Return names that refer directly to one guarded standard-library module."""
+    aliases = {module}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import):
+            continue
+        aliases.update(alias.asname or alias.name for alias in node.names if alias.name == module)
+    return aliases
+
+
+def _execution_reference_name(
+    node: ast.AST,
+    module_aliases: set[str],
+    names: set[str],
+    aliases: set[str],
+) -> str:
+    """Resolve a guarded executor through direct, assigned, or literal reflection."""
+    if isinstance(node, ast.Name):
+        return node.id if node.id in aliases else ""
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in module_aliases
+        and node.attr in names
+    ):
+        return node.attr
+    if isinstance(node, ast.Call) and _node_name(node.func) == "getattr" and len(node.args) >= 2:
+        name = _mapping_key(node.args[1])
+        if (
+            isinstance(node.args[0], ast.Name)
+            and node.args[0].id in module_aliases
+            and name in names
+        ):
+            return name
+    if not isinstance(node, ast.Subscript):
+        return ""
+    name = _mapping_key(node.slice)
+    if name not in names:
+        return ""
+    if (
+        isinstance(node.value, ast.Attribute)
+        and node.value.attr == "__dict__"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id in module_aliases
+    ):
+        return name
+    if (
+        isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "vars"
+        and node.value.args
+        and isinstance(node.value.args[0], ast.Name)
+        and node.value.args[0].id in module_aliases
+    ):
+        return name
+    return ""
+
+
 def _execution_aliases(tree: ast.AST, module: str, names: set[str]) -> set[str]:
-    """Return direct-import aliases for vetted process-execution functions."""
+    """Return aliases for guarded process-execution functions."""
     aliases = set(names)
+    module_aliases = _module_import_aliases(tree, module)
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or node.module != module:
             continue
         aliases.update(alias.asname or alias.name for alias in node.names if alias.name in names)
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for assignment in assignments:
+            assert assignment.value is not None
+            name = _execution_reference_name(
+                assignment.value,
+                module_aliases,
+                names,
+                aliases,
+            )
+            if not name:
+                continue
+            for target in _assignment_target_names(assignment):
+                if target not in aliases:
+                    aliases.add(target)
+                    changed = True
     return aliases
 
 
@@ -324,7 +405,9 @@ def _provider_adapter_violations(
         "subprocess",
         SUBPROCESS_EXECUTION_NAMES,
     )
+    subprocess_module_aliases = _module_import_aliases(tree, "subprocess")
     os_execution_names = _execution_aliases(tree, "os", OS_EXECUTION_NAMES)
+    os_module_aliases = _module_import_aliases(tree, "os")
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             imported = {alias.name for alias in node.names}
@@ -347,9 +430,21 @@ def _provider_adapter_violations(
                     violations.append(f"line {node.lineno}: looks up {reflective_name}()")
                     continue
                 binary = _call_direct_runner_command(node, direct_runner_command_names)
-                if name in subprocess_execution_names and binary:
+                subprocess_execution_name = _execution_reference_name(
+                    node.func,
+                    subprocess_module_aliases,
+                    SUBPROCESS_EXECUTION_NAMES,
+                    subprocess_execution_names,
+                )
+                os_execution_name = _execution_reference_name(
+                    node.func,
+                    os_module_aliases,
+                    OS_EXECUTION_NAMES,
+                    os_execution_names,
+                )
+                if subprocess_execution_name and binary:
                     violations.append(f"line {node.lineno}: runs {binary} subprocess")
-                elif name in os_execution_names and binary:
+                elif os_execution_name and binary:
                     violations.append(f"line {node.lineno}: runs {binary} OS execution")
     return violations
 
@@ -409,8 +504,24 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
             "line 3: runs pi subprocess",
         ),
         (
+            "import subprocess\nexecute = subprocess.run\nexecute(['pi', '--mode', 'json'])\n",
+            "line 3: runs pi subprocess",
+        ),
+        (
+            "import subprocess\ngetattr(subprocess, 'run')(['pi', '--mode', 'json'])\n",
+            "line 2: runs pi subprocess",
+        ),
+        (
             "import os\ncommand = 'pi --mode json'\nos.system(command)\n",
             "line 3: runs pi OS execution",
+        ),
+        (
+            "import os\nexecute = getattr(os, 'system')\nexecute('pi --mode json')\n",
+            "line 3: runs pi OS execution",
+        ),
+        (
+            "import os\nos.__dict__['system']('pi --mode json')\n",
+            "line 2: runs pi OS execution",
         ),
         (
             "import hephaestus.agents.runtime as runtime\n"

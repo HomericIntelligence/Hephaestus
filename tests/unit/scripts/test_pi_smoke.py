@@ -66,6 +66,8 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     assert "LOG_FILE=" in captured.err
     log_file_line = next(line for line in captured.err.splitlines() if line.startswith("LOG_FILE="))
     log_path = Path(log_file_line.split("LOG_FILE=", 1)[1])
+    assert log_path.parent.parent == tmp_path
+    assert log_path.parent.name.startswith("pi-smoke-")
     log_text = log_path.read_text(encoding="utf-8")
     assert "stdout: OK" in log_text
     assert "pi-smoke" not in log_text
@@ -197,7 +199,7 @@ def test_repository_denylist_redacts_values_when_cwd_is_outside_checkout(
     diagnostics = f"{captured.out}\n{captured.err}"
     assert "ROOT_PRIVATE_TOKEN" not in diagnostics
     assert "private-log-directory" not in diagnostics
-    log_paths = list(log_dir.glob("pi-smoke-local-*.log"))
+    log_paths = list(log_dir.glob("pi-smoke-*/pi-smoke-local-*.log"))
     assert len(log_paths) == 1
     log_text = log_paths[0].read_text(encoding="utf-8")
     assert "ROOT_PRIVATE_TOKEN" not in log_text
@@ -237,7 +239,7 @@ def test_repository_project_denylist_redacts_values_when_cwd_is_outside_checkout
     captured = capsys.readouterr()
     diagnostics = f"{captured.out}\n{captured.err}"
     assert "PROJECT_DENYLIST_TOKEN" not in diagnostics
-    log_paths = list(log_dir.glob("pi-smoke-local-*.log"))
+    log_paths = list(log_dir.glob("pi-smoke-*/pi-smoke-local-*.log"))
     assert len(log_paths) == 1
     assert "PROJECT_DENYLIST_TOKEN" not in log_paths[0].read_text(encoding="utf-8")
 
@@ -298,6 +300,29 @@ def test_rejects_smoke_when_user_only_log_permissions_are_unavailable(
 
     run_pi.assert_not_called()
     assert "user-only log permissions" in capsys.readouterr().err
+
+
+def test_rejects_smoke_before_execution_when_private_log_directory_is_unsafe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The smoke request must not run if its artifact directory cannot be secured."""
+    assert hasattr(_mod, "_prepare_private_log_dir")
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr=""))
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
+    monkeypatch.setattr(
+        _mod,
+        "_prepare_private_log_dir",
+        Mock(side_effect=OSError("unsafe artifact directory")),
+    )
+
+    assert _mod.main(["--cwd", str(tmp_path), "--log-dir", str(tmp_path / "logs")]) == 1
+
+    run_pi.assert_not_called()
+    assert "unsafe artifact directory" in capsys.readouterr().err
 
 
 def test_missing_pi_binary_is_a_sanitized_smoke_failure(

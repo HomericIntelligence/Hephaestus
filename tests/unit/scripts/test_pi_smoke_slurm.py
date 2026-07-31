@@ -45,20 +45,26 @@ def test_submit_uses_export_names_without_alias_values(
     cmd_text = "\0".join(cmd)
     assert f"--export={','.join(_mod.EXPORT_NAMES)}" in cmd
     assert "ALL" not in _mod.EXPORT_NAMES
-    assert f"--output={log_dir / 'pi-smoke-%j.out'}" in cmd
-    assert f"--error={log_dir / 'pi-smoke-%j.err'}" in cmd
+    output_arg = next(argument for argument in cmd if argument.startswith("--output="))
+    private_run_dir = Path(output_arg.removeprefix("--output=")).parent
+    error_arg = next(argument for argument in cmd if argument.startswith("--error="))
+    assert Path(output_arg.removeprefix("--output=")).name == "pi-smoke-%j.out"
+    assert Path(error_arg.removeprefix("--error=")).parent == private_run_dir
+    assert Path(error_arg.removeprefix("--error=")).name == "pi-smoke-%j.err"
+    assert private_run_dir.parent == log_dir
+    assert private_run_dir.name.startswith("pi-smoke-")
     assert "private-provider-alias" not in cmd_text
     assert "private-model-alias" not in cmd_text
     assert "github-secret" not in cmd_text
     assert "aws-secret" not in cmd_text
     submission_env = run.call_args.kwargs["env"]
-    assert submission_env["HEPH_PI_SMOKE_LOG_DIR"] == str(log_dir)
+    assert submission_env["HEPH_PI_SMOKE_LOG_DIR"] == str(private_run_dir)
     assert "GH_TOKEN" not in submission_env
     assert "AWS_SECRET_ACCESS_KEY" not in submission_env
     assert "github-secret" not in submission_env.values()
     assert "aws-secret" not in submission_env.values()
     assert set(submission_env).issubset(_mod.EXPORT_NAMES)
-    assert stat.S_IMODE(log_dir.stat().st_mode) & 0o077 == 0
+    assert stat.S_IMODE(private_run_dir.stat().st_mode) & 0o077 == 0
 
 
 def test_missing_alias_env_blocks_submission(
@@ -107,6 +113,9 @@ def test_submit_redacts_sbatch_failure_diagnostics(
     monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    private_run_dir = tmp_path / "private-run"
+    private_run_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(_mod, "_prepare_private_log_dir", lambda _log_dir: private_run_dir)
     monkeypatch.setattr(
         _mod.subprocess,
         "run",
