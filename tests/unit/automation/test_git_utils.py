@@ -310,6 +310,23 @@ class TestCommitIfChanges:
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_threads_configured_agent_model_to_commit_helper(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """The GitJob model override reaches the commit-message helper unchanged."""
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\\n")
+
+        assert commit_if_changes(123, tmp_path, "codex", agent_model="sol:medium") is True
+
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "codex",
+            allowed_paths=None,
+            agent_model="sol:medium",
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_forwards_allowed_paths(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:

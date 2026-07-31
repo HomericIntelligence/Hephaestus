@@ -232,9 +232,15 @@ class TestCommitChanges:
                 pr_manager, "_invoke_git_message_agent", return_value=agent_output
             ) as invoke,
         ):
-            pr_manager.commit_changes(1515, Path("/tmp/wt"), agent="codex")
+            pr_manager.commit_changes(
+                1515,
+                Path("/tmp/wt"),
+                agent="codex",
+                agent_model="sol:medium",
+            )
 
         prompt = invoke.call_args.kwargs["prompt"]
+        assert invoke.call_args.kwargs["model_override"] == "sol:medium"
         assert "LICENSE" in prompt
         assert "NOTICE" in prompt
         commit_msg = run_mock.call_args_list[-1].args[0][-1]
@@ -658,7 +664,6 @@ class TestMessageAgentInvocation:
     def test_claude_message_agent_uses_separate_session(self) -> None:
         with (
             patch.object(pr_manager, "get_repo_slug", return_value="Hephaestus"),
-            patch.object(pr_manager, "git_message_model", return_value="claude-haiku-4-5"),
             patch.object(
                 pr_manager,
                 "invoke_claude_with_session",
@@ -673,6 +678,7 @@ class TestMessageAgentInvocation:
                     worktree_path=Path("/tmp/wt"),
                     agent="claude",
                     timeout=120,
+                    model_override="claude-haiku-4-5",
                 )
                 == "{}"
             )
@@ -687,10 +693,7 @@ class TestMessageAgentInvocation:
         completed = subprocess.CompletedProcess(
             args=["codex", "exec"], returncode=0, stdout="{}", stderr=""
         )
-        with (
-            patch.dict("os.environ", {"HEPH_GIT_MESSAGE_MODEL": "gpt-5.4-mini"}),
-            patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
-        ):
+        with patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent:
             assert (
                 pr_manager._invoke_git_message_agent(
                     issue_number=9,
@@ -699,6 +702,7 @@ class TestMessageAgentInvocation:
                     worktree_path=Path("/tmp/wt"),
                     agent="codex",
                     timeout=120,
+                    model_override="luna:medium",
                 )
                 == "{}"
             )
@@ -707,7 +711,28 @@ class TestMessageAgentInvocation:
         assert kwargs["agent"] == "codex"
         assert kwargs["cwd"] == Path("/tmp/wt")
         assert kwargs["sandbox"] == "read-only"
-        assert kwargs["model"] == "gpt-5.4-mini"
+        assert kwargs["model"] == "luna:medium"
+
+    def test_codex_message_agent_prefers_pipeline_model_override(self) -> None:
+        """A loop's CLI-selected tier and effort win over the legacy environment fallback."""
+        completed = subprocess.CompletedProcess(
+            args=["codex", "exec"], returncode=0, stdout="{}", stderr=""
+        )
+        with patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent:
+            assert (
+                pr_manager._invoke_git_message_agent(
+                    issue_number=9,
+                    agent_kind=AGENT_PR_MESSAGE,
+                    prompt="prompt",
+                    worktree_path=Path("/tmp/wt"),
+                    agent="codex",
+                    timeout=120,
+                    model_override="sol:medium",
+                )
+                == "{}"
+            )
+
+        assert run_agent.call_args.kwargs["model"] == "sol:medium"
 
     def test_pi_message_agent_uses_read_only_pi_exec(self) -> None:
         completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")

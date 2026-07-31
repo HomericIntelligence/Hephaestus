@@ -645,7 +645,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "planner_model",
             "_StoreAction",
             "",
-            help_text="HEPH_PLANNER_MODEL for child processes",
+            help_text="Model ID for planner child processes",
         ),
         _action_spec(
             ("--planner-reasoning-effort",),
@@ -664,7 +664,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review); "
+                "Model ID for reviewer child processes (plan-review + PR-review); "
                 "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
             ),
         ),
@@ -674,8 +674,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "_StoreAction",
             "",
             help_text=(
-                "HEPH_IMPLEMENTER_MODEL for child processes "
-                "(implement, address-review, drive-green)"
+                "Model ID for implementer child processes (implement, address-review, drive-green)"
             ),
         ),
         _action_spec(

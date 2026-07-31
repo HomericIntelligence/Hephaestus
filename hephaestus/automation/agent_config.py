@@ -186,11 +186,6 @@ def learn_model() -> str:
     return _resolve_model("HEPH_LEARN_MODEL", HAIKU)
 
 
-def git_message_model() -> str:
-    """Model used by the lightweight commit/PR message writer."""
-    return _resolve_model("HEPH_GIT_MESSAGE_MODEL", HAIKU)
-
-
 def fallback_model() -> str:
     """Model substituted when a model-specific usage cap is detected (#1793).
 
@@ -602,7 +597,6 @@ __all__ = [
     "follow_up_claude_timeout",
     "gh_cli_timeout",
     "git_message_agent_timeout",
-    "git_message_model",
     "implementer_claude_timeout",
     "implementer_model",
     "issue_auto_impl_branch_name",

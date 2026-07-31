@@ -231,6 +231,7 @@ def commit_if_changes(
     worktree_path: Path,
     agent: str = "claude",
     *,
+    agent_model: str | None = None,
     committed_log_message: str = "Committed changes for issue #%s",
     allowed_paths: Collection[str] | None = None,
     timeout: int | None = None,
@@ -241,6 +242,8 @@ def commit_if_changes(
         issue_number: GitHub issue number used by the commit helper.
         worktree_path: Path to the git worktree to inspect.
         agent: Agent name forwarded to the commit helper.
+        agent_model: Explicit model and reasoning effort forwarded to the
+            commit-message helper.
         committed_log_message: ``logging`` format string for a successful commit.
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
@@ -264,6 +267,8 @@ def commit_if_changes(
         from .pr_manager import commit_changes
 
         commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
+        if agent_model is not None:
+            commit_kwargs["agent_model"] = agent_model
         if timeout is not None:
             commit_kwargs["git_timeout"] = timeout
         commit_changes(
