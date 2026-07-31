@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import stat
 import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -29,6 +33,16 @@ PI_SMOKE_COMMAND_PREFIX = [
     "--offline",
     "--no-tools",
 ]
+
+
+@pytest.fixture
+def private_pi_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Isolate prompt storage and ACL commands when a test mocks Pi itself."""
+    temp_dir = tmp_path / "private-pi-temp"
+    temp_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(agent_runtime, "_prepare_pi_private_temp_dir", lambda: temp_dir)
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    return temp_dir
 
 
 def test_pi_capability_contract_separates_native_packages_and_unsupported_controls() -> None:
@@ -743,7 +757,10 @@ def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
     run.assert_not_called()
 
 
-def test_run_pi_smoke_session_is_noninteractive_and_tool_free(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_is_noninteractive_and_tool_free(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """The only unadmitted Pi seam is fixed, ephemeral, and tool-free."""
     captured_cmd: list[str] = []
     stdout = "\n".join(
@@ -775,7 +792,10 @@ def test_run_pi_smoke_session_is_noninteractive_and_tool_free(tmp_path: Path) ->
     assert result.stdout == "OK"
 
 
-def test_run_pi_smoke_session_accepts_sessionless_terminal_response(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_accepts_sessionless_terminal_response(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """The ``--no-session`` smoke seam must not require a session header."""
     captured_cmd: list[str] = []
     stdout = '{"type":"message_end","message":{"role":"assistant","content":"OK"}}'
@@ -796,7 +816,10 @@ def test_run_pi_smoke_session_accepts_sessionless_terminal_response(tmp_path: Pa
     assert result.stdout == "OK"
 
 
-def test_run_pi_smoke_session_redacts_generated_session_from_diagnostics(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_redacts_generated_session_from_diagnostics(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """A generated session id must not escape through a smoke result payload."""
     session_id = "pi-session-789"
     stdout = "\n".join(
@@ -826,7 +849,10 @@ def test_run_pi_smoke_session_redacts_generated_session_from_diagnostics(tmp_pat
     assert agent_runtime.PI_PRIVATE_REDACTION in result.stderr
 
 
-def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """The constrained smoke seam must discard an ephemeral Pi session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(
@@ -898,6 +924,84 @@ def test_run_pi_smoke_session_detaches_parent_stdin(tmp_path: Path) -> None:
     assert captured["kwargs"].get("stdin") is subprocess.DEVNULL
 
 
+def test_run_pi_smoke_session_removes_prompt_after_write_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A prompt encoding failure must not strand its private temporary file."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    with pytest.raises(UnicodeEncodeError):
+        agent_runtime.run_pi_smoke_session("\ud800", cwd=tmp_path, timeout=30)
+
+    assert list(tmp_path.rglob("pi-prompt-*.md")) == []
+
+
+def test_run_pi_smoke_session_rejects_an_unsafe_temp_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ambient temporary roots writable by peers cannot host Pi prompt files."""
+    unsafe_root = tmp_path / "unsafe-temp"
+    unsafe_root.mkdir()
+    unsafe_root.chmod(0o777)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(unsafe_root))
+
+    with patch("subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            ["pi"],
+            0,
+            stdout='{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+            stderr="",
+        )
+        with pytest.raises(OSError, match="writable by another user"):
+            agent_runtime.run_pi_smoke_session("smoke prompt", cwd=tmp_path, timeout=30)
+
+    run.assert_not_called()
+
+
+def test_run_pi_smoke_session_uses_an_isolated_private_temp_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pi and its prompt file share a fresh owner-only temporary directory."""
+    ambient_temp = tmp_path / "ambient-temp"
+    ambient_temp.mkdir()
+    ambient_temp.chmod(0o700)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(ambient_temp))
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("TMPDIR", str(ambient_temp))
+    monkeypatch.setenv("TMP", str(ambient_temp))
+    monkeypatch.setenv("TEMP", str(ambient_temp))
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        prompt_path = Path(next(arg[1:] for arg in cmd if arg.startswith("@")))
+        captured["prompt_path"] = prompt_path
+        captured["env"] = kwargs["env"]
+        captured["temp_mode"] = stat.S_IMODE(prompt_path.parent.stat().st_mode)
+        (prompt_path.parent / "pi-created-temp").write_text("temporary", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+            stderr="",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session("smoke prompt", cwd=tmp_path, timeout=30)
+
+    private_temp = Path(captured["env"]["TMPDIR"])
+    assert result.stdout == "OK"
+    assert private_temp != ambient_temp
+    assert private_temp.parent.parent == ambient_temp
+    assert captured["env"]["TMP"] == str(private_temp)
+    assert captured["env"]["TEMP"] == str(private_temp)
+    assert captured["prompt_path"].parent == private_temp
+    assert captured["temp_mode"] == 0o700
+    assert not private_temp.exists()
+
+
 def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -909,6 +1013,9 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
     monkeypatch.setenv("PI_SKIP_VERSION_CHECK", "0")
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setenv("TMPDIR", "/untrusted-temp")
+    monkeypatch.setenv("TMP", "/untrusted-temp")
+    monkeypatch.setenv("TEMP", "/untrusted-temp")
 
     env = agent_runtime._pi_env(model="private-model-alias")
 
@@ -920,6 +1027,9 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
         "AWS_SECRET_ACCESS_KEY",
         "HEPH_PI_PROVIDER",
         "HEPH_PI_MODEL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
     ):
         assert name not in env
 
@@ -932,6 +1042,7 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
         ('{"type":"session","id":"pi-session-789"}', "terminal assistant JSON event"),
         ('{"type":"error","message":"provider failed"}', "terminal assistant JSON event"),
         ('{"type":"message_end","message":null}', "terminal assistant JSON event"),
+        ('{"type":"message_end","message":{"content":"OK"}}', "terminal assistant JSON event"),
     ],
 )
 def test_run_pi_smoke_session_rejects_incomplete_event_stdout(
@@ -981,7 +1092,10 @@ def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
             assert private_value not in diagnostics
 
 
-def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_redacts_private_values_from_failures(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """Pi subprocess failure diagnostics should not leak local aliases or tokens."""
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\nprivate-session-id\n",
@@ -1028,7 +1142,10 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(tmp_path: Pat
     _assert_pi_exception_chain_is_redacted(exc)
 
 
-def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_redacts_private_values_from_timeouts(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """Pi timeout diagnostics should redact cmd, partial stdout, and stderr."""
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\nprivate-session-id\n",
@@ -1083,6 +1200,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(tmp_path: Pat
 
 def test_run_pi_smoke_session_redacts_generated_session_from_nonzero_failure(
     tmp_path: Path,
+    private_pi_temp: Path,
 ) -> None:
     """A failed smoke command must not disclose a just-created Pi session id."""
     session_id = "generated-pi-session-id"
@@ -1118,6 +1236,7 @@ def test_run_pi_smoke_session_redacts_generated_session_from_nonzero_failure(
 
 def test_run_pi_smoke_session_redacts_generated_session_from_timeout(
     tmp_path: Path,
+    private_pi_temp: Path,
 ) -> None:
     """A timed-out smoke command must not disclose a just-created Pi session id."""
     session_id = "generated-pi-session-id"
@@ -1241,6 +1360,97 @@ def test_prepare_pi_private_log_dir_rejects_nonsticky_writable_ancestor(
         agent_runtime.prepare_pi_private_log_dir(unsafe_parent / "logs")
 
 
+def test_prepare_pi_private_log_dir_accepts_a_safe_ancestor_with_an_access_acl(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Inherited ancestor ACLs do not invalidate a freshly private leaf directory."""
+    acl_ancestor = tmp_path / "acl-ancestor"
+    acl_ancestor.mkdir()
+    acl_ancestor.chmod(0o755)
+
+    def verify_acl(path: Path, *, clear: bool) -> None:
+        if path == acl_ancestor:
+            raise OSError("inherited access ACL")
+
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", verify_acl)
+
+    run_dir = agent_runtime.prepare_pi_private_log_dir(acl_ancestor / "logs")
+
+    assert run_dir.is_dir()
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+
+
+def test_prepare_pi_private_temp_dir_canonicalizes_a_system_temp_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The canonical system temp target is verified instead of its alias path."""
+    real_temp_root = tmp_path / "real-temp"
+    real_temp_root.mkdir(mode=0o700)
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(real_temp_root, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_alias))
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+
+    private_temp = agent_runtime._prepare_pi_private_temp_dir()
+
+    assert private_temp.parent.parent == real_temp_root
+    assert stat.S_IMODE(private_temp.stat().st_mode) == 0o700
+
+
+def test_verify_pi_private_prompt_file_rejects_a_replaced_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A prompt replacement must be rejected before its path reaches Pi."""
+    target = tmp_path / "target.md"
+    target.write_text("private prompt", encoding="utf-8")
+    prompt_path = tmp_path / "pi-prompt.md"
+    prompt_path.symlink_to(target)
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(OSError, match="regular file, not a symlink"):
+        agent_runtime._verify_pi_private_prompt_file(prompt_path)
+
+
+def test_linux_pi_private_filesystem_type_uses_the_most_specific_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ACL policy follows the deepest escaped mount path from mountinfo."""
+    mountinfo = "\n".join(
+        (
+            "36 25 0:31 / / rw,relatime - overlay overlay rw",
+            "42 36 0:32 / /safe\\040root rw,relatime - nfs server:/share rw",
+        )
+    )
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: mountinfo)
+
+    assert agent_runtime._linux_pi_private_filesystem_type(Path("/safe root/worktree")) == "nfs"
+
+
+def test_verify_pi_private_acl_fails_closed_for_nfs_style_acl_filesystems(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Linux filesystems with non-POSIX ACL semantics must not be trusted by omission."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_linux_pi_private_filesystem_type",
+        lambda _path: "nfs",
+        raising=False,
+    )
+
+    def absent_posix_acl(*_args: Any, **_kwargs: Any) -> bytes:
+        raise OSError(errno.ENODATA, "missing POSIX ACL")
+
+    monkeypatch.setattr(os, "getxattr", absent_posix_acl, raising=False)
+
+    with pytest.raises(OSError, match="local filesystem with verifiable POSIX ACLs"):
+        agent_runtime._verify_pi_private_acl(tmp_path, clear=False)
+
+
 def test_prepare_pi_private_log_dir_fails_closed_without_acl_verification(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1266,7 +1476,10 @@ def test_redact_pi_private_values_replaces_all_tokens() -> None:
     )
 
 
-def test_run_pi_smoke_session_disables_tools(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_disables_tools(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """The unadmitted smoke seam should disable every built-in and extension tool."""
     captured_cmd: list[str] = []
     stdout = "\n".join(
@@ -1297,7 +1510,10 @@ def test_run_pi_smoke_session_disables_tools(tmp_path: Path) -> None:
     assert "review prompt" not in captured_cmd
 
 
-def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Path) -> None:
+def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """Pi feedback loops should resume the captured session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(

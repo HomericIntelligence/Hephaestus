@@ -102,6 +102,29 @@ def test_failure_output_redacts_private_values(
     assert "<redacted-pi-private-value>" in output
 
 
+def test_unicode_pi_failure_is_a_sanitized_smoke_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Prompt encoding failures must be rendered as sanitized CLI diagnostics."""
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    error = UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=error))
+
+    try:
+        result: int | UnicodeError = _mod.main(["--cwd", str(tmp_path)])
+    except UnicodeError as exc:
+        result = exc
+
+    assert result == 1
+    output = capsys.readouterr().err
+    assert "ERROR: Pi smoke could not start:" in output
+    assert "private-provider-alias" not in output
+    assert "private-model-alias" not in output
+
+
 def test_success_output_redacts_private_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

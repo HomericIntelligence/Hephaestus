@@ -61,6 +61,7 @@ PI_PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
 PI_DENYLIST_FILENAMES = (PI_PROJECT_DENYLIST_FILENAME, PI_PRIVATE_DENYLIST_FILENAME)
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
 PI_SMOKE_LOG_DIR_PREFIX = "pi-smoke-"
+PI_RUNTIME_TEMP_ROOT_NAME = "hephaestus-pi-runtime"
 _PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
@@ -416,6 +417,69 @@ def _run_pi_private_acl_command(command: list[str]) -> str:
     return result.stdout
 
 
+_LINUX_POSIX_ACL_FILESYSTEMS = frozenset(
+    {
+        "btrfs",
+        "ext2",
+        "ext3",
+        "ext4",
+        "f2fs",
+        "overlay",
+        "overlayfs",
+        "ramfs",
+        "tmpfs",
+        "xfs",
+    }
+)
+
+
+def _decode_linux_mountinfo_path(value: str) -> str:
+    """Decode the octal path escapes used by Linux ``mountinfo`` records."""
+    decoded: list[str] = []
+    index = 0
+    while index < len(value):
+        candidate = value[index + 1 : index + 4]
+        if (
+            value[index] == "\\"
+            and len(candidate) == 3
+            and all("0" <= character <= "7" for character in candidate)
+        ):
+            decoded.append(chr(int(candidate, 8)))
+            index += 4
+            continue
+        decoded.append(value[index])
+        index += 1
+    return "".join(decoded)
+
+
+def _linux_pi_private_filesystem_type(path: Path) -> str:
+    """Return the filesystem type containing ``path`` from ``/proc/self/mountinfo``."""
+    absolute_path = Path(os.path.abspath(path))
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise OSError("Unable to determine Pi smoke artifact filesystem") from exc
+
+    selected: tuple[int, str] | None = None
+    for line in mountinfo.splitlines():
+        before_separator, separator, after_separator = line.partition(" - ")
+        fields = before_separator.split()
+        filesystem_fields = after_separator.split()
+        if not separator or len(fields) < 5 or not filesystem_fields:
+            continue
+        mount_path = Path(_decode_linux_mountinfo_path(fields[4]))
+        try:
+            absolute_path.relative_to(mount_path)
+        except ValueError:
+            continue
+        candidate = (len(mount_path.parts), filesystem_fields[0])
+        if selected is None or candidate[0] > selected[0]:
+            selected = candidate
+    if selected is None:
+        raise OSError("Unable to determine Pi smoke artifact filesystem")
+    return selected[1]
+
+
 def _verify_pi_private_acl(path: Path, *, clear: bool) -> None:
     """Clear or reject ACL grants that would make a smoke artifact non-private."""
     if not _pi_private_log_permissions_supported():
@@ -427,6 +491,10 @@ def _verify_pi_private_acl(path: Path, *, clear: bool) -> None:
         if len(acl_listing.splitlines()) != 1:
             raise OSError("Pi smoke artifact path has an access ACL")
         return
+
+    filesystem_type = _linux_pi_private_filesystem_type(path)
+    if filesystem_type not in _LINUX_POSIX_ACL_FILESYSTEMS:
+        raise OSError("Pi smoke requires a local filesystem with verifiable POSIX ACLs")
 
     absent_errors = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
     for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
@@ -467,6 +535,7 @@ def _verify_pi_private_log_directory(
     require_current_owner: bool,
     require_owner_only: bool,
     clear_acl: bool,
+    verify_acl: bool = True,
 ) -> None:
     """Verify one no-symlink directory in the private artifact path chain."""
     try:
@@ -487,11 +556,12 @@ def _verify_pi_private_log_directory(
     # is safe as an ancestor (for example, the system temporary root).
     if mode & 0o022 and not (metadata.st_mode & stat.S_ISVTX):
         raise OSError("Pi smoke artifact path is writable by another user")
-    if clear_acl:
+    if clear_acl and verify_acl:
         _verify_pi_private_acl(path, clear=True)
+    if clear_acl:
         path.chmod(0o700)
         metadata = path.lstat()
-    else:
+    if verify_acl:
         _verify_pi_private_acl(path, clear=False)
     if require_owner_only and stat.S_IMODE(metadata.st_mode) & 0o077:
         raise OSError("Pi smoke artifact path is not user-only")
@@ -520,8 +590,9 @@ def _ensure_pi_private_log_root(log_dir: Path) -> Path:
         _verify_pi_private_log_directory(
             component,
             require_current_owner=is_root,
-            require_owner_only=False,
-            clear_acl=False,
+            require_owner_only=is_root,
+            clear_acl=is_root,
+            verify_acl=is_root,
         )
     return absolute_root
 
@@ -542,6 +613,38 @@ def prepare_pi_private_log_dir(log_dir: Path) -> Path:
             run_dir.rmdir()
         raise
     return run_dir
+
+
+def _prepare_pi_private_temp_dir() -> Path:
+    """Create the isolated owner-only temporary directory used by Pi itself."""
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    except OSError as exc:
+        raise OSError("Unable to resolve Pi runtime temporary root") from exc
+    return prepare_pi_private_log_dir(temp_root / PI_RUNTIME_TEMP_ROOT_NAME)
+
+
+def _verify_pi_private_prompt_file(path: Path) -> None:
+    """Verify the prompt file remains a private regular file before Pi reads it."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi smoke prompt file") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("Pi smoke prompt file must be a regular file, not a symlink")
+    if metadata.st_uid != os.getuid():
+        raise OSError("Pi smoke prompt file is not owned by the current user")
+    _verify_pi_private_acl(path, clear=True)
+    path.chmod(0o600)
+    _verify_pi_private_acl(path, clear=False)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi smoke prompt file") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("Pi smoke prompt file must be a regular file, not a symlink")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise OSError("Pi smoke prompt file is not user-only")
 
 
 def pi_private_redaction_tokens(
@@ -898,7 +1001,7 @@ def _pi_message_text(message: Any) -> str:
     """Extract assistant text from a Pi message object."""
     if not isinstance(message, dict):
         return ""
-    if message.get("role") not in (None, "assistant"):
+    if message.get("role") != "assistant":
         return ""
     content = message.get("content")
     if isinstance(content, str):
@@ -1078,7 +1181,7 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
 
 
-def _pi_env(*, model: str = "") -> dict[str, str]:
+def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
     """Return the minimized, privacy-enforcing environment for Pi subprocesses."""
     # The public smoke sentinel is only input to Hephaestus validation and
     # redaction; it is not a native Pi configuration channel.
@@ -1092,9 +1195,6 @@ def _pi_env(*, model: str = "") -> dict[str, str]:
         "XDG_CONFIG_HOME",
         "XDG_CACHE_HOME",
         "XDG_DATA_HOME",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -1107,6 +1207,9 @@ def _pi_env(*, model: str = "") -> dict[str, str]:
     )
     env = {name: value for name in safe_names if (value := os.environ.get(name))}
     env.setdefault("PATH", os.defpath)
+    if temp_dir is not None:
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            env[name] = str(temp_dir)
     env["PI_TELEMETRY"] = "0"
     env["PI_SKIP_VERSION_CHECK"] = "1"
     return env
@@ -1155,17 +1258,20 @@ def _run_pi_command(
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
         _require_pi_automation_admission()
     prompt_path: Path | None = None
+    private_temp_dir: Path | None = None
     try:
+        private_temp_dir = _prepare_pi_private_temp_dir()
         with tempfile.NamedTemporaryFile(
             "w",
             prefix="pi-prompt-",
             suffix=".md",
             encoding="utf-8",
             delete=False,
+            dir=private_temp_dir,
         ) as prompt_file:
-            prompt_file.write(prompt)
             prompt_path = Path(prompt_file.name)
-        prompt_path.chmod(0o600)
+            prompt_file.write(prompt)
+        _verify_pi_private_prompt_file(prompt_path)
         cmd.extend(_pi_sandbox_args(sandbox))
         cmd.append(f"@{prompt_path}")
         try:
@@ -1176,7 +1282,7 @@ def _run_pi_command(
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
                 timeout=timeout,
-                env=_pi_env(model=model),
+                env=_pi_env(model=model, temp_dir=private_temp_dir),
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
@@ -1221,6 +1327,9 @@ def _run_pi_command(
         if prompt_path is not None:
             with contextlib.suppress(OSError):
                 prompt_path.unlink()
+        if private_temp_dir is not None:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(private_temp_dir)
 
 
 def run_pi_text(

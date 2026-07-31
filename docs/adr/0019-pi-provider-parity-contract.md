@@ -46,9 +46,12 @@ test is the machine-checkable companion to this record.
 | Unavailable | Interactive action approval | Pi project trust is not the Claude/Codex approval-policy contract | Normal automation is blocked today; #2518 must reject a request that requires interactive approval instead of silently ignoring it. |
 | Unavailable | OS sandbox | Pi has no built-in OS sandbox | Reject Pi for a stage requiring an OS-enforced sandbox unless an external enforcement adapter is verified. |
 
-The pin values are owned by the Pi bootstrap/update policy introduced in #2516.
-They are intentionally explicit here so a package update cannot silently widen
-the provider's capability surface.
+The top-level Pi CLI version is exact, but package-internal dependency
+resolution is supplied by the installed Pi artifact and its shipped shrinkwrap.
+Hephaestus does not yet own a repository npm lockfile or integrity assertion
+for that artifact. #2516 owns the bootstrap, update, inventory, and integrity
+admission policy; the explicit compatibility pins here prevent a reviewed
+package update from silently widening the provider's capability surface.
 
 ### Scope translation
 
@@ -132,8 +135,10 @@ pipeline verdict or widen a tool grant.
 
 - #2515 publishes and proves the native Athena package.
 - #2516 owns package installation, inventory, command capability probes, and
-  selection preflight; it cannot advance until #2515 has an accepted,
-  security-cleared artifact.
+  selection preflight and is blocked by this parity contract (#2514). It may
+  implement those checks after parity lands, but normal Pi automation remains
+  unadmitted while #2515 awaits an accepted, security-cleared artifact and
+  until the later scope and lifecycle gates are complete.
 - #2517 replaces legacy Mnemosyne handling with Athena-equivalent semantics.
 - #2518 implements the tool-scope translation, explicit approval rejection,
   worktree-local session/resume lifecycle, and complete stage coverage described

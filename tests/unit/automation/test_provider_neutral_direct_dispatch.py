@@ -33,6 +33,9 @@ DIRECT_PROVIDER_ONLY_NAMES = {
     "run_pi_smoke_session",
     "resume_pi_session",
     "_invoke_pi_session",
+    "_pi_base_cmd",
+    "_pi_smoke_base_cmd",
+    "_pi_sandbox_args",
     "_run_pi_command",
 }
 DIRECT_RUNNER_BINARIES = ("pi", "codex")
@@ -111,8 +114,9 @@ def _execution_reference_name(
     module_aliases: set[str],
     names: set[str],
     aliases: set[str],
+    mappings: dict[tuple[str, str], str] | None = None,
 ) -> str:
-    """Resolve a guarded executor through direct, assigned, or literal reflection."""
+    """Resolve a guarded executor through direct, assigned, mapped, or reflected references."""
     if isinstance(node, ast.Name):
         return node.id if node.id in aliases else ""
     if (
@@ -133,6 +137,10 @@ def _execution_reference_name(
     if not isinstance(node, ast.Subscript):
         return ""
     name = _mapping_key(node.slice)
+    if isinstance(node.value, ast.Name) and name is not None and mappings is not None:
+        mapped_name = mappings.get((node.value.id, name), "")
+        if mapped_name:
+            return mapped_name
     if name not in names:
         return ""
     if (
@@ -154,9 +162,61 @@ def _execution_reference_name(
     return ""
 
 
-def _execution_aliases(tree: ast.AST, module: str, names: set[str]) -> set[str]:
-    """Return aliases for guarded process-execution functions."""
+def _copy_execution_mapping_aliases(
+    targets: set[str],
+    value: ast.AST,
+    mappings: dict[tuple[str, str], str],
+) -> bool:
+    """Copy literal executor-map bindings when a map is assigned to an alias."""
+    if not isinstance(value, ast.Name):
+        return False
+    changed = False
+    for (mapping_name, mapping_key), mapping_value in tuple(mappings.items()):
+        if mapping_name != value.id:
+            continue
+        for target in targets:
+            alias_key = (target, mapping_key)
+            if mappings.get(alias_key) != mapping_value:
+                mappings[alias_key] = mapping_value
+                changed = True
+    return changed
+
+
+def _update_literal_execution_mapping_entries(
+    targets: set[str],
+    value: ast.AST,
+    module_aliases: set[str],
+    names: set[str],
+    aliases: set[str],
+    mappings: dict[tuple[str, str], str],
+) -> bool:
+    """Bind literal dictionary entries to guarded process-execution functions."""
+    if not isinstance(value, ast.Dict):
+        return False
+    changed = False
+    for key_node, value_node in zip(value.keys, value.values, strict=True):
+        if key_node is None:
+            continue
+        literal_key = _mapping_key(key_node)
+        name = _execution_reference_name(value_node, module_aliases, names, aliases, mappings)
+        if literal_key is None or not name:
+            continue
+        for target in targets:
+            mapping_key = (target, literal_key)
+            if mappings.get(mapping_key) != name:
+                mappings[mapping_key] = name
+                changed = True
+    return changed
+
+
+def _execution_bindings(
+    tree: ast.AST,
+    module: str,
+    names: set[str],
+) -> tuple[set[str], dict[tuple[str, str], str]]:
+    """Return aliases and literal mapping entries for guarded executors."""
     aliases = set(names)
+    mappings: dict[tuple[str, str], str] = {}
     module_aliases = _module_import_aliases(tree, module)
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or node.module != module:
@@ -177,14 +237,24 @@ def _execution_aliases(tree: ast.AST, module: str, names: set[str]) -> set[str]:
                 module_aliases,
                 names,
                 aliases,
+                mappings,
             )
-            if not name:
-                continue
-            for target in _assignment_target_names(assignment):
-                if target not in aliases:
-                    aliases.add(target)
-                    changed = True
-    return aliases
+            targets = _assignment_target_names(assignment)
+            if name:
+                for target in targets:
+                    if target not in aliases:
+                        aliases.add(target)
+                        changed = True
+            changed |= _copy_execution_mapping_aliases(targets, assignment.value, mappings)
+            changed |= _update_literal_execution_mapping_entries(
+                targets,
+                assignment.value,
+                module_aliases,
+                names,
+                aliases,
+                mappings,
+            )
+    return aliases, mappings
 
 
 def _call_direct_runner_command(
@@ -400,13 +470,17 @@ def _provider_adapter_violations(
     allowed = allowed_names or set()
     violations: list[str] = []
     direct_runner_command_names = _direct_runner_command_names(tree)
-    subprocess_execution_names = _execution_aliases(
+    subprocess_execution_names, subprocess_execution_mappings = _execution_bindings(
         tree,
         "subprocess",
         SUBPROCESS_EXECUTION_NAMES,
     )
     subprocess_module_aliases = _module_import_aliases(tree, "subprocess")
-    os_execution_names = _execution_aliases(tree, "os", OS_EXECUTION_NAMES)
+    os_execution_names, os_execution_mappings = _execution_bindings(
+        tree,
+        "os",
+        OS_EXECUTION_NAMES,
+    )
     os_module_aliases = _module_import_aliases(tree, "os")
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -435,12 +509,14 @@ def _provider_adapter_violations(
                     subprocess_module_aliases,
                     SUBPROCESS_EXECUTION_NAMES,
                     subprocess_execution_names,
+                    subprocess_execution_mappings,
                 )
                 os_execution_name = _execution_reference_name(
                     node.func,
                     os_module_aliases,
                     OS_EXECUTION_NAMES,
                     os_execution_names,
+                    os_execution_mappings,
                 )
                 if subprocess_execution_name and binary:
                     violations.append(f"line {node.lineno}: runs {binary} subprocess")
@@ -456,12 +532,20 @@ def _direct_provider_string_compare(node: ast.Compare) -> bool:
 
 
 def _provider_specific_branch_violations(tree: ast.AST) -> list[str]:
-    """Return direct-provider comparisons that would fork orchestration."""
-    return [
-        f"line {node.lineno}: compares against a direct provider"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Compare) and _direct_provider_string_compare(node)
-    ]
+    """Return direct-provider branches that would fork orchestration."""
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and _direct_provider_string_compare(node):
+            violations.append(f"line {node.lineno}: compares against a direct provider")
+        elif isinstance(node, ast.Match) and any(
+            isinstance(pattern, ast.MatchValue)
+            and isinstance(pattern.value, ast.Constant)
+            and pattern.value.value in {"codex", "pi"}
+            for case in node.cases
+            for pattern in ast.walk(case.pattern)
+        ):
+            violations.append(f"line {node.lineno}: matches against a direct provider")
+    return violations
 
 
 def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
@@ -512,7 +596,31 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
             "line 2: runs pi subprocess",
         ),
         (
+            "import subprocess\n"
+            "executors = {'run': subprocess.run}\n"
+            "executors['run'](['pi', '--mode', 'json'])\n",
+            "line 3: runs pi subprocess",
+        ),
+        (
+            "import subprocess\n"
+            "executors = {'run': subprocess.run}\n"
+            "delegates = executors\n"
+            "delegates['run'](['pi', '--mode', 'json'])\n",
+            "line 4: runs pi subprocess",
+        ),
+        (
+            "import subprocess\n"
+            "executors = {'run': subprocess.run}\n"
+            "execute = executors['run']\n"
+            "execute(['pi', '--mode', 'json'])\n",
+            "line 4: runs pi subprocess",
+        ),
+        (
             "import os\ncommand = 'pi --mode json'\nos.system(command)\n",
+            "line 3: runs pi OS execution",
+        ),
+        (
+            "import os\nexecutors = {'system': os.system}\nexecutors['system']('pi --mode json')\n",
             "line 3: runs pi OS execution",
         ),
         (
@@ -538,6 +646,12 @@ def test_direct_provider_guard_rejects_aliased_adapter_imports() -> None:
             "import hephaestus.agents.runtime as runtime\n"
             "runtime.__dict__['_invoke_pi_session']('prompt')\n",
             "line 2: looks up _invoke_pi_session()",
+        ),
+        (
+            "import hephaestus.agents.runtime as runtime\n"
+            "import subprocess\n"
+            "subprocess.run(runtime._pi_base_cmd())\n",
+            "line 3: calls _pi_base_cmd()",
         ),
     ],
 )
@@ -637,11 +751,7 @@ def test_direct_agent_dispatch_has_no_provider_specific_runtime_branches(
     path = REPO_ROOT / relative_path
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     violations = _provider_adapter_violations(tree)
-    violations.extend(
-        f"line {node.lineno}: compares against a direct provider"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Compare) and _direct_provider_string_compare(node)
-    )
+    violations.extend(_provider_specific_branch_violations(tree))
 
     assert violations == []
 
@@ -661,6 +771,15 @@ def test_provider_specific_branch_guard_rejects_standalone_orchestration() -> No
 
     assert _provider_specific_branch_violations(tree) == [
         "line 1: compares against a direct provider"
+    ]
+
+
+def test_provider_specific_branch_guard_rejects_match_orchestration() -> None:
+    """Structural pattern matching cannot create a hidden provider fork."""
+    tree = ast.parse("match agent:\n    case 'pi':\n        configure_pi_scope()\n")
+
+    assert _provider_specific_branch_violations(tree) == [
+        "line 1: matches against a direct provider"
     ]
 
 

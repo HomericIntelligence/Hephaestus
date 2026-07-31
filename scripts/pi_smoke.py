@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(f"ERROR: {redact_pi_private_values(str(exc), redaction_tokens)}", file=sys.stderr)
         return 1
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         detail = redact_pi_private_values(str(exc), redaction_tokens)
         print(f"ERROR: Pi smoke could not start: {detail}", file=sys.stderr)
         return 1
