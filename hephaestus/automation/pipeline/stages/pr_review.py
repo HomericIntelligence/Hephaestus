@@ -204,6 +204,7 @@ def _parse_review_response(response: str) -> _ParsedReviewResponse:
 ENTER = "ENTER"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
+DIRECT_REBASE_WAIT = "DIRECT_REBASE_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
@@ -230,6 +231,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
+    DIRECT_REBASE_WAIT: "_direct_rebase_wait",
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     VALIDATE_WAIT: "_validate_wait",
@@ -1083,6 +1085,29 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_head_unavailable")
         base_branch = str(review_context.get("pr_base_branch") or "main")
         item.payload.update(review_context)
+        if item.payload.get("direct_pr_worktree") and not item.payload.get(
+            "direct_pr_rebase_attempted"
+        ):
+            # A direct PR arrives as a detached, synchronized checkout. Rebase
+            # it before binding any review inputs, then lease-push that exact
+            # detached HEAD so the following context read reviews GitHub's
+            # current base-compatible head rather than a local-only rewrite.
+            item.payload["direct_pr_rebase_attempted"] = True
+            item.payload["direct_pr_rebase_pending"] = True
+            job = GitJob(
+                repo=item.repo,
+                op="rebase",
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                kwargs={
+                    "cwd": _worktree_path(item, ctx),
+                    "base_branch": base_branch,
+                    "branch": item.branch,
+                    "expected_remote_sha": expected_head,
+                    "publish_detached_head": True,
+                },
+                descr="rebase_direct_pr_before_review",
+            )
+            return JobRequest(job, on_done_state=DIRECT_REBASE_WAIT)
         item.payload["review_checkout_expected_head"] = expected_head
         item.payload["review_checkout_pending"] = True
         job = GitJob(
@@ -1099,6 +1124,16 @@ class PrReviewStage(Stage):
             descr="verify_pr_review_checkout",
         )
         return JobRequest(job, on_done_state=REVIEW_CHECKOUT_WAIT)
+
+    def _direct_rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Refresh context only after a direct PR rebase is durably published."""
+        del ctx
+        error = str(item.payload.pop("direct_pr_rebase_error", "") or "")
+        if error:
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_rebase_failed")
+        if not item.payload.pop("direct_pr_rebase_published", False):
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_rebase_unpublished")
+        return Continue(next_state=REVIEW_WAIT)
 
     def _review_checkout_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Submit review only after the fresh snapshot matches a clean checkout."""
@@ -1480,6 +1515,8 @@ class PrReviewStage(Stage):
         """
         if self._consume_direct_worktree_result(item, result):
             return
+        if self._consume_direct_pr_rebase_result(item, result):
+            return
         if self._consume_review_checkout_result(item, result):
             return
         if item.state == HOST_VERIFICATION_WAIT:
@@ -1653,6 +1690,21 @@ class PrReviewStage(Stage):
         if not item.payload.pop("direct_pr_worktree_pending", None):
             return False
         PrReviewStage._on_direct_pr_worktree_done(item, result)
+        return True
+
+    @staticmethod
+    def _consume_direct_pr_rebase_result(item: WorkItem, result: JobResult) -> bool:
+        """Store the single direct-PR rebase/publish result before state changes."""
+        if not item.payload.pop("direct_pr_rebase_pending", None):
+            return False
+        if not result.ok:
+            item.payload["direct_pr_rebase_error"] = result.error or "rebase job failed"
+            return True
+        value = result.value
+        if not isinstance(value, dict) or not value.get("published"):
+            item.payload["direct_pr_rebase_error"] = "rebase job did not publish a detached head"
+            return True
+        item.payload["direct_pr_rebase_published"] = True
         return True
 
     @staticmethod

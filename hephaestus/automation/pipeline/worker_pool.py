@@ -1774,8 +1774,7 @@ class WorkerPool:
             return self._git_remove_worktree(job)
 
         elif job.op == "rebase":
-            result = git_utils.rebase_worktree_onto(**job.kwargs, timeout=job.timeout_s)
-            return JobResult(ok=result, value=result)
+            return self._git_rebase(job)
 
         elif job.op == "push":
             git_utils.push_current_branch_with_lease_on_divergence(
@@ -1828,6 +1827,37 @@ class WorkerPool:
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_rebase(self, job: GitJob) -> JobResult:
+        """Rebase a checkout and optionally lease-publish a detached PR head."""
+        kwargs = dict(job.kwargs)
+        publish_detached_head = bool(kwargs.pop("publish_detached_head", False))
+        branch = str(kwargs.pop("branch", "") or "")
+        expected_remote_sha = kwargs.pop("expected_remote_sha", None)
+        result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
+        if not result:
+            if not publish_detached_head:
+                return JobResult(ok=False, value=False)
+            return JobResult(ok=False, value={"rebased": False}, error="rebase conflicted")
+        if not publish_detached_head:
+            return JobResult(ok=True, value=True)
+        cwd = Path(str(kwargs.get("cwd") or ""))
+        if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
+            return JobResult(ok=False, error="direct rebase publish arguments invalid")
+        source_sha = self._read_detached_push_head(cwd, timeout=job.timeout_s)
+        if isinstance(source_sha, JobResult):
+            return source_sha
+        git_utils.push_head_to_branch(
+            branch,
+            expected_remote_sha,
+            cwd,
+            source_sha=source_sha,
+            timeout=job.timeout_s,
+        )
+        return JobResult(
+            ok=True,
+            value={"rebased": True, "published": True, "head_sha": source_sha},
+        )
 
     def _git_sync_checkout(self, job: GitJob) -> JobResult:
         """Validate and fast-forward a reusable checkout without discarding local work."""

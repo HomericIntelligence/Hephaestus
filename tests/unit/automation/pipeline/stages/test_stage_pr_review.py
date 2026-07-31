@@ -28,6 +28,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
     DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
     DIRECT_PUSH_RETRY_CAP,
+    DIRECT_REBASE_WAIT,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
@@ -295,6 +296,57 @@ class TestPrReviewStageStep:
         assert result.job.kwargs["base_branch"] == "main"
         assert result.on_done_state == REVIEW_CHECKOUT_WAIT
         assert "reviewed_pr_head_sha" not in item.payload
+
+    def test_direct_pr_rebases_and_lease_pushes_before_binding_review_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A direct PR is refreshed onto its base before a reviewer sees its diff."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+                "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="REVIEW_WAIT")
+        item.worktree = "/tmp/repo/review-worktree"
+        item.branch = "review-branch"
+        item.payload["direct_pr_worktree"] = item.worktree
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "rebase"
+        assert result.job.kwargs == {
+            "cwd": result.job.kwargs["cwd"],
+            "base_branch": "main",
+            "branch": "review-branch",
+            "expected_remote_sha": "a" * 40,
+            "publish_detached_head": True,
+        }
+        assert result.on_done_state == DIRECT_REBASE_WAIT
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={"rebased": True, "published": True, "head_sha": "b" * 40},
+            ),
+            ctx,
+        )
+        item.state = result.on_done_state
+        transition = stage.step(item, ctx)
+        assert transition == Continue(next_state="REVIEW_WAIT")
+        item.state = transition.next_state
+
+        barrier = stage.step(item, ctx)
+        assert isinstance(barrier, JobRequest)
+        assert isinstance(barrier.job, GitJob)
+        assert barrier.job.op == "verify_pr_review_checkout"
 
     def test_checkout_barrier_renews_the_proof_for_an_unchanged_head(
         self, make_ctx: Any, make_work_item: Any

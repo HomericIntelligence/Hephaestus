@@ -109,8 +109,8 @@ def get_review_validation_prompt(
 
     Used by the pipeline PR-review stage to re-check, with a fresh review of
     the current change, prior review, and implementation reply, that the
-    implementer's fixes actually resolved the previous iteration's review
-    comments. It keeps an unaddressed
+    implementer's supplied patch and evidence adequately address the previous
+    iteration's review comments. It keeps an unaddressed
     original thread open and supplies a concrete reviewer reply describing
     what remains; it never creates a replacement inline thread.
 

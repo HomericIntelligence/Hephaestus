@@ -45,6 +45,14 @@ sandbox. If every receipt has `ok: true` and the current reviewed head matches
 each `head_sha`, treat them as independent local execution evidence; if any
 receipt is missing or failed, do not claim the plan passed.
 
+Evidence-provenance rule: validate whether the implementation reply supplies
+concrete, internally coherent evidence (for example, the exact command and
+result, an added regression test, or a linked artifact) that supports its
+claimed fix. Do not independently reproduce, rerun, or require host/CI
+execution of that evidence. A sandbox access failure or the absence of an
+independent execution is not a reason to leave a thread unresolved when the
+current diff and the supplied implementation evidence adequately address it.
+
 ---
 
 For EACH prior comment with `implementation_reply_submitted: true`, judge
