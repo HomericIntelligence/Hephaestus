@@ -306,7 +306,7 @@ config = merge_with_env({}, convert_bools=True)
 
 Run any command with `--help` to see full usage.
 
-The package currently installs 49 console scripts from `[project.scripts]`.
+The package currently installs 56 console scripts from `[project.scripts]`.
 
 ### Automation
 
@@ -370,6 +370,13 @@ sync (#993).
 | `hephaestus-label-severity` | Reconcile the `severity:*` label for a GitHub issue from its issue-form Severity answer |
 | `hephaestus-merge-prs` | Merge open PRs with successful CI/CD through the shared `gh` adapter |
 | `hephaestus-tidy` | Single-repo gh-tidy wrapper with Myrmidon swarm for conflict resolution |
+| `hephaestus-prepare-worktree` | Safely create an isolated worktree at an attested start point |
+| `hephaestus-audit-worktrees` | Emit a read-only inventory of registered worktrees |
+| `hephaestus-remove-worktree` | Remove one approved, clean registered worktree at its audited HEAD |
+| `hephaestus-resolve-pr` | Resolve an explicit or current-branch open pull request |
+| `hephaestus-collect-pr-evidence` | Collect pull-request metadata, changed paths, and check evidence |
+| `hephaestus-pr-diff-context` | Compute author-intent and current-base pull-request diff ranges |
+| `hephaestus-repository-evidence` | Collect bounded Git history and source-pattern evidence |
 
 ### System & Data
 

@@ -62,7 +62,7 @@ may change incompatibly in a minor release.
 The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
-Hephaestus installs 49 console scripts via `[project.scripts]` in
+Hephaestus installs 56 console scripts via `[project.scripts]` in
 `pyproject.toml`.
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -102,6 +102,13 @@ bypass a misfiring hook locally use
 | `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |
 | `hephaestus-tidy` | Provisional | Local-branch rebase + cleanup helper |
 | `hephaestus-label-severity` | Provisional | Reconciles `severity:*` label from issue-form Severity answer |
+| `hephaestus-prepare-worktree` | Provisional | Safe isolated-worktree creation helper for workflow skills |
+| `hephaestus-audit-worktrees` | Provisional | Read-only registered-worktree inventory helper for workflow skills |
+| `hephaestus-remove-worktree` | Provisional | Approved clean-worktree removal helper for workflow skills |
+| `hephaestus-resolve-pr` | Provisional | Resolve and validate an open pull request for workflow skills |
+| `hephaestus-collect-pr-evidence` | Provisional | Collect pull-request metadata, paths, and checks for workflow skills |
+| `hephaestus-pr-diff-context` | Provisional | Compute stable pull-request diff lenses for workflow skills |
+| `hephaestus-repository-evidence` | Provisional | Collect bounded Git history and source-pattern evidence for workflow skills |
 | `hephaestus-system-info` | Provisional | Dispatches to Stable `hephaestus.system` but CLI flags still evolving |
 | `hephaestus-download-dataset` | Provisional | Dataset URL/layout not contracted |
 | `hephaestus-check-python-version` | Internal | Repo CI pre-commit hook |
