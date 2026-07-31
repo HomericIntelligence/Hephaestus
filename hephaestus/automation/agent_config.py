@@ -186,6 +186,15 @@ def learn_model() -> str:
     return _resolve_model("HEPH_LEARN_MODEL", HAIKU)
 
 
+def git_message_model() -> str:
+    """Return the deterministic default for standalone message generation.
+
+    The automation loop passes its CLI-resolved implementation model directly;
+    this compatibility helper deliberately has no environment override.
+    """
+    return HAIKU
+
+
 def fallback_model() -> str:
     """Model substituted when a model-specific usage cap is detected (#1793).
 
@@ -597,6 +606,7 @@ __all__ = [
     "follow_up_claude_timeout",
     "gh_cli_timeout",
     "git_message_agent_timeout",
+    "git_message_model",
     "implementer_claude_timeout",
     "implementer_model",
     "issue_auto_impl_branch_name",

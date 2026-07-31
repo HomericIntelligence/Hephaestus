@@ -27,6 +27,11 @@ class TestDefaults:
     def test_codex_advise_defaults_to_gpt_mini(self) -> None:
         assert claude_models.codex_advise_model() == "gpt-5.4-mini"
 
+    def test_git_message_defaults_to_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The public compatibility helper ignores the retired override."""
+        monkeypatch.setenv("HEPH_GIT_MESSAGE_MODEL", "terra:xhigh")
+        assert claude_models.git_message_model() == claude_models.HAIKU
+
     def test_fallback_defaults_to_current_opus(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The usage-cap fallback model is the current Opus (#1793)."""
         monkeypatch.delenv("HEPH_FALLBACK_MODEL", raising=False)

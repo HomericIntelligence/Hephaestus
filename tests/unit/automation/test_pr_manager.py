@@ -538,7 +538,16 @@ class TestEnsurePRCreated:
             patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
             patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
         ):
-            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"), agent="codex") == 42
+            assert (
+                pr_manager.ensure_pr_created(
+                    1,
+                    "branch",
+                    Path("/tmp/wt"),
+                    agent="codex",
+                    agent_model="sol:medium",
+                )
+                == 42
+            )
             create_mock.assert_called_once_with(
                 1,
                 "branch",
@@ -547,6 +556,7 @@ class TestEnsurePRCreated:
                 base="master",
                 worktree_path=Path("/tmp/wt"),
                 git_message_timeout=1200,
+                agent_model="sol:medium",
             )
 
 
@@ -618,11 +628,13 @@ class TestCreatePR:
                     agent="codex",
                     base="main",
                     worktree_path=Path("/tmp/wt"),
+                    agent_model="sol:medium",
                 )
                 == 7
             )
 
         prompt = invoke.call_args.kwargs["prompt"]
+        assert invoke.call_args.kwargs["model_override"] == "sol:medium"
         assert "LICENSE" in prompt
         assert "NOTICE" in prompt
         assert "33f2ea6 docs: update copyright notices" in prompt
@@ -713,8 +725,8 @@ class TestMessageAgentInvocation:
         assert kwargs["sandbox"] == "read-only"
         assert kwargs["model"] == "luna:medium"
 
-    def test_codex_message_agent_prefers_pipeline_model_override(self) -> None:
-        """A loop's CLI-selected tier and effort win over the legacy environment fallback."""
+    def test_codex_message_agent_uses_pipeline_model_override(self) -> None:
+        """A loop's CLI-selected tier and effort reach the direct runner unchanged."""
         completed = subprocess.CompletedProcess(
             args=["codex", "exec"], returncode=0, stdout="{}", stderr=""
         )
@@ -756,6 +768,7 @@ class TestMessageAgentInvocation:
         assert kwargs["agent"] == "pi"
         assert kwargs["cwd"] == Path("/tmp/wt")
         assert kwargs["sandbox"] == "read-only"
+        assert kwargs["model"] == ""
 
 
 # ---------------------------------------------------------------------------

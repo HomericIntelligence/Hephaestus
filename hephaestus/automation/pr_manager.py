@@ -350,11 +350,11 @@ def _invoke_git_message_agent(
 ) -> str:
     """Run the lightweight message agent in a separate read-only session.
 
-    Pipeline callers must provide their CLI-resolved role model.  The code
-    default keeps non-pipeline callers deterministic without consulting
-    process environment variables.
+    Pipeline callers must provide their CLI-resolved role model.  Claude and
+    Codex use the deterministic lightweight-message default when a standalone
+    caller omits one; Pi retains its provider-specific default in that case.
     """
-    model = model_override if model_override is not None else HAIKU
+    model = model_override if model_override is not None else ("" if agent == "pi" else HAIKU)
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent=agent,
