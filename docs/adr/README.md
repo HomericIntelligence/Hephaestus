@@ -31,3 +31,5 @@ numbered, and listed here.
 | [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted |
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
+| [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
+| [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Accepted |

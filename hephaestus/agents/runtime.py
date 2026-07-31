@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -53,8 +57,31 @@ PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
+PI_PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
+PI_DENYLIST_FILENAMES = (PI_PROJECT_DENYLIST_FILENAME, PI_PRIVATE_DENYLIST_FILENAME)
 PI_PRIVATE_REDACTION = "<redacted-pi-private-value>"
+PI_SMOKE_LOG_DIR_PREFIX = "pi-smoke-"
+PI_RUNTIME_TEMP_ROOT_NAME = "hephaestus-pi-runtime"
+_PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
+PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
+    "--mode",
+    "json",
+    "--print",
+    "--no-session",
+    "--no-approve",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--offline",
+)
+PI_AUTOMATION_PREFLIGHT_ERROR = (
+    "Pi automation preflight is unavailable until #2516 verifies the required "
+    "package/capability inventory and #2518 enforces lifecycle and tool scopes. "
+    "Use Claude or Codex for automation until those stages are complete."
+)
 REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
@@ -79,14 +106,42 @@ class AgentRunResult:
     session_id: str | None = None
 
 
+class AgentCapability(str, Enum):
+    """Provider capability names used by the provider-neutral parity contract."""
+
+    FILE_READ = "file-read"
+    FILE_WRITE = "file-write"
+    SHELL = "shell"
+    SEARCH = "search"
+    SESSION = "session"
+    RESUME = "resume"
+    SKILL = "skill"
+    TOOL_ALLOWLIST = "tool-allowlist"
+    SUBAGENT = "subagent"
+    WEB_ACCESS = "web-access"
+    INTERACTIVE_APPROVAL = "interactive-approval"
+    OS_SANDBOX = "os-sandbox"
+
+
 @dataclass(frozen=True)
 class AgentCapabilities:
-    """Backend capabilities used by provider-neutral call sites."""
+    """Backend capabilities used by provider-neutral call sites.
+
+    ``core_capabilities`` are provided by the provider's base CLI.
+    ``package_capabilities`` require an explicit, separately verified package.
+    ``unavailable_capabilities`` must fail closed rather than being inferred from
+    a similarly named provider feature. The Pi entries form the executable
+    companion to ADR-0019; later bootstrap and pipeline stages consume this
+    distinction instead of creating stage-specific provider forks.
+    """
 
     direct_runner: bool
     supports_approval: bool
     supports_sandbox: bool
     supports_sessions: bool
+    core_capabilities: frozenset[AgentCapability] = frozenset()
+    package_capabilities: frozenset[AgentCapability] = frozenset()
+    unavailable_capabilities: frozenset[AgentCapability] = frozenset()
 
 
 AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
@@ -105,8 +160,32 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
     "pi": AgentCapabilities(
         direct_runner=True,
         supports_approval=False,
-        supports_sandbox=True,
+        supports_sandbox=False,
         supports_sessions=True,
+        core_capabilities=frozenset(
+            {
+                AgentCapability.FILE_READ,
+                AgentCapability.FILE_WRITE,
+                AgentCapability.SHELL,
+                AgentCapability.SEARCH,
+                AgentCapability.SESSION,
+                AgentCapability.RESUME,
+                AgentCapability.SKILL,
+                AgentCapability.TOOL_ALLOWLIST,
+            }
+        ),
+        package_capabilities=frozenset(
+            {
+                AgentCapability.SUBAGENT,
+                AgentCapability.WEB_ACCESS,
+            }
+        ),
+        unavailable_capabilities=frozenset(
+            {
+                AgentCapability.INTERACTIVE_APPROVAL,
+                AgentCapability.OS_SANDBOX,
+            }
+        ),
     ),
 }
 
@@ -173,11 +252,23 @@ def _pi_models_configured() -> bool:
     return False
 
 
+def _require_pi_automation_admission() -> None:
+    """Block every normal Pi automation entry point until admission exists.
+
+    Only the explicitly named ``run_pi_smoke_session`` helper remains the
+    fixed tool-free, non-interactive operator-smoke seam. #2516 replaces this
+    temporary block with verified package-preflight evidence.
+    """
+    raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+
+
 def resolve_agent(agent: str | None) -> AgentName:
     """Resolve an optional provider selection into a concrete backend."""
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
+        if agent == "pi":
+            _require_pi_automation_admission()
         if not is_agent_authenticated(agent):
             if shutil.which(agent) is None:
                 raise RuntimeError(
@@ -196,8 +287,14 @@ def resolve_agent(agent: str | None) -> AgentName:
             )
         return agent
 
-    installed_agents = tuple(agent_name for agent_name in AGENT_CHOICES if shutil.which(agent_name))
+    installed_agents = tuple(
+        agent_name
+        for agent_name in AGENT_CHOICES
+        if agent_name != "pi" and shutil.which(agent_name)
+    )
     if not installed_agents:
+        if shutil.which("pi") is not None:
+            _require_pi_automation_admission()
         raise RuntimeError(
             "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
             "or pass --agent after installing the selected backend."
@@ -224,6 +321,11 @@ def is_pi(agent: str) -> bool:
     return agent == "pi"
 
 
+def agent_supports_model_reasoning_effort(agent: str) -> bool:
+    """Return whether an agent accepts Codex-style model reasoning selectors."""
+    return is_codex(agent)
+
+
 def uses_direct_agent_runner(agent: str) -> bool:
     """Return True when the provider is invoked through runtime text/session helpers."""
     if agent not in AGENT_CAPABILITIES:
@@ -231,10 +333,22 @@ def uses_direct_agent_runner(agent: str) -> bool:
     return AGENT_CAPABILITIES[agent].direct_runner
 
 
-def direct_agent_model(agent: str, phase_env_var: str, *, codex_default: str = "") -> str:
-    """Return a model override appropriate for a direct-runner provider."""
+def direct_agent_model(
+    agent: str,
+    phase_env_var: str | None = None,
+    *,
+    codex_default: str = "",
+) -> str:
+    """Return a provider-neutral direct-runner model default.
+
+    Pi obtains its operator-local alias from :data:`PI_MODEL_ENV`; other
+    providers use an optional phase-specific environment override or the
+    explicit caller default.
+    """
     if is_pi(agent):
         return os.environ.get(PI_MODEL_ENV, "")
+    if phase_env_var is None:
+        return codex_default
     return os.environ.get(phase_env_var, codex_default)
 
 
@@ -258,27 +372,338 @@ def agent_display_name(agent: str) -> str:
         raise ValueError(f"Unsupported agent: {agent}") from e
 
 
-def pi_private_redaction_tokens(cwd: Path, model: str = "") -> tuple[str, ...]:
-    """Return local Pi values that must be redacted from publishable diagnostics."""
-    tokens: list[str] = []
-    resolved_model = (model or os.environ.get(PI_MODEL_ENV, "")).strip()
-    if resolved_model:
-        tokens.append(resolved_model)
+def _resolve_pi_denylist_root(root: Path, *, require_readable: bool) -> Path | None:
+    """Resolve a denylist search root, optionally failing closed on an error."""
+    try:
+        return root.resolve()
+    except OSError as exc:
+        if require_readable:
+            raise OSError("Unable to resolve Pi private denylist root") from exc
+        return None
 
-    resolved_cwd = cwd.resolve()
-    for parent in (resolved_cwd, *resolved_cwd.parents):
-        denylist = parent / PI_PRIVATE_DENYLIST_FILENAME
-        if not denylist.is_file():
+
+def _read_pi_private_denylist(
+    denylist: Path,
+    *,
+    require_readable: bool,
+) -> tuple[str, ...] | None:
+    """Read one Pi privacy-policy file, returning ``None`` when it is absent."""
+    try:
+        denylist.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if require_readable:
+            raise OSError("Unable to inspect Pi private denylist") from exc
+        return ()
+    if not denylist.is_file():
+        if require_readable:
+            raise OSError("Pi private denylist is not a regular file")
+        return ()
+    try:
+        lines = denylist.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        if require_readable:
+            raise OSError("Unable to read Pi private denylist") from exc
+        return ()
+    return tuple(token for line in lines if (token := line.strip()) and not token.startswith("#"))
+
+
+def _pi_private_log_permissions_supported() -> bool:
+    """Return whether this platform can verify private smoke-artifact ACLs."""
+    return os.name == "posix" and (sys.platform == "darwin" or sys.platform.startswith("linux"))
+
+
+def _run_pi_private_acl_command(command: list[str]) -> str:
+    """Run a platform ACL command without accepting caller-controlled input."""
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise OSError("Unable to verify Pi smoke artifact ACLs") from exc
+    return result.stdout
+
+
+_LINUX_POSIX_ACL_FILESYSTEMS = frozenset(
+    {
+        "btrfs",
+        "ext2",
+        "ext3",
+        "ext4",
+        "f2fs",
+        "overlay",
+        "overlayfs",
+        "ramfs",
+        "tmpfs",
+        "xfs",
+    }
+)
+
+
+def _decode_linux_mountinfo_path(value: str) -> str:
+    """Decode the octal path escapes used by Linux ``mountinfo`` records."""
+    decoded: list[str] = []
+    index = 0
+    while index < len(value):
+        candidate = value[index + 1 : index + 4]
+        if (
+            value[index] == "\\"
+            and len(candidate) == 3
+            and all("0" <= character <= "7" for character in candidate)
+        ):
+            decoded.append(chr(int(candidate, 8)))
+            index += 4
             continue
+        decoded.append(value[index])
+        index += 1
+    return "".join(decoded)
+
+
+def _linux_pi_private_filesystem_type(path: Path) -> str:
+    """Return the filesystem type containing ``path`` from ``/proc/self/mountinfo``."""
+    absolute_path = Path(os.path.abspath(path))
+    try:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise OSError("Unable to determine Pi smoke artifact filesystem") from exc
+
+    selected: tuple[int, str] | None = None
+    for line in mountinfo.splitlines():
+        before_separator, separator, after_separator = line.partition(" - ")
+        fields = before_separator.split()
+        filesystem_fields = after_separator.split()
+        if not separator or len(fields) < 5 or not filesystem_fields:
+            continue
+        mount_path = Path(_decode_linux_mountinfo_path(fields[4]))
         try:
-            lines = denylist.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            break
-        for line in lines:
-            token = line.strip()
-            if token and not token.startswith("#"):
-                tokens.append(token)
-        break
+            absolute_path.relative_to(mount_path)
+        except ValueError:
+            continue
+        candidate = (len(mount_path.parts), filesystem_fields[0])
+        if selected is None or candidate[0] > selected[0]:
+            selected = candidate
+    if selected is None:
+        raise OSError("Unable to determine Pi smoke artifact filesystem")
+    return selected[1]
+
+
+def _verify_pi_private_acl(path: Path, *, clear: bool) -> None:
+    """Clear or reject ACL grants that would make a smoke artifact non-private."""
+    if not _pi_private_log_permissions_supported():
+        raise OSError("Pi smoke requires verifiable private artifact permissions")
+    if sys.platform == "darwin":
+        if clear:
+            _run_pi_private_acl_command(["/bin/chmod", "-N", str(path)])
+        acl_listing = _run_pi_private_acl_command(["/bin/ls", "-lde", str(path)])
+        if len(acl_listing.splitlines()) != 1:
+            raise OSError("Pi smoke artifact path has an access ACL")
+        return
+
+    filesystem_type = _linux_pi_private_filesystem_type(path)
+    if filesystem_type not in _LINUX_POSIX_ACL_FILESYSTEMS:
+        raise OSError("Pi smoke requires a local filesystem with verifiable POSIX ACLs")
+
+    absent_errors = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
+    for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
+        if clear:
+            try:
+                os.removexattr(path, attribute, follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno not in absent_errors:
+                    raise OSError("Unable to clear Pi smoke artifact ACLs") from exc
+        try:
+            os.getxattr(path, attribute, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno in absent_errors:
+                continue
+            raise OSError("Unable to verify Pi smoke artifact ACLs") from exc
+        raise OSError("Pi smoke artifact path has an access ACL")
+
+
+def _absolute_pi_log_path(path: Path) -> Path:
+    """Return an absolute, lexical Pi log path without resolving symlinks."""
+    return Path(os.path.abspath(path))
+
+
+def _pi_log_path_components(path: Path) -> tuple[Path, ...]:
+    """Return every lexical component from an absolute path's filesystem root."""
+    root = Path(path.anchor)
+    components = [root]
+    current = root
+    for part in path.parts[1:]:
+        current /= part
+        components.append(current)
+    return tuple(components)
+
+
+def _verify_pi_private_log_directory(
+    path: Path,
+    *,
+    require_current_owner: bool,
+    require_owner_only: bool,
+    clear_acl: bool,
+    verify_acl: bool = True,
+) -> None:
+    """Verify one no-symlink directory in the private artifact path chain."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi smoke artifact path") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("Pi smoke artifact path must be a directory, not a symlink")
+    current_uid = os.getuid()
+    if require_current_owner:
+        if metadata.st_uid != current_uid:
+            raise OSError("Pi smoke artifact path is not owned by the current user")
+    elif metadata.st_uid not in {0, current_uid}:
+        raise OSError("Pi smoke artifact ancestor is not owner-controlled")
+    mode = stat.S_IMODE(metadata.st_mode)
+    # A sticky directory cannot have another user's entry renamed or removed.
+    # Combined with atomic child creation and ownership verification below, it
+    # is safe as an ancestor (for example, the system temporary root).
+    if mode & 0o022 and not (metadata.st_mode & stat.S_ISVTX):
+        raise OSError("Pi smoke artifact path is writable by another user")
+    if clear_acl and verify_acl:
+        _verify_pi_private_acl(path, clear=True)
+    if clear_acl:
+        path.chmod(0o700)
+        metadata = path.lstat()
+    if verify_acl:
+        _verify_pi_private_acl(path, clear=False)
+    if require_owner_only and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise OSError("Pi smoke artifact path is not user-only")
+
+
+def _ensure_pi_private_log_root(log_dir: Path) -> Path:
+    """Create or verify an owner-controlled root for smoke artifact run dirs."""
+    absolute_root = _absolute_pi_log_path(log_dir)
+    components = _pi_log_path_components(absolute_root)
+    for index, component in enumerate(components):
+        is_root = index == len(components) - 1
+        try:
+            component.lstat()
+        except FileNotFoundError:
+            try:
+                os.mkdir(component, 0o700)
+            except OSError as exc:
+                raise OSError("Unable to create Pi smoke artifact directory") from exc
+            _verify_pi_private_log_directory(
+                component,
+                require_current_owner=True,
+                require_owner_only=True,
+                clear_acl=True,
+            )
+            continue
+        _verify_pi_private_log_directory(
+            component,
+            require_current_owner=is_root,
+            require_owner_only=is_root,
+            clear_acl=is_root,
+            verify_acl=is_root,
+        )
+    return absolute_root
+
+
+def prepare_pi_private_log_dir(log_dir: Path) -> Path:
+    """Create a unique ACL-verified private directory for one Pi smoke run."""
+    root = _ensure_pi_private_log_root(log_dir)
+    run_dir = Path(tempfile.mkdtemp(prefix=PI_SMOKE_LOG_DIR_PREFIX, dir=root))
+    try:
+        _verify_pi_private_log_directory(
+            run_dir,
+            require_current_owner=True,
+            require_owner_only=True,
+            clear_acl=True,
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            run_dir.rmdir()
+        raise
+    return run_dir
+
+
+def _prepare_pi_private_temp_dir() -> Path:
+    """Create the isolated owner-only temporary directory used by Pi itself."""
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    except OSError as exc:
+        raise OSError("Unable to resolve Pi runtime temporary root") from exc
+    return prepare_pi_private_log_dir(temp_root / PI_RUNTIME_TEMP_ROOT_NAME)
+
+
+def _verify_pi_private_prompt_file(path: Path) -> None:
+    """Verify the prompt file remains a private regular file before Pi reads it."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi smoke prompt file") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("Pi smoke prompt file must be a regular file, not a symlink")
+    if metadata.st_uid != os.getuid():
+        raise OSError("Pi smoke prompt file is not owned by the current user")
+    _verify_pi_private_acl(path, clear=True)
+    path.chmod(0o600)
+    _verify_pi_private_acl(path, clear=False)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi smoke prompt file") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise OSError("Pi smoke prompt file must be a regular file, not a symlink")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise OSError("Pi smoke prompt file is not user-only")
+
+
+def pi_private_redaction_tokens(
+    cwd: Path,
+    model: str = "",
+    *,
+    additional_roots: Iterable[Path] = (),
+    require_readable: bool = False,
+) -> tuple[str, ...]:
+    """Return local Pi values that must be redacted from publishable diagnostics.
+
+    ``additional_roots`` lets an entry point protect the checkout-level local
+    denylist even when it deliberately invokes Pi from another directory.  A
+    caller that will publish diagnostics can set ``require_readable`` to fail
+    closed instead of running without a configured local privacy policy.
+    """
+    tokens = [
+        value
+        for candidate in (
+            model,
+            os.environ.get(PI_MODEL_ENV, ""),
+            os.environ.get(PI_PROVIDER_ENV, ""),
+        )
+        if (value := candidate.strip())
+    ]
+    seen_denylists: set[Path] = set()
+    for root in (cwd, *additional_roots):
+        resolved_root = _resolve_pi_denylist_root(root, require_readable=require_readable)
+        if resolved_root is None:
+            continue
+        for parent in (resolved_root, *resolved_root.parents):
+            found_policy = False
+            for filename in PI_DENYLIST_FILENAMES:
+                denylist = parent / filename
+                if denylist in seen_denylists:
+                    continue
+                seen_denylists.add(denylist)
+                denylist_tokens = _read_pi_private_denylist(
+                    denylist,
+                    require_readable=require_readable,
+                )
+                if denylist_tokens is None:
+                    continue
+                tokens.extend(denylist_tokens)
+                found_policy = True
+            if found_policy:
+                break
 
     return tuple(dict.fromkeys(tokens))
 
@@ -588,7 +1013,7 @@ def _pi_message_text(message: Any) -> str:
     """Extract assistant text from a Pi message object."""
     if not isinstance(message, dict):
         return ""
-    if message.get("role") not in (None, "assistant"):
+    if message.get("role") != "assistant":
         return ""
     content = message.get("content")
     if isinstance(content, str):
@@ -636,6 +1061,20 @@ def _parse_pi_json_events(text: str) -> tuple[str | None, str]:
                     if message_text:
                         final_message = message_text
     return session_id, final_message.strip()
+
+
+def _has_pi_json_event(text: str) -> bool:
+    """Return whether Pi JSON-mode output contains at least one event object."""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("type"), str) and event["type"].strip():
+            return True
+    return False
 
 
 def run_codex_session(
@@ -738,19 +1177,15 @@ def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
     return cmd
 
 
-def _model_from_pi_cmd(cmd: list[str]) -> str:
-    """Extract the Pi model value from a command list when present."""
-    try:
-        model_index = cmd.index("--model")
-    except ValueError:
-        return ""
-    if model_index + 1 >= len(cmd):
-        return ""
-    return cmd[model_index + 1]
+def _pi_smoke_base_cmd() -> list[str]:
+    """Build the non-interactive, no-discovery Pi operator-smoke command."""
+    return ["pi", *PI_SMOKE_BASE_ARGS]
 
 
 def _pi_sandbox_args(sandbox: str) -> list[str]:
     """Return Pi tool restrictions for the requested sandbox mode."""
+    if sandbox == "no-tools":
+        return ["--no-tools"]
     if sandbox == "read-only":
         return ["--tools", PI_READ_ONLY_TOOLS]
     if sandbox in {"workspace-write", "danger-full-access"}:
@@ -758,14 +1193,67 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
 
 
-def _pi_env(*, model: str = "") -> dict[str, str]:
-    """Return a privacy-biased environment for Pi subprocesses."""
-    env = os.environ.copy()
-    if model:
-        env[PI_MODEL_ENV] = model
-    env.setdefault("PI_TELEMETRY", "0")
-    env.setdefault("PI_SKIP_VERSION_CHECK", "1")
+def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
+    """Return the minimized, privacy-enforcing environment for Pi subprocesses."""
+    # The public smoke sentinel is only input to Hephaestus validation and
+    # redaction; it is not a native Pi configuration channel.
+    del model
+    safe_names = (
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "COMSPEC",
+        "PATHEXT",
+    )
+    env = {name: value for name in safe_names if (value := os.environ.get(name))}
+    env.setdefault("PATH", os.defpath)
+    if temp_dir is not None:
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            env[name] = str(temp_dir)
+    env["PI_TELEMETRY"] = "0"
+    env["PI_SKIP_VERSION_CHECK"] = "1"
     return env
+
+
+def _pi_json_session_ids(text: str) -> tuple[str, ...]:
+    """Return every opaque Pi session ID present in JSONL diagnostic output."""
+    session_ids: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "session" and isinstance(event.get("id"), str):
+            session_ids.append(event["id"])
+    return tuple(dict.fromkeys(session_ids))
+
+
+def _pi_failure_redaction_tokens(
+    cwd: Path,
+    model: str,
+    *diagnostics: str,
+) -> tuple[str, ...]:
+    """Combine configured values with session IDs observed before Pi failed."""
+    tokens = list(pi_private_redaction_tokens(cwd, model))
+    for diagnostic in diagnostics:
+        tokens.extend(_pi_json_session_ids(diagnostic))
+    return tuple(dict.fromkeys(tokens))
 
 
 def _run_pi_command(
@@ -776,20 +1264,26 @@ def _run_pi_command(
     timeout: int,
     sandbox: str,
     model: str = "",
+    _internal_admission_token: object | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Pi with prompt content attached via an ephemeral file, not argv."""
+    if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
+        _require_pi_automation_admission()
     prompt_path: Path | None = None
+    private_temp_dir: Path | None = None
     try:
+        private_temp_dir = _prepare_pi_private_temp_dir()
         with tempfile.NamedTemporaryFile(
             "w",
             prefix="pi-prompt-",
             suffix=".md",
             encoding="utf-8",
             delete=False,
+            dir=private_temp_dir,
         ) as prompt_file:
-            prompt_file.write(prompt)
             prompt_path = Path(prompt_file.name)
-        prompt_path.chmod(0o600)
+            prompt_file.write(prompt)
+        _verify_pi_private_prompt_file(prompt_path)
         cmd.extend(_pi_sandbox_args(sandbox))
         cmd.append(f"@{prompt_path}")
         try:
@@ -798,31 +1292,56 @@ def _run_pi_command(
                 cwd=cwd,
                 text=True,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 timeout=timeout,
-                env=_pi_env(model=model),
+                env=_pi_env(model=model, temp_dir=private_temp_dir),
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
-            tokens = pi_private_redaction_tokens(cwd, _model_from_pi_cmd(cmd))
+            raw_stdout = exc.stdout or ""
+            raw_stderr = exc.stderr or ""
+            tokens = _pi_failure_redaction_tokens(cwd, model, raw_stdout, raw_stderr)
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
-            raise subprocess.CalledProcessError(
+            redacted_output = redact_pi_private_values(raw_stdout, tokens)
+            redacted_stderr = redact_pi_private_values(raw_stderr, tokens)
+            redacted_exception = subprocess.CalledProcessError(
                 exc.returncode,
                 redacted_cmd,
-                output=redact_pi_private_values(exc.stdout or "", tokens),
-                stderr=redact_pi_private_values(exc.stderr or "", tokens),
-            ) from exc
+                output=redacted_output,
+                stderr=redacted_stderr,
+            )
+            # ``raise ... from None`` hides the context when rendered, but the
+            # original exception remains introspectable.  Sanitize it too.
+            exc.cmd = redacted_cmd
+            exc.output = redacted_output
+            exc.stderr = redacted_stderr
+            exc.args = redacted_exception.args
+            raise redacted_exception from None
         except subprocess.TimeoutExpired as exc:
-            tokens = pi_private_redaction_tokens(cwd, _model_from_pi_cmd(cmd))
-            raise subprocess.TimeoutExpired(
-                _redact_pi_command_args(exc.cmd, tokens),
+            raw_output = _coerce_timeout_output(exc.output)
+            raw_stderr = _coerce_timeout_output(exc.stderr)
+            tokens = _pi_failure_redaction_tokens(cwd, model, raw_output, raw_stderr)
+            redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
+            redacted_output = redact_pi_private_values(raw_output, tokens)
+            redacted_stderr = redact_pi_private_values(raw_stderr, tokens)
+            redacted_timeout = subprocess.TimeoutExpired(
+                redacted_cmd,
                 exc.timeout,
-                output=redact_pi_private_values(_coerce_timeout_output(exc.output), tokens),
-                stderr=redact_pi_private_values(_coerce_timeout_output(exc.stderr), tokens),
-            ) from exc
+                output=redacted_output,
+                stderr=redacted_stderr,
+            )
+            exc.cmd = redacted_cmd
+            exc.output = redacted_output
+            exc.stderr = redacted_stderr.encode()
+            exc.args = redacted_timeout.args
+            raise redacted_timeout from None
     finally:
         if prompt_path is not None:
             with contextlib.suppress(OSError):
                 prompt_path.unlink()
+        if private_temp_dir is not None:
+            with contextlib.suppress(OSError):
+                shutil.rmtree(private_temp_dir)
 
 
 def run_pi_text(
@@ -845,6 +1364,51 @@ def run_pi_text(
     )
 
 
+def _invoke_pi_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str,
+    sandbox: str,
+    session_id: str | None = None,
+    base_cmd: list[str] | None = None,
+    require_json_event: bool = False,
+    redact_observed_session_ids: bool = False,
+    _internal_admission_token: object | None = None,
+) -> AgentRunResult:
+    """Execute Pi and preserve a new or resumed opaque session identity."""
+    if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
+        _require_pi_automation_admission()
+    cmd = list(base_cmd) if base_cmd is not None else _pi_base_cmd(session_id=session_id)
+    result = _run_pi_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        sandbox=sandbox,
+        model=model,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
+    )
+    raw_stdout = result.stdout or ""
+    observed_session_ids = _pi_json_session_ids(raw_stdout)
+    if require_json_event and not _has_pi_json_event(raw_stdout):
+        raise RuntimeError("Pi smoke did not emit a JSON event")
+    parsed_session_id, event_message = _parse_pi_json_events(raw_stdout)
+    if require_json_event and not event_message:
+        raise RuntimeError("Pi smoke did not emit a terminal assistant JSON event")
+    stdout = (event_message or raw_stdout).strip()
+    stderr = result.stderr or ""
+    if redact_observed_session_ids:
+        stdout = redact_pi_private_values(stdout, observed_session_ids)
+        stderr = redact_pi_private_values(stderr, observed_session_ids)
+    return AgentRunResult(
+        stdout=stdout,
+        stderr=stderr,
+        session_id=parsed_session_id or session_id,
+    )
+
+
 def run_pi_session(
     prompt: str,
     *,
@@ -855,19 +1419,43 @@ def run_pi_session(
     approval: str = "never",
 ) -> AgentRunResult:
     """Run a new Pi JSON-mode session and capture its id."""
+    _require_pi_automation_admission()
     del approval
-    cmd = _pi_base_cmd()
-    result = _run_pi_command(
-        cmd,
+    return _invoke_pi_session(
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
-        sandbox=sandbox,
         model=model,
+        sandbox=sandbox,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
-    session_id, event_message = _parse_pi_json_events(result.stdout or "")
-    stdout = (event_message or result.stdout or "").strip()
-    return AgentRunResult(stdout=stdout, stderr=result.stderr or "", session_id=session_id)
+
+
+def run_pi_smoke_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+) -> AgentRunResult:
+    """Run the fixed tool-free smoke seam without retaining a Pi session id."""
+    result = _invoke_pi_session(
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox="no-tools",
+        base_cmd=_pi_smoke_base_cmd(),
+        require_json_event=True,
+        redact_observed_session_ids=True,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
+    )
+    session_tokens = (result.session_id,) if result.session_id else ()
+    return AgentRunResult(
+        stdout=redact_pi_private_values(result.stdout, session_tokens),
+        stderr=redact_pi_private_values(result.stderr, session_tokens),
+        session_id=None,
+    )
 
 
 def resume_pi_session(
@@ -881,22 +1469,16 @@ def resume_pi_session(
     approval: str = "never",
 ) -> AgentRunResult:
     """Resume a Pi JSON-mode session by id."""
+    _require_pi_automation_admission()
     del approval
-    cmd = _pi_base_cmd(session_id=session_id)
-    result = _run_pi_command(
-        cmd,
+    return _invoke_pi_session(
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
-        sandbox=sandbox,
         model=model,
-    )
-    parsed_session_id, event_message = _parse_pi_json_events(result.stdout or "")
-    stdout = (event_message or result.stdout or "").strip()
-    return AgentRunResult(
-        stdout=stdout,
-        stderr=result.stderr or "",
-        session_id=parsed_session_id or session_id,
+        sandbox=sandbox,
+        session_id=session_id,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
 
 
@@ -911,6 +1493,8 @@ def run_agent_text(
     approval: str = "never",
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
+    if is_pi(agent):
+        _require_pi_automation_admission()
     if is_codex(agent):
         return run_codex_text(
             prompt,
@@ -944,6 +1528,8 @@ def run_agent_session(
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
+    if is_pi(agent):
+        _require_pi_automation_admission()
     if is_codex(agent):
         return run_codex_session(
             prompt,
@@ -979,6 +1565,8 @@ def resume_agent_session(
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
+    if is_pi(agent):
+        _require_pi_automation_admission()
     if is_codex(agent):
         return resume_codex_session(
             session_id,
