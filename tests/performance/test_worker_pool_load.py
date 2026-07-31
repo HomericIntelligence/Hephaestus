@@ -188,9 +188,9 @@ class _SyntheticRecoveryStage:
         job = BuildTestJob(
             repo=item.repo,
             cwd=Path.cwd(),
-            argv=("synthetic", f"recovery-{item.issue}"),
+            argv=("synthetic", item.payload.get("descr", f"recovery-{item.issue}")),
             timeout_s=2,
-            descr=f"recovery-{item.issue}",
+            descr=item.payload.get("descr", f"recovery-{item.issue}"),
         )
         return JobRequest(job, on_done_state=StageName.PLANNING)
 
@@ -214,6 +214,8 @@ class _ObservedCompletionQueue(CompletionQueue):
         self.rejection_high_water = 0
         self.overflow_observed = False
         self.publication_outcomes: list[tuple[str, bool]] = []
+        self.publication_ownership: list[tuple[str, bool]] = []
+        self.owner: Coordinator | None = None
 
     def offer(self, value: tuple[Any, Any]) -> bool:
         """Publish normally and capture exact paused-consumer high-water state."""
@@ -233,6 +235,9 @@ class _ObservedCompletionQueue(CompletionQueue):
             handle = value[0]
             description = str(getattr(getattr(handle, "job", None), "descr", ""))
             self.publication_outcomes.append((description, accepted))
+            self.publication_ownership.append(
+                (description, self.owner is not None and handle in self.owner.in_flight)
+            )
             self._offer_condition.notify_all()
         return accepted
 
@@ -295,6 +300,7 @@ def _make_recovery_coordinator(
     workers: int,
     *,
     observed: bool = False,
+    issue_count: int | None = None,
 ) -> Coordinator:
     """Build the same C-sized coordinator/pool topology used in production."""
     config = PipelineConfig(
@@ -323,15 +329,21 @@ def _make_recovery_coordinator(
     # Injected pools expose their queue but not their private shutdown event.
     # Use the same event on both sides, as production Coordinator does.
     coordinator.shutdown = shared_shutdown
+    if isinstance(completion_q, _ObservedCompletionQueue):
+        completion_q.owner = coordinator
     coordinator.stages[StageName.PLANNING] = _SyntheticRecoveryStage()
     monkeypatch.setattr(coordinator, "_seed_pass", lambda: 0)
-    for issue in range(workers):
+    for issue in range(issue_count if issue_count is not None else workers):
         item = WorkItem(
             repo="performance/worker-pool",
             kind=ItemKind.ISSUE,
             issue=issue,
             stage=StageName.PLANNING,
         )
+        if issue_count is not None and issue_count > workers:
+            # Rehydrate the complete durable parked set before admission; the
+            # live-work ledger then releases each item as recovery finishes.
+            coordinator._live_work_permit_ids.add(id(item))
         assert coordinator._push_item(item, StageName.PLANNING, enter=True)
     return coordinator
 
@@ -590,19 +602,33 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         # may publish, so subsequent high-water marks cannot race a drain.
         assert stalled.completion_q.paused_publication_state() == (0, 0, 0, 0, 0, False)
 
-        # The coordinator owns C legitimate handles. Queue a separate C+1
-        # publication burst through the same real pool while all workers are
-        # occupied, then release each wave under the stalled consumer.
+        # Submit a separate C+1 publication burst through the coordinator
+        # while all workers are occupied. Register the items with the same
+        # live-work ledger used by finalization, then use the coordinator's
+        # submit chokepoint; bypassing Coordinator.in_flight would make
+        # rejected results impossible to park and recover.
         for index in range(workers + 1):
-            stalled.pool.submit(
-                BuildTestJob(
-                    repo="performance/worker-pool",
-                    cwd=Path.cwd(),
-                    argv=("synthetic", f"overflow-{index}"),
-                    timeout_s=2,
-                    descr=f"overflow-{index}",
+            item = WorkItem(
+                repo="performance/worker-pool",
+                kind=ItemKind.ISSUE,
+                issue=workers + index,
+                stage=StageName.PLANNING,
+                payload={"descr": f"overflow-{index}"},
+            )
+            stalled.items.append(item)
+            stalled._live_work_permit_ids.add(id(item))
+            stalled._submit(
+                item,
+                JobRequest(
+                    BuildTestJob(
+                        repo=item.repo,
+                        cwd=Path.cwd(),
+                        argv=("synthetic", f"overflow-{index}"),
+                        timeout_s=2,
+                        descr=f"overflow-{index}",
+                    ),
+                    on_done_state=StageName.PLANNING,
                 ),
-                StageName.PLANNING,
             )
 
         harness.release_legitimate.set()
@@ -634,26 +660,32 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
             *((f"recovery-{issue}", True) for issue in range(workers)),
             *((f"overflow-{issue}", False) for issue in range(workers + 1)),
         }
+        assert all(owned for _description, owned in stalled.completion_q.publication_ownership)
         assert stalled.completion_q.result_high_water == workers
         assert stalled.completion_q.rejection_high_water == workers
         assert stalled.completion_q.overflow_observed is True
         assert stalled.completion_q.qsize() == stalled.completion_q.capacity == workers
-        assert stalled.shutdown.is_set()
+        assert not stalled.shutdown.is_set()
 
         resume_consumer.set()
         run_thread.join(timeout=5.0)
 
     assert not run_thread.is_alive()
     assert run_codes == [1]
-    assert len(stalled.items) == workers
-    expected_issues = set(range(workers))
+    assert stalled.shutdown.is_set()
+    assert len(stalled.items) == (2 * workers) + 1
+    expected_issues = set(range((2 * workers) + 1))
     assert {item.issue for item in stalled.items} == expected_issues
     assert all(
         item.result is not None and item.result.reason.startswith("resumable at")
         for item in stalled.items
     )
 
-    recovered = _make_recovery_coordinator(monkeypatch, workers)
+    recovered = _make_recovery_coordinator(
+        monkeypatch,
+        workers,
+        issue_count=(2 * workers) + 1,
+    )
     assert recovered._work_window == workers
     assert recovered.completion_q.capacity == recovered._work_window
     with patch.object(
@@ -663,7 +695,7 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     ):
         assert recovered.run() == 0
 
-    assert len(recovered.items) == workers
+    assert len(recovered.items) == (2 * workers) + 1
     assert {item.issue for item in recovered.items} == expected_issues
     assert all(item.result is not None and item.result.passed for item in recovered.items)
 

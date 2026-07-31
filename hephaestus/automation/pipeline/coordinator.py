@@ -413,6 +413,8 @@ class Coordinator:
         self._work_window = max(1, config.parallel_repos * config.max_workers)
         if config.stage_queue_capacity < 1:
             raise ValueError("stage queue capacity must be positive")
+        if not 0 <= config.alert_queue_depth_threshold <= 100:
+            raise ValueError("alert queue depth threshold must be between 0 and 100")
         if config.event_log_capacity < 1:
             raise ValueError("event log capacity must be positive")
         self.completion_q = CompletionQueue(capacity=self._work_window)
@@ -427,7 +429,17 @@ class Coordinator:
                 completion_q=self.completion_q,
             )
         else:
-            # Share channels with an injected pool when it exposes them.
+            # Share channels and cancellation with an injected pool.  The
+            # coordinator owns the event because signals and admission
+            # saturation both set it; workers must observe that same object.
+            injected_shutdown = getattr(pool, "shutdown_event", None)
+            if not isinstance(injected_shutdown, type(self.shutdown)):
+                raise TypeError("injected worker pool must expose shutdown_event")
+            pool.shutdown_event = self.shutdown
+            # WorkerPool keeps its internal alias for hot worker paths.  Keep
+            # compatible injected implementations bound when they expose it.
+            if hasattr(pool, "_shutdown"):
+                pool._shutdown = self.shutdown
             injected_queue = getattr(pool, "completion_q", None)
             if injected_queue is None:
                 raise TypeError("injected worker pool must expose completion_q")
@@ -1010,7 +1022,11 @@ class Coordinator:
         while self.timers and self.timers[0][0] <= now:
             _, _, item = heapq.heappop(self.timers)
             self._progress = True
-            self._push_item(item, item.stage, enter=False)
+            if not self._push_item(item, item.stage, enter=False):
+                # The timer was already removed, so a saturated admission
+                # boundary must park the tracked item before it disappears
+                # from every collection that finalization can recover.
+                self._park_resumable(item, reason="timer wake rejected by admission saturation")
 
     # -- completions ----------------------------------------------------------
 
@@ -1428,11 +1444,21 @@ class Coordinator:
         )
 
     def _drain_repo_issue_sources(self) -> None:
-        """Run one fair admission attempt for each active repository cursor."""
+        """Run one fair admission attempt for each active repository cursor.
+
+        Admission saturation is a recovery boundary.  Once a cursor reaches
+        it, do not let later cursors fetch rows that cannot enter a queue or a
+        durable recovery path; leave those cursors (and their pending rows) in
+        the registry for the next run.
+        """
         for _ in range(len(self._repo_issue_sources)):
+            if self.shutdown.is_set() or self._admission_saturated:
+                return
             active = self._repo_issue_sources.popleft()
             if self._drain_repo_issue_source(active):
                 self._repo_issue_sources.append(active)
+            if self.shutdown.is_set() or self._admission_saturated:
+                return
 
     def _drain_repo_issue_source(  # noqa: C901 - source lifecycle is intentionally linear
         self, active: _ActiveRepoIssueSource

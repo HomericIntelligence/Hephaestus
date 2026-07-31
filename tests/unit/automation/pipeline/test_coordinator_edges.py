@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+import threading
 from pathlib import Path
 from typing import Any, get_type_hints
 from unittest.mock import MagicMock
@@ -22,6 +23,7 @@ from jinja2 import TemplateNotFound, TemplateSyntaxError
 import hephaestus.automation.pipeline as pipeline_pkg
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
 import hephaestus.automation.pipeline.jobs as jobs_mod
+import hephaestus.automation.pipeline.queues as queues_mod
 import hephaestus.automation.pipeline.routing as routing_mod
 import hephaestus.automation.pipeline.seeding as seeding_mod
 import hephaestus.automation.pipeline.stages.base as stage_base_mod
@@ -134,6 +136,22 @@ class TestWiring:
         assert created["size"] == 12
         assert created["shutdown"] is coordinator.shutdown
         assert created["completion_q"] is coordinator.completion_q
+
+    def test_injected_pool_shares_coordinator_shutdown_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Injected workers observe signal and saturation shutdown requests."""
+        config = PipelineConfig(org="org", repos=["r"], projects_dir=tmp_path)
+        pool = FakeWorkerPool(
+            shutdown=threading.Event(),
+            completion_q=queues_mod.CompletionQueue(capacity=config.max_workers),
+        )
+
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=pool, install_signals=False
+        )
+
+        assert pool.shutdown_event is coordinator.shutdown
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

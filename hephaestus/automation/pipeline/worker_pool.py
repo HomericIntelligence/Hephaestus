@@ -353,6 +353,9 @@ class WorkerPool:
             thread_name_prefix="hephaestus-pipeline-worker",
         )
         self._shutdown = shutdown
+        # Public for coordinator wiring and test doubles; worker paths use the
+        # private alias to keep their hot-path access unchanged.
+        self.shutdown_event = shutdown
         self._completion_q = completion_q
         # Public for coordinator wiring and test doubles; the private alias is
         # retained for the worker callback's internal channel use.

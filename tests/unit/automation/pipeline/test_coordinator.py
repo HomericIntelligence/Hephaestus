@@ -1437,6 +1437,49 @@ class TestDurableEventLog:
                 install_signals=False,
             )
 
+    @pytest.mark.parametrize("threshold", [-1, 101])
+    def test_alert_queue_depth_threshold_is_validated_without_metrics(
+        self, tmp_path: Path, threshold: int
+    ) -> None:
+        """Invalid alert thresholds fail even when the metrics server is disabled."""
+        with pytest.raises(
+            ValueError, match="alert queue depth threshold must be between 0 and 100"
+        ):
+            Coordinator(
+                PipelineConfig(
+                    org="org",
+                    repos=["repo-a"],
+                    projects_dir=tmp_path,
+                    alert_queue_depth_threshold=threshold,
+                ),
+                github=FakeStageGitHub(),
+                pool=FakeWorkerPool(
+                    size=1,
+                    completion_q=CompletionQueue(capacity=1),
+                ),
+                install_signals=False,
+            )
+
+    @pytest.mark.parametrize("threshold", [0, 100])
+    def test_alert_queue_depth_threshold_accepts_bounds_without_metrics(
+        self, tmp_path: Path, threshold: int
+    ) -> None:
+        """The inclusive alert threshold bounds remain valid without metrics."""
+        Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                alert_queue_depth_threshold=threshold,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(
+                size=1,
+                completion_q=CompletionQueue(capacity=1),
+            ),
+            install_signals=False,
+        )
+
     def test_zero_thread_nogo_event_is_durable_and_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

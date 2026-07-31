@@ -103,6 +103,27 @@ class TestTimerHeap:
         pushes = [entry[2] for entry in coordinator.event_log if entry[0] == "push"]
         assert pushes == ["repo-a#1", "repo-a#2"]
 
+    def test_saturated_admission_preserves_expired_tracked_timer(
+        self, clocked: tuple[Coordinator, FakeClock]
+    ) -> None:
+        """A rejected timer wake is parked for finalization, not dropped."""
+        coordinator, clock = clocked
+        item = _item(13)
+        coordinator._seen_item_ids.add(id(item))
+        coordinator.items.append(item)
+        coordinator._timer_park(item, 1.0)
+        coordinator._admission_saturated = True
+
+        clock.now += 2.0
+        coordinator._wake_timers()
+
+        assert coordinator.timers == []
+        assert coordinator.items == [item]
+        assert item.result is not None
+        assert item.result.reason == (
+            "resumable at pr_review: timer wake rejected by admission saturation"
+        )
+
 
 class TestRetryDelayConsumption:
     """RETRY timer contract: payload["retry_delay_s"] -> heap park."""

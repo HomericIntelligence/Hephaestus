@@ -10,7 +10,11 @@ import pytest
 
 from hephaestus.automation import loop_repo_manager, pr_discovery
 from hephaestus.automation.pipeline import seeding as seeding_mod
-from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.coordinator import (
+    Coordinator,
+    PipelineConfig,
+    _ActiveRepoIssueSource,
+)
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER,
     Disposition,
@@ -18,7 +22,7 @@ from hephaestus.automation.pipeline.routing import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.seeding import IssueFacts
-from hephaestus.automation.pipeline.stages.repo import RepoStage
+from hephaestus.automation.pipeline.stages.repo import RepoIssueSource, RepoStage
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -140,6 +144,44 @@ def test_large_repo_discovery_retains_only_page_cursor_and_one_pending_row(
     assert not [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
 
 
+def test_repo_source_drain_stops_after_admission_saturation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Later cursors retain metadata when an earlier cursor saturates admission."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a", "repo-b"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    first = _ActiveRepoIssueSource("repo-a", RepoIssueSource(iter(()), pending={"number": 1}))
+    second_metadata = {"number": 2, "labels": ["state:needs-plan"], "title": "pending"}
+    second = _ActiveRepoIssueSource("repo-b", RepoIssueSource(iter(()), pending=second_metadata))
+    coordinator._repo_issue_sources.extend((first, second))
+    drained: list[str] = []
+
+    def drain(active: _ActiveRepoIssueSource) -> bool:
+        drained.append(active.repo)
+        coordinator._admission_saturated = True
+        coordinator._begin_graceful_shutdown("test admission saturation")
+        return True
+
+    monkeypatch.setattr(coordinator, "_drain_repo_issue_source", drain)
+
+    coordinator._drain_repo_issue_sources()
+
+    assert drained == ["repo-a"]
+    assert list(coordinator._repo_issue_sources) == [second, first]
+    assert second.source.pending is second_metadata
+
+
 def test_repo_source_is_lossless_and_ordered_at_capacity_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,14 +275,8 @@ def test_repo_source_deduplicates_metadata_after_completed_work_at_capacity_one(
         ("classify", 2),
         ("complete", 2),
     ]
-    assert Counter(events) == Counter(
-        {
-            ("classify", 1): 1,
-            ("complete", 1): 1,
-            ("classify", 2): 1,
-            ("complete", 2): 1,
-        }
-    )
+    assert Counter(issue for event, issue in events if event == "classify") == Counter({1: 1, 2: 1})
+    assert Counter(issue for event, issue in events if event == "complete") == Counter({1: 1, 2: 1})
     issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
     assert [item.issue for item in issues] == [1, 2]
     assert all(item.result is not None and item.result.passed for item in issues)
