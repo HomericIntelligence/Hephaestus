@@ -749,6 +749,7 @@ class TestMessageAgentInvocation:
     def test_pi_message_agent_uses_read_only_pi_exec(self) -> None:
         completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")
         with (
+            patch.dict("os.environ", {"HEPH_PI_MODEL": "operator-local-alias"}, clear=True),
             patch.object(pr_manager, "uses_direct_agent_runner", return_value=True),
             patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
         ):
@@ -768,7 +769,7 @@ class TestMessageAgentInvocation:
         assert kwargs["agent"] == "pi"
         assert kwargs["cwd"] == Path("/tmp/wt")
         assert kwargs["sandbox"] == "read-only"
-        assert kwargs["model"] == ""
+        assert kwargs["model"] == "operator-local-alias"
 
 
 # ---------------------------------------------------------------------------

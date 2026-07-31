@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+import stat
 import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -12,6 +17,74 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
+
+PI_SMOKE_COMMAND_PREFIX = [
+    "pi",
+    "--mode",
+    "json",
+    "--print",
+    "--no-session",
+    "--no-approve",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--offline",
+    "--no-tools",
+]
+
+
+@pytest.fixture
+def private_pi_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Isolate prompt storage and ACL commands when a test mocks Pi itself."""
+    temp_dir = tmp_path / "private-pi-temp"
+    temp_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(agent_runtime, "_prepare_pi_private_temp_dir", lambda: temp_dir)
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    return temp_dir
+
+
+def test_pi_capability_contract_separates_native_packages_and_unsupported_controls() -> None:
+    """Pi's runtime boundary must expose its fail-closed parity contract."""
+    capabilities = agent_runtime.AGENT_CAPABILITIES["pi"]
+
+    assert capabilities.core_capabilities == frozenset(
+        {
+            agent_runtime.AgentCapability.FILE_READ,
+            agent_runtime.AgentCapability.FILE_WRITE,
+            agent_runtime.AgentCapability.SHELL,
+            agent_runtime.AgentCapability.SEARCH,
+            agent_runtime.AgentCapability.SESSION,
+            agent_runtime.AgentCapability.RESUME,
+            agent_runtime.AgentCapability.SKILL,
+            agent_runtime.AgentCapability.TOOL_ALLOWLIST,
+        }
+    )
+    assert capabilities.package_capabilities == frozenset(
+        {
+            agent_runtime.AgentCapability.SUBAGENT,
+            agent_runtime.AgentCapability.WEB_ACCESS,
+        }
+    )
+    assert capabilities.unavailable_capabilities == frozenset(
+        {
+            agent_runtime.AgentCapability.INTERACTIVE_APPROVAL,
+            agent_runtime.AgentCapability.OS_SANDBOX,
+        }
+    )
+    assert capabilities.core_capabilities.isdisjoint(capabilities.package_capabilities)
+    assert capabilities.core_capabilities.isdisjoint(capabilities.unavailable_capabilities)
+    assert capabilities.package_capabilities.isdisjoint(capabilities.unavailable_capabilities)
+    assert (
+        capabilities.core_capabilities
+        | capabilities.package_capabilities
+        | capabilities.unavailable_capabilities
+    ) == frozenset(agent_runtime.AgentCapability)
+    assert capabilities.direct_runner is True
+    assert capabilities.supports_approval is False
+    assert capabilities.supports_sandbox is False
+    assert capabilities.supports_sessions is True
 
 
 def _write_pi_models_config(home: Path) -> None:
@@ -617,8 +690,212 @@ def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_pat
     assert 'approval_policy="never"' in captured_cmd
 
 
-def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> None:
-    """Pi stage execution should consume JSONL and preserve the session id."""
+def test_run_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
+    """A public Pi session runner cannot bypass the automation admission gate."""
+    with patch("subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            ["pi", "--mode", "json"],
+            0,
+            stdout='{"type":"session","id":"pi-session-789"}',
+            stderr="",
+        )
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_pi_session("prompt", cwd=tmp_path, timeout=30)
+
+    run.assert_not_called()
+
+
+def test_run_pi_text_rejects_unadmitted_execution(tmp_path: Path) -> None:
+    """A public Pi text runner cannot bypass the automation admission gate."""
+    with patch("hephaestus.agents.runtime._run_pi_command") as run:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_pi_text("prompt", cwd=tmp_path, timeout=30)
+
+    run.assert_not_called()
+
+
+def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
+    """Reflective private-helper access cannot bypass the Pi admission boundary."""
+    with patch("subprocess.run") as run:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime._invoke_pi_session(
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+                model="",
+                sandbox="no-tools",
+            )
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime._run_pi_command(
+                ["pi", "--mode", "json"],
+                prompt="prompt",
+                cwd=tmp_path,
+                timeout=30,
+                sandbox="no-tools",
+            )
+
+    run.assert_not_called()
+
+
+def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
+    """A public Pi resume runner cannot bypass the automation admission gate."""
+    with patch("subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            ["pi", "--mode", "json", "--session", "pi-session-789"],
+            0,
+            stdout='{"type":"session","id":"pi-session-789"}',
+            stderr="",
+        )
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.resume_pi_session(
+                "pi-session-789",
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+            )
+
+    run.assert_not_called()
+
+
+def test_run_pi_smoke_session_is_noninteractive_and_tool_free(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """The only unadmitted Pi seam is fixed, ephemeral, and tool-free."""
+    captured_cmd: list[str] = []
+    stdout = "\n".join(
+        [
+            '{"type":"session","id":"pi-session-789"}',
+            '{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+        ]
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="local-alias",
+        )
+
+    assert captured_cmd[:-1] == PI_SMOKE_COMMAND_PREFIX
+    assert result.session_id is None
+    assert result.stdout == "OK"
+
+
+def test_run_pi_smoke_session_accepts_sessionless_terminal_response(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """The ``--no-session`` smoke seam must not require a session header."""
+    captured_cmd: list[str] = []
+    stdout = '{"type":"message_end","message":{"role":"assistant","content":"OK"}}'
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert captured_cmd[:-1] == PI_SMOKE_COMMAND_PREFIX
+    assert result.session_id is None
+    assert result.stdout == "OK"
+
+
+def test_run_pi_smoke_session_redacts_generated_session_from_diagnostics(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """A generated session id must not escape through a smoke result payload."""
+    session_id = "pi-session-789"
+    stdout = "\n".join(
+        [
+            f'{{"type":"session","id":"{session_id}"}}',
+            (
+                '{"type":"message_end","message":{"role":"assistant","content":'
+                f'"completed {session_id}"}}}}'
+            ),
+        ]
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=session_id)
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert result.session_id is None
+    assert session_id not in result.stdout
+    assert session_id not in result.stderr
+    assert agent_runtime.PI_PRIVATE_REDACTION in result.stdout
+    assert agent_runtime.PI_PRIVATE_REDACTION in result.stderr
+
+
+def test_run_pi_smoke_session_redacts_every_observed_session_from_diagnostics(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """A multi-event response must not retain an earlier generated session id."""
+    first_session_id = "pi-session-first"
+    final_session_id = "pi-session-final"
+    stdout = "\n".join(
+        [
+            f'{{"type":"session","id":"{first_session_id}"}}',
+            f'{{"type":"session","id":"{final_session_id}"}}',
+            (
+                '{"type":"message_end","message":{"role":"assistant","content":'
+                f'"completed {first_session_id} and {final_session_id}"}}}}'
+            ),
+        ]
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=stdout,
+            stderr=f"diagnostics {first_session_id} and {final_session_id}",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert result.session_id is None
+    assert first_session_id not in result.stdout
+    assert first_session_id not in result.stderr
+    assert final_session_id not in result.stdout
+    assert final_session_id not in result.stderr
+    assert result.stdout.count(agent_runtime.PI_PRIVATE_REDACTION) == 2
+    assert result.stderr.count(agent_runtime.PI_PRIVATE_REDACTION) == 2
+
+
+def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """The constrained smoke seam must discard an ephemeral Pi session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(
         [
@@ -640,16 +917,16 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
         patch("subprocess.run", side_effect=fake_run),
     ):
-        result = agent_runtime.run_pi_session(
+        result = agent_runtime.run_pi_smoke_session(
             "private prompt content",
             cwd=tmp_path,
             timeout=30,
             model="private-alias",
         )
 
-    assert result.session_id == "pi-session-789"
+    assert result.session_id is None
     assert result.stdout == "pi output"
-    assert captured["cmd"][:-1] == ["pi", "--mode", "json"]
+    assert captured["cmd"][:-1] == PI_SMOKE_COMMAND_PREFIX
     assert captured["cmd"][-1].startswith("@")
     assert "--model" not in captured["cmd"]
     assert "private-alias" not in captured["cmd"]
@@ -659,74 +936,572 @@ def test_run_pi_session_uses_json_mode_and_captures_session(tmp_path: Path) -> N
     assert captured["kwargs"]["cwd"] == tmp_path
     assert captured["kwargs"]["timeout"] == 30
     assert captured["kwargs"]["check"] is True
-    assert captured["kwargs"]["env"]["HEPH_PI_MODEL"] == "private-alias"
+    assert "HEPH_PI_MODEL" not in captured["kwargs"]["env"]
+    assert "private-alias" not in captured["kwargs"]["env"].values()
     assert captured["kwargs"]["env"]["PI_TELEMETRY"] == "0"
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
 
 
-def test_run_pi_session_redacts_private_values_from_failures(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_detaches_parent_stdin(tmp_path: Path) -> None:
+    """The fixed smoke prompt must not absorb data piped to its parent process."""
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+            stderr="",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert result.stdout == "OK"
+    assert captured["kwargs"].get("stdin") is subprocess.DEVNULL
+
+
+def test_run_pi_smoke_session_removes_prompt_after_write_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A prompt encoding failure must not strand its private temporary file."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    with pytest.raises(UnicodeEncodeError):
+        agent_runtime.run_pi_smoke_session("\ud800", cwd=tmp_path, timeout=30)
+
+    assert list(tmp_path.rglob("pi-prompt-*.md")) == []
+
+
+def test_run_pi_smoke_session_rejects_an_unsafe_temp_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ambient temporary roots writable by peers cannot host Pi prompt files."""
+    unsafe_root = tmp_path / "unsafe-temp"
+    unsafe_root.mkdir()
+    unsafe_root.chmod(0o777)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(unsafe_root))
+
+    with patch("subprocess.run") as run:
+        run.return_value = subprocess.CompletedProcess(
+            ["pi"],
+            0,
+            stdout='{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+            stderr="",
+        )
+        with pytest.raises(OSError, match="writable by another user"):
+            agent_runtime.run_pi_smoke_session("smoke prompt", cwd=tmp_path, timeout=30)
+
+    run.assert_not_called()
+
+
+def test_run_pi_smoke_session_uses_an_isolated_private_temp_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pi and its prompt file share a fresh owner-only temporary directory."""
+    ambient_temp = tmp_path / "ambient-temp"
+    ambient_temp.mkdir()
+    ambient_temp.chmod(0o700)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(ambient_temp))
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("TMPDIR", str(ambient_temp))
+    monkeypatch.setenv("TMP", str(ambient_temp))
+    monkeypatch.setenv("TEMP", str(ambient_temp))
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        prompt_path = Path(next(arg[1:] for arg in cmd if arg.startswith("@")))
+        captured["prompt_path"] = prompt_path
+        captured["env"] = kwargs["env"]
+        captured["temp_mode"] = stat.S_IMODE(prompt_path.parent.stat().st_mode)
+        (prompt_path.parent / "pi-created-temp").write_text("temporary", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"type":"message_end","message":{"role":"assistant","content":"OK"}}',
+            stderr="",
+        )
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session("smoke prompt", cwd=tmp_path, timeout=30)
+
+    private_temp = Path(captured["env"]["TMPDIR"])
+    assert result.stdout == "OK"
+    assert private_temp != ambient_temp
+    assert private_temp.parent.parent == ambient_temp
+    assert captured["env"]["TMP"] == str(private_temp)
+    assert captured["env"]["TEMP"] == str(private_temp)
+    assert captured["prompt_path"].parent == private_temp
+    assert captured["temp_mode"] == 0o700
+    assert not private_temp.exists()
+
+
+def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi receives only the explicit runtime environment, never ambient credentials."""
+    monkeypatch.setenv("GH_TOKEN", "github-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-actions-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("PI_TELEMETRY", "1")
+    monkeypatch.setenv("PI_SKIP_VERSION_CHECK", "0")
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setenv("TMPDIR", "/untrusted-temp")
+    monkeypatch.setenv("TMP", "/untrusted-temp")
+    monkeypatch.setenv("TEMP", "/untrusted-temp")
+
+    env = agent_runtime._pi_env(model="private-model-alias")
+
+    assert env["PI_TELEMETRY"] == "0"
+    assert env["PI_SKIP_VERSION_CHECK"] == "1"
+    for name in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "HEPH_PI_PROVIDER",
+        "HEPH_PI_MODEL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    ):
+        assert name not in env
+
+
+@pytest.mark.parametrize(
+    ("stdout", "error"),
+    [
+        ("not Pi JSON output", "JSON event"),
+        ("{}", "JSON event"),
+        ('{"type":"session","id":"pi-session-789"}', "terminal assistant JSON event"),
+        ('{"type":"error","message":"provider failed"}', "terminal assistant JSON event"),
+        ('{"type":"message_end","message":null}', "terminal assistant JSON event"),
+        ('{"type":"message_end","message":{"content":"OK"}}', "terminal assistant JSON event"),
+    ],
+)
+def test_run_pi_smoke_session_rejects_incomplete_event_stdout(
+    tmp_path: Path,
+    stdout: str,
+    error: str,
+) -> None:
+    """The smoke seam must receive a terminal assistant response, not arbitrary JSON."""
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    with (
+        patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(RuntimeError, match=error),
+    ):
+        agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+
+def _assert_pi_exception_chain_is_redacted(exc: BaseException) -> None:
+    """Structured exception chains must not retain unredacted Pi diagnostics."""
+    assert exc.__cause__ is None
+    for chained in (exc.__cause__, exc.__context__):
+        if chained is None:
+            continue
+        diagnostics = " ".join(
+            [
+                str(chained),
+                repr(chained.args),
+                *(
+                    str(getattr(chained, attribute, ""))
+                    for attribute in ("cmd", "output", "stdout", "stderr")
+                ),
+            ]
+        )
+        for private_value in (
+            "private-provider-alias",
+            "private-test-alias",
+            "PRIVATE_ENDPOINT_TOKEN",
+            "private-session-id",
+        ):
+            assert private_value not in diagnostics
+
+
+def test_run_pi_smoke_session_redacts_private_values_from_failures(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """Pi subprocess failure diagnostics should not leak local aliases or tokens."""
     (tmp_path / ".heph-private-denylist").write_text(
-        "PRIVATE_ENDPOINT_TOKEN\n",
+        "PRIVATE_ENDPOINT_TOKEN\nprivate-session-id\n",
         encoding="utf-8",
     )
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.CalledProcessError(
             7,
-            cmd,
-            output="PRIVATE_ENDPOINT_TOKEN",
-            stderr="private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            [*cmd, "private-session-id"],
+            output="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            stderr="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
         )
 
-    with patch("subprocess.run", side_effect=fake_run):
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            agent_runtime.run_pi_session(
-                "prompt",
-                cwd=tmp_path,
-                timeout=30,
-                model="private-test-alias",
-            )
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "HEPH_PI_PROVIDER": "private-provider-alias",
+                "HEPH_PI_MODEL": "private-test-alias",
+            },
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.CalledProcessError) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-test-alias",
+        )
 
     exc = exc_info.value
+    assert "private-provider-alias" not in str(exc.cmd)
     assert "private-test-alias" not in str(exc.cmd)
+    assert "private-provider-alias" not in (exc.stdout or "")
+    assert "private-test-alias" not in (exc.stdout or "")
+    assert "private-provider-alias" not in (exc.stderr or "")
+    assert "private-test-alias" not in (exc.stderr or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
+    assert "private-session-id" not in str(exc.cmd)
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
+    _assert_pi_exception_chain_is_redacted(exc)
 
 
-def test_run_pi_session_redacts_private_values_from_timeouts(tmp_path: Path) -> None:
+def test_run_pi_smoke_session_redacts_private_values_from_timeouts(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """Pi timeout diagnostics should redact cmd, partial stdout, and stderr."""
     (tmp_path / ".heph-private-denylist").write_text(
-        "PRIVATE_ENDPOINT_TOKEN\n",
+        "PRIVATE_ENDPOINT_TOKEN\nprivate-session-id\n",
         encoding="utf-8",
     )
 
     def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(
-            cmd,
+            [*cmd, "private-session-id"],
             7,
-            output="private-test-alias PRIVATE_ENDPOINT_TOKEN",
-            stderr="PRIVATE_ENDPOINT_TOKEN private-test-alias",
+            output="private-provider-alias private-test-alias PRIVATE_ENDPOINT_TOKEN",
+            stderr="PRIVATE_ENDPOINT_TOKEN private-test-alias private-provider-alias",
         )
 
-    with patch("subprocess.run", side_effect=fake_run):
-        with pytest.raises(subprocess.TimeoutExpired) as exc_info:
-            agent_runtime.run_pi_session(
-                "prompt",
-                cwd=tmp_path,
-                timeout=30,
-                model="private-test-alias",
-            )
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "HEPH_PI_PROVIDER": "private-provider-alias",
+                "HEPH_PI_MODEL": "private-test-alias",
+            },
+        ),
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.TimeoutExpired) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="private-test-alias",
+        )
 
     exc = exc_info.value
+    assert "private-provider-alias" not in str(exc)
     assert "private-test-alias" not in str(exc)
+    assert "private-provider-alias" not in str(exc.cmd)
     assert "private-test-alias" not in str(exc.cmd)
+    assert "private-provider-alias" not in (exc.output or "")
+    assert "private-test-alias" not in (exc.output or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.output or "")
+    assert "private-provider-alias" not in (exc.stdout or "")
+    assert "private-test-alias" not in (exc.stdout or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stdout or "")
+    assert "private-provider-alias" not in (exc.stderr or "")
+    assert "private-test-alias" not in (exc.stderr or "")
     assert "PRIVATE_ENDPOINT_TOKEN" not in (exc.stderr or "")
+    assert "private-session-id" not in str(exc.cmd)
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.output or "")
     assert agent_runtime.PI_PRIVATE_REDACTION in (exc.stderr or "")
+    _assert_pi_exception_chain_is_redacted(exc)
+
+
+def test_run_pi_smoke_session_redacts_generated_session_from_nonzero_failure(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """A failed smoke command must not disclose a just-created Pi session id."""
+    session_id = "generated-pi-session-id"
+    partial_stdout = f'{{"type":"session","id":"{session_id}"}}\n{{"type":"error"}}'
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            7,
+            cmd,
+            output=partial_stdout,
+            stderr=f"provider failed after {session_id}",
+        )
+
+    with (
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.CalledProcessError) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session("prompt", cwd=tmp_path, timeout=30)
+
+    diagnostics = " ".join(
+        str(value)
+        for value in (
+            exc_info.value,
+            exc_info.value.args,
+            exc_info.value.cmd,
+            exc_info.value.output,
+            exc_info.value.stderr,
+        )
+    )
+    assert session_id not in diagnostics
+    assert agent_runtime.PI_PRIVATE_REDACTION in diagnostics
+
+
+def test_run_pi_smoke_session_redacts_generated_session_from_timeout(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """A timed-out smoke command must not disclose a just-created Pi session id."""
+    session_id = "generated-pi-session-id"
+    partial_stdout = f'{{"type":"session","id":"{session_id}"}}\n{{"type":"error"}}'
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd,
+            7,
+            output=partial_stdout,
+            stderr=f"provider timed out after {session_id}",
+        )
+
+    with (
+        patch("subprocess.run", side_effect=fake_run),
+        pytest.raises(subprocess.TimeoutExpired) as exc_info,
+    ):
+        agent_runtime.run_pi_smoke_session("prompt", cwd=tmp_path, timeout=30)
+
+    diagnostics = " ".join(
+        str(value)
+        for value in (
+            exc_info.value,
+            exc_info.value.args,
+            exc_info.value.cmd,
+            exc_info.value.output,
+            exc_info.value.stderr,
+        )
+    )
+    assert session_id not in diagnostics
+    assert agent_runtime.PI_PRIVATE_REDACTION in diagnostics
+
+
+def test_pi_private_redaction_tokens_merge_project_and_local_denylists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The committed policy and local policy must both protect Pi diagnostics."""
+    monkeypatch.delenv("HEPH_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("HEPH_PI_MODEL", raising=False)
+    (tmp_path / ".heph-project-denylist").write_text(
+        "PROJECT_DENYLIST_TOKEN\nSHARED_DENYLIST_TOKEN\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".heph-private-denylist").write_text(
+        "LOCAL_DENYLIST_TOKEN\nSHARED_DENYLIST_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    tokens = agent_runtime.pi_private_redaction_tokens(tmp_path)
+
+    assert "PROJECT_DENYLIST_TOKEN" in tokens
+    assert "LOCAL_DENYLIST_TOKEN" in tokens
+    assert tokens.count("SHARED_DENYLIST_TOKEN") == 1
+
+
+def test_pi_private_redaction_tokens_fail_closed_on_broken_policy_link(tmp_path: Path) -> None:
+    """A configured-but-unreadable privacy policy cannot silently disable redaction."""
+    (tmp_path / ".heph-project-denylist").symlink_to("missing-policy-file")
+
+    with pytest.raises(OSError, match="not a regular file"):
+        agent_runtime.pi_private_redaction_tokens(tmp_path, require_readable=True)
+
+
+def test_prepare_pi_private_log_dir_creates_unique_owner_only_run_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each smoke run must receive a distinct private directory below its safe root."""
+    assert hasattr(agent_runtime, "prepare_pi_private_log_dir")
+    verify_calls: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        agent_runtime,
+        "_verify_pi_private_acl",
+        lambda path, *, clear: verify_calls.append((path, clear)),
+    )
+    root = tmp_path / "logs"
+
+    first = agent_runtime.prepare_pi_private_log_dir(root)
+    second = agent_runtime.prepare_pi_private_log_dir(root)
+
+    assert first.parent == root
+    assert second.parent == root
+    assert first != second
+    assert first.name.startswith("pi-smoke-")
+    assert second.name.startswith("pi-smoke-")
+    assert stat.S_IMODE(first.stat().st_mode) & 0o077 == 0
+    assert stat.S_IMODE(second.stat().st_mode) & 0o077 == 0
+    assert (first, True) in verify_calls
+    assert (second, True) in verify_calls
+
+
+def test_prepare_pi_private_log_dir_accepts_a_sticky_ancestor_after_atomic_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sticky ancestor cannot replace a newly owned private run directory."""
+    assert hasattr(agent_runtime, "prepare_pi_private_log_dir")
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    sticky_parent = tmp_path / "sticky"
+    sticky_parent.mkdir()
+    sticky_parent.chmod(0o1777)
+
+    run_dir = agent_runtime.prepare_pi_private_log_dir(sticky_parent / "logs")
+
+    assert run_dir.parent == sticky_parent / "logs"
+    assert stat.S_IMODE(run_dir.stat().st_mode) & 0o077 == 0
+
+
+def test_prepare_pi_private_log_dir_rejects_nonsticky_writable_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An artifact root under a replaceable directory must fail before use."""
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+    unsafe_parent = tmp_path / "unsafe"
+    unsafe_parent.mkdir()
+    unsafe_parent.chmod(0o777)
+
+    with pytest.raises(OSError, match="writable by another user"):
+        agent_runtime.prepare_pi_private_log_dir(unsafe_parent / "logs")
+
+
+def test_prepare_pi_private_log_dir_accepts_a_safe_ancestor_with_an_access_acl(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Inherited ancestor ACLs do not invalidate a freshly private leaf directory."""
+    acl_ancestor = tmp_path / "acl-ancestor"
+    acl_ancestor.mkdir()
+    acl_ancestor.chmod(0o755)
+
+    def verify_acl(path: Path, *, clear: bool) -> None:
+        if path == acl_ancestor:
+            raise OSError("inherited access ACL")
+
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", verify_acl)
+
+    run_dir = agent_runtime.prepare_pi_private_log_dir(acl_ancestor / "logs")
+
+    assert run_dir.is_dir()
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+
+
+def test_prepare_pi_private_temp_dir_canonicalizes_a_system_temp_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The canonical system temp target is verified instead of its alias path."""
+    real_temp_root = tmp_path / "real-temp"
+    real_temp_root.mkdir(mode=0o700)
+    temp_alias = tmp_path / "temp-alias"
+    temp_alias.symlink_to(real_temp_root, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_alias))
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+
+    private_temp = agent_runtime._prepare_pi_private_temp_dir()
+
+    assert private_temp.parent.parent == real_temp_root
+    assert stat.S_IMODE(private_temp.stat().st_mode) == 0o700
+
+
+def test_verify_pi_private_prompt_file_rejects_a_replaced_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A prompt replacement must be rejected before its path reaches Pi."""
+    target = tmp_path / "target.md"
+    target.write_text("private prompt", encoding="utf-8")
+    prompt_path = tmp_path / "pi-prompt.md"
+    prompt_path.symlink_to(target)
+    monkeypatch.setattr(agent_runtime, "_verify_pi_private_acl", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(OSError, match="regular file, not a symlink"):
+        agent_runtime._verify_pi_private_prompt_file(prompt_path)
+
+
+def test_linux_pi_private_filesystem_type_uses_the_most_specific_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ACL policy follows the deepest escaped mount path from mountinfo."""
+    mountinfo = "\n".join(
+        (
+            "36 25 0:31 / / rw,relatime - overlay overlay rw",
+            "42 36 0:32 / /safe\\040root rw,relatime - nfs server:/share rw",
+        )
+    )
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: mountinfo)
+
+    assert agent_runtime._linux_pi_private_filesystem_type(Path("/safe root/worktree")) == "nfs"
+
+
+def test_verify_pi_private_acl_fails_closed_for_nfs_style_acl_filesystems(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Linux filesystems with non-POSIX ACL semantics must not be trusted by omission."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_linux_pi_private_filesystem_type",
+        lambda _path: "nfs",
+        raising=False,
+    )
+
+    def absent_posix_acl(*_args: Any, **_kwargs: Any) -> bytes:
+        raise OSError(errno.ENODATA, "missing POSIX ACL")
+
+    monkeypatch.setattr(os, "getxattr", absent_posix_acl, raising=False)
+
+    with pytest.raises(OSError, match="local filesystem with verifiable POSIX ACLs"):
+        agent_runtime._verify_pi_private_acl(tmp_path, clear=False)
+
+
+def test_prepare_pi_private_log_dir_fails_closed_without_acl_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Private artifacts cannot be created when ACL grants cannot be verified."""
+    monkeypatch.setattr(agent_runtime, "_pi_private_log_permissions_supported", lambda: False)
+
+    with pytest.raises(OSError, match="requires verifiable private artifact permissions"):
+        agent_runtime.prepare_pi_private_log_dir(tmp_path / "logs")
 
 
 def test_redact_pi_private_values_replaces_all_tokens() -> None:
@@ -743,8 +1518,11 @@ def test_redact_pi_private_values_replaces_all_tokens() -> None:
     )
 
 
-def test_run_pi_session_read_only_restricts_tools(tmp_path: Path) -> None:
-    """Read-only Pi stages should request a read-only tool surface."""
+def test_run_pi_smoke_session_disables_tools(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
+    """The unadmitted smoke seam should disable every built-in and extension tool."""
     captured_cmd: list[str] = []
     stdout = "\n".join(
         [
@@ -761,21 +1539,23 @@ def test_run_pi_session_read_only_restricts_tools(tmp_path: Path) -> None:
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
         patch("subprocess.run", side_effect=fake_run),
     ):
-        result = agent_runtime.run_pi_session(
+        result = agent_runtime.run_pi_smoke_session(
             "review prompt",
             cwd=tmp_path,
             timeout=30,
-            sandbox="read-only",
         )
 
     assert result.stdout == "pi output"
-    tools_index = captured_cmd.index("--tools")
-    assert captured_cmd[tools_index + 1] == agent_runtime.PI_READ_ONLY_TOOLS
+    assert "--no-tools" in captured_cmd
+    assert "--tools" not in captured_cmd
     assert captured_cmd[-1].startswith("@")
     assert "review prompt" not in captured_cmd
 
 
-def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Path) -> None:
+def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(
+    tmp_path: Path,
+    private_pi_temp: Path,
+) -> None:
     """Pi feedback loops should resume the captured session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(
@@ -794,6 +1574,7 @@ def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Pa
 
     with (
         patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
         patch("subprocess.run", side_effect=fake_run),
     ):
         result = agent_runtime.resume_pi_session(
@@ -813,7 +1594,8 @@ def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Pa
     assert "private-alias" not in captured["cmd"]
     assert "private feedback content" not in captured["cmd"]
     assert captured["prompt_text"] == "private feedback content"
-    assert captured["kwargs"]["env"]["HEPH_PI_MODEL"] == "private-alias"
+    assert "HEPH_PI_MODEL" not in captured["kwargs"]["env"]
+    assert "private-alias" not in captured["kwargs"]["env"].values()
     assert result.stdout == "resumed"
     assert result.session_id == "pi-session-789"
 
@@ -851,6 +1633,18 @@ def test_direct_agent_model_uses_operator_pi_alias_and_codex_default() -> None:
         assert agent_runtime.direct_agent_model("claude", "HEPH_IMPLEMENTER_MODEL") == (
             "phase-model"
         )
+        assert (
+            agent_runtime.direct_agent_model("pi", codex_default="standalone-default")
+            == "operator-local-alias"
+        )
+        assert (
+            agent_runtime.direct_agent_model("codex", codex_default="standalone-default")
+            == "standalone-default"
+        )
+        assert (
+            agent_runtime.direct_agent_model("claude", codex_default="standalone-default")
+            == "standalone-default"
+        )
 
 
 def test_agent_json_stdout_wraps_direct_agent_text() -> None:
@@ -858,6 +1652,39 @@ def test_agent_json_stdout_wraps_direct_agent_text() -> None:
     assert agent_runtime.agent_json_stdout("learned", "pi-session") == (
         '{"result": "learned", "session_id": "pi-session", "is_error": false}'
     )
+
+
+def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
+    """The shared text boundary cannot bypass Pi admission through direct use."""
+    with patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
+
+    run_pi_text.assert_not_called()
+
+
+def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
+    """The shared session boundary cannot bypass Pi admission through direct use."""
+    with patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.run_agent_session("pi", "prompt", cwd=tmp_path, timeout=30)
+
+    run_pi_session.assert_not_called()
+
+
+def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
+    """The shared resume boundary cannot bypass Pi admission through direct use."""
+    with patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session:
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.resume_agent_session(
+                "pi",
+                "pi-session-123",
+                "prompt",
+                cwd=tmp_path,
+                timeout=30,
+            )
+
+    resume_pi_session.assert_not_called()
 
 
 def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
@@ -1001,8 +1828,8 @@ def test_is_agent_authenticated_uses_env_configured_status_timeout(
     assert mock_run.call_args.kwargs["timeout"] == 77
 
 
-def test_resolve_agent_uses_pi_when_claude_and_codex_absent(tmp_path: Path) -> None:
-    """Pi is the third auto-detected backend after Claude and Codex."""
+def test_resolve_agent_rejects_pi_auto_detection_until_preflight_exists(tmp_path: Path) -> None:
+    """Pi cannot enter normal automation before the required preflight exists."""
     _write_pi_models_config(tmp_path)
     with patch("hephaestus.agents.runtime.shutil.which") as mock_which:
         mock_which.side_effect = lambda name: "/bin/pi" if name == "pi" else None
@@ -1016,11 +1843,12 @@ def test_resolve_agent_uses_pi_when_claude_and_codex_absent(tmp_path: Path) -> N
                 ),
             ),
         ):
-            assert agent_runtime.resolve_agent(None) == "pi"
+            with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+                agent_runtime.resolve_agent(None)
 
 
-def test_resolve_agent_explicit_pi(tmp_path: Path) -> None:
-    """An explicit Pi backend should be accepted when the CLI preflight succeeds."""
+def test_resolve_agent_explicit_pi_fails_closed_until_preflight_exists(tmp_path: Path) -> None:
+    """A local Pi model alias is insufficient evidence for automation admission."""
     _write_pi_models_config(tmp_path)
     with (
         patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"),
@@ -1032,18 +1860,19 @@ def test_resolve_agent_explicit_pi(tmp_path: Path) -> None:
             ),
         ),
     ):
-        assert agent_runtime.resolve_agent("pi") == "pi"
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+            agent_runtime.resolve_agent("pi")
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:
-    """An explicit Pi selection should fail clearly when the CLI is missing."""
+    """An explicit Pi selection reports the actionable preflight boundary first."""
     with patch("hephaestus.agents.runtime.shutil.which", return_value=None):
-        with pytest.raises(RuntimeError, match="not installed on PATH"):
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
             agent_runtime.resolve_agent("pi")
 
 
 def test_resolve_agent_explicit_rejects_unconfigured_pi(tmp_path: Path) -> None:
-    """An installed Pi CLI without model configuration should fail preflight."""
+    """An installed Pi CLI does not bypass the package/scope preflight gate."""
     with (
         patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/pi"),
         patch("hephaestus.agents.runtime.Path.home", return_value=tmp_path),
@@ -1054,7 +1883,7 @@ def test_resolve_agent_explicit_rejects_unconfigured_pi(tmp_path: Path) -> None:
             ),
         ),
     ):
-        with pytest.raises(RuntimeError, match="not authenticated"):
+        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
             agent_runtime.resolve_agent("pi")
 
 

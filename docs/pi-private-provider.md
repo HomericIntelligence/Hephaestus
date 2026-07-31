@@ -8,6 +8,7 @@ or operator-local aliases.
 Use placeholders in documentation:
 
 - `<operator-local-alias>`
+- `<operator-local-provider-alias>`
 - `<private-provider-url>`
 - `<private-model-name>`
 
@@ -19,12 +20,53 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
 pi --version
 ```
 
-Set the local alias at runtime:
+Set the local smoke sentinels at runtime:
 
 ```bash
+export HEPH_PI_PROVIDER=<operator-local-provider-alias>
 export HEPH_PI_MODEL=<operator-local-alias>
 python3 scripts/pi_smoke.py
 ```
+
+Both variables are required by the explicit smoke seam. They are not yet
+forwarded as Pi native provider/model selection arguments, so a successful
+smoke validates only the bounded adapter path, not a requested provider/model
+selection. That seam is non-interactive and ephemeral: it disables sessions,
+tools, project approval/context, and extension, skill, prompt-template, and
+theme discovery. #2516 owns configuration discovery and preflight; #2518 owns
+native selection and scoped pipeline admission.
+
+The smoke command starts Pi with a minimized execution, configuration, locale,
+and temporary-directory environment. It disconnects Pi from the caller's
+standard input, so a piped parent input cannot become part of the fixed smoke
+prompt. It does not forward the `HEPH_PI_*` sentinels, arbitrary Pi settings,
+GitHub/cloud credentials, or an operator's telemetry preference; it forces
+`PI_TELEMETRY=0` and `PI_SKIP_VERSION_CHECK=1`. A generated Pi session ID is
+discarded and never printed or written to the diagnostic artifact.
+
+The smoke command writes each artifact below a fresh, owner-only
+`pi-smoke-*` run directory under `--log-dir`; it never reuses a caller-supplied
+directory for an artifact. Before Pi runs, the wrapper verifies the complete
+path chain has no symlinks or replaceable non-sticky ancestor, clears and
+verifies the new run directory's access ACLs, and fails closed when it cannot
+establish that boundary. Existing log roots must also have no access ACL grant.
+This permits safe sticky system roots such as `/tmp` while preserving atomic
+creation and ownership verification for the run directory. It loads both
+`.heph-project-denylist` and `.heph-private-denylist` from its
+working-directory ancestry and the checkout ancestry, fails closed if a found
+policy file cannot be read, and redacts matching values from displayed log
+paths. On Windows or a POSIX platform without a verifiable ACL mechanism, it
+fails closed before invoking Pi; do not work around that guard by redirecting
+output to a shared path.
+
+For Slurm, use `python3 scripts/pi_smoke_slurm.py`. The wrapper invokes
+`sbatch` with a minimized environment, writes scheduler artifacts only inside
+the same fresh ACL-verified private run directory, and redacts scheduler
+diagnostics. The default
+`scripts/slurm/pi_smoke.sbatch` template uses the same fixed export list and
+suppresses scheduler stdout/stderr; inspect the private Pi smoke artifact for
+the result. An operator-supplied `--template` remains outside this smoke
+conformance boundary.
 
 Create `.heph-private-denylist` at the repository root on machines that know
 private values. Add one fixed string per line, including any private alias,
@@ -36,8 +78,16 @@ Before committing, run:
 python3 scripts/check_private_denylist.py --staged --tracked
 ```
 
-The guard prints only file paths and line numbers. It intentionally never prints
-matched values or source lines.
+The guard prints only file paths and line numbers. It intentionally never
+prints matched values or source lines.
+
+## Automation admission
+
+This configuration supports explicit local adapter-smoke validation. Normal
+Hephaestus automation intentionally rejects `--agent pi` until #2516 verifies
+the required package/capability inventory and #2518 enforces lifecycle and
+tool scopes. Do not treat a local model configuration or a successful smoke
+command as automation admission evidence.
 
 ## Project-level denylist (committed)
 
