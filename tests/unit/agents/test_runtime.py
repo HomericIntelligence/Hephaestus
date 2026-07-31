@@ -770,12 +770,63 @@ def test_run_pi_smoke_session_is_noninteractive_and_tool_free(tmp_path: Path) ->
         )
 
     assert captured_cmd[:-1] == PI_SMOKE_COMMAND_PREFIX
-    assert result.session_id == "pi-session-789"
+    assert result.session_id is None
     assert result.stdout == "OK"
 
 
-def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path) -> None:
-    """The constrained smoke seam should consume JSONL and preserve its session id."""
+def test_run_pi_smoke_session_accepts_sessionless_terminal_response(tmp_path: Path) -> None:
+    """The ``--no-session`` smoke seam must not require a session header."""
+    captured_cmd: list[str] = []
+    stdout = '{"type":"message_end","message":{"role":"assistant","content":"OK"}}'
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert captured_cmd[:-1] == PI_SMOKE_COMMAND_PREFIX
+    assert result.session_id is None
+    assert result.stdout == "OK"
+
+
+def test_run_pi_smoke_session_redacts_generated_session_from_diagnostics(tmp_path: Path) -> None:
+    """A generated session id must not escape through a smoke result payload."""
+    session_id = "pi-session-789"
+    stdout = "\n".join(
+        [
+            f'{{"type":"session","id":"{session_id}"}}',
+            (
+                '{"type":"message_end","message":{"role":"assistant","content":'
+                f'"completed {session_id}"}}}}'
+            ),
+        ]
+    )
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr=session_id)
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = agent_runtime.run_pi_smoke_session(
+            "smoke prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert result.session_id is None
+    assert session_id not in result.stdout
+    assert session_id not in result.stderr
+    assert agent_runtime.PI_PRIVATE_REDACTION in result.stdout
+    assert agent_runtime.PI_PRIVATE_REDACTION in result.stderr
+
+
+def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(tmp_path: Path) -> None:
+    """The constrained smoke seam must discard an ephemeral Pi session id."""
     captured: dict[str, Any] = {}
     stdout = "\n".join(
         [
@@ -804,7 +855,7 @@ def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path
             model="private-alias",
         )
 
-    assert result.session_id == "pi-session-789"
+    assert result.session_id is None
     assert result.stdout == "pi output"
     assert captured["cmd"][:-1] == PI_SMOKE_COMMAND_PREFIX
     assert captured["cmd"][-1].startswith("@")
@@ -816,9 +867,36 @@ def test_run_pi_smoke_session_uses_json_mode_and_captures_session(tmp_path: Path
     assert captured["kwargs"]["cwd"] == tmp_path
     assert captured["kwargs"]["timeout"] == 30
     assert captured["kwargs"]["check"] is True
-    assert captured["kwargs"]["env"]["HEPH_PI_MODEL"] == "private-alias"
+    assert "HEPH_PI_MODEL" not in captured["kwargs"]["env"]
+    assert "private-alias" not in captured["kwargs"]["env"].values()
     assert captured["kwargs"]["env"]["PI_TELEMETRY"] == "0"
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
+
+
+def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi receives only the explicit runtime environment, never ambient credentials."""
+    monkeypatch.setenv("GH_TOKEN", "github-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-actions-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("PI_TELEMETRY", "1")
+    monkeypatch.setenv("PI_SKIP_VERSION_CHECK", "0")
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
+    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+
+    env = agent_runtime._pi_env(model="private-model-alias")
+
+    assert env["PI_TELEMETRY"] == "0"
+    assert env["PI_SKIP_VERSION_CHECK"] == "1"
+    for name in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "HEPH_PI_PROVIDER",
+        "HEPH_PI_MODEL",
+    ):
+        assert name not in env
 
 
 @pytest.mark.parametrize(
@@ -1062,7 +1140,8 @@ def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(tmp_path: Pa
     assert "private-alias" not in captured["cmd"]
     assert "private feedback content" not in captured["cmd"]
     assert captured["prompt_text"] == "private feedback content"
-    assert captured["kwargs"]["env"]["HEPH_PI_MODEL"] == "private-alias"
+    assert "HEPH_PI_MODEL" not in captured["kwargs"]["env"]
+    assert "private-alias" not in captured["kwargs"]["env"].values()
     assert result.stdout == "resumed"
     assert result.session_id == "pi-session-789"
 

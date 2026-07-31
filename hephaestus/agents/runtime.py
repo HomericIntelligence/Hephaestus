@@ -353,32 +353,83 @@ def agent_display_name(agent: str) -> str:
         raise ValueError(f"Unsupported agent: {agent}") from e
 
 
-def pi_private_redaction_tokens(cwd: Path, model: str = "") -> tuple[str, ...]:
-    """Return local Pi values that must be redacted from publishable diagnostics."""
-    tokens: list[str] = []
-    for candidate in (
-        model,
-        os.environ.get(PI_MODEL_ENV, ""),
-        os.environ.get(PI_PROVIDER_ENV, ""),
-    ):
-        value = candidate.strip()
-        if value:
-            tokens.append(value)
+def _resolve_pi_denylist_root(root: Path, *, require_readable: bool) -> Path | None:
+    """Resolve a denylist search root, optionally failing closed on an error."""
+    try:
+        return root.resolve()
+    except OSError as exc:
+        if require_readable:
+            raise OSError("Unable to resolve Pi private denylist root") from exc
+        return None
 
-    resolved_cwd = cwd.resolve()
-    for parent in (resolved_cwd, *resolved_cwd.parents):
-        denylist = parent / PI_PRIVATE_DENYLIST_FILENAME
-        if not denylist.is_file():
+
+def _read_pi_private_denylist(
+    denylist: Path,
+    *,
+    require_readable: bool,
+) -> tuple[str, ...] | None:
+    """Read one local denylist, returning ``None`` when it is absent."""
+    try:
+        if not denylist.exists():
+            return None
+    except OSError as exc:
+        if require_readable:
+            raise OSError("Unable to inspect Pi private denylist") from exc
+        return ()
+    if not denylist.is_file():
+        if require_readable:
+            raise OSError("Pi private denylist is not a regular file")
+        return ()
+    try:
+        lines = denylist.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        if require_readable:
+            raise OSError("Unable to read Pi private denylist") from exc
+        return ()
+    return tuple(token for line in lines if (token := line.strip()) and not token.startswith("#"))
+
+
+def pi_private_redaction_tokens(
+    cwd: Path,
+    model: str = "",
+    *,
+    additional_roots: Iterable[Path] = (),
+    require_readable: bool = False,
+) -> tuple[str, ...]:
+    """Return local Pi values that must be redacted from publishable diagnostics.
+
+    ``additional_roots`` lets an entry point protect the checkout-level local
+    denylist even when it deliberately invokes Pi from another directory.  A
+    caller that will publish diagnostics can set ``require_readable`` to fail
+    closed instead of running without a configured local privacy policy.
+    """
+    tokens = [
+        value
+        for candidate in (
+            model,
+            os.environ.get(PI_MODEL_ENV, ""),
+            os.environ.get(PI_PROVIDER_ENV, ""),
+        )
+        if (value := candidate.strip())
+    ]
+    seen_denylists: set[Path] = set()
+    for root in (cwd, *additional_roots):
+        resolved_root = _resolve_pi_denylist_root(root, require_readable=require_readable)
+        if resolved_root is None:
             continue
-        try:
-            lines = denylist.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
+        for parent in (resolved_root, *resolved_root.parents):
+            denylist = parent / PI_PRIVATE_DENYLIST_FILENAME
+            if denylist in seen_denylists:
+                continue
+            seen_denylists.add(denylist)
+            denylist_tokens = _read_pi_private_denylist(
+                denylist,
+                require_readable=require_readable,
+            )
+            if denylist_tokens is None:
+                continue
+            tokens.extend(denylist_tokens)
             break
-        for line in lines:
-            token = line.strip()
-            if token and not token.startswith("#"):
-                tokens.append(token)
-        break
 
     return tuple(dict.fromkeys(tokens))
 
@@ -869,12 +920,36 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
 
 
 def _pi_env(*, model: str = "") -> dict[str, str]:
-    """Return a privacy-biased environment for Pi subprocesses."""
-    env = os.environ.copy()
-    if model:
-        env[PI_MODEL_ENV] = model
-    env.setdefault("PI_TELEMETRY", "0")
-    env.setdefault("PI_SKIP_VERSION_CHECK", "1")
+    """Return the minimized, privacy-enforcing environment for Pi subprocesses."""
+    # The public smoke sentinel is only input to Hephaestus validation and
+    # redaction; it is not a native Pi configuration channel.
+    del model
+    safe_names = (
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "COMSPEC",
+        "PATHEXT",
+    )
+    env = {name: value for name in safe_names if (value := os.environ.get(name))}
+    env.setdefault("PATH", os.defpath)
+    env["PI_TELEMETRY"] = "0"
+    env["PI_SKIP_VERSION_CHECK"] = "1"
     return env
 
 
@@ -1043,8 +1118,8 @@ def run_pi_smoke_session(
     timeout: int,
     model: str = "",
 ) -> AgentRunResult:
-    """Run the explicit operator smoke seam with fixed tool-free Pi scope."""
-    return _invoke_pi_session(
+    """Run the fixed tool-free smoke seam without retaining a Pi session id."""
+    result = _invoke_pi_session(
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
@@ -1053,6 +1128,12 @@ def run_pi_smoke_session(
         base_cmd=_pi_smoke_base_cmd(),
         require_json_event=True,
         _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
+    )
+    session_tokens = (result.session_id,) if result.session_id else ()
+    return AgentRunResult(
+        stdout=redact_pi_private_values(result.stdout, session_tokens),
+        stderr=redact_pi_private_values(result.stderr, session_tokens),
+        session_id=None,
     )
 
 

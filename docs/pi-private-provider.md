@@ -36,10 +36,20 @@ tools, project approval/context, and extension, skill, prompt-template, and
 theme discovery. #2516 owns configuration discovery and preflight; #2518 owns
 native selection and scoped pipeline admission.
 
+The smoke command starts Pi with a minimized execution, configuration, locale,
+and temporary-directory environment. It does not forward the `HEPH_PI_*`
+sentinels, arbitrary Pi settings, GitHub/cloud credentials, or an operator's
+telemetry preference; it forces `PI_TELEMETRY=0` and
+`PI_SKIP_VERSION_CHECK=1`. A generated Pi session ID is discarded and never
+printed or written to the diagnostic artifact.
+
 The smoke command writes a local diagnostic artifact and requires user-only
-file permissions for it. On Windows it fails closed before invoking Pi until a
-user-only ACL implementation is available; do not work around that guard by
-redirecting output to a shared path.
+file permissions for it. It loads `.heph-private-denylist` from both its
+working-directory ancestry and the checkout ancestry, fails closed if a found
+denylist cannot be read, and redacts matching values from displayed log paths.
+On Windows it fails closed before invoking Pi until a user-only ACL
+implementation is available; do not work around that guard by redirecting
+output to a shared path.
 
 Create `.heph-private-denylist` at the repository root on machines that know
 private values. Add one fixed string per line, including any private alias,

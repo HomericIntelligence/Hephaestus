@@ -31,6 +31,7 @@ from hephaestus.agents.runtime import (
 
 DEFAULT_PROMPT = "Reply with exactly: OK"
 DEFAULT_LOG_DIR = Path("pi-smoke-logs")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _private_smoke_log_permissions_supported() -> bool:
@@ -73,9 +74,9 @@ def _write_smoke_log(
     log_dir.mkdir(parents=True, exist_ok=True)
     epoch_ns = time.time_ns()
     log_path = log_dir / f"pi-smoke-local-{epoch_ns}.log"
-    print(f"NOTE: writing smoke log to {log_path}", file=sys.stderr)
+    display_path = redact_pi_private_values(str(log_path), redaction_tokens)
+    print(f"NOTE: writing smoke log to {display_path}", file=sys.stderr)
     lines = [
-        f"session_id: {redact_pi_private_values(result.session_id or '', redaction_tokens)}",
         f"stdout: {redact_pi_private_values(result.stdout, redaction_tokens)}",
         f"stderr: {redact_pi_private_values(result.stderr, redaction_tokens)}",
         "",
@@ -95,7 +96,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: missing required env vars: {', '.join(missing)}", file=sys.stderr)
         return 2
     model = os.environ.get(PI_MODEL_ENV, "").strip()
-    redaction_tokens = pi_private_redaction_tokens(args.cwd, model)
+    try:
+        redaction_tokens = pi_private_redaction_tokens(
+            args.cwd,
+            model,
+            additional_roots=(REPOSITORY_ROOT,),
+            require_readable=True,
+        )
+    except OSError:
+        print("ERROR: unable to load Pi private denylist safely", file=sys.stderr)
+        return 1
     try:
         _require_private_smoke_log_permissions()
     except OSError as exc:
@@ -130,10 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: could not write Pi smoke log: {detail}", file=sys.stderr)
         return 1
     print(redact_pi_private_values(result.stdout, redaction_tokens))
-    if result.session_id:
-        session_id = redact_pi_private_values(result.session_id, redaction_tokens)
-        print(f"SESSION_ID={session_id}", file=sys.stderr)
-    print(f"LOG_FILE={log_path}", file=sys.stderr)
+    display_log_path = redact_pi_private_values(str(log_path), redaction_tokens)
+    print(f"LOG_FILE={display_log_path}", file=sys.stderr)
     return 0
 
 

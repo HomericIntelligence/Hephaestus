@@ -14,7 +14,20 @@ from hephaestus.agents.runtime import REQUIRED_ALIAS_ENVS, missing_pi_alias_env
 DEFAULT_LOG_DIR = Path("pi-smoke-logs")
 DEFAULT_TEMPLATE = Path("scripts/slurm/pi_smoke.sbatch")
 LOG_DIR_ENV = "HEPH_PI_SMOKE_LOG_DIR"
-EXPORT_NAMES = ("ALL", *REQUIRED_ALIAS_ENVS, LOG_DIR_ENV)
+EXPORT_NAMES = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    *REQUIRED_ALIAS_ENVS,
+    LOG_DIR_ENV,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:

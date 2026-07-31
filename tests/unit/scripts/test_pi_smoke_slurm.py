@@ -23,6 +23,8 @@ def test_submit_uses_export_names_without_alias_values(
     """Slurm submission must export alias env var names, never alias values."""
     monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
     monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setenv("GH_TOKEN", "github-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     run = Mock(
         return_value=subprocess.CompletedProcess(
             ["sbatch"],
@@ -37,11 +39,14 @@ def test_submit_uses_export_names_without_alias_values(
 
     cmd = run.call_args.args[0]
     cmd_text = "\0".join(cmd)
-    assert "--export=ALL,HEPH_PI_PROVIDER,HEPH_PI_MODEL,HEPH_PI_SMOKE_LOG_DIR" in cmd
+    assert f"--export={','.join(_mod.EXPORT_NAMES)}" in cmd
+    assert "ALL" not in _mod.EXPORT_NAMES
     assert f"--output={tmp_path / 'pi-smoke-%j.out'}" in cmd
     assert f"--error={tmp_path / 'pi-smoke-%j.err'}" in cmd
     assert "private-provider-alias" not in cmd_text
     assert "private-model-alias" not in cmd_text
+    assert "github-secret" not in cmd_text
+    assert "aws-secret" not in cmd_text
     assert run.call_args.kwargs["env"]["HEPH_PI_SMOKE_LOG_DIR"] == str(tmp_path)
     assert tmp_path.is_dir()
 
