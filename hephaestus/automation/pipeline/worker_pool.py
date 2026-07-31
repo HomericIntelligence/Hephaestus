@@ -814,7 +814,8 @@ def _confirmed_pytest_failure(returncode: int, stdout: str, stderr: str) -> bool
     return returncode == 1 and bool(
         re.search(
             r"(?m)^(?:=+ .*?\b[1-9]\d* failed\b.*?\bin [0-9.]+s =+|"
-            r"[1-9]\d* failed(?:, [^\n]*)? in [0-9.]+s)$",
+            r"[1-9]\d* failed(?:, [^\n]*)? in [0-9.]+s"
+            r"(?: \(\d+:\d{2}(?::\d{2})?\))?)$",
             transcript,
         )
     )
