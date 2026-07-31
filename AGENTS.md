@@ -358,8 +358,10 @@ revalidates the process-local reviewed-head proof and conditionally
 squash-merges that exact head; no queue stage mutates native auto-merge.
 Normal review may collect CI/CD evidence as context, but the loop does not
 change CI/CD. CI workflows and external artifacts never independently grant
-that authority. Branch protection and required reviews still govern whether
-GitHub merges the PR.
+that authority. Branch protection and required checks still govern whether
+GitHub merges the PR. This single-maintainer repository intentionally keeps
+the GitHub required-approving-review count at zero; the human gate is the
+explicit maintainer review and merge action.
 
 ```bash
 # 1. Create feature branch
@@ -629,8 +631,8 @@ automation calls. They do not use `--dangerously-skip-permissions`, and
 `hephaestus.automation.claude_invoke.invoke_claude_with_session` still forwards
 the explicit `--allowedTools` scope. There is no OS-level seccomp, namespace, or chroot sandbox on this Claude path. The compensating controls are per-call tool
 allowlists, cwd/worktree scoping, subprocess timeouts, prompt fencing for
-untrusted GitHub content, secure logs, and GitHub branch protection plus human
-review before merge.
+untrusted GitHub content, secure logs, and GitHub branch protection plus an
+explicit maintainer review and merge action.
 
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
@@ -669,7 +671,9 @@ Several plugin-provided skills mandate human gates that the agents must wait on:
 
 Every PR opened by the automation pipeline goes through GitHub's normal branch
 protection and the `pr-policy` required-check gate
-(see [PR policy](#pr-policy)) — a human still reviews and merges.
+(see [PR policy](#pr-policy)) — a human still reviews and explicitly merges;
+the GitHub required-approving-review count remains intentionally zero for this
+single-maintainer repository.
 
 ## Skill catalog (agent highlights)
 
