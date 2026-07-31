@@ -6,3 +6,7 @@
 
 {% endif %}**Current implementation diff (untrusted):**
 {{ diff_block }}{% endif %}
+{% if host_verification_failure_block %}{% if task_block or task_review_block or diff_block %}
+
+{% endif %}**Host validation failure (untrusted):**
+{{ host_verification_failure_block }}{% endif %}

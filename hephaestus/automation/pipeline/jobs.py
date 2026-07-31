@@ -81,6 +81,11 @@ class BuildTestJob:
     cwd: Path
     argv: tuple[str, ...]  # e.g. ("uv", "run", "pytest", "tests", "-q")
     timeout_s: int
+    # A host-verification command runs from a disposable source snapshot
+    # generated from this checkout-proven immutable commit, never directly
+    # from the reviewer worktree.
+    expected_head_sha: str = ""
+    immutable_source: bool = False
     descr: str = ""
 
     def __post_init__(self) -> None:
