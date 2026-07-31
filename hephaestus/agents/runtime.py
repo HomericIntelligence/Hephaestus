@@ -333,10 +333,22 @@ def uses_direct_agent_runner(agent: str) -> bool:
     return AGENT_CAPABILITIES[agent].direct_runner
 
 
-def direct_agent_model(agent: str, phase_env_var: str, *, codex_default: str = "") -> str:
-    """Return a model override appropriate for a direct-runner provider."""
+def direct_agent_model(
+    agent: str,
+    phase_env_var: str | None = None,
+    *,
+    codex_default: str = "",
+) -> str:
+    """Return a provider-neutral direct-runner model default.
+
+    Pi obtains its operator-local alias from :data:`PI_MODEL_ENV`; other
+    providers use an optional phase-specific environment override or the
+    explicit caller default.
+    """
     if is_pi(agent):
         return os.environ.get(PI_MODEL_ENV, "")
+    if phase_env_var is None:
+        return codex_default
     return os.environ.get(phase_env_var, codex_default)
 
 

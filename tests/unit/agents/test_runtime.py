@@ -1591,6 +1591,18 @@ def test_direct_agent_model_uses_operator_pi_alias_and_codex_default() -> None:
         assert agent_runtime.direct_agent_model("claude", "HEPH_IMPLEMENTER_MODEL") == (
             "phase-model"
         )
+        assert (
+            agent_runtime.direct_agent_model("pi", codex_default="standalone-default")
+            == "operator-local-alias"
+        )
+        assert (
+            agent_runtime.direct_agent_model("codex", codex_default="standalone-default")
+            == "standalone-default"
+        )
+        assert (
+            agent_runtime.direct_agent_model("claude", codex_default="standalone-default")
+            == "standalone-default"
+        )
 
 
 def test_agent_json_stdout_wraps_direct_agent_text() -> None:

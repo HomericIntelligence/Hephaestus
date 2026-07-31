@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from hephaestus.agents.runtime import (
     agent_display_name,
+    direct_agent_model,
     run_agent_text,
     uses_direct_agent_runner,
 )
@@ -354,7 +355,11 @@ def _invoke_git_message_agent(
     Codex use the deterministic lightweight-message default when a standalone
     caller omits one; Pi retains its provider-specific default in that case.
     """
-    model = model_override if model_override is not None else ("" if agent == "pi" else HAIKU)
+    model = (
+        model_override
+        if model_override is not None
+        else direct_agent_model(agent, codex_default=HAIKU)
+    )
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent=agent,
