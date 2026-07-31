@@ -7,12 +7,19 @@ perform GitHub API mutations (enforced by test_pipeline_architecture.py).
 
 from __future__ import annotations
 
+import hashlib
+import io
 import logging
 import os
 import queue as queue_mod
+import re
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
+import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Collection, Iterator
@@ -50,6 +57,7 @@ from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     WorktreeManager,
 )
+from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
     resilient_call,
@@ -100,6 +108,833 @@ _TRUSTED_GH_CANDIDATES = (
     Path("/usr/bin/gh"),
 )
 _TRUSTED_GH_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
+_TRUSTED_UV_CANDIDATES = (
+    Path("/opt/homebrew/bin/uv"),
+    Path("/usr/local/bin/uv"),
+    Path.home() / ".local/bin/uv",
+)
+_TRUSTED_GIT_CANDIDATES = (
+    Path("/opt/homebrew/bin/git"),
+    Path("/usr/local/bin/git"),
+    Path("/usr/bin/git"),
+)
+_HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
+_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v3-rewritten-launchers"
+
+# The host verification handles code from an untrusted pull request.  Bound
+# the Git archive before extraction and bound every child output/write path.
+_HOST_VERIFICATION_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
+_HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS = 20_000
+_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 64 * 1024 * 1024
+_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 2_048  # POSIX ulimit -f units
+_HOST_VERIFICATION_CPU_MAX_S = 240
+_HOST_VERIFICATION_PROCESS_HEADROOM = 64
+_HOST_VERIFICATION_POLL_S = 0.05
+_HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
+
+
+class _HostVerificationBoundaryError(RuntimeError):
+    """Raised when a host verification cannot keep PR code contained."""
+
+
+def _sandbox_string(path: Path) -> str:
+    """Canonicalize and quote a filesystem path for a sandbox profile literal."""
+    # macOS presents /var as a symlink to /private/var, but sandbox rules match
+    # the physical path. A lexical temporary-directory path would otherwise
+    # deny the declared snapshot's current working directory.
+    return str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _host_verification_env(
+    scratch: Path,
+    executable: str,
+    runtime_environment: Path,
+    git_executable: str | None = None,
+) -> dict[str, str]:
+    """Build the minimal disposable environment for host verification.
+
+    Deliberately do not inherit the automation process environment: a PR test
+    must not receive GitHub, package-index, or cloud credentials by accident.
+    The executable is resolved before this point, so ``PATH`` only needs its
+    containing directory and the platform defaults.
+    """
+    # Keep environment paths consistent with the physical paths granted to
+    # sandbox-exec; on macOS, /var is an alias for /private/var.
+    scratch = scratch.resolve()
+    runtime_environment = runtime_environment.resolve()
+    home = scratch / "home"
+    temporary = scratch / "tmp"
+    cache = scratch / "cache"
+    for directory in (home, temporary, cache):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    env = {
+        "HOME": str(home),
+        "TMPDIR": str(temporary),
+        "TMP": str(temporary),
+        "TEMP": str(temporary),
+        "XDG_CACHE_HOME": str(cache),
+        "UV_CACHE_DIR": str(cache / "uv"),
+        # The coordinator's existing runtime environment is host-owned and
+        # read-only inside the OS sandbox.  It has the locked dependencies
+        # needed for an offline ``uv run`` without exposing a user home/cache.
+        "UV_PROJECT_ENVIRONMENT": str(runtime_environment),
+        "UV_OFFLINE": "1",
+        "UV_NO_SYNC": "1",
+        "RUFF_CACHE_DIR": str(cache / "ruff"),
+        "COVERAGE_FILE": str(cache / ".coverage"),
+        "PYTHONPYCACHEPREFIX": str(cache / "pycache"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTEST_ADDOPTS": "-p no:cacheprovider",
+        "PATH": os.pathsep.join(
+            (
+                str(Path(executable).parent),
+                *((str(Path(git_executable).parent),) if git_executable else ()),
+                os.defpath,
+            )
+        ),
+    }
+    # Locale is harmless input-only process configuration and prevents tools
+    # from producing platform-dependent decoding failures.
+    for key in ("LANG", "LC_ALL", "TZ"):
+        if value := os.environ.get(key):
+            env[key] = value
+    return env
+
+
+def _host_runtime_fingerprint(runtime: Path) -> str:
+    """Return a stable cache key for a host process's installed runtime."""
+    hasher = hashlib.sha256()
+    hasher.update(_HOST_RUNTIME_CACHE_FORMAT)
+    hasher.update(sys.version.encode())
+    try:
+        hasher.update((runtime / "pyvenv.cfg").read_bytes())
+    except OSError:
+        hasher.update(str(runtime).encode())
+    return hasher.hexdigest()
+
+
+def _seal_host_runtime(runtime: Path) -> None:
+    """Remove write bits without following runtime symlinks."""
+    for path in (runtime, *runtime.rglob("*")):
+        if path.is_symlink():
+            continue
+        mode = path.stat().st_mode
+        path.chmod(mode & ~0o222)
+
+
+def _rewrite_runtime_launchers(runtime: Path, source_runtime: Path) -> None:
+    """Point copied console-script shebangs at the sealed runtime.
+
+    A uv-managed environment records its original ``.venv`` path in console
+    scripts such as ``bin/mypy``. The verifier copies that environment outside
+    the mutable checkout, so those launchers must name the copied interpreter
+    before the runtime is sealed.
+    """
+    source_prefix = f"#!{source_runtime.resolve()}".encode()
+    target_prefix = f"#!{runtime.resolve()}".encode()
+    for launcher in (runtime / "bin").iterdir():
+        if launcher.is_symlink() or not launcher.is_file():
+            continue
+        try:
+            content = launcher.read_bytes()
+        except OSError:
+            continue
+        first_line, separator, remainder = content.partition(b"\n")
+        if not first_line.startswith(source_prefix):
+            continue
+        launcher.write_bytes(
+            target_prefix + first_line[len(source_prefix) :] + separator + remainder
+        )
+
+
+def _sealed_runtime_marker(target: Path) -> Path:
+    """Return the immutable completion marker for a cached runtime."""
+    return target.with_name(f"{target.name}.sealed")
+
+
+def _is_sealed_runtime_cache(target: Path) -> bool:
+    """Return whether *target* was completely sealed by this verifier."""
+    marker = _sealed_runtime_marker(target)
+    try:
+        return (
+            target.is_dir()
+            and not target.is_symlink()
+            and marker.is_file()
+            and not marker.is_symlink()
+            and marker.read_text(encoding="utf-8") == f"{target.name}\n"
+            and not (marker.stat().st_mode & 0o222)
+        )
+    except OSError:
+        return False
+
+
+def _verifier_owned_runtime_environment(checkout: Path) -> Path:
+    """Return a read-only runtime outside the mutable review checkout.
+
+    ``uv run`` commonly executes the worker from ``<checkout>/.venv``.  That
+    ignored tree is not Git-bound, so it cannot be reused as verification
+    evidence. Snapshot the already-running host interpreter environment once
+    into the user-private temp area, seal it, and use only that external copy
+    for immutable host validation.
+    """
+    runtime = Path(sys.prefix).resolve()
+    try:
+        inside_checkout = runtime.is_relative_to(checkout.resolve())
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_runtime_unavailable") from exc
+    if not inside_checkout:
+        return runtime
+
+    cache_root = Path(tempfile.gettempdir()) / _HOST_RUNTIME_CACHE_DIRNAME
+    if cache_root.is_symlink():
+        raise _HostVerificationBoundaryError("host_verification_runtime_cache_unsafe")
+    cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache_root.chmod(0o700)
+    target = cache_root / _host_runtime_fingerprint(runtime)
+    if _is_sealed_runtime_cache(target):
+        return target
+    lock_path = cache_root / f"{target.name}.lock"
+    try:
+        with file_lock(lock_path, require_exclusive=True):
+            if _is_sealed_runtime_cache(target):
+                return target
+            if target.exists() or target.is_symlink():
+                raise _HostVerificationBoundaryError("host_verification_runtime_cache_unsafe")
+            staging = Path(tempfile.mkdtemp(prefix="runtime-", dir=cache_root))
+            copied = staging / "environment"
+            try:
+                # A uv environment's Python launcher is commonly an absolute
+                # symlink. Preserve the environment boundary by dereferencing
+                # it into the cache; otherwise UV resolves it back to the
+                # mutable host interpreter rather than this sealed snapshot.
+                shutil.copytree(runtime, copied, symlinks=False)
+                copied.replace(target)
+                try:
+                    _rewrite_runtime_launchers(target, runtime)
+                    _seal_host_runtime(target)
+                    write_secure(
+                        _sealed_runtime_marker(target),
+                        f"{target.name}\n",
+                        permissions=0o400,
+                    )
+                except OSError:
+                    shutil.rmtree(target, ignore_errors=True)
+                    raise
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+    except _HostVerificationBoundaryError:
+        raise
+    except (OSError, RuntimeError, LockUnavailableError) as exc:
+        raise _HostVerificationBoundaryError("host_verification_runtime_prepare_failed") from exc
+    return target
+
+
+def _host_verification_profile(
+    *,
+    source: Path,
+    scratch: Path,
+    runtime_environment: Path,
+    git_metadata: Path,
+    pi_smoke_logs: Path,
+    executable: Path,
+) -> str:
+    """Build the macOS profile; only the declared scratch tree is writable."""
+    allowed_roots = (
+        Path("/bin"),
+        Path("/sbin"),
+        Path("/usr"),
+        Path("/System"),
+        Path("/opt/homebrew"),
+        Path("/usr/local"),
+    )
+    return "\n".join(
+        (
+            "(version 1)",
+            "(deny default)",
+            # ``system.sb`` supplies the macOS runtime IPC, loader, and
+            # device-read allowances needed even by /usr/bin/true. It does
+            # not grant user-workspace writes; this profile still grants
+            # writes only to the disposable scratch directory below.
+            '(import "system.sb")',
+            "(allow process*)",
+            # Tests may stop only child processes they created; no signals to
+            # unrelated host processes are allowed.
+            "(allow signal (target children))",
+            # Python multiprocessing names its spawned semaphores ``/mp-``.
+            # Limit cross-process synchronization to that private namespace.
+            '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))',
+            "(allow file-read*",
+            f'  (subpath "{_sandbox_string(source)}")',
+            f'  (subpath "{_sandbox_string(scratch)}")',
+            f'  (subpath "{_sandbox_string(runtime_environment)}")',
+            f'  (subpath "{_sandbox_string(git_metadata)}")',
+            f'  (subpath "{_sandbox_string(pi_smoke_logs)}")',
+            f'  (literal "{_sandbox_string(executable)}")',
+            *(f'  (subpath "{_sandbox_string(root)}")' for root in allowed_roots),
+            ")",
+            # ``getcwd`` and dynamic-loader path checks need metadata on the
+            # ancestors of the explicitly allowed paths, not read access to
+            # their contents. Without these, macOS reports a nonexistent CWD.
+            *(
+                f'(allow file-read-metadata (path-ancestors "{_sandbox_string(path)}"))'
+                for path in (
+                    source,
+                    scratch,
+                    runtime_environment,
+                    git_metadata,
+                    pi_smoke_logs,
+                    executable,
+                )
+            ),
+            f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
+            f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
+            "(deny network*)",
+        )
+    )
+
+
+def _host_verification_command(
+    *,
+    argv: tuple[str, ...],
+    source: Path,
+    scratch: Path,
+    runtime_environment: Path,
+    git_metadata: Path,
+    pi_smoke_logs: Path,
+) -> tuple[str, ...]:
+    """Return a command that denies network and host writes to PR code.
+
+    A disposable Git archive protects the reviewer checkout, but it is not a
+    complete trust boundary by itself: test code could still access the host.
+    On supported macOS hosts, ``sandbox-exec`` supplies the remaining boundary
+    (no network, read-only source, write access only to ``scratch``).  We fail
+    closed when that primitive is unavailable rather than quietly widening a
+    reviewer-stage capability.
+    """
+    if sys.platform != "darwin":
+        raise _HostVerificationBoundaryError("unsupported_host_verification_boundary")
+
+    sandbox_exec = Path("/usr/bin/sandbox-exec")
+    if not sandbox_exec.is_file() or not os.access(sandbox_exec, os.X_OK):
+        raise _HostVerificationBoundaryError("host_verification_boundary_unavailable")
+
+    executable = Path(argv[0])
+    profile = scratch / "host-verification.sb"
+    write_secure(
+        profile,
+        _host_verification_profile(
+            source=source,
+            scratch=scratch,
+            runtime_environment=runtime_environment,
+            git_metadata=git_metadata,
+            pi_smoke_logs=pi_smoke_logs,
+            executable=executable,
+        ),
+    )
+    # Start through a constant trusted shell so resource limits are inherited
+    # by ``sandbox-exec`` and every process launched by UV/pytest. Some macOS
+    # launch contexts reject unprivileged hard-limit changes, so this local
+    # boundary deliberately lowers the macOS-supported soft CPU and
+    # output-file limits. The process cap is the host's live baseline plus a
+    # fixed small headroom, so the verifier can spawn tools without removing
+    # a per-PR bound. The separately mounted scratch volume remains the
+    # non-bypassable disk quota. No PR text enters the shell program; the
+    # fixed argv follows the ``--`` sentinel.
+    limits = (
+        "set -e; "
+        'limit() { hard=$(ulimit -H "$1"); target=$2; '
+        'if [ "$hard" != unlimited ] && [ "$hard" -lt "$target" ]; then target=$hard; fi; '
+        'ulimit -S "$1" "$target"; }; '
+        f"limit -t {_HOST_VERIFICATION_CPU_MAX_S}; "
+        f"limit -f {_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS}; "
+        'active=$(/bin/ps -u "$(/usr/bin/id -u)" -o pid= | /usr/bin/wc -l | /usr/bin/tr -d " "); '
+        f'limit -u "$((active + {_HOST_VERIFICATION_PROCESS_HEADROOM}))"; '
+        'exec "$@"'
+    )
+    return (
+        "/bin/sh",
+        "-c",
+        limits,
+        "host-verification-limits",
+        str(sandbox_exec),
+        "-f",
+        str(profile),
+        *argv,
+    )
+
+
+def _hdiutil_create_argv(image: Path) -> tuple[str, ...]:
+    """Return the valid blank HFS+ image creation argv for quota scratch."""
+    return (
+        "/usr/bin/hdiutil",
+        "create",
+        "-size",
+        f"{_HOST_VERIFICATION_SCRATCH_MAX_BYTES // (1024 * 1024)}m",
+        "-fs",
+        "HFS+",
+        "-quiet",
+        str(image),
+    )
+
+
+@contextmanager
+def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Iterator[Path]:
+    """Mount a fixed-size disposable volume at an already-created mountpoint."""
+    if sys.platform != "darwin":
+        raise _HostVerificationBoundaryError("unsupported_host_verification_boundary")
+    hdiutil = Path("/usr/bin/hdiutil")
+    if not hdiutil.is_file() or not os.access(hdiutil, os.X_OK):
+        raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
+    image = root / image_name
+    create = subprocess.run(
+        _hdiutil_create_argv(image),
+        capture_output=True,
+        timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+        check=False,
+    )
+    if create.returncode != 0:
+        raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
+    attached = False
+    try:
+        attach = subprocess.run(
+            (str(hdiutil), "attach", "-nobrowse", "-mountpoint", str(mountpoint), str(image)),
+            capture_output=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+        )
+        if attach.returncode != 0:
+            raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
+        attached = True
+        yield mountpoint
+    finally:
+        if attached:
+            # This mount is a fresh per-command scratch image.  A completed
+            # child can leave a brief busy reference, so retry one bounded
+            # forced detach after a timeout, OS error, or nonzero result.
+            # Retrying here avoids accumulating mounted images in a
+            # long-running validation loop while still failing closed when
+            # cleanup cannot be confirmed.
+            for _attempt in range(2):
+                try:
+                    detach = subprocess.run(
+                        (str(hdiutil), "detach", "-force", str(mountpoint)),
+                        capture_output=True,
+                        timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+                        check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if detach.returncode == 0:
+                    break
+            else:
+                raise _HostVerificationBoundaryError("host_verification_quota_cleanup_failed")
+
+
+@contextmanager
+def _quota_backed_scratch(root: Path) -> Iterator[Path]:
+    """Mount the general fixed-size scratch volume before PR code runs."""
+    scratch = root / "scratch"
+    scratch.mkdir()
+    with _quota_backed_volume(root, "scratch.dmg", scratch) as mounted:
+        yield mounted
+
+
+@contextmanager
+def _quota_backed_pi_smoke_logs(root: Path, source: Path) -> Iterator[Path]:
+    """Mount Pi smoke logs directly at their validated non-symlink path."""
+    logs = source / "pi-smoke-logs"
+    logs.mkdir()
+    with _quota_backed_volume(root, "pi-smoke-logs.dmg", logs) as mounted:
+        yield mounted
+
+
+def _checkout_matches_immutable_head(checkout: Path, expected_head_sha: str) -> str | None:
+    """Return an error when *checkout* no longer names the expected clean commit."""
+    env = _controlled_git_env()
+    try:
+        head = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=str(checkout),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if head.returncode != 0 or head.stdout.strip() != expected_head_sha:
+            return "review_checkout_head_changed"
+        for argv in (
+            ("git", "diff", "--quiet", expected_head_sha, "--"),
+            ("git", "diff", "--cached", "--quiet", expected_head_sha, "--"),
+        ):
+            clean = subprocess.run(
+                argv,
+                cwd=str(checkout),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if clean.returncode != 0:
+                return "review_checkout_not_clean"
+    except (OSError, subprocess.TimeoutExpired):
+        return "review_checkout_verification_failed"
+    return None
+
+
+def _extract_immutable_archive(archive: bytes, destination: Path) -> None:
+    """Extract a Git archive while rejecting links and path traversal."""
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+        members = tar.getmembers()
+        if len(members) > _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS:
+            raise _HostVerificationBoundaryError("git_archive_member_limit_exceeded")
+        declared_size = 0
+        for member in members:
+            member_path = Path(member.name)
+            if (
+                member_path.is_absolute()
+                or ".." in member_path.parts
+                or member.issym()
+                or member.islnk()
+                or member.isdev()
+            ):
+                raise _HostVerificationBoundaryError("unsafe_git_archive_member")
+            declared_size += member.size
+            if declared_size > _HOST_VERIFICATION_ARCHIVE_MAX_BYTES:
+                raise _HostVerificationBoundaryError("git_archive_size_limit_exceeded")
+        # Materialize only regular files and directories ourselves.  This
+        # avoids tarfile's version-dependent extraction filters and keeps the
+        # already-validated destination as the sole write root.
+        for member in members:
+            target = destination / member.name
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                target.chmod(member.mode & 0o777)
+                continue
+            if not member.isfile():
+                raise _HostVerificationBoundaryError("unsupported_git_archive_member")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                raise _HostVerificationBoundaryError("unreadable_git_archive_member")
+            with extracted, target.open("wb") as output:
+                shutil.copyfileobj(extracted, output)
+            target.chmod(member.mode & 0o777)
+
+
+def _bounded_git_archive(
+    checkout: Path, expected_head_sha: str, timeout_s: int
+) -> tuple[bytes, str]:
+    """Export one immutable commit without unbounded archive buffering."""
+    with tempfile.TemporaryFile(mode="w+b") as stderr:
+        process = subprocess.Popen(
+            ("git", "archive", "--format=tar", expected_head_sha),
+            cwd=str(checkout),
+            env=_controlled_git_env(),
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+        )
+        if process.stdout is None:  # pragma: no cover - guaranteed by PIPE
+            raise _HostVerificationBoundaryError("immutable_source_snapshot_failed")
+        archive = bytearray()
+        deadline = time.monotonic() + timeout_s
+        while chunk := process.stdout.read(64 * 1024):
+            if len(archive) + len(chunk) > _HOST_VERIFICATION_ARCHIVE_MAX_BYTES:
+                process.kill()
+                process.wait()
+                raise _HostVerificationBoundaryError("git_archive_size_limit_exceeded")
+            archive.extend(chunk)
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.wait()
+                raise subprocess.TimeoutExpired(process.args, timeout_s)
+        remaining = max(deadline - time.monotonic(), 0.01)
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        stderr.seek(0, os.SEEK_END)
+        stderr.seek(max(stderr.tell() - _TAIL, 0))
+        stderr_tail = stderr.read().decode(errors="replace")
+        if returncode != 0:
+            raise _HostVerificationBoundaryError(
+                f"immutable_source_snapshot_failed:{stderr_tail[-_ERR_MAX:]}"
+            )
+    return bytes(archive), stderr_tail
+
+
+def _prepare_immutable_git_metadata(
+    checkout: Path, expected_head_sha: str, source: Path, root: Path, git_executable: str
+) -> Path:
+    """Attach a sealed Git snapshot so repository-aware tests remain valid.
+
+    ``git archive`` deliberately omits ``.git``. Several unit tests inspect
+    only Git's tracked inventory or commit graph, so prepare a separate local
+    bare clone at the already-proven head and point the archive's ``.git``
+    control file to it. Both source and metadata are read-only to PR code once
+    the macOS sandbox starts.
+    """
+    metadata = root / "metadata.git"
+    env = _controlled_git_env()
+    try:
+        clone = subprocess.run(
+            (git_executable, "clone", "--bare", "--no-local", str(checkout), str(metadata)),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+        )
+        if clone.returncode != 0:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_snapshot_failed")
+        head = subprocess.run(
+            (git_executable, f"--git-dir={metadata}", "rev-parse", "HEAD"),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+        )
+        if head.returncode != 0 or head.stdout.strip() != expected_head_sha:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_head_changed")
+        for key, value in (("core.bare", "false"), ("core.worktree", str(source.resolve()))):
+            configured = subprocess.run(
+                (git_executable, f"--git-dir={metadata}", "config", key, value),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+                check=False,
+            )
+            if configured.returncode != 0:
+                raise _HostVerificationBoundaryError("immutable_git_metadata_setup_failed")
+        origin = subprocess.run(
+            (git_executable, "-C", str(checkout), "remote", "get-url", "origin"),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+        )
+        if origin.returncode == 0 and (origin_url := origin.stdout.strip()):
+            configured_origin = subprocess.run(
+                (
+                    git_executable,
+                    f"--git-dir={metadata}",
+                    "remote",
+                    "set-url",
+                    "origin",
+                    origin_url,
+                ),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+                check=False,
+            )
+            if configured_origin.returncode != 0:
+                raise _HostVerificationBoundaryError("immutable_git_metadata_setup_failed")
+        write_secure(source / ".git", f"gitdir: {metadata.resolve()}\n", permissions=0o400)
+        # A bare clone has no index. Populate it while metadata is still
+        # host-owned and writable so ``git ls-files`` remains a read-only
+        # operation for repository-aware tests.
+        indexed = subprocess.run(
+            (git_executable, f"--git-dir={metadata}", "read-tree", expected_head_sha),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
+            check=False,
+        )
+        if indexed.returncode != 0:
+            raise _HostVerificationBoundaryError("immutable_git_metadata_setup_failed")
+        _seal_host_runtime(metadata)
+    except _HostVerificationBoundaryError:
+        raise
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _HostVerificationBoundaryError("immutable_git_metadata_snapshot_failed") from exc
+    return metadata
+
+
+def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
+    """Route the generic ignored build output into bounded scratch.
+
+    Pi smoke tests deliberately reject symlinked artifact roots.  Their
+    ``pi-smoke-logs`` directory is instead a second quota-backed volume mounted
+    directly at that source path by :func:`_quota_backed_pi_smoke_logs`.
+    """
+    alias = source / "build"
+    if alias.exists() or alias.is_symlink():
+        raise _HostVerificationBoundaryError("host_verification_output_alias_conflict")
+    try:
+        target = scratch / "build"
+        target.mkdir()
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        raise _HostVerificationBoundaryError("host_verification_output_alias_failed") from exc
+
+
+def _scratch_usage_exceeds_limit(scratch: Path) -> bool:
+    """Return whether the PR-visible writable tree crossed its fixed quota."""
+    total = 0
+    for root, directories, filenames in os.walk(scratch, followlinks=False):
+        for name in (*directories, *filenames):
+            try:
+                stat_result = (Path(root) / name).lstat()
+            except OSError:
+                continue
+            total += stat_result.st_size
+            if total > _HOST_VERIFICATION_SCRATCH_MAX_BYTES:
+                return True
+    return False
+
+
+def _tail_file(path: Path) -> str:
+    """Read a bounded diagnostic tail from a resource-limited child log."""
+    try:
+        with path.open("rb") as output:
+            output.seek(0, os.SEEK_END)
+            output.seek(max(output.tell() - _TAIL, 0))
+            return output.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def _confirmed_pytest_failure(returncode: int, stdout: str, stderr: str) -> bool:
+    """Return whether the fixed pytest command, not its runner, failed.
+
+    ``sandbox-exec``/UV/bootstrap errors also surface as nonzero exits.  Only
+    pytest's normal test-failure exit code plus its terminal summary is safe to
+    send to the implementation agent as a code-remediation task.
+    """
+    transcript = f"{stdout}\n{stderr}"
+    return returncode == 1 and bool(
+        re.search(
+            r"(?m)^=+ .*?\b[1-9]\d* failed\b.*?\bin [0-9.]+s =+$",
+            transcript,
+        )
+    )
+
+
+def _host_validation_failure_kind(
+    argv: tuple[str, ...], returncode: int, stdout: str, stderr: str
+) -> str:
+    """Classify fixed-tool failures without mistaking bootstrap faults for code work."""
+    transcript = f"{stdout}\n{stderr}"
+    if _confirmed_pytest_failure(returncode, stdout, stderr):
+        return "validation"
+    if len(argv) >= 3 and argv[:2] == ("uv", "run"):
+        tool = argv[2]
+        if (
+            tool == "ruff"
+            and returncode == 1
+            and re.search(r"(?m)^(Found |Would reformat )", transcript)
+        ):
+            return "validation"
+        if (
+            tool == "mypy"
+            and returncode == 1
+            and re.search(r"(?m)^Found [1-9]\d* errors? in \d+ files?", transcript)
+        ):
+            return "validation"
+    return "runner"
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Terminate a host-verification process tree after a hard boundary breach."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        process.kill()
+
+
+def _run_bounded_host_command(
+    command: tuple[str, ...],
+    *,
+    validation_argv: tuple[str, ...],
+    source: Path,
+    scratch: Path,
+    environment: dict[str, str],
+    timeout_s: int,
+    shutdown: threading.Event,
+) -> JobResult:
+    """Run the sandboxed child with bounded files, time, and scratch usage."""
+    output = scratch / "outputs"
+    output.mkdir()
+    stdout_path = output / "stdout.log"
+    stderr_path = output / "stderr.log"
+    try:
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(
+                command,
+                cwd=str(source),
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + timeout_s
+            resource_breach = False
+            with subprocess_registry.track_process_group(process.pid):
+                while process.poll() is None:
+                    if shutdown.is_set():
+                        _terminate_process_group(process)
+                        process.wait()
+                        return JobResult(
+                            ok=False,
+                            error="interrupted",
+                            value={"failure_kind": "runner"},
+                            interrupted=True,
+                        )
+                    if _scratch_usage_exceeds_limit(scratch):
+                        resource_breach = True
+                        _terminate_process_group(process)
+                        break
+                    if time.monotonic() >= deadline:
+                        _terminate_process_group(process)
+                        process.wait()
+                        return JobResult(
+                            ok=False,
+                            error="timeout",
+                            value={"failure_kind": "validation"},
+                        )
+                    time.sleep(_HOST_VERIFICATION_POLL_S)
+                process.wait()
+        stdout_tail = _tail_file(stdout_path)
+        stderr_tail = _tail_file(stderr_path)
+        if resource_breach:
+            return JobResult(
+                ok=False,
+                error="host_verification_resource_limit_exceeded",
+                value={"failure_kind": "runner"},
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
+        failure_kind = (
+            "none"
+            if process.returncode == 0
+            else _host_validation_failure_kind(
+                validation_argv, process.returncode, stdout_tail, stderr_tail
+            )
+        )
+        return JobResult(
+            ok=process.returncode == 0,
+            value={"failure_kind": failure_kind},
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+            error=None if process.returncode == 0 else f"rc={process.returncode}",
+        )
+    except OSError as exc:
+        return JobResult(
+            ok=False,
+            error=f"host_verification_failed: {exc!s}"[:_ERR_MAX],
+            value={"failure_kind": "runner"},
+        )
 
 
 def _is_full_commit_sha(value: object) -> TypeGuard[str]:
@@ -132,6 +967,38 @@ def _trusted_executable(name: str, *, path: str | None = None) -> str | None:
     """Resolve a command to an absolute path before entering a controlled env."""
     executable = shutil.which(name, path=path)
     return str(Path(executable).resolve()) if executable is not None else None
+
+
+def _trusted_uv_executable() -> str | None:
+    """Return an allowlisted, non-writable ``uv`` binary for host checks."""
+    for candidate in _TRUSTED_UV_CANDIDATES:
+        try:
+            resolved = candidate.resolve(strict=True)
+            mode = resolved.stat().st_mode
+        except OSError:
+            continue
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            continue
+        if mode & 0o022:
+            continue
+        return str(resolved)
+    return None
+
+
+def _trusted_git_executable() -> str | None:
+    """Return an allowlisted, non-writable ``git`` binary for host checks."""
+    for candidate in _TRUSTED_GIT_CANDIDATES:
+        try:
+            resolved = candidate.resolve(strict=True)
+            mode = resolved.stat().st_mode
+        except OSError:
+            continue
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            continue
+        if mode & 0o022:
+            continue
+        return str(resolved)
+    return None
 
 
 def _trusted_gh_executable() -> str | None:
@@ -718,6 +1585,10 @@ class WorkerPool:
 
     def _run_build_test(self, job: BuildTestJob) -> JobResult:
         """Run a build/test job (subprocess with argv)."""
+        if job.immutable_source:
+            if not _is_full_commit_sha(job.expected_head_sha):
+                return JobResult(ok=False, error="immutable_source_requires_full_head_sha")
+            return self._run_immutable_build_test(job)
         try:
             result = subprocess.run(
                 job.argv,
@@ -741,6 +1612,97 @@ class WorkerPool:
                 stdout_tail=str(exc.stdout or "")[-_TAIL:],
                 stderr_tail=str(exc.stderr or "")[-_TAIL:],
             )
+
+    def _run_immutable_build_test(self, job: BuildTestJob) -> JobResult:
+        """Run a fixed host check in an archive of the proven review commit."""
+        checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
+        if checkout_error is not None:
+            return JobResult(ok=False, error=checkout_error)
+
+        executable = (
+            _trusted_uv_executable()
+            if job.argv[0] == "uv"
+            else _trusted_executable(job.argv[0], path=os.defpath)
+        )
+        if executable is None:
+            return JobResult(ok=False, error="host_verification_executable_unavailable")
+        git_executable = _trusted_git_executable()
+        if git_executable is None:
+            return JobResult(ok=False, error="host_verification_git_unavailable")
+        argv = (executable, *job.argv[1:])
+        try:
+            runtime_environment = _verifier_owned_runtime_environment(job.cwd)
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(ok=False, error=str(exc))
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="hephaestus-host-verification-") as temp_dir:
+                root = Path(temp_dir)
+                # PR code executes from a separately archived source tree.
+                # The sandbox grants write permission only to ``scratch``;
+                # source is never a child of that writable root.
+                source = root / "source"
+                source.mkdir()
+                archive, _archive_stderr = _bounded_git_archive(
+                    job.cwd, job.expected_head_sha, job.timeout_s
+                )
+                _extract_immutable_archive(archive, source)
+                git_metadata = _prepare_immutable_git_metadata(
+                    job.cwd, job.expected_head_sha, source, root, git_executable
+                )
+                with _quota_backed_scratch(root) as scratch:
+                    with _quota_backed_pi_smoke_logs(root, source) as pi_smoke_logs:
+                        _prepare_host_output_aliases(source, scratch)
+                        command = _host_verification_command(
+                            argv=argv,
+                            source=source,
+                            scratch=scratch,
+                            runtime_environment=runtime_environment,
+                            git_metadata=git_metadata,
+                            pi_smoke_logs=pi_smoke_logs,
+                        )
+                        result = _run_bounded_host_command(
+                            command,
+                            validation_argv=job.argv,
+                            source=source,
+                            scratch=scratch,
+                            environment=_host_verification_env(
+                                scratch, executable, runtime_environment, git_executable
+                            ),
+                            timeout_s=job.timeout_s,
+                            shutdown=self._shutdown,
+                        )
+                checkout_error = _checkout_matches_immutable_head(job.cwd, job.expected_head_sha)
+                if checkout_error is not None:
+                    return JobResult(
+                        ok=False,
+                        error=checkout_error,
+                        stdout_tail=result.stdout_tail,
+                        stderr_tail=result.stderr_tail,
+                    )
+                return replace(
+                    result,
+                    value={
+                        "head_sha": job.expected_head_sha,
+                        "immutable_source": True,
+                        "failure_kind": (
+                            result.value.get("failure_kind", "runner")
+                            if isinstance(result.value, dict)
+                            else "runner"
+                        ),
+                    },
+                )
+        except _HostVerificationBoundaryError as exc:
+            return JobResult(ok=False, error=str(exc))
+        except subprocess.TimeoutExpired as exc:
+            return JobResult(
+                ok=False,
+                error="timeout",
+                stdout_tail=str(exc.stdout or "")[-_TAIL:],
+                stderr_tail=str(exc.stderr or "")[-_TAIL:],
+            )
+        except OSError as exc:
+            return JobResult(ok=False, error=f"host_verification_failed: {exc!s}"[:_ERR_MAX])
 
     def _run_git(self, job: GitJob) -> JobResult:
         """Run a git job (serialized per-repo, in-process AND cross-process).

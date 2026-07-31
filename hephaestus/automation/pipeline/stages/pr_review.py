@@ -142,6 +142,7 @@ from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
+    BuildTestJob,
     CompactJob,
     Continue,
     Disposition,
@@ -204,6 +205,7 @@ ENTER = "ENTER"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
+HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
 DIFFICULTY_WAIT = "DIFFICULTY_WAIT"
@@ -229,6 +231,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
+    HOST_VERIFICATION_WAIT: "_host_verification_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
     DIFFICULTY_WAIT: "_difficulty_wait",
@@ -284,6 +287,163 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
 )
 _IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 
+
+@dataclass(frozen=True)
+class _HostVerificationSpec:
+    """One repository-owned verification command eligible for PR review."""
+
+    changed_path: str | None
+    argv: tuple[str, ...]
+    descr: str
+
+
+_HOST_SAFE_UNIT_TEST_ARGS = (
+    "-o",
+    "addopts=",
+    "tests/unit",
+    "-q",
+    # These test the host's own mutation-capable Git/CI facilities or recurse
+    # into host verification itself. They require GitHub CLI access or Bash's
+    # global /tmp and are therefore intentionally left to normal CI, not this
+    # read-only immutable reviewer boundary.
+    "--ignore=tests/unit/ci/test_workflows.py",
+    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps",
+    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::"
+    "TestWorkerPoolSubmitComplete::test_immutable_build_test_runs_from_disposable_head_snapshot",
+)
+
+
+#: Python reviews run read-only by design.  The host therefore performs the
+#: complete fixed Python validation plan against an immutable snapshot before
+#: the reviewer sees it.  These commands deliberately cover the local work
+#: normally selected by ``$athena:pr-review`` without granting that agent a
+#: writable source tree, cache, or temporary directory.
+_PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
+    _HostVerificationSpec(
+        changed_path=None,
+        argv=("uv", "run", "ruff", "check", "hephaestus/", "tests/"),
+        descr="review_python_ruff_check",
+    ),
+    _HostVerificationSpec(
+        changed_path=None,
+        argv=("uv", "run", "ruff", "format", "--check", "hephaestus/", "tests/"),
+        descr="review_python_ruff_format",
+    ),
+    _HostVerificationSpec(
+        changed_path=None,
+        argv=(
+            "uv",
+            "run",
+            "mypy",
+            "--cache-dir=/dev/null",
+            "hephaestus/",
+            "scripts/",
+            "tests/",
+        ),
+        descr="review_python_mypy",
+    ),
+    _HostVerificationSpec(
+        changed_path=None,
+        argv=("uv", "run", "pytest", *_HOST_SAFE_UNIT_TEST_ARGS),
+        descr="review_python_unit_tests",
+    ),
+)
+_PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
+    {
+        "pyproject.toml",
+        "uv.lock",
+        "coverage.toml",
+        "mypy.ini",
+        "pytest.ini",
+        "ruff.toml",
+        "setup.cfg",
+        "tox.ini",
+    }
+)
+_INTEGRATION_HOST_VERIFICATION_SPEC = _HostVerificationSpec(
+    changed_path=None,
+    argv=("uv", "run", "pytest", "tests/integration", "-q"),
+    descr="review_python_integration_tests",
+)
+
+
+#: Some Python regressions require additional bounded execution beyond the
+#: baseline review plan.  Their path trigger is derived only from a real Git
+#: diff header, never from reviewer or GitHub prose.
+_PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
+    _HostVerificationSpec(
+        changed_path="tests/performance/test_worker_pool_load.py",
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            "tests/performance/test_worker_pool_load.py",
+            "-q",
+            "--load-report=../scratch/outputs/worker-pool.json",
+        ),
+        descr="review_stalled_consumer_verification",
+    ),
+)
+HOST_VERIFICATION_TIMEOUT_S = 300
+HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
+
+
+def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ...]:
+    """Return the complete fixed host plan activated by the verified diff."""
+    if not isinstance(pr_diff, str):
+        return ()
+    changed_paths = {
+        match.group(2)
+        for match in re.finditer(r"^diff --git a/(.+?) b/(.+?)$", pr_diff, flags=re.MULTILINE)
+    }
+    if not any(
+        path.endswith(".py") or path in _PYTHON_VALIDATION_CONFIG_PATHS for path in changed_paths
+    ):
+        return ()
+    return (
+        *_PYTHON_HOST_VERIFICATION_SPECS,
+        *(
+            (_INTEGRATION_HOST_VERIFICATION_SPEC,)
+            if any(path.startswith("tests/integration/") for path in changed_paths)
+            else ()
+        ),
+        *(spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths),
+    )
+
+
+def _host_verification_receipt_matches(
+    receipt: object, spec: _HostVerificationSpec, reviewed_head: str
+) -> bool:
+    """Return whether *receipt* was captured for this immutable head and command."""
+    return bool(
+        isinstance(receipt, dict)
+        and receipt.get("head_sha") == reviewed_head
+        and receipt.get("argv") == list(spec.argv)
+        and receipt.get("immutable_source") is True
+        and isinstance(receipt.get("ok"), bool)
+        and isinstance(receipt.get("stdout_tail"), str)
+        and isinstance(receipt.get("stderr_tail"), str)
+    )
+
+
+def _host_verification_receipts_match(
+    receipts: object,
+    specs: tuple[_HostVerificationSpec, ...],
+    reviewed_head: str,
+) -> bool:
+    """Return whether every required fixed check has an exact-head receipt."""
+    return bool(
+        isinstance(receipts, list)
+        and len(receipts) == len(specs)
+        and all(
+            _host_verification_receipt_matches(receipt, spec, reviewed_head)
+            for receipt, spec in zip(receipts, specs, strict=True)
+        )
+    )
+
+
 #: Round-scoped payload keys cleared at REVIEW_WAIT submission so a failed
 #: later round can never replay an earlier round's results.
 _ROUND_PAYLOAD_KEYS = (
@@ -312,6 +472,8 @@ _ROUND_PAYLOAD_KEYS = (
     "validation_receipt_fingerprints",
     "scope_retraction_paths",
     "reviewed_pr_base_sha",
+    "host_verification_receipts",
+    "host_verification_failure",
 )
 
 
@@ -732,8 +894,12 @@ def _reviewer_thread_decisions(  # noqa: C901
 def _address_review_feedback(item: WorkItem) -> str:
     """Serialize normalized live blocking threads for fresh-PR remediation."""
     threads = item.payload.get("remediation_threads")
+    host_failure = item.payload.get("host_verification_failure")
+    feedback: dict[str, object] = {"findings": threads if isinstance(threads, list) else []}
+    if isinstance(host_failure, dict):
+        feedback["host_verification_failure"] = host_failure
     return json.dumps(
-        {"findings": threads if isinstance(threads, list) else []},
+        feedback,
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -953,7 +1119,34 @@ class PrReviewStage(Stage):
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
+        verifications = _host_verification_specs(item.payload.get("pr_diff"))
+        if verifications:
+            logger.info(
+                "pr_review:%d: requesting %d host verifications",
+                _issue_number(item),
+                len(verifications),
+            )
+            item.payload["host_verification_receipts"] = []
+            return self._submit_host_verification(item, ctx, verifications[0])
         return self._submit_review_job(item, ctx)
+
+    @staticmethod
+    def _submit_host_verification(
+        item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
+    ) -> JobRequest:
+        """Submit one fixed host command from the immutable review plan."""
+        return JobRequest(
+            BuildTestJob(
+                repo=item.repo,
+                cwd=_worktree_path(item, ctx),
+                argv=verification.argv,
+                timeout_s=HOST_VERIFICATION_TIMEOUT_S,
+                expected_head_sha=str(item.payload.get("reviewed_pr_head_sha") or ""),
+                immutable_source=True,
+                descr=verification.descr,
+            ),
+            on_done_state=HOST_VERIFICATION_WAIT,
+        )
 
     def _submit_review_job(self, item: WorkItem, ctx: StageContext) -> JobRequest:
         """Create the agent job after the checkout/head barrier succeeds."""
@@ -990,6 +1183,9 @@ class PrReviewStage(Stage):
                 "issue_body": item.payload.get("issue_body", ""),
                 "pr_description": item.payload.get("pr_description", ""),
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "host_verifications_json": json.dumps(
+                    item.payload.get("host_verification_receipts", []), sort_keys=True
+                ),
                 "include_nitpicks": bool(
                     getattr(
                         ctx.config,
@@ -1062,11 +1258,106 @@ class PrReviewStage(Stage):
                 "issue_number": item.issue,
                 "prior_comments_json": item.payload["prior_comments_json"],
                 "diff_text": item.payload.get("pr_diff", ""),
+                "host_verifications_json": json.dumps(
+                    item.payload.get("host_verification_receipts", []), sort_keys=True
+                ),
                 "review_context_kind": _review_context_kind(item),
             },
             descr="validate",
         )
         return JobRequest(job, on_done_state=POST)
+
+    def _host_verification_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Submit primary review only after its host verification passed."""
+        verifications = _host_verification_specs(item.payload.get("pr_diff"))
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        receipts = item.payload.get("host_verification_receipts")
+        if not isinstance(receipts, list) or len(receipts) > len(verifications):
+            return self._handle_host_verification_failure(
+                item,
+                ctx,
+                None,
+                "host_verification_receipt_invalid",
+            )
+        matched_receipts = cast(list[dict[str, Any]], receipts)
+        for verification, receipt in zip(verifications, matched_receipts, strict=False):
+            if not _host_verification_receipt_matches(receipt, verification, reviewed_head):
+                return self._handle_host_verification_failure(
+                    item,
+                    ctx,
+                    verification,
+                    str(receipt.get("error") or "host_verification_receipt_invalid"),
+                )
+            if receipt["ok"]:
+                continue
+            return self._handle_host_verification_failure(
+                item,
+                ctx,
+                verification,
+                str(receipt.get("error") or "host_verification_failed"),
+            )
+        if len(matched_receipts) < len(verifications):
+            return self._submit_host_verification(item, ctx, verifications[len(matched_receipts)])
+        if not _host_verification_receipts_match(receipts, verifications, reviewed_head):
+            return self._handle_host_verification_failure(
+                item,
+                ctx,
+                None,
+                "host_verification_receipt_invalid",
+            )
+        return self._submit_review_job(item, ctx)
+
+    @staticmethod
+    def _handle_host_verification_failure(
+        item: WorkItem,
+        ctx: StageContext,
+        verification: _HostVerificationSpec | None,
+        reason: str,
+    ) -> StepResult:
+        """Durably reject a failed host test without entering audit retries."""
+        receipts = item.payload.get("host_verification_receipts")
+        receipt = (
+            receipts[-1]
+            if isinstance(receipts, list) and receipts and isinstance(receipts[-1], dict)
+            else None
+        )
+        diagnostic = {
+            "argv": list(verification.argv) if verification is not None else [],
+            "path": ((verification.changed_path or "") if verification is not None else ""),
+            "head_sha": str(item.payload.get("reviewed_pr_head_sha") or ""),
+            "error": reason[:HOST_VERIFICATION_DIAGNOSTIC_MAX],
+            "stdout_tail": (
+                str(receipt.get("stdout_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
+                if isinstance(receipt, dict)
+                else ""
+            ),
+            "stderr_tail": (
+                str(receipt.get("stderr_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
+                if isinstance(receipt, dict)
+                else ""
+            ),
+        }
+        item.payload["host_verification_failure"] = diagnostic
+        no_go_outcome = PrReviewStage._write_no_go(item, ctx)
+        if no_go_outcome is not None:
+            return no_go_outcome
+
+        # Only a confirmed fixed-tool validation failure may be repaired by
+        # the implementation agent. UV/sandbox/bootstrap errors share a
+        # nonzero process status but are operator remediation, not code work.
+        failure_kind = receipt.get("failure_kind") if isinstance(receipt, dict) else None
+        if failure_kind in {"test", "validation"}:
+            detail = (
+                "Host verification failed for "
+                f"{diagnostic['path']}: {reason}. Investigate and fix the test or "
+                "implementation, then rerun the fixed verification command."
+            )
+            if item.payload.get("existing_pr"):
+                item.payload["unaddressed_findings"] = [
+                    {"path": diagnostic["path"], "line": None, "body": detail}
+                ]
+            return Continue(next_state=ADDRESS_WAIT)
+        return StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed")
 
     def _difficulty_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """DIFFICULTY_WAIT submits the comment-difficulty job."""
@@ -1190,6 +1481,9 @@ class PrReviewStage(Stage):
         if self._consume_direct_worktree_result(item, result):
             return
         if self._consume_review_checkout_result(item, result):
+            return
+        if item.state == HOST_VERIFICATION_WAIT:
+            self._store_host_verification_result(item, result)
             return
 
         review_job_pending = bool(item.payload.pop("review_job_pending", None))
@@ -1382,6 +1676,43 @@ class PrReviewStage(Stage):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready
         return True
+
+    @staticmethod
+    def _store_host_verification_result(item: WorkItem, result: JobResult) -> None:
+        """Append a bounded, head-bound receipt from the fixed host plan."""
+        specs = _host_verification_specs(item.payload.get("pr_diff"))
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        receipts = item.payload.get("host_verification_receipts")
+        if (
+            not specs
+            or not is_full_commit_sha(reviewed_head)
+            or not isinstance(receipts, list)
+            or len(receipts) >= len(specs)
+        ):
+            item.payload.pop("host_verification_receipts", None)
+            return
+        spec = specs[len(receipts)]
+        receipts.append(
+            {
+                "argv": list(spec.argv),
+                "head_sha": reviewed_head,
+                "immutable_source": bool(
+                    isinstance(result.value, dict)
+                    and result.value.get("head_sha") == reviewed_head
+                    and result.value.get("immutable_source") is True
+                ),
+                "failure_kind": (
+                    result.value.get("failure_kind", "runner")
+                    if isinstance(result.value, dict)
+                    and result.value.get("failure_kind") in {"none", "runner", "test", "validation"}
+                    else "runner"
+                ),
+                "ok": result.ok,
+                "error": result.error or "",
+                "stdout_tail": result.stdout_tail,
+                "stderr_tail": result.stderr_tail,
+            }
+        )
 
     def _consume_failed_job(
         self, item: WorkItem, result: JobResult, is_review_result: bool
@@ -1737,6 +2068,7 @@ class PrReviewStage(Stage):
                     "task_block": "\n\n".join(part for part in task_parts if part),
                     "diff_text": str(item.payload.get("pr_diff", "")),
                     "scope_retraction_paths": scope_retraction_paths or (),
+                    "host_verification_failure": item.payload.get("host_verification_failure"),
                     # No-commit retry directive (#1575): non-empty ONLY on
                     # the one retry after a no-commit address turn;
                     # get_address_review_prompt renders it via

@@ -29,6 +29,7 @@ def get_pr_review_analysis_prompt(
     issue_body: str = "",
     pr_description: str = "",
     advise_findings: str = "",
+    host_verifications_json: str = "",
     include_nitpicks: bool = False,
     review_context_kind: str = "issue",
 ) -> str:
@@ -48,6 +49,8 @@ def get_pr_review_analysis_prompt(
         pr_description: PR description body
         advise_findings: Prior team learnings from Mnemosyne to give the
             reviewer continuity with the advise-first implementation turn.
+        host_verifications_json: Host-captured output from every fixed,
+            repository-owned validation command bound to the reviewed head.
         include_nitpicks: When False (default), the reviewer is told to OMIT
             ``nitpick``-severity comments entirely. When True (``--nitpick``),
             nitpick comments are re-enabled. Either way every emitted comment
@@ -77,6 +80,10 @@ def get_pr_review_analysis_prompt(
             "ADVISE_FINDINGS",
             advise_findings or "_(no prior advise findings supplied)_",
         ),
+        host_verifications_block=fenced.fence(
+            "HOST_VERIFICATIONS",
+            host_verifications_json or "[]",
+        ),
         pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
         review_rubric=get_pr_review_rubric().strip(),
@@ -95,6 +102,7 @@ def get_review_validation_prompt(
     issue_number: int,
     prior_comments_json: str,
     diff_text: str = "",
+    host_verifications_json: str = "",
     review_context_kind: str = "issue",
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
@@ -115,6 +123,8 @@ def get_review_validation_prompt(
         prior_comments_json: JSON array string of prior comment dicts
             (``path``/``line``/``body``).
         diff_text: The current cumulative PR diff.
+        host_verifications_json: Host-captured output from every fixed,
+            repository-owned validation command bound to the reviewed head.
         review_context_kind: Human-readable numeric context kind for the
             prompt header (defaults to ``"issue"``).
 
@@ -130,6 +140,10 @@ def get_review_validation_prompt(
         review_context_kind=review_context_kind,
         prior_comments_block=fenced.fence("PRIOR_COMMENTS", prior_comments_json),
         diff_block=fenced.fence("DIFF", diff_text),
+        host_verifications_block=fenced.fence(
+            "HOST_VERIFICATIONS",
+            host_verifications_json or "[]",
+        ),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )

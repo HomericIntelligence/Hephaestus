@@ -913,11 +913,18 @@ PR review is the sole authority for implementation approval. Reviews and
 findings are recorded on the GitHub pull request so their history survives
 local process or agent-session loss.
 
+For the registered UV performance verification, the host boundary currently
+requires macOS `sandbox-exec` plus a disposable, quota-backed disk image. On
+other platforms the loop fails closed after writing `state:implementation-no-go`
+rather than running PR code outside that boundary. A Linux or Windows backend
+must be added as a separately reviewed isolation implementation; there is no
+unsandboxed fallback.
+
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    PR["PR diff and requirements"] --> Review
+    PR["PR diff and requirements"] --> Snapshot["Immutable host verification"] --> Review
     Review --> GitHub["GitHub review and inline threads"]
     GitHub --> Gate{"Open review thread?"}
     Gate -->|"open thread"| Address["Implementation fixes and replies"] --> Validate["Reviewer validates reply + diff"]
@@ -935,7 +942,11 @@ stateDiagram-v2
     VerifyUnarmed --> Review: open, complete, and unarmed
     VerifyUnarmed --> OperatorOwned: external arm or incomplete state
     Review --> Checkout: GitHub snapshot captured
-    Checkout --> Review: clean checkout matches snapshot head
+    Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
+    HostVerification --> Review: immutable snapshot verification passed
+    HostVerification --> Address: confirmed test failure or timeout, after durable no-go
+    HostVerification --> Failed: boundary/setup failure, after durable no-go
+    Checkout --> Review: clean checkout matches snapshot head, no fixed check required
     Checkout --> Review: checkout or head drift requires a fresh snapshot
     Review --> Validate: review produced
     Review --> Implementation: invalid output requires fresh implementation context
@@ -974,6 +985,16 @@ Architectural contract:
 - The review decision proof is a fresh GitHub snapshot plus a clean checkout
   at that snapshot's head. A GitHub marker can recover only a candidate reply
   after restart; it is never a substitute for that fresh proof.
+- Review agents stay read-only. For an applicable Python change, the host runs
+  its complete fixed, repository-owned `uv` validation plan (Ruff check and
+  format, mypy, unit pytest, applicable integration pytest, plus any registered
+  regression) against the checkout-proven head and supplies bounded receipts to
+  the fresh reviewer and validator. Tool/dependency configuration changes also
+  select that plan. If the running `uv` environment is inside the review
+  checkout, the host first seals a verifier-owned copy outside every worktree;
+  the untracked local environment is never accepted as evidence. The receipts
+  are evidence only: they are cleared on a new head and cannot grant
+  `state:implementation-go` without the ordinary audit and GitHub checks.
 - No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait
@@ -1237,7 +1258,8 @@ mutations.
 - [`BuildTestJob`](../hephaestus/automation/pipeline/jobs.py) — subprocess
  argv. Security: argv MUST NOT carry untrusted strings; only the
  coordinator constructs them from vetted templates
- (`PRE_PR_TEST_ARGV` for the pre-PR test gate).
+ (`PRE_PR_TEST_ARGV` for the pre-PR test gate and the fixed host-review
+ verification registry).
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
  sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
  rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review

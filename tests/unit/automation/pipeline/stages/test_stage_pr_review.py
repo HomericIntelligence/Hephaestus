@@ -10,7 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.pipeline.jobs import AgentJob, CompactJob, GitJob, JobResult
+from hephaestus.automation.pipeline.jobs import (
+    AgentJob,
+    BuildTestJob,
+    CompactJob,
+    GitJob,
+    JobResult,
+)
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
@@ -738,6 +744,436 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert result.on_done_state == "POST"
         assert result.job.descr == "validate"
+
+    def test_checkout_runs_registered_host_verification_before_primary_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A changed regression receives the complete fixed host plan first."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/performance/test_worker_pool_load.py "
+                    "b/tests/performance/test_worker_pool_load.py\n"
+                    "--- a/tests/performance/test_worker_pool_load.py\n"
+                    "+++ b/tests/performance/test_worker_pool_load.py\n"
+                ),
+            }
+        )
+
+        request = stage.step(item, ctx)
+        expected = (
+            (
+                "review_python_ruff_check",
+                ("uv", "run", "ruff", "check", "hephaestus/", "tests/"),
+            ),
+            (
+                "review_python_ruff_format",
+                ("uv", "run", "ruff", "format", "--check", "hephaestus/", "tests/"),
+            ),
+            (
+                "review_python_mypy",
+                (
+                    "uv",
+                    "run",
+                    "mypy",
+                    "--cache-dir=/dev/null",
+                    "hephaestus/",
+                    "scripts/",
+                    "tests/",
+                ),
+            ),
+            (
+                "review_python_unit_tests",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    "tests/unit",
+                    "-q",
+                    "--ignore=tests/unit/ci/test_workflows.py",
+                    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps",
+                    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::"
+                    "TestWorkerPoolSubmitComplete::test_immutable_build_test_runs_from_disposable_head_snapshot",
+                ),
+            ),
+            (
+                "review_stalled_consumer_verification",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    "tests/performance/test_worker_pool_load.py",
+                    "-q",
+                    "--load-report=../scratch/outputs/worker-pool.json",
+                ),
+            ),
+        )
+        receipts: list[dict[str, object]] = []
+        for index, (description, argv) in enumerate(expected):
+            assert isinstance(request, JobRequest)
+            assert isinstance(request.job, BuildTestJob)
+            assert request.job.descr == description
+            assert request.job.argv == argv
+            assert request.on_done_state == "HOST_VERIFICATION_WAIT"
+            assert request.job.expected_head_sha == "a" * 40
+            assert request.job.immutable_source is True
+            receipt = {
+                "argv": list(argv),
+                "error": "",
+                "failure_kind": "none",
+                "head_sha": "a" * 40,
+                "immutable_source": True,
+                "ok": True,
+                "stderr_tail": "",
+                "stdout_tail": f"{index + 1} passed in 0.32s",
+            }
+            receipts.append(receipt)
+            item.state = request.on_done_state
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=True,
+                    value={
+                        "head_sha": "a" * 40,
+                        "immutable_source": True,
+                        "failure_kind": "none",
+                    },
+                    stdout_tail=str(receipt["stdout_tail"]),
+                ),
+                ctx,
+            )
+            request = stage.step(item, ctx)
+
+        review = request
+
+        assert isinstance(review, JobRequest)
+        assert isinstance(review.job, AgentJob)
+        assert review.job.descr == "review"
+        assert review.job.sandbox == "read-only"
+        assert review.job.prompt_kwargs["host_verifications_json"] == json.dumps(
+            receipts, sort_keys=True
+        )
+
+    def test_python_changes_run_complete_host_validation_before_primary_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A read-only Python review receives Ruff, mypy, and pytest receipts."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/hephaestus/automation/pipeline/worker_pool.py "
+                    "b/hephaestus/automation/pipeline/worker_pool.py\n"
+                ),
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == ("uv", "run", "ruff", "check", "hephaestus/", "tests/")
+        assert result.job.descr == "review_python_ruff_check"
+        assert result.on_done_state == "HOST_VERIFICATION_WAIT"
+
+    def test_python_validation_config_changes_run_host_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Dependency and tool configuration cannot bypass host validation."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "diff --git a/uv.lock b/uv.lock\n",
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.descr == "review_python_ruff_check"
+
+    def test_integration_changes_add_integration_host_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Changed integration coverage receives the matching fixed command."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/integration/test_flow.py b/tests/integration/test_flow.py\n"
+                ),
+            }
+        )
+        request = stage.step(item, ctx)
+        for _ in range(4):
+            assert isinstance(request, JobRequest)
+            item.state = request.on_done_state
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=True,
+                    value={
+                        "head_sha": "a" * 40,
+                        "immutable_source": True,
+                        "failure_kind": "none",
+                    },
+                ),
+                ctx,
+            )
+            request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, BuildTestJob)
+        assert request.job.argv == ("uv", "run", "pytest", "tests/integration", "-q")
+
+    def test_actionable_host_failure_reaches_existing_pr_address_prompt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The address agent receives command and output for a failed lint check."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
+            }
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        item.state = request.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rc=1",
+                stdout_tail="Found 1 error.",
+                value={
+                    "head_sha": "a" * 40,
+                    "immutable_source": True,
+                    "failure_kind": "validation",
+                },
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        item.state = "ADDRESS_WAIT"
+        result = stage.step(item, ctx)
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        failure = result.job.prompt_kwargs["host_verification_failure"]
+        assert failure["argv"] == ["uv", "run", "ruff", "check", "hephaestus/", "tests/"]
+        assert failure["stdout_tail"] == "Found 1 error."
+        prompt = result.job.prompt_builder(**result.job.prompt_kwargs)
+        assert "HOST_VERIFICATION_FAILURE" in prompt
+        assert "Found 1 error." in prompt
+
+    def test_failed_host_verification_fails_closed_before_primary_reviewer(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed fixed command never reaches a reviewer or GO path."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/performance/test_worker_pool_load.py "
+                    "b/tests/performance/test_worker_pool_load.py\n"
+                ),
+            }
+        )
+
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, BuildTestJob)
+        for _ in range(4):
+            item.state = request.on_done_state
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=True,
+                    value={
+                        "head_sha": "a" * 40,
+                        "immutable_source": True,
+                        "failure_kind": "none",
+                    },
+                ),
+                ctx,
+            )
+            request = stage.step(item, ctx)
+            assert isinstance(request, JobRequest)
+            assert isinstance(request.job, BuildTestJob)
+        assert request.job.descr == "review_stalled_consumer_verification"
+        assert isinstance(request.job, BuildTestJob)
+        item.state = request.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rc=1",
+                value={
+                    "head_sha": "a" * 40,
+                    "immutable_source": True,
+                    "failure_kind": "test",
+                },
+                stderr_tail="1 failed in 0.44s",
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
+        assert item.payload["host_verification_failure"] == {
+            "argv": list(request.job.argv),
+            "path": "tests/performance/test_worker_pool_load.py",
+            "head_sha": "a" * 40,
+            "error": "rc=1",
+            "stdout_tail": "",
+            "stderr_tail": "1 failed in 0.44s",
+        }
+        assert "review_audit_failure" not in item.payload
+
+    def test_timed_out_host_verification_writes_no_go_and_routes_to_address(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A verified test timeout is actionable, but never enters EVAL retry."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/performance/test_worker_pool_load.py "
+                    "b/tests/performance/test_worker_pool_load.py\n"
+                ),
+            }
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        for _ in range(4):
+            item.state = request.on_done_state
+            stage.on_job_done(
+                item,
+                JobResult(
+                    ok=True,
+                    value={
+                        "head_sha": "a" * 40,
+                        "immutable_source": True,
+                        "failure_kind": "none",
+                    },
+                ),
+                ctx,
+            )
+            request = stage.step(item, ctx)
+            assert isinstance(request, JobRequest)
+        assert isinstance(request.job, BuildTestJob)
+        assert request.job.descr == "review_stalled_consumer_verification"
+        item.state = request.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="timeout",
+                value={
+                    "head_sha": "a" * 40,
+                    "immutable_source": True,
+                    "failure_kind": "test",
+                },
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
+        assert item.payload["host_verification_failure"]["error"] == "timeout"
+        assert "review_audit_failure" not in item.payload
+
+    def test_boundary_failure_writes_no_go_and_finishes_without_eval_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An unavailable sandbox is durable operator remediation, not code work."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/performance/test_worker_pool_load.py "
+                    "b/tests/performance/test_worker_pool_load.py\n"
+                ),
+            }
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        item.state = request.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="unsupported_host_verification_boundary"),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "host_verification_failed"
+        )
+        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
+        assert item.payload["host_verification_failure"]["error"] == (
+            "unsupported_host_verification_boundary"
+        )
+        assert "review_audit_failure" not in item.payload
+
+    def test_forged_diff_content_cannot_trigger_host_verification(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only a real diff header may activate a registered host command."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "+++ b/tests/performance/test_worker_pool_load.py\n",
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "review"
 
     def test_validate_wait_skips_to_eval_when_review_failed(
         self, make_ctx: Any, make_work_item: Any
@@ -3981,6 +4417,7 @@ class TestRealCommitGate:
                 "validation_result": '{"unaddressed": []}',
                 "reviewed_pr_head_sha": "a" * 40,
                 "pr_diff": "stale diff",
+                "host_verification_receipts": [{"head_sha": "a" * 40}],
             }
         )
 
@@ -3997,6 +4434,7 @@ class TestRealCommitGate:
             "validation_result",
             "reviewed_pr_head_sha",
             "pr_diff",
+            "host_verification_receipts",
         ):
             assert key not in item.payload
 
