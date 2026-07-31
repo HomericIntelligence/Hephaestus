@@ -582,6 +582,9 @@ def _finding_key(thread: dict[str, Any]) -> tuple[str, int, str, str] | None:
         for line_text in body.splitlines()
         if not line_text.strip().startswith("<!-- hephaestus-severity:")
     )
+    # The visible role marker distinguishes the original reviewer in GitHub's
+    # conversation but must not make an otherwise identical finding look new.
+    body = re.sub(r"^\[Review\]\s*", "", body)
     body = re.sub(r"^Reopened \(prior round, still unaddressed\):\s*", "", body).strip()
     return (path.strip(), line, side.strip().upper(), re.sub(r"\s+", " ", body).casefold())
 
@@ -2163,6 +2166,10 @@ class PrReviewStage(Stage):
         item.payload["existing_pr"] = True
         item.payload.pop("direct_pr_worktree", None)
         item.payload.pop("direct_pr_worktree_dirty", None)
+        item.payload.pop("direct_pr_rebase_attempted", None)
+        item.payload.pop("direct_pr_rebase_pending", None)
+        item.payload.pop("direct_pr_rebase_published", None)
+        item.payload.pop("direct_pr_rebase_error", None)
         item.payload["direct_pr_worktree_generation"] = generation + 1
         item.session_ids.pop(AGENT_PR_REVIEWER, None)
         item.session_ids.pop(AGENT_ADDRESS_REVIEW, None)

@@ -1030,7 +1030,7 @@ class PipelineGitHub:
         shared CSPRNG batch nonce binds the complete implementation pass without
         publishing an unanchored review-level summary.
         """
-        candidates: list[tuple[dict[str, Any], str, str, str]] = []
+        candidates: list[tuple[dict[str, Any], str, str, str, str]] = []
         seen_thread_ids: set[str] = set()
         for thread in threads:
             if not isinstance(thread, dict):
@@ -1053,16 +1053,22 @@ class PipelineGitHub:
                 return []
             reply_id, reply_body = implementation_reply
             batch_nonce = self._implementation_reply_batch_nonce(reply_body)
-            if batch_nonce is None:
+            review_id = comments[-1].get("review_id")
+            if batch_nonce is None or not isinstance(review_id, str) or not review_id:
                 return []
             seen_thread_ids.add(thread_id)
-            candidates.append((thread, reply_id, reply_body, batch_nonce))
+            candidates.append((thread, reply_id, reply_body, batch_nonce, review_id))
         if not candidates:
             return []
         batch_nonces = {candidate[3] for candidate in candidates}
         if len(batch_nonces) != 1:
             return []
-        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _ in candidates]
+        # Multiple implementation responses from one pass must share one
+        # submitted GitHub review, not merely a common local nonce. Otherwise
+        # legacy one-review-per-comment replies could be resolved as a batch.
+        if len(candidates) > 1 and len({candidate[4] for candidate in candidates}) != 1:
+            return []
+        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _, _ in candidates]
 
     def reviewer_validation_receipts(
         self,
@@ -1593,6 +1599,7 @@ class PipelineGitHub:
         reply_bodies: dict[str, str] = {}
         pull_request_ids: set[str] = set()
         pending_review_ids: set[str] = set()
+        commented_review_ids: set[str] = set()
         has_commented_recovery = False
         try:
             for thread_id in candidate_ids:
@@ -1641,6 +1648,7 @@ class PipelineGitHub:
                         pending_review_ids.add(review_id)
                     elif review_state == "COMMENTED":
                         has_commented_recovery = True
+                        commented_review_ids.add(review_id)
                     else:
                         blocked.append(thread_id)
                     continue
@@ -1660,7 +1668,6 @@ class PipelineGitHub:
                 )
             pull_request_id = next(iter(pull_request_ids))
             pending_review_id = next(iter(pending_review_ids), None)
-            needs_envelope = len(candidate_ids) > 1 or pending_review_id is not None
             if has_commented_recovery and (prepared or pending_review_id is not None):
                 # A submitted review cannot safely be extended. A mixed
                 # recovery means another actor changed the batch boundary.
@@ -1668,14 +1675,30 @@ class PipelineGitHub:
                     retryable_thread_ids=candidate_ids,
                     retryable=True,
                 )
+            if has_commented_recovery and len(candidate_ids) > 1 and len(commented_review_ids) != 1:
+                # Never let legacy one-review-per-comment recovery masquerade
+                # as a complete implementation pass.
+                return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+            if has_commented_recovery:
+                # The submit mutation may have succeeded even when its
+                # response was lost. Every reply is already bound to the
+                # submitted review, so a retry must not create an empty one.
+                return ImplementationThreadReplyResult(
+                    replied_thread_ids=candidate_ids,
+                    receipts=tuple(recovered[thread_id] for thread_id in candidate_ids),
+                )
+            needs_envelope = len(candidate_ids) > 1 or pending_review_id is not None
             if needs_envelope and pending_review_id is None:
                 pending_review_id = self._create_pending_implementation_review(
                     pull_request_id, expected_head_sha, batch_nonce
                 )
                 if pending_review_id is None:
+                    # GitHub may have accepted the create mutation while its
+                    # response was lost. There is no source-attached receipt
+                    # yet from which to identify that pending review safely;
+                    # fail closed rather than creating a duplicate envelope.
                     return ImplementationThreadReplyResult(
-                        retryable_thread_ids=candidate_ids,
-                        retryable=True,
+                        blocked_thread_ids=candidate_ids,
                     )
             for thread_id, snapshot, body in prepared:
                 comment_id = self._add_thread_reply(

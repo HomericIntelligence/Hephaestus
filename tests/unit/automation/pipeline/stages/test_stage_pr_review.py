@@ -41,6 +41,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     _reviewer_thread_decisions,
     _validation_receipt_fingerprints,
     _validation_thread_snapshots,
+    _without_duplicate_live_findings,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
@@ -2004,6 +2005,26 @@ class TestReviewThreadLifecycle:
         assert not _is_postable_finding({**valid, "severity": "informational"})
         assert not _is_postable_finding({**valid, "body": "<!-- hephaestus-severity: major -->"})
 
+    def test_visible_reviewer_prefix_does_not_repost_a_live_finding(self) -> None:
+        """The human-readable role prefix is not part of finding identity."""
+        finding = {
+            "path": "hephaestus/example.py",
+            "line": 3,
+            "side": "RIGHT",
+            "body": "Handle the null value before reading it.",
+        }
+        live = {
+            "thread-1": {
+                **finding,
+                "body": (
+                    "[Review] Handle the null value before reading it.\n"
+                    "<!-- hephaestus-severity: major -->"
+                ),
+            }
+        }
+
+        assert _without_duplicate_live_findings([finding], live) == []
+
     def test_reviewer_feedback_is_preserved_for_the_next_implementer(self) -> None:
         """A rejection reply is present in the next remediation prompt payload."""
         thread = self._thread("thread-1", 3, "fix this")
@@ -3429,6 +3450,53 @@ class TestEvalVerdicts:
         assert isinstance(retry, JobRequest)
         assert isinstance(retry.job, GitJob)
         assert retry.job.kwargs["isolated_generation"] == 1
+
+    def test_direct_pr_drift_restart_rebases_the_recreated_checkout(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fresh direct checkout must not inherit an old rebase attempt."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+                "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+        item.branch = "review-branch"
+        item.payload.update(
+            {
+                "direct_pr_rebase_attempted": True,
+                "direct_pr_rebase_pending": True,
+                "direct_pr_rebase_published": True,
+                "direct_pr_rebase_error": "old error",
+            }
+        )
+
+        assert PrReviewStage._restart_direct_pr_review(item) is None
+        assert (
+            not {
+                "direct_pr_rebase_attempted",
+                "direct_pr_rebase_pending",
+                "direct_pr_rebase_published",
+                "direct_pr_rebase_error",
+            }
+            & item.payload.keys()
+        )
+
+        item.worktree = "/tmp/review-pr-1001-1"
+        item.payload["direct_pr_worktree"] = item.worktree
+        item.state = "REVIEW_WAIT"
+        restart = stage.step(item, ctx)
+
+        assert isinstance(restart, JobRequest)
+        assert isinstance(restart.job, GitJob)
+        assert restart.job.op == "rebase"
+        assert restart.on_done_state == DIRECT_REBASE_WAIT
 
     def test_detached_push_without_a_durable_recovery_receipt_preserves_the_checkout(
         self, make_ctx: Any, make_work_item: Any

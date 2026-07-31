@@ -1142,6 +1142,7 @@ class TestReviewValidationPrompt:
 
         assert "Do not independently reproduce, rerun" in out
         assert "sandbox access failure" in out
+        assert "Do not independently adjudicate the original code-level concern" in out
 
     def test_requires_explicit_two_way_validation_contract(self) -> None:
         out = self._build()
