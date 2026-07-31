@@ -142,16 +142,20 @@ class TestWiring:
     ) -> None:
         """Injected workers observe signal and saturation shutdown requests."""
         config = PipelineConfig(org="org", repos=["r"], projects_dir=tmp_path)
-        pool = FakeWorkerPool(
+        pool: Any = FakeWorkerPool(
             shutdown=threading.Event(),
             completion_q=queues_mod.CompletionQueue(capacity=config.max_workers),
         )
+        stale_shutdown = threading.Event()
+        pool._shutdown = stale_shutdown
 
         coordinator = Coordinator(
             config, github=FakeStageGitHub(), pool=pool, install_signals=False
         )
 
         assert pool.shutdown_event is coordinator.shutdown
+        assert pool._shutdown is coordinator.shutdown
+        assert pool._shutdown is not stale_shutdown
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

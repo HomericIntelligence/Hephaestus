@@ -188,8 +188,9 @@ def test_repo_source_is_lossless_and_ordered_at_capacity_one(
     """C+1 discovered issues classify only as capacity becomes available."""
     events: list[tuple[str, int]] = []
     metadata = [
-        {"number": 101, "labels": ["state:needs-plan"], "title": "first"},
-        {"number": 102, "labels": ["state:needs-plan"], "title": "second"},
+        {"number": 1, "labels": ["state:needs-plan"], "title": "first"},
+        {"number": 2, "labels": ["state:needs-plan"], "title": "second"},
+        {"number": 1, "labels": ["state:needs-plan"], "title": "duplicate"},
     ]
 
     monkeypatch.setattr(
@@ -221,14 +222,92 @@ def test_repo_source_is_lossless_and_ordered_at_capacity_one(
 
     assert coordinator.run() == 0
     assert events == [
-        ("classify", 101),
-        ("complete", 101),
-        ("classify", 102),
-        ("complete", 102),
+        ("classify", 1),
+        ("complete", 1),
+        ("classify", 2),
+        ("complete", 2),
     ]
+    assert Counter(issue for event, issue in events if event == "classify") == Counter({1: 1, 2: 1})
+    assert Counter(issue for event, issue in events if event == "complete") == Counter({1: 1, 2: 1})
     issues = [item for item in coordinator.items if item.kind is ItemKind.ISSUE]
-    assert [item.issue for item in issues] == [101, 102]
+    assert [item.issue for item in issues] == [1, 2]
     assert all(item.result is not None and item.result.passed for item in issues)
+
+
+def test_active_cursor_reserves_progress_before_next_repo_setup_at_capacity_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A C=1 cursor cannot be deadlocked by the next repo setup permit."""
+    events: list[tuple[str, int]] = []
+    metadata = {
+        "repo-a": iter(
+            [
+                {"number": 1, "labels": ["epic"], "title": "Epic"},
+                {"number": 2, "labels": ["state:needs-plan"], "title": "actionable"},
+            ]
+        ),
+        "repo-b": iter(()),
+    }
+    monkeypatch.setattr(
+        loop_repo_manager,
+        "_iter_open_issue_meta",
+        lambda _org, repo: metadata[repo],
+    )
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_issue_from_github",
+        lambda issue, github: _facts(issue),
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a", "repo-b"],
+            loops=1,
+            parallel_repos=1,
+            max_workers=1,
+            stage_queue_capacity=1,
+            dry_run=True,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
+
+    assert coordinator._seed_pass() == 1
+    coordinator._drain_queues()
+    assert [active.repo for active in coordinator._repo_issue_sources] == ["repo-a"]
+    assert coordinator.repo_source_owner_count == 1
+    assert coordinator.live_work_count == 0
+
+    # The first row is an excluded epic, so A has not consumed a work permit.
+    # B must nevertheless remain in the lazy seed iterator: admitting it here
+    # would recreate B-permit -> A-cursor -> B-cursor at C=1.
+    coordinator._drain_repo_issue_sources()
+    assert coordinator.live_work_count == 0
+    assert coordinator._drain_seed_entries() == 0
+    assert coordinator.repo_source_owner_count == 1
+    assert not coordinator.queues[StageName.REPO].snapshot()
+
+    # A can now classify its next row and acquire the still-free permit.
+    coordinator._drain_repo_issue_sources()
+    planning = coordinator.queues[StageName.PLANNING].snapshot()
+    assert [item.issue for item in planning] == [2]
+    assert coordinator.live_work_count == 1
+
+    # Once A's work completes and its source exhausts, the same source slot
+    # transfers to B; reserving progress does not starve later repositories.
+    coordinator._drain_queues()
+    coordinator._drain_queues()
+    assert events == [("complete", 2)]
+    assert coordinator.live_work_count == 0
+    coordinator._drain_repo_issue_sources()
+    assert not coordinator._repo_issue_sources
+    assert coordinator._drain_seed_entries() == 1
+    repo_items = coordinator.queues[StageName.REPO].snapshot()
+    assert [item.repo for item in repo_items] == ["repo-b"]
+    assert coordinator.repo_source_owner_count == 1
 
 
 def test_repo_source_deduplicates_metadata_after_completed_work_at_capacity_one(

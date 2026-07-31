@@ -374,6 +374,22 @@ def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
 
 
+def _bind_injected_pool_shutdown(pool: Any, shutdown: threading.Event) -> None:
+    """Bind every injected-pool shutdown alias to the coordinator event."""
+    injected_shutdown = getattr(pool, "shutdown_event", None)
+    if not isinstance(injected_shutdown, type(shutdown)):
+        raise TypeError("injected worker pool must expose shutdown_event")
+    pool.shutdown_event = shutdown
+    if pool.shutdown_event is not shutdown:
+        raise TypeError("injected worker pool shutdown_event must be coordinator-owned")
+    # WorkerPool keeps its internal alias for hot worker paths.  Keep
+    # compatible injected implementations bound when they expose it.
+    if hasattr(pool, "_shutdown"):
+        pool._shutdown = shutdown
+        if pool._shutdown is not shutdown:
+            raise TypeError("injected worker pool _shutdown must be coordinator-owned")
+
+
 class Coordinator:
     """The single-threaded pipeline event loop.
 
@@ -432,14 +448,7 @@ class Coordinator:
             # Share channels and cancellation with an injected pool.  The
             # coordinator owns the event because signals and admission
             # saturation both set it; workers must observe that same object.
-            injected_shutdown = getattr(pool, "shutdown_event", None)
-            if not isinstance(injected_shutdown, type(self.shutdown)):
-                raise TypeError("injected worker pool must expose shutdown_event")
-            pool.shutdown_event = self.shutdown
-            # WorkerPool keeps its internal alias for hot worker paths.  Keep
-            # compatible injected implementations bound when they expose it.
-            if hasattr(pool, "_shutdown"):
-                pool._shutdown = self.shutdown
+            _bind_injected_pool_shutdown(pool, self.shutdown)
             injected_queue = getattr(pool, "completion_q", None)
             if injected_queue is None:
                 raise TypeError("injected worker pool must expose completion_q")
@@ -1118,6 +1127,22 @@ class Coordinator:
     def live_work_count(self) -> int:
         """Return the number of globally permitted nonterminal work items."""
         return len(self._live_work_permit_ids)
+
+    @property
+    def repo_source_owner_count(self) -> int:
+        """Return repo setup items plus active cursors owning source slots.
+
+        Repo setup and its detached discovery cursor are two states of the
+        same C-bounded ownership.  Counting both prevents a later setup item
+        from taking the last live-work permit while every cursor slot is
+        already occupied: at C=1 that would leave the setup waiting for the
+        cursor and the cursor waiting for the permit forever.
+        """
+        setup_owners = sum(
+            item.kind is ItemKind.REPO and id(item) in self._live_work_permit_ids
+            for item in self.items
+        )
+        return len(self._repo_issue_sources) + setup_owners
 
     def _try_acquire_work_permit(self, item: WorkItem) -> bool:
         """Reserve one of the coordinator's C global live-work slots."""
@@ -2220,12 +2245,15 @@ class Coordinator:
         return self._drain_seed_entries()
 
     def _drain_seed_entries(self) -> int:
-        """Lazily admit source entries while global work permits remain."""
+        """Lazily admit source entries while their ownership slots remain."""
         entries = self._seed_entries
         if entries is None or self.shutdown.is_set():
             return 0
         pushed = 0
-        while self.live_work_count < self._work_window:
+        direct_scope = bool(self.config.issues or self.config.prs)
+        while self.live_work_count < self._work_window and (
+            direct_scope or self.repo_source_owner_count < self._work_window
+        ):
             try:
                 entry = next(entries)
             except StopIteration:

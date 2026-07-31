@@ -152,6 +152,19 @@ def _parse_metrics_port(value: str) -> int:
     return port
 
 
+def _parse_alert_queue_depth_threshold(value: str) -> int:
+    """Parse an inclusive queue-capacity percentage for alerting."""
+    try:
+        threshold = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"alert queue depth threshold must be an integer, got {value!r}"
+        ) from exc
+    if not 0 <= threshold <= 100:
+        raise argparse.ArgumentTypeError("alert queue depth threshold must be in 0..100")
+    return threshold
+
+
 def _default_phase_timeout_s() -> float:
     """Return the default per-agent-job timeout in seconds.
 
@@ -237,6 +250,8 @@ class LoopConfig:
     # listener rather than selecting an ephemeral port, so the CLI remains
     # opt-in and operators know which port is exposed.
     metrics_port: int = 0
+    # Queue-capacity percentage that triggers a measured backlog alert.
+    alert_queue_depth_threshold: int = 100
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +443,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Loopback-only port for the local Prometheus /metrics and /health server "
             "(0 disables it)."
+        ),
+    )
+    p.add_argument(
+        "--alert-queue-depth-threshold",
+        type=_parse_alert_queue_depth_threshold,
+        default=100,
+        metavar="PERCENT",
+        help=(
+            "Queue-capacity percentage that triggers a backlog alert when local metrics "
+            "are enabled (0-100, default: 100)."
         ),
     )
     p.add_argument(
@@ -688,6 +713,7 @@ def _build_pipeline_config(
         budget_overrides={"merge": cfg.drive_green_loops},
         serialize_file_overlap=cfg.serialize_file_overlap,
         metrics_port=cfg.metrics_port,
+        alert_queue_depth_threshold=cfg.alert_queue_depth_threshold,
         circuit_breaker_snapshot_provider=circuit_breaker_snapshot_provider,
         event_log_path=_pipeline_event_log_path(cfg.projects_dir, repos),
         projects_dir=cfg.projects_dir,
@@ -837,6 +863,7 @@ def main(argv: list[str] | None = None) -> int:
             args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
         ),
         metrics_port=args.metrics_port,
+        alert_queue_depth_threshold=args.alert_queue_depth_threshold,
     )
 
     if not repos:

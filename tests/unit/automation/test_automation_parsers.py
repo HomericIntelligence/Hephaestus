@@ -775,6 +775,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             ),
         ),
         _action_spec(
+            ("--alert-queue-depth-threshold",),
+            "alert_queue_depth_threshold",
+            "_StoreAction",
+            100,
+            help_text=(
+                "Queue-capacity percentage that triggers a backlog alert when local metrics "
+                "are enabled (0-100, default: 100)."
+            ),
+        ),
+        _action_spec(
             ("--repos",),
             "repos",
             "_StoreAction",

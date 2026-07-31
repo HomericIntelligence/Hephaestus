@@ -599,6 +599,42 @@ def test_main_wires_metrics_port_to_pipeline_config(monkeypatch: pytest.MonkeyPa
     assert config.metrics_port == 9123  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("threshold", [0, 100])
+def test_alert_queue_depth_threshold_parser_accepts_percentage_bounds(threshold: int) -> None:
+    """The alert threshold accepts the full inclusive percentage range."""
+    args = loop_runner._parse_args(["--alert-queue-depth-threshold", str(threshold)])
+
+    assert args.alert_queue_depth_threshold == threshold
+
+
+@pytest.mark.parametrize("threshold", [-1, 101])
+def test_alert_queue_depth_threshold_parser_rejects_out_of_range_values(threshold: int) -> None:
+    """Bad alert thresholds fail during CLI parsing, before coordinator setup."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--alert-queue-depth-threshold", str(threshold)])
+
+
+def test_main_wires_alert_queue_depth_threshold_to_pipeline_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validated alert threshold reaches the coordinator configuration."""
+    config = _capture_config(
+        [
+            "--repos",
+            "Repo",
+            "--alert-queue-depth-threshold",
+            "75",
+            "--loops",
+            "1",
+            "--agent",
+            "claude",
+        ],
+        monkeypatch,
+    )
+
+    assert config.alert_queue_depth_threshold == 75  # type: ignore[attr-defined]
+
+
 def test_main_installs_sigtstp_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper.
 

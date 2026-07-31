@@ -42,7 +42,9 @@ uv run pytest tests/performance --override-ini="addopts=" -v --strict-markers --
 
 The stalled-consumer recovery regression is performance-marked and is not
 covered by the default unit-suite command (`pyproject.toml` deselects
-`performance`). Re-execute it explicitly when validating that behavior:
+`performance`). A successful unit-suite run therefore does not validate this
+regression and must not be reported as evidence for it. Re-execute the test
+explicitly when validating that behavior:
 
 ```bash
 uv run pytest tests/performance/test_worker_pool_load.py::test_worker_pool_stalled_consumer_preserves_and_recovers --override-ini="addopts=" -m performance --strict-markers -v

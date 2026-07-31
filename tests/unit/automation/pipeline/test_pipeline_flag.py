@@ -92,6 +92,8 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
             "--no-advise",
             "--no-serialize-file-overlap",
             "--nitpick",
+            "--alert-queue-depth-threshold",
+            "75",
         ]
     )
 
@@ -107,6 +109,7 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.no_advise is True
     assert config.serialize_file_overlap is False
     assert config.nitpick is True
+    assert config.alert_queue_depth_threshold == 75
     assert config.scope is None
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")

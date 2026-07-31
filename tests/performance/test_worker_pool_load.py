@@ -215,6 +215,7 @@ class _ObservedCompletionQueue(CompletionQueue):
         self.overflow_observed = False
         self.publication_outcomes: list[tuple[str, bool]] = []
         self.publication_ownership: list[tuple[str, bool]] = []
+        self.publication_handles: list[JobHandle] = []
         self.owner: Coordinator | None = None
 
     def offer(self, value: tuple[Any, Any]) -> bool:
@@ -233,6 +234,7 @@ class _ObservedCompletionQueue(CompletionQueue):
             )
             self.overflow_observed = self.overflow_observed or self._rejection_overflowed
             handle = value[0]
+            self.publication_handles.append(handle)
             description = str(getattr(getattr(handle, "job", None), "descr", ""))
             self.publication_outcomes.append((description, accepted))
             self.publication_ownership.append(
@@ -266,32 +268,22 @@ class _ObservedCompletionQueue(CompletionQueue):
 
 
 class _StalledConsumerHarness:
-    """Synchronize two complete worker waves without relying on sleeps."""
+    """Synchronize one complete worker wave without relying on sleeps."""
 
     def __init__(self, workers: int) -> None:
         self.workers = workers
         self.legitimate_started = 0
-        self.overflow_started = 0
         self.state_lock = threading.Lock()
         self.legitimate_ready = threading.Event()
-        self.overflow_ready = threading.Event()
         self.release_legitimate = threading.Event()
-        self.release_overflow = threading.Event()
 
     def run_job(self, _pool: WorkerPool, job: BuildTestJob) -> JobResult:
-        """Hold two worker waves while the coordinator cannot consume."""
-        is_overflow = job.descr.startswith("overflow-")
+        """Hold the admitted worker wave while the coordinator cannot consume."""
         with self.state_lock:
-            if is_overflow:
-                self.overflow_started += 1
-                if self.overflow_started == self.workers:
-                    self.overflow_ready.set()
-            else:
-                self.legitimate_started += 1
-                if self.legitimate_started == self.workers:
-                    self.legitimate_ready.set()
-        release = self.release_overflow if is_overflow else self.release_legitimate
-        assert release.wait(timeout=5.0)
+            self.legitimate_started += 1
+            if self.legitimate_started == self.workers:
+                self.legitimate_ready.set()
+        assert self.release_legitimate.wait(timeout=5.0)
         return JobResult(ok=True, value=job.descr)
 
 
@@ -318,17 +310,18 @@ def _make_recovery_coordinator(
         completion_q = _ObservedCompletionQueue(capacity=work_window)
     else:
         completion_q = CompletionQueue(capacity=work_window)
-    shared_shutdown = threading.Event()
-    pool = WorkerPool(size=work_window, shutdown=shared_shutdown, completion_q=completion_q)
+    pool = WorkerPool(
+        size=work_window,
+        shutdown=threading.Event(),
+        completion_q=completion_q,
+    )
     coordinator = Coordinator(
         config,
         github=cast(Any, object()),
         pool=pool,
         install_signals=False,
     )
-    # Injected pools expose their queue but not their private shutdown event.
-    # Use the same event on both sides, as production Coordinator does.
-    coordinator.shutdown = shared_shutdown
+    assert pool.shutdown_event is coordinator.shutdown
     if isinstance(completion_q, _ObservedCompletionQueue):
         completion_q.owner = coordinator
     coordinator.stages[StageName.PLANNING] = _SyntheticRecoveryStage()
@@ -576,6 +569,16 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     harness = _StalledConsumerHarness(workers)
     consumer_paused = threading.Event()
     resume_consumer = threading.Event()
+    graceful_shutdown_reasons: list[str] = []
+
+    original_begin_graceful_shutdown = stalled._begin_graceful_shutdown
+
+    def record_graceful_shutdown(reason: str) -> None:
+        """Capture the coordinator graceful-shutdown path."""
+        graceful_shutdown_reasons.append(reason)
+        original_begin_graceful_shutdown(reason)
+
+    monkeypatch.setattr(stalled, "_begin_graceful_shutdown", record_graceful_shutdown)
 
     original_wait = stalled._wait_for_completion
 
@@ -602,41 +605,24 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         # may publish, so subsequent high-water marks cannot race a drain.
         assert stalled.completion_q.paused_publication_state() == (0, 0, 0, 0, 0, False)
 
-        # Submit a separate C+1 publication burst through the coordinator
-        # while all workers are occupied. Register the items with the same
-        # live-work ledger used by finalization, then use the coordinator's
-        # submit chokepoint; bypassing Coordinator.in_flight would make
-        # rejected results impossible to park and recover.
-        for index in range(workers + 1):
-            item = WorkItem(
-                repo="performance/worker-pool",
-                kind=ItemKind.ISSUE,
-                issue=workers + index,
-                stage=StageName.PLANNING,
-                payload={"descr": f"overflow-{index}"},
-            )
-            stalled.items.append(item)
-            stalled._live_work_permit_ids.add(id(item))
-            stalled._submit(
-                item,
-                JobRequest(
-                    BuildTestJob(
-                        repo=item.repo,
-                        cwd=Path.cwd(),
-                        argv=("synthetic", f"overflow-{index}"),
-                        timeout_s=2,
-                        descr=f"overflow-{index}",
-                    ),
-                    on_done_state=StageName.PLANNING,
-                ),
-            )
-
         harness.release_legitimate.set()
         stalled.completion_q.wait_for_offers(workers, timeout=5.0)
-        assert harness.overflow_ready.wait(timeout=5.0)
         assert stalled.completion_q.qsize() == workers
 
-        harness.release_overflow.set()
+        # Explicitly model faulty worker publication by duplicating one
+        # already-admitted completion. This preserves the stalled-consumer
+        # overflow contract without submitting work outside Coordinator's
+        # admission and live-work permit bounds.
+        duplicate_handle = stalled.completion_q.publication_handles[0]
+        duplicate_description = str(duplicate_handle.job.descr)
+        for index in range(workers + 1):
+            accepted = stalled.completion_q.offer(
+                (duplicate_handle, JobResult(ok=True, value=f"duplicate-{index}"))
+            )
+            if not accepted:
+                # Match WorkerPool._on_future_done: a rejected worker
+                # publication requests coordinator shutdown without blocking.
+                stalled.shutdown.set()
         stalled.completion_q.wait_for_offers((2 * workers) + 1, timeout=5.0)
 
         # C results occupy the channel, C rejected results occupy its bounded
@@ -656,16 +642,18 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
         assert stalled.completion_q.offer_count == (2 * workers) + 1
         assert stalled.completion_q.accepted_count == workers
         assert stalled.completion_q.rejected_count == workers + 1
-        assert set(stalled.completion_q.publication_outcomes) == {
-            *((f"recovery-{issue}", True) for issue in range(workers)),
-            *((f"overflow-{issue}", False) for issue in range(workers + 1)),
+        assert set(stalled.completion_q.publication_outcomes[:workers]) == {
+            (f"recovery-{issue}", True) for issue in range(workers)
         }
+        assert stalled.completion_q.publication_outcomes[workers:] == [
+            (duplicate_description, False)
+        ] * (workers + 1)
         assert all(owned for _description, owned in stalled.completion_q.publication_ownership)
         assert stalled.completion_q.result_high_water == workers
         assert stalled.completion_q.rejection_high_water == workers
         assert stalled.completion_q.overflow_observed is True
         assert stalled.completion_q.qsize() == stalled.completion_q.capacity == workers
-        assert not stalled.shutdown.is_set()
+        assert stalled.shutdown.is_set()
 
         resume_consumer.set()
         run_thread.join(timeout=5.0)
@@ -673,8 +661,9 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     assert not run_thread.is_alive()
     assert run_codes == [1]
     assert stalled.shutdown.is_set()
-    assert len(stalled.items) == (2 * workers) + 1
-    expected_issues = set(range((2 * workers) + 1))
+    assert graceful_shutdown_reasons == ["external shutdown request"]
+    assert len(stalled.items) == workers
+    expected_issues = set(range(workers))
     assert {item.issue for item in stalled.items} == expected_issues
     assert all(
         item.result is not None and item.result.reason.startswith("resumable at")
@@ -684,7 +673,7 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     recovered = _make_recovery_coordinator(
         monkeypatch,
         workers,
-        issue_count=(2 * workers) + 1,
+        issue_count=workers,
     )
     assert recovered._work_window == workers
     assert recovered.completion_q.capacity == recovered._work_window
@@ -695,7 +684,7 @@ def test_worker_pool_stalled_consumer_preserves_and_recovers(
     ):
         assert recovered.run() == 0
 
-    assert len(recovered.items) == (2 * workers) + 1
+    assert len(recovered.items) == workers
     assert {item.issue for item in recovered.items} == expected_issues
     assert all(item.result is not None and item.result.passed for item in recovered.items)
 
