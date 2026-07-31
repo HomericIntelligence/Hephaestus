@@ -1146,6 +1146,14 @@ class PrReviewStage(Stage):
         if error:
             return StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable")
         if not ready:
+            if item.payload.get("direct_pr_worktree"):
+                # A failed checkout barrier may have synchronized a newer
+                # remote PR head after the prior rebase. Re-run the direct
+                # rebase before reviewing that unverified replacement head.
+                item.payload.pop("direct_pr_rebase_attempted", None)
+                item.payload.pop("direct_pr_rebase_pending", None)
+                item.payload.pop("direct_pr_rebase_published", None)
+                item.payload.pop("direct_pr_rebase_error", None)
             retries = int(item.payload.get("review_checkout_retries", 0)) + 1
             item.payload["review_checkout_retries"] = retries
             if retries <= REVIEW_CHECKOUT_RETRY_CAP:

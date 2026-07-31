@@ -349,6 +349,50 @@ class TestPrReviewStageStep:
         assert isinstance(barrier.job, GitJob)
         assert barrier.job.op == "verify_pr_review_checkout"
 
+    def test_direct_pr_checkout_head_drift_retries_the_rebase(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A changed direct head cannot bypass the rebase on checkout retry."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+                "pr_description": "Closes #1",
+                "pr_head_sha": "b" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            kind=ItemKind.PR,
+            state=REVIEW_CHECKOUT_WAIT,
+        )
+        item.worktree = "/tmp/repo/review-worktree"
+        item.branch = "review-branch"
+        item.payload.update(
+            {
+                "direct_pr_worktree": item.worktree,
+                "direct_pr_rebase_attempted": True,
+                "direct_pr_rebase_published": True,
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": False,
+            }
+        )
+
+        retry = stage.step(item, ctx)
+
+        assert retry == Continue(next_state="REVIEW_WAIT")
+        assert "direct_pr_rebase_attempted" not in item.payload
+        assert "direct_pr_rebase_published" not in item.payload
+
+        item.state = retry.next_state
+        rebased = stage.step(item, ctx)
+        assert isinstance(rebased, JobRequest)
+        assert isinstance(rebased.job, GitJob)
+        assert rebased.job.op == "rebase"
+
     def test_checkout_barrier_renews_the_proof_for_an_unchanged_head(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
