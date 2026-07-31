@@ -358,8 +358,10 @@ revalidates the process-local reviewed-head proof and conditionally
 squash-merges that exact head; no queue stage mutates native auto-merge.
 Normal review may collect CI/CD evidence as context, but the loop does not
 change CI/CD. CI workflows and external artifacts never independently grant
-that authority. Branch protection and required reviews still govern whether
-GitHub merges the PR.
+the loop-owned label authority. Branch protection and required CI/CD checks
+are the merge contract. This single-maintainer repository intentionally keeps
+the GitHub required-approving-review count at zero; a human approval is not a
+merge gate.
 
 ```bash
 # 1. Create feature branch
@@ -613,11 +615,11 @@ Hephaestus's shared tooling. Those principles, applied to agent design, are:
   substitutable at a call site without changing orchestration logic.
 - **Least privilege, least astonishment (POLA).** Every agent call site declares
   an explicit `--allowedTools` scope (see the permission-policy table below),
-  runs in a scoped worktree, and defers all irreversible actions (merge, tag,
-  force-push) to human-gated checkpoints.
-- **Human-in-the-loop by default.** Autonomy is bounded: skills that can act
-  destructively stop for a human gate, and every automation PR still passes
-  branch protection and the `pr-policy` check.
+  runs in a scoped worktree, and defers irreversible actions to explicit
+  repository policy gates.
+- **CI/CD-gated merges.** Merge eligibility is enforced by branch protection
+  and required CI/CD checks, especially the `pr-policy` gate. Review prose and
+  optional review signals are audit evidence, not merge authorization.
 
 For the full, non-agent-specific statement of these principles see
 [Key Development Principles](#key-development-principles).
@@ -629,8 +631,8 @@ automation calls. They do not use `--dangerously-skip-permissions`, and
 `hephaestus.automation.claude_invoke.invoke_claude_with_session` still forwards
 the explicit `--allowedTools` scope. There is no OS-level seccomp, namespace, or chroot sandbox on this Claude path. The compensating controls are per-call tool
 allowlists, cwd/worktree scoping, subprocess timeouts, prompt fencing for
-untrusted GitHub content, secure logs, and GitHub branch protection plus human
-review before merge.
+untrusted GitHub content, secure logs, and GitHub branch protection plus the
+required CI/CD checks.
 
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
@@ -656,20 +658,24 @@ This prevents a hostile issue body from forging a verdict line or injecting
 instructions that bypass the PR review loop. See the tests in
 `tests/unit/automation/test_prompts.py` for the regression coverage.
 
-## Human-in-the-loop checkpoints
+## Agent safety checkpoints
 
-Several plugin-provided skills mandate human gates that the agents must wait on:
+Several plugin-provided skills mandate safety confirmations for agent actions.
+These are workflow safety controls, not GitHub required approvals or merge
+gates:
 
 - `/athena:myrmidon-swarm` — explicit Phase 1 "STOP HERE. Ask the user…"
   before any swarm deploys.
 - `/athena:skill-advisor` — invoked at the start of any substantive task
   with `allowed-tools: []`, so it can route but never act autonomously.
 - `/athena:finish-branch` and `/athena:code-review` — explicit confirm
-  steps before tagging, force-pushing, or merging.
+  steps before tagging or force-pushing.
 
 Every PR opened by the automation pipeline goes through GitHub's normal branch
 protection and the `pr-policy` required-check gate
-(see [PR policy](#pr-policy)) — a human still reviews and merges.
+(see [PR policy](#pr-policy)); required CI/CD checks enforce the merge contract,
+and the GitHub required-approving-review count remains intentionally zero for
+this single-maintainer repository.
 
 ## Skill catalog (agent highlights)
 
