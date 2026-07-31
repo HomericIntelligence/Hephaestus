@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, call, patch
@@ -36,9 +37,17 @@ from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
+    _confirmed_pytest_failure,
+    _hdiutil_create_argv,
+    _host_validation_failure_kind,
+    _host_verification_env,
+    _host_verification_profile,
+    _quota_backed_volume,
     _repo_lock_path,
+    _run_bounded_host_command,
     _trusted_gh_executable,
     _unsafe_local_git_config_key,
+    _verifier_owned_runtime_environment,
 )
 from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
@@ -603,6 +612,377 @@ class TestWorkerPoolSubmitComplete:
 
         assert result.ok is False
         assert result.error == "timeout"
+
+    def test_pytest_failure_classification_requires_terminal_summary(self) -> None:
+        """A bootstrap error mentioning failures is never implementation work."""
+        assert _confirmed_pytest_failure(
+            1,
+            "========================= 1 failed, 5 passed in 0.42s =========================\n",
+            "",
+        )
+        assert not _confirmed_pytest_failure(
+            1,
+            "uv bootstrap error: 1 failed to prepare environment",
+            "",
+        )
+
+    def test_fixed_lint_and_type_failures_are_actionable_validation_work(self) -> None:
+        """Known tool diagnostics reach remediation; bootstrap errors do not."""
+        assert (
+            _host_validation_failure_kind(
+                ("uv", "run", "ruff", "check", "hephaestus/"),
+                1,
+                "Found 1 error.\n",
+                "",
+            )
+            == "validation"
+        )
+        assert (
+            _host_validation_failure_kind(
+                ("uv", "run", "mypy", "hephaestus/"),
+                1,
+                "Found 2 errors in 1 file (checked 3 source files)\n",
+                "",
+            )
+            == "validation"
+        )
+        assert (
+            _host_validation_failure_kind(
+                ("uv", "run", "ruff", "check", "hephaestus/"),
+                2,
+                "",
+                "uv failed to prepare the environment",
+            )
+            == "runner"
+        )
+
+    def test_bounded_host_command_disconnects_stdin_and_unregisters_process_group(
+        self, tmp_path: Path
+    ) -> None:
+        """Untrusted validation code gets no inherited input or leaked group."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        source.mkdir()
+        scratch.mkdir()
+
+        result = _run_bounded_host_command(
+            (sys.executable, "-c", "import sys; raise SystemExit(sys.stdin.read() != '')"),
+            validation_argv=("uv", "run", "pytest", "tests/unit"),
+            source=source,
+            scratch=scratch,
+            environment=dict(os.environ),
+            timeout_s=5,
+            shutdown=threading.Event(),
+        )
+
+        assert result.ok is True
+        assert subprocess_registry.live_count() == 0
+
+    def test_bounded_host_command_stops_immediately_when_pool_is_interrupted(
+        self, tmp_path: Path
+    ) -> None:
+        """A stopping loop terminates a host child rather than waiting for timeout."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        source.mkdir()
+        scratch.mkdir()
+        shutdown = threading.Event()
+        shutdown.set()
+
+        result = _run_bounded_host_command(
+            (sys.executable, "-c", "import time; time.sleep(30)"),
+            validation_argv=("uv", "run", "pytest", "tests/unit"),
+            source=source,
+            scratch=scratch,
+            environment=dict(os.environ),
+            timeout_s=60,
+            shutdown=shutdown,
+        )
+
+        assert result.interrupted is True
+        assert result.error == "interrupted"
+        assert subprocess_registry.live_count() == 0
+
+    def test_immutable_build_test_runs_from_disposable_head_snapshot(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Host verification never lets PR code mutate the reviewer checkout."""
+        checkout = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (("user.name", "Test User"), ("user.email", "test@example.com")):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        (checkout / "tracked.txt").write_text("original\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "tracked.txt"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "fixture"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        program = (
+            "from pathlib import Path; import subprocess; "
+            "assert Path('.git').is_file(); "
+            "assert Path('build').is_symlink(); "
+            "assert Path('pi-smoke-logs').is_dir(); "
+            "assert not Path('pi-smoke-logs').is_symlink(); "
+            "resolved = subprocess.check_output(('git', 'rev-parse', 'HEAD'), text=True).strip(); "
+            f"assert resolved == {head!r}"
+        )
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=(
+                sys.executable,
+                "-c",
+                program,
+            ),
+            timeout_s=60,
+            expected_head_sha=head,
+            immutable_source=True,
+        )
+
+        # The host OS boundary has its own command-construction tests.  Keep
+        # this fixture focused on the archive and Git-metadata boundaries: the
+        # child sees a disposable source snapshot and matching sealed Git data,
+        # never the reviewer checkout.
+        def disposable_scratch(root: Path) -> object:
+            scratch = root / "scratch"
+            scratch.mkdir()
+            return nullcontext(scratch)
+
+        def disposable_pi_smoke_logs(root: Path, source: Path) -> object:
+            logs = source / "pi-smoke-logs"
+            logs.mkdir()
+            return nullcontext(logs)
+
+        with (
+            patch(
+                f"{_WP}._host_verification_command",
+                side_effect=lambda **kwargs: kwargs["argv"],
+            ),
+            patch(f"{_WP}._quota_backed_scratch", side_effect=disposable_scratch),
+            patch(
+                f"{_WP}._quota_backed_pi_smoke_logs",
+                side_effect=disposable_pi_smoke_logs,
+            ),
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is True
+        assert result.value == {
+            "head_sha": head,
+            "immutable_source": True,
+            "failure_kind": "none",
+        }
+        assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
+
+    def test_immutable_build_test_fails_closed_without_host_boundary(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A missing OS boundary never falls back to the reviewer checkout."""
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=tmp_path,
+            argv=(sys.executable, "-c", "raise SystemExit(0)"),
+            timeout_s=60,
+            expected_head_sha="a" * 40,
+            immutable_source=True,
+        )
+
+        with (
+            patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
+            patch(f"{_WP}._trusted_executable", return_value=sys.executable),
+            patch(f"{_WP}._bounded_git_archive", return_value=(b"", "")),
+            patch(f"{_WP}._extract_immutable_archive"),
+            patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata.git"),
+            patch(f"{_WP}._quota_backed_scratch", side_effect=nullcontext),
+            patch(
+                f"{_WP}._quota_backed_pi_smoke_logs",
+                side_effect=lambda root, source: nullcontext(source / "pi-smoke-logs"),
+            ),
+            patch(f"{_WP}.sys.platform", "linux"),
+        ):
+            result = pool._run_build_test(job)
+
+        assert result.ok is False
+        assert result.error == "unsupported_host_verification_boundary"
+
+    def test_host_verification_profile_keeps_source_outside_writable_root(
+        self, tmp_path: Path
+    ) -> None:
+        """Only the separate scratch tree is writable to PR-controlled code."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        runtime = tmp_path / "runtime"
+        pi_smoke_logs = source / "pi-smoke-logs"
+        profile = _host_verification_profile(
+            source=source,
+            scratch=scratch,
+            runtime_environment=runtime,
+            git_metadata=tmp_path / "metadata.git",
+            pi_smoke_logs=pi_smoke_logs,
+            executable=Path("/usr/bin/uv"),
+        )
+
+        source_entry = f'(subpath "{source.resolve()}")'
+        scratch_entry = f'(subpath "{scratch.resolve()}")'
+        pi_smoke_logs_entry = f'(subpath "{pi_smoke_logs.resolve()}")'
+        assert '(import "system.sb")' in profile
+        assert "(deny network*)" in profile
+        assert "(allow signal (target children))" in profile
+        assert '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))' in profile
+        assert f'(subpath "{Path("/bin").resolve()}")' in profile
+        assert f'  (literal "{Path("/tmp").resolve()}")' not in profile
+        assert f'(allow file-read-metadata (path-ancestors "{source.resolve()}"))' in profile
+        assert source_entry in profile
+        assert f"(allow file-write* {source_entry})" not in profile
+        assert f"(allow file-write* {scratch_entry})" in profile
+        assert f"(allow file-write* {pi_smoke_logs_entry})" in profile
+
+    def test_hdiutil_blank_image_argv_uses_no_srcfolder_only_format(self, tmp_path: Path) -> None:
+        """The quota image uses the valid blank-HFS+ form accepted by macOS."""
+        argv = _hdiutil_create_argv(tmp_path / "scratch.dmg")
+
+        assert argv[:6] == ("/usr/bin/hdiutil", "create", "-size", "64m", "-fs", "HFS+")
+        assert "-format" not in argv
+
+    def test_quota_volume_retries_a_timed_out_detach(self, tmp_path: Path) -> None:
+        """A transient forced-detach timeout cannot leak a verifier volume."""
+        mountpoint = tmp_path / "scratch"
+        mountpoint.mkdir()
+        completed: subprocess.CompletedProcess[Any] = subprocess.CompletedProcess([], 0)
+
+        with (
+            patch(f"{_WP}.sys.platform", "darwin"),
+            patch.object(Path, "is_file", return_value=True),
+            patch(f"{_WP}.os.access", return_value=True),
+            patch(
+                f"{_WP}.subprocess.run",
+                side_effect=(
+                    completed,
+                    completed,
+                    subprocess.TimeoutExpired(cmd="hdiutil detach", timeout=15),
+                    completed,
+                ),
+            ) as run,
+        ):
+            with _quota_backed_volume(tmp_path, "scratch.dmg", mountpoint) as mounted:
+                assert mounted == mountpoint
+
+        assert run.call_count == 4
+
+    def test_quota_volume_fails_closed_after_two_detach_failures(self, tmp_path: Path) -> None:
+        """Unconfirmed cleanup is an explicit host-boundary failure."""
+        mountpoint = tmp_path / "scratch"
+        mountpoint.mkdir()
+        completed: subprocess.CompletedProcess[Any] = subprocess.CompletedProcess([], 0)
+        failed_detach: subprocess.CompletedProcess[Any] = subprocess.CompletedProcess([], 1)
+
+        with (
+            patch(f"{_WP}.sys.platform", "darwin"),
+            patch.object(Path, "is_file", return_value=True),
+            patch(f"{_WP}.os.access", return_value=True),
+            patch(
+                f"{_WP}.subprocess.run",
+                side_effect=(completed, completed, failed_detach, failed_detach),
+            ) as run,
+            pytest.raises(RuntimeError, match="host_verification_quota_cleanup_failed"),
+        ):
+            with _quota_backed_volume(tmp_path, "scratch.dmg", mountpoint):
+                pass
+
+        assert run.call_count == 4
+
+    def test_verifier_runtime_rejects_an_incomplete_cache_entry(self, tmp_path: Path) -> None:
+        """A pre-seal runtime cache cannot be reused after an interrupted copy."""
+        checkout = tmp_path / "checkout"
+        runtime = checkout / ".venv"
+        runtime.mkdir(parents=True)
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        cache_temp = tmp_path / "cache-temp"
+        incomplete = cache_temp / "hephaestus-host-validation-runtime" / "fixture-runtime"
+        incomplete.mkdir(parents=True)
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+            patch(f"{_WP}._host_runtime_fingerprint", return_value="fixture-runtime"),
+            pytest.raises(RuntimeError, match="host_verification_runtime_cache_unsafe"),
+        ):
+            _verifier_owned_runtime_environment(checkout)
+
+    def test_verifier_runtime_dereferences_the_python_launcher(self, tmp_path: Path) -> None:
+        """The sealed copy does not retain a launcher back into its source runtime."""
+        checkout = tmp_path / "checkout"
+        runtime = checkout / ".venv"
+        launcher = runtime / "bin" / "python"
+        external_launcher = tmp_path / "base" / "python"
+        launcher.parent.mkdir(parents=True)
+        external_launcher.parent.mkdir()
+        external_launcher.write_text("host interpreter\n", encoding="utf-8")
+        os.symlink(external_launcher, launcher)
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        (runtime / "bin" / "mypy").write_text(
+            f"#!{runtime.resolve()}/bin/python\nentry point\n", encoding="utf-8"
+        )
+        cache_temp = tmp_path / "cache-temp"
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+        ):
+            sealed = _verifier_owned_runtime_environment(checkout)
+
+        copied_launcher = sealed / "bin" / "python"
+        assert not copied_launcher.is_symlink()
+        assert copied_launcher.read_text(encoding="utf-8") == "host interpreter\n"
+        assert (
+            (sealed / "bin" / "mypy")
+            .read_text(encoding="utf-8")
+            .startswith(f"#!{sealed.resolve()}/bin/python\n")
+        )
+
+    def test_host_verification_environment_keeps_tool_output_in_scratch(
+        self, tmp_path: Path
+    ) -> None:
+        """UV, Ruff, pytest coverage, and bytecode write only to scratch."""
+        scratch = tmp_path / "scratch"
+
+        environment = _host_verification_env(scratch, "/usr/bin/uv", tmp_path / "runtime")
+
+        for key in (
+            "UV_CACHE_DIR",
+            "RUFF_CACHE_DIR",
+            "COVERAGE_FILE",
+            "PYTHONPYCACHEPREFIX",
+        ):
+            assert Path(environment[key]).is_relative_to(scratch.resolve())
+        assert environment["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
 
 
 class TestAgentErrorHandling:
@@ -4115,7 +4495,11 @@ class TestShutdownReapsSubprocess:
         """A direct Codex session is registered and reaped with the worker pool."""
         sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
         job = _agent_job(
-            agent="codex", model="reap-test", timeout_s=60, session_agent="implementer"
+            agent="codex",
+            model="reap-test",
+            timeout_s=60,
+            session_agent="implementer",
+            cwd=Path.cwd(),
         )
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
@@ -4161,7 +4545,12 @@ class TestShutdownReapsSubprocess:
             # keep the REAL _run_tracked spawn (Popen + process-group tracking).
             return real_run_tracked(list(sleeper), **kwargs)
 
-        job = _agent_job(model="reap-test", timeout_s=60, session_agent="implementer")
+        job = _agent_job(
+            model="reap-test",
+            timeout_s=60,
+            session_agent="implementer",
+            cwd=Path.cwd(),
+        )
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
             patch(f"{_WP}.claude_invoke._run_tracked", side_effect=fake_run_tracked),

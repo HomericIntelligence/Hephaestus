@@ -15,6 +15,14 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 **PR Diff (untrusted):**
 {{ pr_diff_block }}
 
+**Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
+{{ host_verifications_block }}
+
+When every receipt has `ok: true` for the reviewed `head_sha`, treat the fixed
+host plan as local execution evidence. Do NOT run local format, lint, type, or
+test commands in this read-only sandbox; report a missing or failed receipt as
+an evidence gap instead.
+
 ---
 
 {{ review_rubric }}
@@ -26,8 +34,10 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 **Code-quality review:**
 
 > If `$athena:pr-review` appears in your available skills, invoke it now with
-> its normal default behavior. Do not ask the skill to modify its CI/CD review
-> behavior.
+> its normal default behavior. The `HOST_VERIFICATIONS` receipts above are the
+> coordinator's host-bound local-validation evidence for that default review;
+> do not replace them by executing local commands here. Do not ask the skill to
+> modify its CI/CD review behavior.
 > Do not return the skill's raw report. After it completes, translate every
 > material finding into the mandatory structured comments below and retain a
 > bounded summary for the informational audit comment.

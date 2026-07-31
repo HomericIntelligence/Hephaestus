@@ -69,6 +69,7 @@ def _build_context_block(
     task_block: str,
     task_review_block: str,
     diff_text: str,
+    host_verification_failure: dict[str, Any] | None,
     nonce: str,
 ) -> str:
     """Render the optional TASK / TASK_REVIEW / DIFF context for the address prompt.
@@ -81,7 +82,14 @@ def _build_context_block(
     Returns an empty string when none are supplied (the resume path already
     carries this context in its transcript).
     """
-    if not any((task_block.strip(), task_review_block.strip(), diff_text.strip())):
+    if not any(
+        (
+            task_block.strip(),
+            task_review_block.strip(),
+            diff_text.strip(),
+            host_verification_failure,
+        )
+    ):
         return ""
     context = PromptCatalog.current().render(
         "address_review/context_block.j2",
@@ -92,6 +100,15 @@ def _build_context_block(
             else ""
         ),
         diff_block=_fence_untrusted("DIFF", diff_text, nonce) if diff_text.strip() else "",
+        host_verification_failure_block=(
+            _fence_untrusted(
+                "HOST_VERIFICATION_FAILURE",
+                json.dumps(host_verification_failure, ensure_ascii=False, sort_keys=True),
+                nonce,
+            )
+            if host_verification_failure
+            else ""
+        ),
     )
     return f"\n{context}\n"
 
@@ -106,6 +123,7 @@ def get_address_review_prompt(
     task_block: str = "",
     task_review_block: str = "",
     diff_text: str = "",
+    host_verification_failure: dict[str, Any] | None = None,
     unaddressed_findings: list[dict[str, Any]] | None = None,
     scope_retraction_paths: tuple[str, ...] = (),
 ) -> str:
@@ -133,6 +151,8 @@ def get_address_review_prompt(
             untrusted context section.
         diff_text: Optional current implementation diff, rendered as an untrusted
             context section.
+        host_verification_failure: Failed fixed host command and bounded output
+            supplied only when an existing PR needs remediation.
         unaddressed_findings: Optional still-unresolved review threads from a
             prior address turn that produced NO commit (#1554). When supplied,
             a "Make sure to handle <finding>" directive is rendered above the
@@ -155,6 +175,7 @@ def get_address_review_prompt(
             task_block,
             task_review_block,
             diff_text,
+            host_verification_failure,
             fenced.nonce,
         ),
         retry_directive_block=build_unaddressed_directive(
