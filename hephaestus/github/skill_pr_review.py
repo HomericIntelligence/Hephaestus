@@ -81,6 +81,9 @@ def _resolve_open_pr(identifier: str) -> dict[str, Any]:
     """Return metadata for one explicitly identified open PR."""
     validate_pr_identifier(identifier)
     pull_request = _load_object(_gh_output("pr", "view", identifier, "--json", _RESOLVE_FIELDS))
+    metadata_problem = resolve_metadata_error(pull_request)
+    if metadata_problem:
+        raise RuntimeError(metadata_problem)
     if pull_request.get("state") != "OPEN":
         raise RuntimeError(f"pull request {identifier} is not open")
     return pull_request
@@ -171,24 +174,68 @@ def resolve_pr_main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def metadata_error(metadata: object) -> str | None:
-    """Return a diagnostic when GitHub returns partial PR metadata."""
+def _missing_metadata_fields(
+    metadata: object,
+    required_types: dict[str, type[object]],
+    label: str,
+    nonempty_fields: frozenset[str] = frozenset(),
+) -> str | None:
+    """Return a diagnostic when GitHub omits a required typed field."""
     if not isinstance(metadata, dict):
-        return "PR metadata must be a JSON object"
-    required_types: dict[str, type[object]] = {
-        "number": int,
-        "title": str,
-        "author": dict,
-        "baseRefName": str,
-        "headRefName": str,
-        "statusCheckRollup": list,
-        "url": str,
-    }
+        return f"{label} must be a JSON object"
     invalid = [
         field
         for field, expected_type in required_types.items()
         if not isinstance(metadata.get(field), expected_type)
+        or (field in nonempty_fields and not metadata[field].strip())
     ]
+    if invalid:
+        return f"GitHub returned incomplete or invalid {label} fields: " + ", ".join(
+            sorted(set(invalid))
+        )
+    return None
+
+
+def resolve_metadata_error(metadata: object) -> str | None:
+    """Return a diagnostic when PR resolution lacks immutable references."""
+    return _missing_metadata_fields(
+        metadata,
+        {
+            "number": int,
+            "url": str,
+            "state": str,
+            "headRefName": str,
+            "baseRefName": str,
+            "headRefOid": str,
+            "baseRefOid": str,
+        },
+        "pull-request resolution metadata",
+        frozenset({"url", "state", "headRefName", "baseRefName", "headRefOid", "baseRefOid"}),
+    )
+
+
+def metadata_error(metadata: object) -> str | None:
+    """Return a diagnostic when GitHub returns partial PR metadata."""
+    if not isinstance(metadata, dict):
+        return "GitHub returned PR metadata that is not a JSON object"
+    required_types: dict[str, type[object]] = {
+        "number": int,
+        "title": str,
+        "body": str,
+        "state": str,
+        "isDraft": bool,
+        "author": dict,
+        "baseRefName": str,
+        "headRefName": str,
+        "reviews": list,
+        "statusCheckRollup": list,
+        "closingIssuesReferences": list,
+        "url": str,
+    }
+    problem = _missing_metadata_fields(metadata, required_types, "PR metadata")
+    if problem:
+        return problem
+    invalid: list[str] = []
     author = metadata.get("author")
     if not isinstance(author, dict) or not isinstance(author.get("login"), str):
         invalid.append("author.login")
@@ -237,17 +284,27 @@ def collect_pr_evidence_main(argv: Sequence[str] | None = None) -> int:
             raise RuntimeError(
                 f"pull request {url} does not belong to current repository {repository}"
             )
-        changed_files = [
-            line
-            for line in _gh_output(
+        changed_pages: Any = json.loads(
+            _gh_output(
                 "api",
                 "--paginate",
+                "--slurp",
                 f"repos/{repository}/pulls/{number}/files",
-                "--jq",
-                ".[].filename",
-            ).splitlines()
-            if line
-        ]
+            )
+        )
+        if not isinstance(changed_pages, list) or any(
+            not isinstance(page, list) for page in changed_pages
+        ):
+            raise RuntimeError("GitHub returned invalid changed-file evidence")
+        changed_files = []
+        for page in changed_pages:
+            for changed_file in page:
+                if not isinstance(changed_file, dict):
+                    raise RuntimeError("GitHub returned invalid changed-file evidence")
+                filename = changed_file.get("filename")
+                if not isinstance(filename, str):
+                    raise RuntimeError("GitHub returned invalid changed-file evidence")
+                changed_files.append(filename)
         checks: Any = json.loads(
             _gh_output(
                 "pr",

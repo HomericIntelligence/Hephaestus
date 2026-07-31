@@ -84,6 +84,10 @@ def test_resolve_pr_reports_foreign_pr_as_an_operational_error(
                     "number": 42,
                     "url": "https://github.com/other/repository/pull/42",
                     "state": "OPEN",
+                    "headRefName": "feature",
+                    "baseRefName": "main",
+                    "headRefOid": "head",
+                    "baseRefOid": "base",
                 }
             )
         ),
@@ -115,10 +119,16 @@ def test_collect_evidence_keeps_pending_checks_and_paginated_paths(
         "closingIssuesReferences": [],
         "url": "https://github.com/owner/repository/pull/9",
     }
+    changed_file_pages = [
+        [
+            {"filename": "src/feature.py"},
+            {"filename": "docs/feature.md"},
+        ],
+    ]
     mock_gh_call.side_effect = [
         _completed(stdout=json.dumps(metadata)),
         _completed(stdout=json.dumps({"nameWithOwner": "owner/repository"})),
-        _completed(stdout="src/feature.py\ndocs/feature.md\n"),
+        _completed(stdout=json.dumps(changed_file_pages)),
         _completed(stdout=json.dumps([{"name": "checks", "state": "PENDING"}]), returncode=8),
     ]
 
@@ -128,6 +138,73 @@ def test_collect_evidence_keeps_pending_checks_and_paginated_paths(
     assert payload["changed_files"] == ["src/feature.py", "docs/feature.md"]
     assert payload["changed_paths"] == payload["changed_files"]
     assert payload["checks"] == [{"name": "checks", "state": "PENDING"}]
+    assert "--slurp" in mock_gh_call.call_args_list[2].args[0]
+
+
+@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.github.skill_pr_review.gh_call")
+def test_collect_evidence_preserves_newline_in_changed_filename(
+    mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
+) -> None:
+    """Changed-path evidence keeps a single filename containing a newline intact."""
+    metadata = {
+        "number": 9,
+        "title": "Feature",
+        "body": "",
+        "state": "OPEN",
+        "isDraft": False,
+        "author": {"login": "author"},
+        "baseRefName": "main",
+        "headRefName": "feature",
+        "reviews": [],
+        "statusCheckRollup": [],
+        "closingIssuesReferences": [],
+        "url": "https://github.com/owner/repository/pull/9",
+    }
+    filename = "docs/line\nbreak.md"
+    mock_gh_call.side_effect = [
+        _completed(stdout=json.dumps(metadata)),
+        _completed(stdout=json.dumps({"nameWithOwner": "owner/repository"})),
+        _completed(stdout=json.dumps([[{"filename": filename}]])),
+        _completed(stdout=json.dumps([])),
+    ]
+
+    assert collect_pr_evidence_main(["9"]) == 0
+
+    assert json.loads(capsys.readouterr().out)["changed_files"] == [filename]
+
+
+@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.github.skill_pr_review.gh_call")
+def test_collect_evidence_rejects_partial_metadata_as_json(
+    mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
+) -> None:
+    """Evidence collection rejects a response missing requested review fields."""
+    metadata = {
+        "number": 9,
+        "title": "Feature",
+        "state": "OPEN",
+        "isDraft": False,
+        "author": {"login": "author"},
+        "baseRefName": "main",
+        "headRefName": "feature",
+        "reviews": [],
+        "statusCheckRollup": [],
+        "closingIssuesReferences": [],
+        "url": "https://github.com/owner/repository/pull/9",
+    }
+    mock_gh_call.side_effect = [
+        _completed(stdout=json.dumps(metadata)),
+        _completed(stdout=json.dumps({"nameWithOwner": "owner/repository"})),
+        _completed(stdout=json.dumps([[{"filename": "src/feature.py"}]])),
+        _completed(stdout=json.dumps([])),
+    ]
+
+    assert collect_pr_evidence_main(["9", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "incomplete PR metadata"
+    assert "body" in payload["details"]
 
 
 @patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
@@ -194,3 +271,28 @@ def test_resolve_pr_json_error_is_machine_readable(_mock_throttle: MagicMock, ca
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "error"
     assert "invalid pull-request identifier" in payload["message"]
+
+
+@patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
+@patch("hephaestus.github.skill_pr_review.gh_call")
+def test_resolve_pr_rejects_missing_immutable_refs_as_json(
+    mock_gh_call: MagicMock, _mock_throttle: MagicMock, capsys
+) -> None:
+    """PR resolution never succeeds without its immutable base and head references."""
+    pull_request = {
+        "number": 42,
+        "url": "https://github.com/owner/repository/pull/42",
+        "state": "OPEN",
+        "headRefName": "feature",
+        "baseRefName": "main",
+    }
+    mock_gh_call.side_effect = [
+        _completed(stdout=json.dumps(pull_request)),
+        _completed(stdout=json.dumps({"nameWithOwner": "owner/repository"})),
+    ]
+
+    assert resolve_pr_main(["42", "--json"]) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert "headRefOid" in payload["message"]

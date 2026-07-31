@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 from hephaestus.github.skill_worktrees import (
@@ -130,6 +131,55 @@ def test_prepare_worktree_rejects_path_traversal_outside_path_root(
     assert "escapes trusted root" in capsys.readouterr().err
 
 
+def test_prepare_worktree_rejects_nested_symlink_in_default_directory(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Default project-local paths cannot escape through a nested symlink."""
+    repository = tmp_path / "repo"
+    worktree_directory = repository / ".worktrees"
+    outside = tmp_path / "outside"
+    escaped_worktree = outside / "review"
+    _initialize_repository(repository)
+    worktree_directory.mkdir()
+    outside.mkdir()
+    (worktree_directory / "topic").symlink_to(outside, target_is_directory=True)
+    start_sha = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+
+    try:
+        assert prepare_worktree_main(["topic/review", "--start-point", start_sha]) == 1
+    finally:
+        if escaped_worktree.exists():
+            _git(repository, "worktree", "remove", "--force", str(escaped_worktree))
+
+    assert "symlink" in capsys.readouterr().err
+
+
+def test_prepare_worktree_rejects_nested_symlink_in_temporary_fallback(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Temporary fallback paths cannot escape through a predictable symlink."""
+    repository = tmp_path / f"repository-{tmp_path.name}"
+    outside = tmp_path / "outside"
+    temporary_component = Path(tempfile.gettempdir()) / f"{repository.name}-topic"
+    escaped_worktree = outside / "review"
+    _initialize_repository(repository)
+    outside.mkdir()
+    temporary_component.symlink_to(outside, target_is_directory=True)
+    start_sha = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+
+    try:
+        assert prepare_worktree_main(["topic/review", "--start-point", start_sha]) == 1
+    finally:
+        if escaped_worktree.exists():
+            _git(repository, "worktree", "remove", "--force", str(escaped_worktree))
+        if temporary_component.is_symlink():
+            temporary_component.unlink()
+
+    assert "symlink" in capsys.readouterr().err
+
+
 def test_audit_worktrees_reports_a_computable_inventory(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -145,6 +195,22 @@ def test_audit_worktrees_reports_a_computable_inventory(
     assert records[0]["path"] == str(repository.resolve())
     assert records[0]["clean"] is True
     assert records[0]["head"] == _git(repository, "rev-parse", "HEAD")
+
+
+def test_audit_worktrees_marks_ignored_files_as_dirty(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Ignored files are reported because they would be deleted by removal."""
+    repository = tmp_path / "repo"
+    _initialize_repository(repository)
+    (repository / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    _git(repository, "add", ".gitignore")
+    _git(repository, "commit", "--quiet", "-m", "test: ignore generated data")
+    (repository / "preserve.ignored").write_text("keep\n", encoding="utf-8")
+    monkeypatch.chdir(repository)
+
+    assert audit_worktrees_main([]) == 0
+
+    records = json.loads(capsys.readouterr().out)
+    assert records[0]["clean"] is False
 
 
 def test_audit_worktrees_reports_git_failures_as_json(monkeypatch, capsys) -> None:
@@ -179,6 +245,29 @@ def test_remove_worktree_requires_a_clean_expected_head(
 
     assert "not clean" in capsys.readouterr().err
     _git(repository, "worktree", "remove", "--force", str(worktree))
+
+
+def test_remove_worktree_refuses_ignored_user_data(tmp_path: Path, monkeypatch, capsys) -> None:
+    """Removal preserves ignored files that Git's default short status omits."""
+    repository = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    _initialize_repository(repository)
+    (repository / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    _git(repository, "add", ".gitignore")
+    _git(repository, "commit", "--quiet", "-m", "test: ignore generated data")
+    _git(repository, "worktree", "add", "--quiet", "-b", "review", str(worktree))
+    expected_head = _git(worktree, "rev-parse", "HEAD")
+    (worktree / "preserve.ignored").write_text("keep\n", encoding="utf-8")
+    monkeypatch.chdir(repository)
+
+    try:
+        assert remove_worktree_main([str(worktree), "--expected-head", expected_head]) == 1
+        assert worktree.exists()
+    finally:
+        if worktree.exists():
+            _git(repository, "worktree", "remove", "--force", str(worktree))
+
+    assert "not clean" in capsys.readouterr().err
 
 
 def test_remove_worktree_removes_only_the_approved_clean_registration(

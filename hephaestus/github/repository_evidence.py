@@ -10,8 +10,6 @@ from collections.abc import Sequence
 from hephaestus.cli.utils import add_json_arg, create_parser, emit_json_status
 from hephaestus.github.git_ops import run_git
 
-_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
 
 def _git_output(*arguments: str, accepted_codes: tuple[int, ...] = (0,)) -> str:
     """Run Git through the shared adapter and return stdout."""
@@ -42,8 +40,14 @@ def repository_evidence_main(argv: Sequence[str] | None = None) -> int:
             f"{recent_revisions[-1]}^",
             accepted_codes=(0, 128),
         ).strip()
-        recent_range = f"{oldest_parent or _EMPTY_TREE}..HEAD"
-        recent_diff = _git_output("diff", "--stat", recent_range)
+        if oldest_parent:
+            recent_range = f"{oldest_parent}..HEAD"
+            recent_diff = _git_output("diff", "--stat", recent_range)
+        else:
+            recent_range = "<root>..HEAD"
+            recent_diff = _git_output(
+                "diff-tree", "--root", "--no-commit-id", "--stat", "-r", "HEAD"
+            )
         pattern_matches = _git_output(
             "grep",
             "--line-number",

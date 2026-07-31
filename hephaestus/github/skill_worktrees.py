@@ -82,8 +82,15 @@ def select_worktree_path(
         if directory.is_dir():
             if directory.is_symlink():
                 raise RuntimeError(f"project-local worktree directory is a symlink: {directory}")
-            return (directory / branch).resolve(), True
-    return Path(tempfile.gettempdir()) / f"{root.name}-{branch}", False
+            path = directory / branch
+            reject_symlinks_below(directory, path)
+            resolved_path = path.resolve()
+            return resolved_path, resolved_path.is_relative_to(root)
+    temporary_root = Path(tempfile.gettempdir())
+    path = temporary_root / f"{root.name}-{branch}"
+    reject_symlinks_below(temporary_root, path)
+    resolved_path = path.resolve()
+    return resolved_path, resolved_path.is_relative_to(root)
 
 
 def verify_ignored(root: Path, path: Path) -> None:
@@ -101,6 +108,11 @@ def verify_ignored(root: Path, path: Path) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"project-local worktree directory {relative.parent} is not ignored")
+
+
+def worktree_status(path: Path) -> str:
+    """Return every local worktree change, including ignored user data."""
+    return _git_output(path, "status", "--short", "--untracked-files=all", "--ignored=matching")
 
 
 def prepare_worktree_main(argv: Sequence[str] | None = None) -> int:
@@ -201,7 +213,7 @@ def audit_worktrees_main(argv: Sequence[str] | None = None) -> int:
                 record["recent_commits"] = []
                 record["head"] = porcelain_head
                 continue
-            status = _git_output(path, "status", "--short")
+            status = worktree_status(path)
             record["clean"] = not bool(status.strip())
             record["status"] = status.splitlines()
             record["recent_commits"] = _git_output(
@@ -238,7 +250,7 @@ def remove_worktree_main(argv: Sequence[str] | None = None) -> int:
         }
         if target not in registered:
             raise RuntimeError(f"not a registered worktree: {target}")
-        if _git_output(target, "status", "--short").strip():
+        if worktree_status(target).strip():
             raise RuntimeError(f"worktree is not clean: {target}")
         head = _git_output(target, "rev-parse", "--verify", "HEAD").strip()
         if head != arguments.expected_head:
