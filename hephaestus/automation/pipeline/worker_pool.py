@@ -806,13 +806,15 @@ def _confirmed_pytest_failure(returncode: int, stdout: str, stderr: str) -> bool
     """Return whether the fixed pytest command, not its runner, failed.
 
     ``sandbox-exec``/UV/bootstrap errors also surface as nonzero exits.  Only
-    pytest's normal test-failure exit code plus its terminal summary is safe to
-    send to the implementation agent as a code-remediation task.
+    pytest's normal test-failure exit code plus either supported terminal
+    summary format is safe to send to the implementation agent as a
+    code-remediation task.
     """
     transcript = f"{stdout}\n{stderr}"
     return returncode == 1 and bool(
         re.search(
-            r"(?m)^=+ .*?\b[1-9]\d* failed\b.*?\bin [0-9.]+s =+$",
+            r"(?m)^(?:=+ .*?\b[1-9]\d* failed\b.*?\bin [0-9.]+s =+|"
+            r"[1-9]\d* failed(?:, [^\n]*)? in [0-9.]+s)$",
             transcript,
         )
     )
