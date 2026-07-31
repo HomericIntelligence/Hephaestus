@@ -1337,8 +1337,31 @@ class TestCommitPushAndPrCreate:
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
+            "agent_model": "claude-haiku-4-5",
         }
         assert result.on_done_state == "PR_CREATE"
+
+    def test_commit_push_uses_configured_codex_implementer_model(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Commit-message generation inherits the CLI-selected Codex tier and effort."""
+        stage = ImplementationStage()
+        ctx = make_ctx(
+            config=SimpleNamespace(
+                agent="codex",
+                implementer_model="sol",
+                implementer_reasoning_effort="medium",
+            )
+        )
+        item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["agent_model"] == "sol:medium"
 
     def test_direct_scope_commit_push_carries_its_remote_reservation_pin(
         self, make_ctx: Any, make_work_item: Any

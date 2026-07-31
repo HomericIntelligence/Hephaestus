@@ -1095,13 +1095,15 @@ class PrReviewStage(Stage):
         """PUSH_WAIT submits the commit+push job for the addressing changes."""
         issue = _issue_number(item)
         logger.info("pr_review:%d: requesting push job", issue)
+        agent = agent_provider(ctx)
         kwargs: dict[str, object] = {
             "issue_number": issue,
             "pr_number": item.pr,
             "repo_root": str(ctx.paths.repo_root),
             "worktree_path": item.worktree,
             "branch": item.branch,
-            "agent": agent_provider(ctx),
+            "agent": agent,
+            "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
         }
         if item.payload.get("direct_pr_worktree"):
             # Direct review addresses findings from a detached checkout; the

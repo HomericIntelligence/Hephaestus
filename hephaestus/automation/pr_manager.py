@@ -18,17 +18,16 @@ from typing import Any, cast
 
 from hephaestus.agents.runtime import (
     agent_display_name,
-    direct_agent_model,
     run_agent_text,
     uses_direct_agent_runner,
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
 
-from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
+from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import git_message_model, implementer_model
+from .claude_models import implementer_model
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
     OpenPrDiscoveryIncompleteError,
@@ -82,7 +81,6 @@ _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
     re.IGNORECASE,
 )
-_GIT_MESSAGE_MODEL_ENV = "HEPH_GIT_MESSAGE_MODEL"
 _AGENT_COMMIT_IDENTITIES = {
     "claude": ("Claude Code", "noreply@anthropic.com"),
     "codex": ("Codex", "noreply@openai.com"),
@@ -348,15 +346,22 @@ def _invoke_git_message_agent(
     worktree_path: Path,
     agent: str,
     timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    model_override: str | None = None,
 ) -> str:
-    """Run the lightweight message agent in a separate read-only session."""
+    """Run the lightweight message agent in a separate read-only session.
+
+    Pipeline callers must provide their CLI-resolved role model.  Claude and
+    Codex use the deterministic lightweight-message default when a standalone
+    caller omits one; Pi retains its provider-specific default in that case.
+    """
+    model = model_override if model_override is not None else ("" if agent == "pi" else HAIKU)
     if uses_direct_agent_runner(agent):
         result = run_agent_text(
             agent=agent,
             prompt=prompt,
             cwd=worktree_path,
             timeout=timeout,
-            model=direct_agent_model(agent, _GIT_MESSAGE_MODEL_ENV),
+            model=model,
             sandbox="read-only",
         )
         return (result.stdout or "").strip()
@@ -366,7 +371,7 @@ def _invoke_git_message_agent(
         issue=issue_number,
         agent=agent_kind,
         prompt=prompt,
-        model=git_message_model(),
+        model=model,
         cwd=worktree_path,
         timeout=timeout,
         output_format="text",
@@ -415,6 +420,7 @@ def _generate_commit_message(
     agent: str,
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     git_timeout: int | None = None,
+    agent_model: str | None = None,
 ) -> str:
     """Generate a commit message via a lightweight agent with deterministic fallback."""
     changed_files, diff_stat = _staged_change_context(worktree_path, timeout=git_timeout)
@@ -433,6 +439,7 @@ def _generate_commit_message(
             worktree_path=worktree_path,
             agent=agent,
             timeout=git_message_timeout,
+            model_override=agent_model,
         )
         data = _parse_agent_json(raw)
         if data is None:
@@ -483,6 +490,7 @@ def _generate_pr_message(
     worktree_path: Path | None,
     agent: str,
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    agent_model: str | None = None,
 ) -> _PrMessageParts:
     """Generate PR text via a lightweight agent with deterministic fallback."""
     fallback = _fallback_pr_message(issue_number, issue_title, agent)
@@ -506,6 +514,7 @@ def _generate_pr_message(
             worktree_path=worktree_path,
             agent=agent,
             timeout=git_message_timeout,
+            model_override=agent_model,
         )
         data = _parse_agent_json(raw)
         if data is None:
@@ -860,6 +869,7 @@ def commit_changes(
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     allowed_paths: Collection[str] | None = None,
     git_timeout: int | None = None,
+    agent_model: str | None = None,
 ) -> None:
     """Commit changes in worktree, filtering out secret files.
 
@@ -868,6 +878,9 @@ def commit_changes(
         worktree_path: Path to git worktree
         agent: Selected implementation agent. Defaults to Claude for backwards
             compatibility with existing direct callers.
+        agent_model: Explicit model and reasoning effort selected by the
+            command line for the message-generation session.  When omitted,
+            the deterministic lightweight-message default is used.
         git_message_timeout: Timeout in seconds for the lightweight commit-message
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
         allowed_paths: Optional exact set of porcelain paths allowed to be
@@ -902,6 +915,7 @@ def commit_changes(
         issue_body=_issue_body(issue),
         worktree_path=worktree_path,
         agent=agent,
+        agent_model=agent_model,
         git_message_timeout=git_message_timeout,
         git_timeout=git_timeout,
     )
@@ -922,6 +936,7 @@ def ensure_pr_created(
     slot_id: int | None = None,
     agent: str = "claude",
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    agent_model: str | None = None,
 ) -> int:
     """Ensure the implementation commit is pushed and a PR exists.
 
@@ -934,6 +949,8 @@ def ensure_pr_created(
         status_tracker: StatusTracker instance for slot updates (optional)
         slot_id: Worker slot ID for status updates
         agent: Selected implementation agent for generated PR metadata.
+        agent_model: Explicit model and reasoning effort for generated PR
+            metadata. When omitted, the deterministic message default is used.
         git_message_timeout: Timeout in seconds for the lightweight PR-message
             agent. Defaults to :data:`DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT`.
 
@@ -1010,15 +1027,27 @@ def ensure_pr_created(
             "Keeping auto-merge disabled for branch %s until the PR-review gate exists",
             branch_name,
         )
-    pr_number = create_pr(
-        issue_number,
-        branch_name,
-        auto_merge=False,
-        agent=agent,
-        base=base_branch,
-        worktree_path=worktree_path,
-        git_message_timeout=git_message_timeout,
-    )
+    if agent_model is None:
+        pr_number = create_pr(
+            issue_number,
+            branch_name,
+            auto_merge=False,
+            agent=agent,
+            base=base_branch,
+            worktree_path=worktree_path,
+            git_message_timeout=git_message_timeout,
+        )
+    else:
+        pr_number = create_pr(
+            issue_number,
+            branch_name,
+            auto_merge=False,
+            agent=agent,
+            base=base_branch,
+            worktree_path=worktree_path,
+            git_message_timeout=git_message_timeout,
+            agent_model=agent_model,
+        )
     logger.info("Created PR #%s", pr_number)
     return pr_number
 
@@ -1031,6 +1060,7 @@ def create_pr(
     base: str = "main",
     worktree_path: Path | None = None,
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
+    agent_model: str | None = None,
 ) -> int:
     """Create pull request for issue.
 
@@ -1040,6 +1070,8 @@ def create_pr(
         auto_merge: Deprecated compatibility flag; ignored. Native auto-merge
             is prohibited; merge-wait conditionally merges reviewed heads.
         agent: Selected implementation agent for generated PR metadata.
+        agent_model: Explicit model and reasoning effort for generated PR
+            metadata. When omitted, the deterministic message default is used.
         base: Base branch used for changed-file and commit context.
         worktree_path: Optional worktree path used to invoke the lightweight
             PR-message agent. When omitted, deterministic fallback text is used.
@@ -1060,6 +1092,7 @@ def create_pr(
         base=base,
         worktree_path=worktree_path,
         agent=agent,
+        agent_model=agent_model,
         git_message_timeout=git_message_timeout,
     )
     pr_title = pr_message.title

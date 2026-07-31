@@ -15,13 +15,13 @@ import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TypeGuard
+from typing import TypeGuard, cast
 
 from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
@@ -1490,13 +1490,26 @@ class WorkerPool:
         # remote tracking ref: the coordinator, not the agent, publishes that
         # already-created commit so every subsequent review binds to the new
         # remote head.
-        changed = git_utils.commit_if_changes(
+        commit_args = (
             int(issue_number),
             Path(worktree_path),
             str(job.kwargs.get("agent", "claude")),
-            allowed_paths=job.kwargs.get("allowed_paths"),
-            timeout=job.timeout_s,
         )
+        allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+        agent_model = job.kwargs.get("agent_model")
+        if agent_model is None:
+            changed = git_utils.commit_if_changes(
+                *commit_args,
+                allowed_paths=allowed_paths,
+                timeout=job.timeout_s,
+            )
+        else:
+            changed = git_utils.commit_if_changes(
+                *commit_args,
+                allowed_paths=allowed_paths,
+                timeout=job.timeout_s,
+                agent_model=str(agent_model),
+            )
         branch = str(job.kwargs.get("branch") or "")
         if not changed:
             publish_state = self._commit_push_requires_publish(
