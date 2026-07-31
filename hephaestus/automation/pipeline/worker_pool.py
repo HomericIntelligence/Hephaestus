@@ -119,7 +119,7 @@ _TRUSTED_GIT_CANDIDATES = (
     Path("/usr/bin/git"),
 )
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
-_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v3-rewritten-launchers"
+_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v4-all-worker-environments"
 
 # The host verification handles code from an untrusted pull request.  Bound
 # the Git archive before extraction and bound every child output/write path.
@@ -272,19 +272,17 @@ def _is_sealed_runtime_cache(target: Path) -> bool:
 def _verifier_owned_runtime_environment(checkout: Path) -> Path:
     """Return a read-only runtime outside the mutable review checkout.
 
-    ``uv run`` commonly executes the worker from ``<checkout>/.venv``.  That
-    ignored tree is not Git-bound, so it cannot be reused as verification
-    evidence. Snapshot the already-running host interpreter environment once
-    into the user-private temp area, seal it, and use only that external copy
-    for immutable host validation.
+    The worker environment can be inside or outside the checkout.  In either
+    case, snapshot it once into the user-private temp area, seal it, and use
+    only that external copy for immutable host validation.  This prevents the
+    sandboxed command from resolving a live worker ``.venv`` path and ensures
+    the verifier has one consistent read-only runtime contract.
     """
     runtime = Path(sys.prefix).resolve()
     try:
-        inside_checkout = runtime.is_relative_to(checkout.resolve())
+        checkout.resolve()
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_runtime_unavailable") from exc
-    if not inside_checkout:
-        return runtime
 
     cache_root = Path(tempfile.gettempdir()) / _HOST_RUNTIME_CACHE_DIRNAME
     if cache_root.is_symlink():
