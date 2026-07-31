@@ -936,6 +936,28 @@ class TestWorkerPoolSubmitComplete:
         ):
             _verifier_owned_runtime_environment(checkout)
 
+    def test_verifier_runtime_snapshots_external_worker_environment(self, tmp_path: Path) -> None:
+        """The verifier never exposes a live worker environment to the sandbox."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        runtime = tmp_path / "worker-runtime"
+        launcher = runtime / "bin" / "python"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("host interpreter\n", encoding="utf-8")
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        cache_temp = tmp_path / "cache-temp"
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+        ):
+            sealed = _verifier_owned_runtime_environment(checkout)
+
+        assert sealed != runtime
+        assert sealed.is_relative_to(cache_temp / "hephaestus-host-validation-runtime")
+        assert (sealed / "bin" / "python").read_text(encoding="utf-8") == "host interpreter\n"
+        assert not ((sealed / "bin" / "python").stat().st_mode & 0o222)
+
     def test_verifier_runtime_dereferences_the_python_launcher(self, tmp_path: Path) -> None:
         """The sealed copy does not retain a launcher back into its source runtime."""
         checkout = tmp_path / "checkout"
