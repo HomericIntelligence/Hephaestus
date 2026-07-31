@@ -96,7 +96,7 @@ jobs:
 
       - name: Run unit tests
         if: matrix.test-type == 'unit'
-        run: uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers
+        run: uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not nightly"
 
       - name: Check unit test structure
         if: matrix.test-type == 'unit'
@@ -110,4 +110,4 @@ jobs:
         env:
           HEPHAESTUS_REQUIRE_CLI: "1"
         run: |
-          uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers
+          uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"

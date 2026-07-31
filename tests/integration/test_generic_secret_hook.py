@@ -55,6 +55,7 @@ def test_gitleaks_hook_is_mandatory_and_matches_ci_version() -> None:
 
 
 @pytest.mark.requires_posix
+@pytest.mark.nightly
 def test_gitleaks_blocks_staged_secret_without_private_denylist(tmp_path: Path) -> None:
     """Gitleaks must reject staged credentials without an operator denylist."""
     repo = tmp_path / "repo"
