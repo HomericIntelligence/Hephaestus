@@ -485,8 +485,8 @@ transition. The GitHub label is the loop's sole durable implementation-state
 authority. `merge_wait` revalidates the current-process proof and conditionally
 squash-merges that exact head; it does not create, disable, adopt, or poll an
 auto-merge request. Normal review may collect CI/CD evidence as context, but
-the loop does not change CI/CD and no CI workflow independently authorizes it.
-The `auto-merge-policy` check is advisory.
+the loop does not change CI/CD. Required CI/CD checks are the merge contract;
+the `auto-merge-policy` check is advisory.
 
 1. Create a feature branch named `<issue-number>-description`
    (`git checkout -b 123-amazing-feature`).
