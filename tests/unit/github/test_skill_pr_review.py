@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import hephaestus.github.skill_pr_review as skill_pr_review
 from hephaestus.github.skill_pr_review import (
+    _git_read_environment,
     collect_pr_evidence_main,
     pr_diff_context_main,
     repository_from_pr_url,
@@ -64,7 +64,7 @@ def test_git_read_environment_rejects_inherited_git_overrides(monkeypatch) -> No
     for key, value in hostile_environment.items():
         monkeypatch.setenv(key, value)
 
-    environment = skill_pr_review._git_read_environment()
+    environment = _git_read_environment()
 
     for key, value in hostile_environment.items():
         assert environment.get(key) != value
