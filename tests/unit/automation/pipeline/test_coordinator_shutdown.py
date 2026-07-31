@@ -207,6 +207,7 @@ class TestInterruptSemantics:
         assert item.result.reason == "resumable at pr_review"
         assert coordinator.ledger == []
 
+    @pytest.mark.nightly
     def test_second_signal_immediate_teardown_synthesizes_interrupted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

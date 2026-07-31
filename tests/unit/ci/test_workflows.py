@@ -39,6 +39,7 @@ RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 PERFORMANCE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "performance.yml"
+NIGHTLY_TESTS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml"
 PERFORMANCE_DOC = REPO_ROOT / "docs" / "performance-testing.md"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
@@ -279,7 +280,44 @@ class TestPerformanceWorkflow:
         config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
         assert "-m" in addopts
-        assert "not performance" in addopts
+        assert any("not performance" in option for option in addopts)
+
+
+class TestNightlyTestsWorkflow:
+    """Contracts for the scheduled high-cost functional-test lane."""
+
+    def _load(self) -> dict[str, Any]:
+        workflow: dict[str, Any] = yaml.load(
+            NIGHTLY_TESTS_WORKFLOW.read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        return workflow
+
+    def test_lane_is_scheduled_manual_and_selects_only_nightly_tests(self) -> None:
+        """High-cost tests must be isolated from pull-request workflows."""
+        workflow = self._load()
+        assert set(workflow["on"]) == {"schedule", "workflow_dispatch"}
+
+        run_steps = [
+            str(step["run"])
+            for step in workflow["jobs"]["nightly-tests"]["steps"]
+            if step.get("name") == "Run nightly tests"
+        ]
+        assert len(run_steps) == 1
+        assert "uv run pytest tests/unit tests/integration" in run_steps[0]
+        assert '-m "nightly"' in run_steps[0]
+        assert '--override-ini="addopts="' in run_steps[0]
+
+    def test_default_pytest_options_deselect_nightly_tests(self) -> None:
+        """Developer and required-CI defaults must exclude the nightly marker."""
+        config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
+        assert any("not nightly" in option for option in addopts)
+
+    def test_pull_request_test_commands_deselect_nightly_tests(self) -> None:
+        """Commands that override pytest defaults retain the nightly exclusion."""
+        for workflow_path in (REQUIRED_WORKFLOW, TEST_WORKFLOW):
+            assert '-m "not nightly"' in workflow_path.read_text(encoding="utf-8")
 
 
 class TestIsCheckoutStep:

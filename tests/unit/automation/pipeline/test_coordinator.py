@@ -1349,6 +1349,7 @@ class TestImplementationAdmission:
 
         assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [retrying, deferred]
 
+    @pytest.mark.nightly
     def test_duplicate_issue_numbers_collapse_to_first_queued(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1395,6 +1396,7 @@ class TestImplementationAdmission:
         # Repo-scoped reason string (#2057).
         assert duplicate.result.reason == "repo-a#21 superseded by queued duplicate"
 
+    @pytest.mark.nightly
     def test_cross_repo_same_issue_number_both_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1429,6 +1431,7 @@ class TestImplementationAdmission:
         assert b71.result is None or "superseded" not in (b71.result.reason or "")
         assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
 
+    @pytest.mark.nightly
     def test_three_duplicates_collapse_to_first(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
