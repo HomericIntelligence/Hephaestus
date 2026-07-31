@@ -355,7 +355,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "overrides this for that phase."
         ),
     )
-    p.add_argument("--planner-model", default="", help="HEPH_PLANNER_MODEL for child processes")
+    p.add_argument("--planner-model", default="", help="Model ID for planner child processes")
     reasoning_help = (
         "Explicit Codex reasoning effort for this role. Use default to omit "
         "model_reasoning_effort; when omitted, the selected model alias keeps its default."
@@ -370,14 +370,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reviewer-model",
         default="",
         help=(
-            "HEPH_REVIEWER_MODEL for child processes (plan-review + PR-review); "
+            "Model ID for reviewer child processes (plan-review + PR-review); "
             "use terra:default to select GPT-5.6 Terra without an explicit reasoning override"
         ),
     )
     p.add_argument(
         "--implementer-model",
         default="",
-        help="HEPH_IMPLEMENTER_MODEL for child processes (implement, address-review, drive-green)",
+        help="Model ID for implementer child processes (implement, address-review, drive-green)",
     )
     p.add_argument(
         "--reviewer-reasoning-effort",

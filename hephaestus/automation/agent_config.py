@@ -187,8 +187,12 @@ def learn_model() -> str:
 
 
 def git_message_model() -> str:
-    """Model used by the lightweight commit/PR message writer."""
-    return _resolve_model("HEPH_GIT_MESSAGE_MODEL", HAIKU)
+    """Return the deterministic default for standalone message generation.
+
+    The automation loop passes its CLI-resolved implementation model directly;
+    this compatibility helper deliberately has no environment override.
+    """
+    return HAIKU
 
 
 def fallback_model() -> str:

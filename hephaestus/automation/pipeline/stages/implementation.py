@@ -558,11 +558,13 @@ class ImplementationStage(Stage):
         if item.payload.get("tests_failed"):
             return Continue(next_state=TESTFIX_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
+        agent = agent_provider(ctx)
         kwargs: dict[str, object] = {
             "issue_number": issue,
             "worktree_path": item.worktree,
             "branch": item.branch,
-            "agent": agent_provider(ctx),
+            "agent": agent,
+            "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
         }
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
         if direct_base_sha is not None:

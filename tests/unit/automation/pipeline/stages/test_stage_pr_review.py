@@ -1099,8 +1099,31 @@ class TestPrReviewStageStep:
             "worktree_path": "/tmp/wt",
             "branch": "1-auto-impl",
             "agent": "claude",
+            "agent_model": "claude-haiku-4-5",
         }
         assert result.on_done_state == "EVAL"
+
+    def test_push_wait_uses_configured_codex_implementer_model(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Review-thread fix commits retain the CLI-selected Codex effort."""
+        stage = PrReviewStage()
+        ctx = make_ctx(
+            config=SimpleNamespace(
+                agent="codex",
+                implementer_model="sol",
+                implementer_reasoning_effort="medium",
+            )
+        )
+        item = make_work_item(issue=1, pr=1001, state="PUSH_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["agent_model"] == "sol:medium"
 
     def test_push_wait_binds_detached_push_to_reviewed_head(
         self, make_ctx: Any, make_work_item: Any

@@ -1816,6 +1816,7 @@ class TestGitOps:
                 "worktree_path": tmp_path,
                 "branch": "5-auto",
                 "agent": "claude",
+                "agent_model": "sol:medium",
             },
         )
         with (
@@ -1834,6 +1835,7 @@ class TestGitOps:
             "claude",
             allowed_paths=None,
             timeout=60,
+            agent_model="sol:medium",
         )
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
