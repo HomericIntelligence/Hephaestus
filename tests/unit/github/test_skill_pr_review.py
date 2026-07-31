@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hephaestus.github.skill_pr_review as skill_pr_review
 from hephaestus.github.skill_pr_review import (
     collect_pr_evidence_main,
     pr_diff_context_main,
@@ -45,6 +47,30 @@ def test_repository_from_pr_url_rejects_an_unexpected_number() -> None:
         assert "invalid pull-request URL" in str(error)
     else:  # pragma: no cover - defensive assertion for an invalid URL accepted
         raise AssertionError("mismatched PR URL was accepted")
+
+
+def test_git_read_environment_rejects_inherited_git_overrides(monkeypatch) -> None:
+    """Immutable review reads cannot inherit a caller-controlled Git graph."""
+    hostile_environment = {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/attacker/objects",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.commitGraph",
+        "GIT_CONFIG_VALUE_0": "true",
+        "GIT_DIR": "/attacker/.git",
+        "GIT_GRAFT_FILE": "/attacker/grafts",
+        "GIT_REPLACE_REF_BASE": "/attacker/replace",
+        "GIT_WORK_TREE": "/attacker/worktree",
+    }
+    for key, value in hostile_environment.items():
+        monkeypatch.setenv(key, value)
+
+    environment = skill_pr_review._git_read_environment()
+
+    for key, value in hostile_environment.items():
+        assert environment.get(key) != value
+    assert environment["GIT_GRAFT_FILE"] == os.devnull
+    assert environment["GIT_NO_LAZY_FETCH"] == "1"
+    assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
 @patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
@@ -315,7 +341,15 @@ def test_diff_context_uses_the_supplied_base_for_both_lenses(
         "author_intent_range": f"{merge_base}...{head}",
         "current_base_range": f"{base}..{head}",
     }
-    assert mock_run_git.call_args_list[0].args[0] == ["rev-parse", "--is-shallow-repository"]
+    first_call = mock_run_git.call_args_list[0]
+    assert first_call.args[0] == [
+        "-c",
+        "core.commitGraph=false",
+        "--no-replace-objects",
+        "rev-parse",
+        "--is-shallow-repository",
+    ]
+    assert first_call.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
 @patch("hephaestus.github.skill_pr_review.run_git")

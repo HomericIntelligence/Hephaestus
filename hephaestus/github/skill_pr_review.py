@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -29,6 +30,7 @@ _EVIDENCE_FIELDS = (
     "number,title,body,state,isDraft,author,baseRefName,headRefName,"
     "reviews,statusCheckRollup,closingIssuesReferences,url"
 )
+_GIT_READ_ARGUMENTS = ("-c", "core.commitGraph=false", "--no-replace-objects")
 
 
 @dataclass(frozen=True)
@@ -103,11 +105,35 @@ def _gh_output(*arguments: str, accepted_codes: tuple[int, ...] = (0,)) -> str:
 
 
 def _git_output(*arguments: str) -> str:
-    """Run Git through the shared adapter and return stdout."""
-    result = run_git(list(arguments), check=False, log_on_error=False)
+    """Run an immutable Git read through the shared adapter and return stdout."""
+    result = run_git(
+        [*_GIT_READ_ARGUMENTS, *arguments],
+        check=False,
+        env=_git_read_environment(),
+        log_on_error=False,
+    )
     if result.returncode != 0:
         raise _command_error(result, f"git {' '.join(arguments)}")
     return result.stdout
+
+
+def _git_read_environment() -> dict[str, str]:
+    """Return a hermetic environment for non-interactive immutable Git reads."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_GRAFT_FILE": os.devnull,
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return environment
 
 
 def _require_complete_git_history() -> None:
