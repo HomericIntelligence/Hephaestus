@@ -79,7 +79,7 @@ import queue as queue_mod
 import signal
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -527,8 +527,11 @@ class Coordinator:
         self._terminal_per_stage: Counter[str] = Counter()
         # Aggregates represent the latest terminal attempt for each logical
         # item, rather than every retired reseed attempt.  This keeps a
-        # fail->pass reseed from leaving the run failed after collapse.
-        self._terminal_latest: dict[tuple[object, ...], tuple[str, str]] = {}
+        # fail->pass reseed from leaving the run failed after collapse.  The
+        # cache is deliberately bounded: once a terminal row has fallen out
+        # of the retained summary window, its identity is no longer needed to
+        # reconcile the bounded diagnostic view.
+        self._terminal_latest: OrderedDict[tuple[object, ...], tuple[str, str]] = OrderedDict()
         self.event_log: deque[tuple[Any, ...]] = deque(maxlen=config.event_log_capacity)
         self._event_log_disabled = False
         self._journal_failure = False
@@ -1014,6 +1017,9 @@ class Coordinator:
             if self._terminal_per_stage[old_stage] == 0:
                 del self._terminal_per_stage[old_stage]
         self._terminal_latest[key] = (disposition, summary.stage.value)
+        self._terminal_latest.move_to_end(key)
+        while len(self._terminal_latest) > self.config.terminal_retention_capacity:
+            self._terminal_latest.popitem(last=False)
         self._terminal_dispositions[disposition] += 1
         self._terminal_per_stage[summary.stage.value] += 1
 

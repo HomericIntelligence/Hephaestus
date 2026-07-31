@@ -69,6 +69,7 @@ def _coordinator(
     max_workers: int = 1,
     parallel_repos: int = 1,
     stage_queue_capacity: int | None = None,
+    terminal_retention_capacity: int | None = None,
 ) -> Coordinator:
     """Build a coordinator with an explicitly matched bounded worker channel."""
     capacity = max(1, max_workers * parallel_repos)
@@ -82,6 +83,8 @@ def _coordinator(
     )
     if stage_queue_capacity is not None:
         config = replace(config, stage_queue_capacity=stage_queue_capacity)
+    if terminal_retention_capacity is not None:
+        config = replace(config, terminal_retention_capacity=terminal_retention_capacity)
     if pool is None:
         pool = FakeWorkerPool(size=capacity, completion_q=CompletionQueue(capacity=capacity))
     monkeypatch.setattr(
@@ -526,6 +529,25 @@ def test_fail_then_pass_reseed_uses_latest_terminal_disposition(
     assert coordinator._terminal_item_count == 1
     assert coordinator._terminal_dispositions == {"pass": 1}
     assert coordinator._exit_code() == 0
+
+
+def test_terminal_latest_cache_is_bounded_by_retention_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completed logical items cannot grow the attempt-reconciliation cache."""
+    capacity = 3
+    coordinator = _coordinator(
+        tmp_path,
+        monkeypatch,
+        terminal_retention_capacity=capacity,
+    )
+
+    for issue in range(capacity * 4):
+        item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=issue, stage=StageName.FINISHED)
+        item.result = ItemResult(passed=True, reason="done", final_stage=StageName.FINISHED)
+        coordinator._record_terminal_summary(item)
+
+    assert len(coordinator._terminal_latest) == capacity
 
 
 def test_c_plus_one_products_stop_at_global_permit_bound(
