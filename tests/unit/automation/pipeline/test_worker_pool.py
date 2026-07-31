@@ -19,7 +19,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
-from hephaestus.automation import git_utils
+from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
@@ -3087,7 +3087,10 @@ class TestShutdownReapsSubprocess:
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             assert started.wait(timeout=10), "agent subprocess never started"
-            time.sleep(0.2)  # let the child settle inside communicate()
+            deadline = time.monotonic() + 10.0
+            while subprocess_registry.live_count() == 0:
+                assert time.monotonic() < deadline, "agent subprocess was not registered"
+                time.sleep(0.01)
 
             t0 = time.monotonic()
             pool.shutdown()
