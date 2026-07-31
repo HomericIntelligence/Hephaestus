@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -20,7 +21,9 @@ from hephaestus.cli.utils import (
 from hephaestus.github.client import gh_call
 from hephaestus.github.git_ops import run_git
 
-_PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/[1-9][0-9]*/?")
+_PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/[1-9][0-9]*")
+_COMMIT_OID = re.compile(r"[0-9a-f]{40}\Z")
+_GITHUB_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+\Z")
 _RESOLVE_FIELDS = "number,url,state,headRefName,baseRefName,headRefOid,baseRefOid"
 _EVIDENCE_FIELDS = (
     "number,title,body,state,isDraft,author,baseRefName,headRefName,"
@@ -28,11 +31,46 @@ _EVIDENCE_FIELDS = (
 )
 
 
+@dataclass(frozen=True)
+class RepositoryTarget:
+    """An explicit GitHub target that never relies on checkout inference."""
+
+    host: str
+    repository: str
+
+    def repository_argument(self) -> str:
+        """Return the fully qualified repository argument accepted by ``gh``."""
+        return f"{self.host}/{self.repository}"
+
+
 def validate_pr_identifier(value: str) -> None:
     """Require a positive PR number or canonical GitHub pull-request URL."""
     if (value.isascii() and value.isdigit() and int(value) > 0) or _PR_URL.fullmatch(value):
         return
     raise RuntimeError(f"invalid pull-request identifier: {value!r}")
+
+
+def _pull_request_number(value: str) -> int:
+    validate_pr_identifier(value)
+    if value.isdigit():
+        return int(value)
+    return int(urlparse(value).path.rsplit("/", maxsplit=1)[-1])
+
+
+def _require_commit_oid(value: object, label: str) -> str:
+    if not isinstance(value, str) or _COMMIT_OID.fullmatch(value) is None:
+        raise RuntimeError(f"{label} must be a lowercase 40-hex Git commit OID")
+    return value
+
+
+def _require_repository(value: object, label: str) -> str:
+    if not isinstance(value, str) or _GITHUB_REPOSITORY.fullmatch(value) is None:
+        raise RuntimeError(f"{label} must be a canonical GitHub owner/repository")
+    return value
+
+
+def _canonical_pull_request_url(repository: str, number: int) -> str:
+    return f"https://github.com/{_require_repository(repository, 'repository')}/pull/{number}"
 
 
 def repository_from_pr_url(url: str, number: int) -> str:
@@ -46,7 +84,10 @@ def repository_from_pr_url(url: str, number: int) -> str:
         or path_parts[3] != str(number)
     ):
         raise RuntimeError(f"GitHub returned invalid pull-request URL: {url}")
-    return "/".join(path_parts[:2])
+    repository = "/".join(path_parts[:2])
+    if url != _canonical_pull_request_url(repository, number):
+        raise RuntimeError(f"GitHub returned invalid pull-request URL: {url}")
+    return repository
 
 
 def _command_error(result: subprocess.CompletedProcess[str], command: str) -> RuntimeError:
@@ -69,6 +110,20 @@ def _git_output(*arguments: str) -> str:
     return result.stdout
 
 
+def _require_complete_git_history() -> None:
+    """Reject shallow repositories, which cannot provide a complete diff lens."""
+    if _git_output("rev-parse", "--is-shallow-repository").strip() != "false":
+        raise RuntimeError("repository history is shallow; immutable diff evidence is incomplete")
+
+
+def _unambiguous_merge_base(base_oid: str, head_oid: str) -> str:
+    """Return the only merge base shared by the two immutable revisions."""
+    merge_bases = _git_output("merge-base", "--all", base_oid, head_oid).splitlines()
+    if len(merge_bases) != 1:
+        raise RuntimeError("immutable diff lenses require exactly one merge base")
+    return _require_commit_oid(merge_bases[0], "merge base")
+
+
 def _load_object(output: str) -> dict[str, Any]:
     """Decode one GitHub JSON object or reject malformed results."""
     value: Any = json.loads(output)
@@ -77,37 +132,101 @@ def _load_object(output: str) -> dict[str, Any]:
     return value
 
 
-def _resolve_open_pr(identifier: str) -> dict[str, Any]:
+def _target_from_arguments(
+    parser: Any,
+    identifier: str | None,
+    host: str | None,
+    repository: str | None,
+) -> RepositoryTarget:
+    """Bind an explicit target, or derive it only from a direct canonical URL."""
+    if (host is None) != (repository is None):
+        parser.error("--target-host and --target-repository must be supplied together")
+    if host is not None and repository is not None:
+        if host != "github.com":
+            parser.error("--target-host must be github.com")
+        try:
+            target = RepositoryTarget(
+                host=host,
+                repository=_require_repository(repository, "--target-repository"),
+            )
+        except RuntimeError as error:
+            parser.error(str(error))
+        if identifier is not None and identifier.startswith("https://"):
+            try:
+                supplied = repository_from_pr_url(identifier, _pull_request_number(identifier))
+            except RuntimeError as error:
+                parser.error(str(error))
+            if supplied.casefold() != target.repository.casefold():
+                parser.error("pull-request URL does not match --target-repository")
+        return target
+    if identifier is not None and identifier.startswith("https://"):
+        try:
+            return RepositoryTarget(
+                host="github.com",
+                repository=repository_from_pr_url(identifier, _pull_request_number(identifier)),
+            )
+        except RuntimeError as error:
+            parser.error(str(error))
+    parser.error(
+        "numeric pull requests and branch discovery require --target-host and --target-repository"
+    )
+    raise AssertionError("argument parser returned after a target error")
+
+
+def _resolve_open_pr(identifier: str, target: RepositoryTarget) -> dict[str, Any]:
     """Return metadata for one explicitly identified open PR."""
-    validate_pr_identifier(identifier)
-    pull_request = _load_object(_gh_output("pr", "view", identifier, "--json", _RESOLVE_FIELDS))
+    number = _pull_request_number(identifier)
+    if identifier.startswith("https://"):
+        supplied = repository_from_pr_url(identifier, number)
+        if supplied.casefold() != target.repository.casefold():
+            raise RuntimeError("pull-request URL does not match the retained target")
+    pull_request = _load_object(
+        _gh_output(
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            target.repository_argument(),
+            "--json",
+            _RESOLVE_FIELDS,
+        )
+    )
     metadata_problem = resolve_metadata_error(pull_request)
     if metadata_problem:
         raise RuntimeError(metadata_problem)
     if pull_request.get("state") != "OPEN":
         raise RuntimeError(f"pull request {identifier} is not open")
+    if pull_request.get("number") != number:
+        raise RuntimeError("GitHub returned a pull request different from the request")
+    for field in ("baseRefOid", "headRefOid"):
+        _require_commit_oid(pull_request.get(field), f"GitHub immutable PR revision {field}")
     return pull_request
 
 
-def _validate_repository_identity(pull_request: dict[str, Any]) -> None:
-    """Reject a PR URL that belongs to a different repository than the checkout."""
+def _validate_repository_identity(pull_request: dict[str, Any], target: RepositoryTarget) -> None:
+    """Reject a PR URL that differs from the retained explicit forge target."""
     number = pull_request.get("number")
     url = pull_request.get("url")
     if not isinstance(number, int) or not isinstance(url, str):
         raise RuntimeError("GitHub returned incomplete pull-request identity")
-    repository = _load_object(_gh_output("repo", "view", "--json", "nameWithOwner"))
-    current = repository.get("nameWithOwner")
-    if not isinstance(current, str) or not current:
-        raise RuntimeError("GitHub returned incomplete repository identity")
     pull_repository = repository_from_pr_url(url, number)
-    if pull_repository.casefold() != current.casefold():
-        raise RuntimeError(f"pull request {url} does not belong to current repository {current}")
+    if pull_repository.casefold() != target.repository.casefold():
+        raise RuntimeError(
+            f"pull request {url} does not belong to target repository {target.repository}"
+        )
+    pull_request["review_target"] = {
+        "host": target.host,
+        "kind": "github",
+        "number": number,
+        "repository": target.repository,
+        "url": url,
+    }
 
 
-def resolve_pull_request(explicit: str | None) -> dict[str, Any]:
+def resolve_pull_request(explicit: str | None, target: RepositoryTarget) -> dict[str, Any]:
     """Resolve an explicit PR or the sole open PR associated with this branch."""
     if explicit:
-        return _resolve_open_pr(explicit)
+        return _resolve_open_pr(explicit, target)
 
     branch = _git_output("branch", "--show-current").strip()
     if not branch:
@@ -116,6 +235,8 @@ def resolve_pull_request(explicit: str | None) -> dict[str, Any]:
         _gh_output(
             "pr",
             "list",
+            "--repo",
+            target.repository_argument(),
             "--state",
             "open",
             "--head",
@@ -133,7 +254,7 @@ def resolve_pull_request(explicit: str | None) -> dict[str, Any]:
         number = candidates[0].get("number")
         if not isinstance(number, int) or number < 1:
             raise RuntimeError("GitHub returned an invalid pull-request candidate")
-        return _resolve_open_pr(str(number))
+        return _resolve_open_pr(str(number), target)
     if not candidates:
         raise LookupError(f"no open pull request found for branch {branch!r}")
     rendered = "\n".join(
@@ -154,14 +275,19 @@ def _print_error(exit_code: int, error: Exception, json_output: bool) -> int:
 def resolve_pr_main(argv: Sequence[str] | None = None) -> int:
     """Resolve an explicit PR or the sole open PR for the current branch."""
     parser = create_parser("hephaestus-resolve-pr", description=__doc__)
+    parser.add_argument("--target-host", metavar="HOST")
+    parser.add_argument("--target-repository", metavar="OWNER/REPOSITORY")
     parser.add_argument("pull_request", nargs="?", metavar="PR_NUMBER_OR_URL")
     add_github_throttle_args(parser)
     add_json_arg(parser)
     arguments = parser.parse_args(argv)
     configure_github_throttle_from_args(arguments)
+    target = _target_from_arguments(
+        parser, arguments.pull_request, arguments.target_host, arguments.target_repository
+    )
     try:
-        pull_request = resolve_pull_request(arguments.pull_request)
-        _validate_repository_identity(pull_request)
+        pull_request = resolve_pull_request(arguments.pull_request, target)
+        _validate_repository_identity(pull_request, target)
     except json.JSONDecodeError as error:
         return _print_error(1, error, arguments.json)
     except LookupError as error:
@@ -347,12 +473,12 @@ def pr_diff_context_main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     base_ref, head_ref = arguments.base_ref, arguments.head_ref
     try:
-        for label, value in (("base ref", base_ref), ("head ref", head_ref)):
-            if value.startswith("-"):
-                raise RuntimeError(f"{label} must not begin with '-': {value!r}")
+        base_ref = _require_commit_oid(base_ref, "base OID")
+        head_ref = _require_commit_oid(head_ref, "head OID")
+        _require_complete_git_history()
         _git_output("rev-parse", "--verify", f"{base_ref}^{{commit}}")
         _git_output("rev-parse", "--verify", f"{head_ref}^{{commit}}")
-        merge_base = _git_output("merge-base", base_ref, head_ref).strip()
+        merge_base = _unambiguous_merge_base(base_ref, head_ref)
         behind_count = int(_git_output("rev-list", "--count", f"{head_ref}..{base_ref}").strip())
     except (FileNotFoundError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         return _print_error(1, error, arguments.json)
