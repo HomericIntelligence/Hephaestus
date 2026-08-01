@@ -1136,6 +1136,14 @@ class TestReviewValidationPrompt:
         assert "fresh validation review" in out
         assert "current diff, the prior review conversation, and the implementation reply" in out
 
+    def test_validation_checks_the_implementers_evidence_without_rerunning_it(self) -> None:
+        """Thread validation evaluates supplied evidence, not a new local execution."""
+        out = self._build()
+
+        assert "Do not independently reproduce, rerun" in out
+        assert "sandbox access failure" in out
+        assert "Do not independently adjudicate the original code-level concern" in out
+
     def test_requires_explicit_two_way_validation_contract(self) -> None:
         out = self._build()
         assert '"resolved"' in out

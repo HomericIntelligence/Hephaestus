@@ -170,7 +170,7 @@ def rate_budget_ok(now_epoch: float | None = None) -> tuple[bool, float]:
 
 
 def _with_severity_marker(comment: dict[str, Any]) -> str:
-    """Prepend the ``<!-- hephaestus-severity: X -->`` marker line (#1856).
+    """Publish a visible reviewer prefix and durable severity marker (#1856).
 
     An absent/unknown severity is written as ``major`` (blocking) so an
     unclassifiable thread never silently unblocks a GO, and so the pre-#1856
@@ -187,12 +187,13 @@ def _with_severity_marker(comment: dict[str, Any]) -> str:
         and not line.strip().startswith(SCOPE_RETRACTION_MARKER_PREFIX)
         and not _STANDALONE_VERDICT_LINE_RE.match(line)
     )
+    if body.startswith("[Review] "):
+        body = body.removeprefix("[Review] ")
     paths = normalize_scope_retraction_paths(comment.get("scope_retraction_paths"))
     markers = [f"{SEVERITY_MARKER_PREFIX} {sev} -->"]
     if paths:
         markers.append(scope_retraction_marker(paths))
-    markers.append(body)
-    return "\n".join(markers)
+    return "\n".join([f"[Review] {body}", *markers])
 
 
 def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
@@ -948,12 +949,20 @@ class PipelineGitHub:
             raise ValueError(
                 "implementation reply batch nonce must be 32 lowercase hexadecimal chars"
             )
+        response = reply.removeprefix("[Response] ")
         seed = ":".join(
-            [self._repo_slug or self.org, str(pr_number), thread_id, head_sha, reply, batch_nonce]
+            [
+                self._repo_slug or self.org,
+                str(pr_number),
+                thread_id,
+                head_sha,
+                response,
+                batch_nonce,
+            ]
         )
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
         return (
-            f"{reply}\n\n"
+            f"[Response] {response}\n\n"
             f"<!-- hephaestus-implementation-reply:{marker} -->\n"
             f"<!-- hephaestus-implementation-batch:{batch_nonce} -->"
         )
@@ -995,7 +1004,10 @@ class PipelineGitHub:
         marker_match = _IMPLEMENTATION_REPLY_BODY_RE.fullmatch(reply_body)
         if marker_match is None:
             return None
-        reply = self._safe_thread_reply(marker_match.group(1))
+        visible_reply = marker_match.group(1)
+        if not visible_reply.startswith("[Response] "):
+            return None
+        reply = self._safe_thread_reply(visible_reply.removeprefix("[Response] "))
         batch_nonce = marker_match.group(2)
         if reply is None or batch_nonce is None:
             return None
@@ -1018,7 +1030,7 @@ class PipelineGitHub:
         shared CSPRNG batch nonce binds the complete implementation pass without
         publishing an unanchored review-level summary.
         """
-        candidates: list[tuple[dict[str, Any], str, str, str]] = []
+        candidates: list[tuple[dict[str, Any], str, str, str, str]] = []
         seen_thread_ids: set[str] = set()
         for thread in threads:
             if not isinstance(thread, dict):
@@ -1041,16 +1053,22 @@ class PipelineGitHub:
                 return []
             reply_id, reply_body = implementation_reply
             batch_nonce = self._implementation_reply_batch_nonce(reply_body)
-            if batch_nonce is None:
+            review_id = comments[-1].get("review_id")
+            if batch_nonce is None or not isinstance(review_id, str) or not review_id:
                 return []
             seen_thread_ids.add(thread_id)
-            candidates.append((thread, reply_id, reply_body, batch_nonce))
+            candidates.append((thread, reply_id, reply_body, batch_nonce, review_id))
         if not candidates:
             return []
         batch_nonces = {candidate[3] for candidate in candidates}
         if len(batch_nonces) != 1:
             return []
-        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _ in candidates]
+        # Multiple implementation responses from one pass must share one
+        # submitted GitHub review, not merely a common local nonce. Otherwise
+        # legacy one-review-per-comment replies could be resolved as a batch.
+        if len(candidates) > 1 and len({candidate[4] for candidate in candidates}) != 1:
+            return []
+        return [(thread, reply_id, reply_body) for thread, reply_id, reply_body, _, _ in candidates]
 
     def reviewer_validation_receipts(
         self,
@@ -1104,27 +1122,39 @@ class PipelineGitHub:
         )
         marker = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
         return (
-            f"Reviewer validation found this still unresolved: {feedback}\n\n"
+            f"[Review] Reviewer validation found this still unresolved: {feedback}\n\n"
             f"<!-- hephaestus-reviewer-validation:{marker} -->"
         )
 
-    def _add_thread_reply(self, thread_id: str, body: str) -> str | None:
+    def _add_thread_reply(
+        self, thread_id: str, body: str, *, pull_request_review_id: str | None = None
+    ) -> str | None:
         """Post one response on an existing review thread.
 
-        Both implementation receipts and fresh reviewer feedback use this one
-        mutation.  It intentionally cannot attach a reply to a review-level
-        envelope: every response is anchored by ``pullRequestReviewThreadId``.
+        Every response remains anchored by ``pullRequestReviewThreadId``. An
+        implementation pass may additionally bind its replies to one pending
+        review envelope so GitHub renders the complete pass as one review.
         """
-        query = (
-            "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
-            "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
-            "clientMutationId:$clientMutationId}){comment{id}}}"
-        )
+        if pull_request_review_id is None:
+            query = (
+                "mutation($threadId:ID!,$body:String!,$clientMutationId:String!){"
+                "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body,"
+                "clientMutationId:$clientMutationId}){comment{id}}}"
+            )
+        else:
+            query = (
+                "mutation($threadId:ID!,$reviewId:ID!,$body:String!,$clientMutationId:String!){"
+                "addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,"
+                "pullRequestReviewId:$reviewId,body:$body,clientMutationId:$clientMutationId})"
+                "{comment{id}}}"
+            )
         mutation_fields: dict[str, str] = {
             "threadId": thread_id,
             "body": body,
             "clientMutationId": hashlib.sha256(f"{thread_id}:{body}".encode()).hexdigest(),
         }
+        if pull_request_review_id is not None:
+            mutation_fields["reviewId"] = pull_request_review_id
         data = self._graphql(
             query,
             **mutation_fields,
@@ -1139,6 +1169,59 @@ class PipelineGitHub:
         if not isinstance(comment, dict) or not isinstance(comment.get("id"), str):
             return None
         return str(comment["id"])
+
+    def _create_pending_implementation_review(
+        self, pull_request_id: str, head_sha: str, batch_nonce: str
+    ) -> str | None:
+        """Create one pending review envelope for an implementation reply batch."""
+        query = (
+            "mutation($pullRequestId:ID!,$commitOID:GitObjectID!,$clientMutationId:String!){"
+            "addPullRequestReview(input:{pullRequestId:$pullRequestId,commitOID:$commitOID,"
+            "clientMutationId:$clientMutationId}){pullRequestReview{id}}}"
+        )
+        data = self._graphql(
+            query,
+            pullRequestId=pull_request_id,
+            commitOID=head_sha,
+            clientMutationId=hashlib.sha256(
+                f"{pull_request_id}:{head_sha}:{batch_nonce}:implementation-review".encode()
+            ).hexdigest(),
+        )
+        response_data = data.get("data") if isinstance(data, dict) else None
+        mutation = (
+            response_data.get("addPullRequestReview") if isinstance(response_data, dict) else None
+        )
+        review = mutation.get("pullRequestReview") if isinstance(mutation, dict) else None
+        review_id = review.get("id") if isinstance(review, dict) else None
+        return review_id if isinstance(review_id, str) and review_id else None
+
+    def _submit_implementation_review(self, pull_request_id: str, review_id: str) -> bool:
+        """Submit a complete pending implementation reply review as a comment."""
+        query = (
+            "mutation($pullRequestId:ID!,$reviewId:ID!,$clientMutationId:String!){"
+            "submitPullRequestReview(input:{pullRequestId:$pullRequestId,pullRequestReviewId:$reviewId,"
+            "event:COMMENT,clientMutationId:$clientMutationId}){pullRequestReview{id state}}}"
+        )
+        data = self._graphql(
+            query,
+            pullRequestId=pull_request_id,
+            reviewId=review_id,
+            clientMutationId=hashlib.sha256(
+                f"{pull_request_id}:{review_id}:implementation-submit".encode()
+            ).hexdigest(),
+        )
+        response_data = data.get("data") if isinstance(data, dict) else None
+        mutation = (
+            response_data.get("submitPullRequestReview")
+            if isinstance(response_data, dict)
+            else None
+        )
+        review = mutation.get("pullRequestReview") if isinstance(mutation, dict) else None
+        return bool(
+            isinstance(review, dict)
+            and review.get("id") == review_id
+            and review.get("state") == "COMMENTED"
+        )
 
     def _review_thread_snapshot(  # noqa: C901 - GraphQL response validation is fail-closed
         self, pr_number: int, thread_id: str
@@ -1333,6 +1416,7 @@ class PipelineGitHub:
                             "line": expected_thread_fields[2],
                             "side": expected_thread_fields[3],
                             "comments": comments,
+                            "pr_node_id": expected_pr_id,
                             "pr_state": expected_pr_state,
                         },
                         page_count > 1,
@@ -1512,9 +1596,16 @@ class PipelineGitHub:
 
         prepared: list[tuple[str, dict[str, Any], str]] = []
         recovered: dict[str, dict[str, Any]] = {}
+        reply_bodies: dict[str, str] = {}
+        pull_request_ids: set[str] = set()
+        pending_review_ids: set[str] = set()
+        commented_review_ids: set[str] = set()
+        has_commented_recovery = False
         try:
             for thread_id in candidate_ids:
                 reply = self._safe_thread_reply(replies.get(thread_id))
+                if reply is not None:
+                    reply = self._safe_thread_reply(reply.removeprefix("[Response] "))
                 snapshot = snapshots[thread_id]
                 if reply is None:
                     blocked.append(thread_id)
@@ -1530,12 +1621,36 @@ class PipelineGitHub:
                 ):
                     blocked.append(thread_id)
                     continue
+                pull_request_id = live.get("pr_node_id")
+                if not isinstance(pull_request_id, str) or not pull_request_id:
+                    blocked.append(thread_id)
+                    continue
+                pull_request_ids.add(pull_request_id)
+                reply_bodies[thread_id] = body
                 # A prior transport failure may have applied this exact reply.
                 # Recover its host proof before treating the saved snapshot as
                 # stale or attempting a duplicate mutation.
                 recovered_id = self._host_reply_receipt(snapshot, live, body)
                 if recovered_id is not None:
                     recovered[thread_id] = receipt(live, recovered_id, body)
+                    final_comment = live.get("comments", [])[-1]
+                    review_id = (
+                        final_comment.get("review_id") if isinstance(final_comment, dict) else None
+                    )
+                    review_state = (
+                        final_comment.get("review_state")
+                        if isinstance(final_comment, dict)
+                        else None
+                    )
+                    if not isinstance(review_id, str) or not review_id:
+                        blocked.append(thread_id)
+                    elif review_state == "PENDING":
+                        pending_review_ids.add(review_id)
+                    elif review_state == "COMMENTED":
+                        has_commented_recovery = True
+                        commented_review_ids.add(review_id)
+                    else:
+                        blocked.append(thread_id)
                     continue
                 if not self._same_thread_snapshot(snapshot, live):
                     blocked.append(thread_id)
@@ -1546,8 +1661,51 @@ class PipelineGitHub:
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=tuple(sorted(blocked)),
                 )
+            if len(pull_request_ids) != 1 or len(pending_review_ids) > 1:
+                return ImplementationThreadReplyResult(
+                    retryable_thread_ids=candidate_ids,
+                    retryable=True,
+                )
+            pull_request_id = next(iter(pull_request_ids))
+            pending_review_id = next(iter(pending_review_ids), None)
+            if has_commented_recovery and (prepared or pending_review_id is not None):
+                # A submitted review cannot safely be extended. A mixed
+                # recovery means another actor changed the batch boundary.
+                return ImplementationThreadReplyResult(
+                    retryable_thread_ids=candidate_ids,
+                    retryable=True,
+                )
+            if has_commented_recovery and len(candidate_ids) > 1 and len(commented_review_ids) != 1:
+                # Never let legacy one-review-per-comment recovery masquerade
+                # as a complete implementation pass.
+                return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
+            if has_commented_recovery:
+                # The submit mutation may have succeeded even when its
+                # response was lost. Every reply is already bound to the
+                # submitted review, so a retry must not create an empty one.
+                return ImplementationThreadReplyResult(
+                    replied_thread_ids=candidate_ids,
+                    receipts=tuple(recovered[thread_id] for thread_id in candidate_ids),
+                )
+            # Every implementation pass, including a singleton reply, must be
+            # submitted as one GitHub review. The later comment-review handoff
+            # accepts only replies bound to that submitted review.
+            if pending_review_id is None:
+                pending_review_id = self._create_pending_implementation_review(
+                    pull_request_id, expected_head_sha, batch_nonce
+                )
+                if pending_review_id is None:
+                    # GitHub may have accepted the create mutation while its
+                    # response was lost. There is no source-attached receipt
+                    # yet from which to identify that pending review safely;
+                    # fail closed rather than creating a duplicate envelope.
+                    return ImplementationThreadReplyResult(
+                        blocked_thread_ids=candidate_ids,
+                    )
             for thread_id, snapshot, body in prepared:
-                comment_id = self._add_thread_reply(thread_id, body)
+                comment_id = self._add_thread_reply(
+                    thread_id, body, pull_request_review_id=pending_review_id
+                )
                 replied_live = self._review_thread_snapshot(pr_number, thread_id)
                 if (
                     not isinstance(replied_live, dict)
@@ -1572,6 +1730,37 @@ class PipelineGitHub:
                         retryable=True,
                     )
                 recovered[thread_id] = receipt(replied_live, proved_comment_id, body)
+            if pending_review_id is not None and not self._submit_implementation_review(
+                pull_request_id, pending_review_id
+            ):
+                return ImplementationThreadReplyResult(
+                    retryable_thread_ids=candidate_ids,
+                    retryable=True,
+                )
+            if pending_review_id is not None:
+                for thread_id in candidate_ids:
+                    body = reply_bodies[thread_id]
+                    submitted_live = self._review_thread_snapshot(pr_number, thread_id)
+                    if (
+                        not isinstance(submitted_live, dict)
+                        or submitted_live.get("isResolved") is not False
+                        or not self._pr_is_current_open_head(
+                            submitted_live.get("pr_state"), expected_head_sha
+                        )
+                    ):
+                        return ImplementationThreadReplyResult(
+                            retryable_thread_ids=candidate_ids,
+                            retryable=True,
+                        )
+                    submitted_id = self._validated_implementation_reply(
+                        pr_number, expected_head_sha, submitted_live
+                    )
+                    if submitted_id is None or submitted_id[1] != body:
+                        return ImplementationThreadReplyResult(
+                            retryable_thread_ids=candidate_ids,
+                            retryable=True,
+                        )
+                    recovered[thread_id] = receipt(submitted_live, submitted_id[0], body)
         except (
             AttributeError,
             OSError,
