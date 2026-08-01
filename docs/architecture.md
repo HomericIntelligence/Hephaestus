@@ -906,6 +906,14 @@ Architectural contract:
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
+- When parallel file-overlap serialization is enabled, normal-item dependency
+  order remains authoritative while repeated overlap deferrals raise priority.
+  Cross-repo same-number items are interleaved with normal items by that age
+  through one repo-scoped claim selector; this never lets a normal dependent
+  overtake its prerequisite. The selected plan-file snapshot is retained for
+  the full implementation-stage lifetime, across worktree, agent, test, and
+  push jobs; serial and overlap-opt-out modes perform no claim lookup or
+  tracking.
 
 ### 5.5 PR review
 
