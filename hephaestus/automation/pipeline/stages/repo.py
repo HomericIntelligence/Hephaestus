@@ -60,11 +60,20 @@ logger = logging.getLogger(__name__)
 # discovery retains per-issue fresh-trunk semantics.
 DIRECT_SCOPE_BOOTSTRAP_KEY = "_direct_scope_bootstrap"
 DIRECT_SCOPE_BASE_SHA_KEY = "_direct_scope_base_sha"
+# The coordinator creates one UUID4 hex value per explicit issue cursor.  A
+# fresh direct run carries it through to its writer worktree so a preserved
+# failed checkout cannot block a later run for the same issue.
+DIRECT_SCOPE_WORKTREE_NONCE_KEY = "_direct_scope_worktree_nonce"
 # A direct-scope worker returns this receipt only after it has atomically
 # reserved the remote implementation branch.  It remains on the item until a
 # coordinator-owned push publishes a commit or the Finished stage releases the
 # still-unused reservation.
 DIRECT_SCOPE_RESERVATION_KEY = "_direct_scope_reservation"
+# Typed result retained only between the direct worktree reservation worker
+# and implementation's next step.  A confirmed remote collision is terminal
+# rather than a generic infrastructure retry: retrying cannot make a branch
+# owned by another run safe to overwrite.
+DIRECT_SCOPE_RESERVATION_COLLISION_KEY = "_direct_scope_reservation_collision"
 # The remote reservation is already released after a direct no-op.  Finished
 # uses this receipt to compare-and-delete the now-detached local branch only
 # after removing its worktree.
@@ -76,6 +85,15 @@ def is_full_commit_sha(value: object) -> TypeGuard[str]:
     return bool(
         isinstance(value, str)
         and len(value) in (40, 64)
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def is_direct_scope_worktree_nonce(value: object) -> TypeGuard[str]:
+    """Return whether ``value`` is the coordinator's UUID4 hex token."""
+    return bool(
+        isinstance(value, str)
+        and len(value) == 32
         and all(character in "0123456789abcdef" for character in value)
     )
 

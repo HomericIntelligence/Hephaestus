@@ -121,7 +121,10 @@ from .base import (
 from .repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
+    DIRECT_SCOPE_RESERVATION_COLLISION_KEY,
     DIRECT_SCOPE_RESERVATION_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
+    is_direct_scope_worktree_nonce,
     is_full_commit_sha,
 )
 
@@ -331,6 +334,23 @@ class ImplementationStage(Stage):
         }
         if not adopted and direct_base_sha is not None:
             kwargs["base_sha"] = direct_base_sha
+            direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
+            direct_branch_prefix = f"{issue}-auto-impl-direct-"
+            if item.branch.startswith(direct_branch_prefix):
+                if (
+                    not is_direct_scope_worktree_nonce(direct_worktree_nonce)
+                    or item.branch != f"{direct_branch_prefix}{direct_worktree_nonce}"
+                ):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "direct_scope_worktree_nonce_invalid",
+                    )
+                kwargs["direct_worktree_nonce"] = direct_worktree_nonce
+            elif direct_worktree_nonce is not None:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "direct_scope_worktree_nonce_invalid",
+                )
         if adopted:
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr
@@ -381,6 +401,12 @@ class ImplementationStage(Stage):
                 f"branch {branch!r} already owned at {owner_path}; "
                 "redundant implementation superseded",
             )
+        if item.payload.pop(DIRECT_SCOPE_RESERVATION_COLLISION_KEY, None):
+            # A worker-side remote probe proved this direct branch already
+            # exists.  Retrying an absent-only reservation would only rerun
+            # pre-agent work and must never be interpreted as permission to
+            # overwrite the other owner.
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_reservation_collision")
         if item.payload.pop("git_error", None):
             # Worktree creation failed: transient infrastructure, not an
             # implement outcome. If the retry budget remains, retry the
@@ -696,6 +722,16 @@ class ImplementationStage(Stage):
                     "branch": ownership.get("branch"),
                     "owner_path": ownership.get("owner_path"),
                 }
+                item.worktree = ""
+                return
+            collision = (
+                result.value.get("direct_scope_reservation_collision")
+                if result.error == "direct_scope_reservation_collision"
+                and isinstance(result.value, dict)
+                else None
+            )
+            if isinstance(collision, dict) and collision.get("branch") == item.branch:
+                item.payload[DIRECT_SCOPE_RESERVATION_COLLISION_KEY] = True
                 item.worktree = ""
                 return
             materialized_path = (

@@ -2138,12 +2138,23 @@ class WorkerPool:
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
-        direct_setup = self._prepare_direct_scope_worktree(
-            kwargs=kwargs,
-            sync_to_remote=sync_to_remote,
-            repo_root=repo_root,
-            timeout_s=job.timeout_s,
-        )
+        try:
+            direct_setup = self._prepare_direct_scope_worktree(
+                kwargs=kwargs,
+                sync_to_remote=sync_to_remote,
+                repo_root=repo_root,
+                timeout_s=job.timeout_s,
+            )
+        except git_utils.DirectBranchReservationCollisionError as exc:
+            # The post-failure remote probe proved another branch now owns
+            # this absent-only reservation.  Preserve that type across the
+            # worker boundary so Implementation terminalizes it rather than
+            # spending its generic transport retry budget (or an agent job).
+            return JobResult(
+                ok=False,
+                error="direct_scope_reservation_collision",
+                value={"direct_scope_reservation_collision": {"branch": exc.branch_name}},
+            )
         if isinstance(direct_setup, JobResult):
             return direct_setup
         base_sha, branch_name = direct_setup

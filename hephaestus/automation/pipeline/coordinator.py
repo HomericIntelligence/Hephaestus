@@ -81,6 +81,7 @@ import queue as queue_mod
 import signal
 import threading
 import time
+import uuid
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
@@ -133,6 +134,7 @@ from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARG
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_BOOTSTRAP_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
     RepoIssueSource,
     is_full_commit_sha,
     product_to_work_item,
@@ -408,6 +410,7 @@ class _DirectIssueSource:
     repo: str
     issues: Iterator[int]
     base_sha: str
+    run_nonce: str
 
 
 @dataclass
@@ -2658,6 +2661,7 @@ class Coordinator:
             repo=repo,
             issues=iter(open_issues),
             base_sha=base_sha,
+            run_nonce=uuid.uuid4().hex,
         )
 
     def _begin_direct_pr_source(self, repo: str, base_sha: str) -> None:
@@ -2709,6 +2713,13 @@ class Coordinator:
             item = self._entry_to_item(entry, source.repo)
             if is_full_commit_sha(source.base_sha):
                 item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
+                if item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
+                    # A fresh direct issue is tied to one immutable checkout
+                    # snapshot.  Its branch and writer-worktree identity must
+                    # be unique per cursor so a preserved predecessor cannot
+                    # stall a restart before implementation reaches an agent.
+                    item.branch = f"{item.issue}-auto-impl-direct-{source.run_nonce}"
+                    item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = source.run_nonce
             if item.stage not in (StageName.REPO, StageName.FINISHED):
                 self._pass_work_count += 1
             if item.stage is StageName.FINISHED and item.result is None:

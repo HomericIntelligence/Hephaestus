@@ -175,6 +175,21 @@ class TestGate:
         assert result.next_state == "WORKTREE_WAIT"
         assert item.branch == "7-auto-impl"
 
+    def test_gate_preserves_preallocated_direct_restart_branch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Direct-source branch allocation must survive the implementation gate unchanged."""
+        stage = ImplementationStage()
+        ctx = make_ctx(github=FakeStageGitHub(labels=["state:plan-go"]))
+        item = make_work_item(issue=7, state="GATE")
+        item.branch = "7-auto-impl-direct-abc123"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "WORKTREE_WAIT"
+        assert item.branch == "7-auto-impl-direct-abc123"
+
     def test_gate_live_label_failure_cannot_authorize_from_cached_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -884,6 +899,28 @@ class TestWorktreeAndAdvise:
             "base_sha": "a" * 40,
         }
 
+    def test_direct_scope_worktree_forwards_the_coordinator_run_nonce(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart-specific branch also receives a restart-specific worktree path."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        run_nonce = "d" * 32
+        item.branch = f"1-auto-impl-direct-{run_nonce}"
+        item.payload.update(
+            {
+                "_direct_scope_base_sha": "a" * 40,
+                "_direct_scope_worktree_nonce": run_nonce,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["direct_worktree_nonce"] == run_nonce
+
     def test_worktree_result_stores_path_and_dirty_state(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -970,6 +1007,37 @@ class TestWorktreeAndAdvise:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
         assert item.attempts["implement"] == 0  # transient: no budget burned
+
+    def test_confirmed_direct_reservation_collision_finishes_without_retry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A confirmed branch collision stops before an agent or generic retry can run."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-abc123"
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="direct_scope_reservation_collision",
+                value={
+                    "direct_scope_reservation_collision": {"branch": "1-auto-impl-direct-abc123"}
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "direct_scope_reservation_collision",
+        )
+        assert item.attempts["implement"] == 0
+        assert "git_error_retries" not in item.payload
 
     def test_worktree_rollback_failure_preserves_direct_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
