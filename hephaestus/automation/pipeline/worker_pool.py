@@ -2417,8 +2417,10 @@ class WorkerPool:
             check=False,
             timeout=job.timeout_s,
         )
-        if base_is_ancestor.returncode != 0:
+        if base_is_ancestor.returncode == 1:
             return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
+        if base_is_ancestor.returncode != 0:
+            return JobResult(ok=False, error="review checkout base ancestry check failed")
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,
