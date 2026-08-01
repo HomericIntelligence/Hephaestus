@@ -1002,9 +1002,7 @@ class TestWorktreeAndAdvise:
                 ok=False,
                 error="direct_scope_reservation_collision",
                 value={
-                    "direct_scope_reservation_collision": {
-                        "branch": "1-auto-impl-direct-abc123"
-                    }
+                    "direct_scope_reservation_collision": {"branch": "1-auto-impl-direct-abc123"}
                 },
             ),
             ctx,

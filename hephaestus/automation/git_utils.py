@@ -375,8 +375,7 @@ def _remote_branch_exists(
     if probe.returncode != 0:
         return False
     return any(
-        line.partition("\t")[2] == expected_ref
-        for line in str(probe.stdout or "").splitlines()
+        line.partition("\t")[2] == expected_ref for line in str(probe.stdout or "").splitlines()
     )
 
 
