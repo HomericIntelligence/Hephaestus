@@ -45,7 +45,7 @@ from hephaestus.cli.utils import (
 from hephaestus.config.paths import resolve_projects_dir
 
 from ._review_utils import build_automation_parser
-from .git_utils import get_repo_slug
+from .git_utils import get_repo_info
 from .pipeline.routing import PipelineScope, StageName
 
 logger = logging.getLogger(__name__)
@@ -188,13 +188,10 @@ def _resolve_repo() -> tuple[str, str]:
     """Resolve ``(org, repo)`` for the current checkout.
 
     Returns:
-        The GitHub ``owner`` and ``repo`` name derived from the local repo
-        slug (``owner/repo``).
+        The GitHub ``owner`` and ``repo`` name derived from the local remote.
 
     """
-    slug = get_repo_slug()
-    org, _, repo = slug.partition("/")
-    return org, repo
+    return get_repo_info()
 
 
 def main() -> int:
