@@ -62,6 +62,7 @@ from .dependency_resolver import CyclicDependencyError, DependencyResolver
 # that constructs an IssueImplementer.  Explicit ``as`` alias satisfies mypy
 # ``implicit_reexport=false`` and makes the re-export intentional.
 from .git_utils import (
+    get_repo_info,
     get_repo_root as get_repo_root,
     run,
 )
@@ -430,15 +431,10 @@ def _resolve_repo() -> tuple[str, str]:
     """Resolve ``(org, repo)`` for the current checkout.
 
     Returns:
-        The GitHub ``owner`` and ``repo`` name derived from the local repo
-        slug (``owner/repo``).
+        The GitHub ``owner`` and ``repo`` name derived from the local remote.
 
     """
-    from .git_utils import get_repo_slug
-
-    slug = get_repo_slug()
-    org, _, repo = slug.partition("/")
-    return org, repo
+    return get_repo_info()
 
 
 def main() -> int:
