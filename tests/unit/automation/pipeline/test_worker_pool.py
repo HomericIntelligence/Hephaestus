@@ -1633,7 +1633,7 @@ class TestGitOps:
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """A concurrent remote branch owner fails the worktree job closed."""
+        """A confirmed remote branch owner yields a typed terminal result."""
         pinned_sha = "a" * 40
         job = GitJob(
             repo="test/repo",
@@ -1657,14 +1657,52 @@ class TestGitOps:
             ),
             patch(
                 f"{_WP}.git_utils.reserve_remote_branch_if_absent",
-                side_effect=RuntimeError("remote branch already exists"),
+                side_effect=git_utils.DirectBranchReservationCollisionError("7-auto"),
             ),
         ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert "remote branch already exists" in (result.error or "")
+        assert result.error == "direct_scope_reservation_collision"
+        assert result.value == {"direct_scope_reservation_collision": {"branch": "7-auto"}}
+
+    def test_direct_pinned_worktree_keeps_unproven_reservation_failure_retryable(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A transport failure is not mislabeled as another run's branch collision."""
+        pinned_sha = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": False,
+                "base_sha": pinned_sha,
+            },
+        )
+        with (
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
+            ),
+            patch(
+                f"{_WP}.git_utils.reserve_remote_branch_if_absent",
+                side_effect=RuntimeError("network unavailable"),
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "RuntimeError: network unavailable"
+        assert result.value is None
 
     def test_create_worktree_syncs_adopted_clean_branch(
         self,

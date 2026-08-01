@@ -199,6 +199,32 @@ class TestWorktreeManager:
             pin,
         ]
 
+    def test_direct_scope_run_nonce_uses_a_fresh_path_without_reusing_a_stale_one(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A restarted direct run preserves the prior issue worktree."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        stale_path = manager.base_dir / "issue-2460"
+        stale_path.mkdir(parents=True)
+        run_nonce = "d" * 32
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_direct_scope_local_branch_exists", return_value=False),
+        ):
+            result = manager.create_worktree(
+                2460,
+                "2460-auto-impl-direct-" + run_nonce,
+                base_sha="a" * 40,
+                remote_branch_reserved=True,
+                direct_worktree_nonce=run_nonce,
+            )
+
+        assert stale_path.exists()
+        assert result == manager.base_dir / f"issue-2460-direct-{run_nonce}"
+        assert manager.worktrees[f"2460-direct-{run_nonce}"] == result
+
     def test_direct_scope_rejects_refresh_before_any_git_mutation(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
