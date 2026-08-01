@@ -15,6 +15,7 @@ from hephaestus.automation.git_utils import (
     DetachedHeadPushRemoteHeadChangedError,
     DetachedHeadPushRemoteHeadUnchangedError,
     DetachedHeadPushRemoteProbeError,
+    DirectBranchReservationCollisionError,
     _commit_policy_rebase_command,
     _remove_untracked_files_tracked_by_ref,
     clear_repo_caches,
@@ -418,6 +419,48 @@ class TestDirectScopeBranchReservation:
             cwd=tmp_path,
             timeout=42,
         )
+
+    def test_reserve_reports_a_typed_collision_only_after_exact_remote_probe(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A failed absent-only lease is a collision only when the ref is proven live."""
+        pin = "a" * 40
+        branch = "2452-auto-impl-direct-abc123"
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(1, ["git", "push"]),
+            Mock(returncode=0, stdout=f"{pin}\trefs/heads/{branch}\n"),
+        ]
+
+        with pytest.raises(DirectBranchReservationCollisionError, match=branch):
+            reserve_remote_branch_if_absent(branch, pin, tmp_path, timeout=42)
+
+        assert git_utils_mocks.run.call_args_list[1].args[0] == [
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            f"refs/heads/{branch}",
+        ]
+        assert git_utils_mocks.run.call_args_list[1].kwargs == {
+            "cwd": tmp_path,
+            "check": False,
+            "log_errors": False,
+            "timeout": 42,
+        }
+
+    def test_reserve_keeps_an_unproven_rejection_as_a_generic_error(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """Transport/auth failures must retain the implementation retry path."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(1, ["git", "push"]),
+            Mock(returncode=2, stdout=""),
+        ]
+
+        with pytest.raises(RuntimeError, match="Failed to reserve direct-scope branch"):
+            reserve_remote_branch_if_absent("2452-auto-impl", pin, tmp_path, timeout=42)
 
     def test_strict_publish_requires_expected_remote_sha(
         self, git_utils_mocks: Any, tmp_path: Path

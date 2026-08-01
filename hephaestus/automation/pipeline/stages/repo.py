@@ -65,6 +65,11 @@ DIRECT_SCOPE_BASE_SHA_KEY = "_direct_scope_base_sha"
 # coordinator-owned push publishes a commit or the Finished stage releases the
 # still-unused reservation.
 DIRECT_SCOPE_RESERVATION_KEY = "_direct_scope_reservation"
+# Typed result retained only between the direct worktree reservation worker
+# and implementation's next step.  A confirmed remote collision is terminal
+# rather than a generic infrastructure retry: retrying cannot make a branch
+# owned by another run safe to overwrite.
+DIRECT_SCOPE_RESERVATION_COLLISION_KEY = "_direct_scope_reservation_collision"
 # The remote reservation is already released after a direct no-op.  Finished
 # uses this receipt to compare-and-delete the now-detached local branch only
 # after removing its worktree.

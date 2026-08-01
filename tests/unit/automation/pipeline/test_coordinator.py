@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -132,6 +133,93 @@ def _issue_item(
 
 class TestQuiescence:
     """Full-run tests driving seeded items to the finished ledger."""
+
+    def test_fresh_direct_issue_uses_a_unique_branch_per_source_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A closed predecessor cannot reserve a later direct run's branch name."""
+        base_sha = "a" * 40
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[617],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        nonce_one = uuid.UUID(int=1)
+        nonce_two = uuid.UUID(int=2)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator.uuid.uuid4",
+            lambda: nonce_one,
+        )
+        first = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        first._begin_direct_issue_source("repo-a", base_sha)
+        first_source = first._direct_issue_source
+        assert first_source is not None
+        assert first._drain_direct_issue_source() == 1
+        first_item = first.queues[StageName.IMPLEMENTATION].snapshot()[0]
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator.uuid.uuid4",
+            lambda: nonce_two,
+        )
+        second = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        second._begin_direct_issue_source("repo-a", base_sha)
+        second_source = second._direct_issue_source
+        assert second_source is not None
+        assert second._drain_direct_issue_source() == 1
+        second_item = second.queues[StageName.IMPLEMENTATION].snapshot()[0]
+
+        assert first_source.run_nonce == nonce_one.hex
+        assert second_source.run_nonce == nonce_two.hex
+        assert first_item.branch == f"617-auto-impl-direct-{nonce_one.hex}"
+        assert second_item.branch == f"617-auto-impl-direct-{nonce_two.hex}"
+        assert first_item.branch != second_item.branch
+        assert first_item.payload["_direct_scope_base_sha"] == base_sha
+
+    def test_direct_issue_with_open_replacement_pr_does_not_allocate_a_fresh_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact ``Closes #N`` rediscovery path remains an adopted PR path."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[617],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"], open_pr=812),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+
+        assert coordinator._drain_direct_issue_source() == 1
+        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+
+        assert item.pr == 812
+        assert item.branch == ""
+        assert item.payload["existing_pr"] is True
 
     def test_metrics_server_starts_for_run_and_stops_on_teardown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

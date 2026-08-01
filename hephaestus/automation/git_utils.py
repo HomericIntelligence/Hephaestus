@@ -49,6 +49,15 @@ class DetachedHeadPushRemoteProbeError(DetachedHeadPushError):
     """The remote branch could not be checked after a detached push failure."""
 
 
+class DirectBranchReservationCollisionError(RuntimeError):
+    """An absent-only direct branch reservation found an existing remote ref."""
+
+    def __init__(self, branch_name: str) -> None:
+        """Record the ref whose existence was confirmed by the remote probe."""
+        self.branch_name = branch_name
+        super().__init__(f"Direct-scope branch {branch_name} already exists")
+
+
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
@@ -334,7 +343,41 @@ def reserve_remote_branch_if_absent(
             **_timeout_kw(timeout),
         )
     except subprocess.CalledProcessError as exc:
+        if _remote_branch_exists(branch_name, repo_root, timeout=timeout):
+            raise DirectBranchReservationCollisionError(branch_name) from exc
         raise RuntimeError(f"Failed to reserve direct-scope branch {branch_name}: {exc}") from exc
+
+
+def _remote_branch_exists(
+    branch_name: str,
+    repo_root: Path,
+    *,
+    timeout: int | None,
+) -> bool:
+    """Return whether a remote probe conclusively found ``branch_name``.
+
+    A rejected absent-only lease can mean a competing branch creator, but it
+    can also mean authentication, transport, or server trouble.  Only a
+    successful post-failure ``ls-remote`` result for the exact ref proves the
+    former; every other outcome remains a retriable infrastructure failure.
+    """
+    expected_ref = f"refs/heads/{branch_name}"
+    try:
+        probe = run(
+            ["git", "ls-remote", "--exit-code", "--heads", "origin", expected_ref],
+            cwd=repo_root,
+            check=False,
+            log_errors=False,
+            **_timeout_kw(timeout),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if probe.returncode != 0:
+        return False
+    return any(
+        line.partition("\t")[2] == expected_ref
+        for line in str(probe.stdout or "").splitlines()
+    )
 
 
 def push_branch_if_remote_matches(
