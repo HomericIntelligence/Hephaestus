@@ -1341,8 +1341,8 @@ class TestImplementationAdmission:
         coordinator._push_item(retrying, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(deferred, StageName.IMPLEMENTATION, enter=True)
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.admission._select_non_overlapping",
-            lambda issues, repo_of=None, **_kwargs: (issues[:1], issues[1:]),
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"},
         )
 
         coordinator._drain_implementation()
@@ -1560,7 +1560,7 @@ class TestImplementationAdmission:
     def test_topo_order_and_overlap_reuse(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """order_for_implementation and _select_non_overlapping gate dispatch."""
+        """Dependency order leads the common repo-scoped overlap admission pass."""
         coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
         run_order: list[int] = []
 
@@ -1571,34 +1571,27 @@ class TestImplementationAdmission:
 
         coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
         # 21 depends on 22 (payload dependency): topo order runs 22 first.
-        # Distinct repos: the implementation queue is keyed by stage, not repo,
-        # so the coordinator must resolve each issue's repo from its own item (#1795).
         item_a = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
         item_a.payload["dependencies"] = [22]
-        item_b = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-b")
+        item_b = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
         coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
-        seen_repo_of: dict[int, tuple[str, str]] = {}
+        seen_fetches: list[tuple[int, tuple[str, str] | None]] = []
 
-        def _fake_select(
-            issues: list[int],
-            repo_of: dict[int, tuple[str, str]] | None = None,
-            **_kwargs: Any,
-        ) -> tuple[list[int], list[int]]:
-            seen_repo_of.update(repo_of or {})
-            return issues[:1], issues[1:]  # defer everything but the first
+        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
+            seen_fetches.append((issue, repo))
+            return {"shared.py"}
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.admission._select_non_overlapping",
-            _fake_select,
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            _planned_files,
         )
 
         coordinator._drain_implementation()
 
         assert run_order == [22]  # dependency first; 21 deferred by overlap
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
-        # Each issue is scoped to the repo of ITS OWN WorkItem, not the ambient CWD.
-        assert seen_repo_of == {21: ("org", "repo-a"), 22: ("org", "repo-b")}
+        assert seen_fetches == [(22, ("org", "repo-a")), (21, ("org", "repo-a"))]
 
     def test_aged_dependent_never_overtakes_its_queued_prerequisite(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1611,25 +1604,22 @@ class TestImplementationAdmission:
         prerequisite = _issue_item(22, StageName.IMPLEMENTATION)
         coordinator._push_item(dependent, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(prerequisite, StageName.IMPLEMENTATION, enter=True)
-        seen_order: list[int] = []
+        run_order: list[int] = []
 
-        def _fake_select(
-            issues: list[int],
-            repo_of: dict[int, tuple[str, str]] | None = None,
-            **_kwargs: Any,
-        ) -> tuple[list[int], list[int]]:
-            del repo_of
-            seen_order.extend(issues)
-            return issues, []
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
 
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.admission._select_non_overlapping",
-            _fake_select,
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda issue, repo=None: {f"planned-{issue}.py"},
         )
 
         coordinator._drain_implementation()
 
-        assert seen_order == [22, 21]
+        assert run_order == [22, 21]
 
     def test_overlap_gate_reuses_admission_snapshot_at_parallel_submission(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1870,6 +1860,65 @@ class TestImplementationAdmission:
 
         assert run_repos == ["repo-a"]
         assert "file_overlap_deferrals" not in repo_a.payload
+
+    def test_ambiguous_aged_overlap_beats_a_recurring_regular_contender(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An aged same-number item claims its file before a newly recurring regular item."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            repos=["repo-a", "repo-b"],
+            max_workers=2,
+            parallel_repos=2,
+        )
+        run_order: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(f"{item.repo}#{item.issue}")
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active_a_handle = _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        _fake_in_flight_item(
+            coordinator,
+            _issue_item(6, StageName.IMPLEMENTATION, repo="repo-b"),
+            claimed_files={"other.py"},
+        )
+        ambiguous_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        ambiguous_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(ambiguous_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(ambiguous_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert ambiguous_a.payload["file_overlap_deferrals"] == 1
+        assert ambiguous_b.payload["file_overlap_deferrals"] == 1
+        assert run_order == []
+
+        coordinator._handle_completion(active_a_handle, JobResult(ok=True))
+        recurring_regular = _issue_item(9, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(recurring_regular, StageName.IMPLEMENTATION, enter=True)
+        run_order.clear()
+        coordinator._drain_implementation()
+
+        assert run_order == ["repo-a#7"]
+        assert "file_overlap_deferrals" not in ambiguous_a.payload
+        assert ambiguous_b.payload["file_overlap_deferrals"] == 2
+        assert recurring_regular.payload["file_overlap_deferrals"] == 1
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [
+            ambiguous_b,
+            recurring_regular,
+        ]
 
     @pytest.mark.parametrize(
         ("initial_deferrals", "expected_deferrals", "expected_level"),
@@ -2120,11 +2169,6 @@ class TestImplementationAdmission:
         item_b = _issue_item(22, StageName.IMPLEMENTATION)
         coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
         coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
-        monkeypatch.setattr(
-            "hephaestus.automation.pipeline.admission._select_non_overlapping",
-            lambda issues: (_ for _ in ()).throw(AssertionError("should not serialize overlap")),
-        )
-
         coordinator._drain_implementation()
 
         assert run_order == [21, 22]

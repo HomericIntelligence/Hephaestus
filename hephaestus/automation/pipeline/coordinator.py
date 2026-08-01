@@ -30,7 +30,7 @@ poisoned item routes to finished(fail) and never kills the loop.
 Admission control: per-repo in-flight cap (= ``max_workers``), and the
 implementation queue is additionally gated by dependency topological order
 (:func:`~.admission.order_for_implementation`) and file-overlap serialization
-(:func:`~.admission._select_non_overlapping`). Pool size =
+through the coordinator's shared repo-scoped admission pass. Pool size =
 ``parallel_repos x max_workers``.
 
 ### ``--phase-timeout`` queue semantics
@@ -1715,11 +1715,12 @@ class Coordinator:
     def _drain_implementation(self) -> None:
         """Drain the implementation queue under topo order + file-overlap gating.
 
-        REUSES :func:`admission.order_for_implementation` (dependencies
-        first) and :func:`admission._select_non_overlapping` (defer plans
-        touching the same files while a peer is queued or already executing,
-        #1623/#2451 — only engaged when real parallelism is possible,
-        mirroring the legacy ``serialize_file_overlap`` gate).
+        REUSES :func:`admission.order_for_implementation` for dependency-safe
+        normal-item ordering, then applies one age-prioritized, repo-scoped
+        file-overlap admission pass to both normal and cross-repo
+        same-number items. The overlap gate is engaged only when real
+        parallelism is possible (#1623/#2451), mirroring the legacy
+        ``serialize_file_overlap`` gate.
 
         The queue is STAGE-keyed, so one drain round can hold issues from
         several repos (#1795), and dependency ordering runs across the whole
@@ -1772,7 +1773,14 @@ class Coordinator:
     def _select_implementation_dispatch(
         self, items: list[WorkItem]
     ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
-        """Order queued work and reserve immutable snapshots for this drain."""
+        """Order queued work and reserve immutable snapshots for this drain.
+
+        Normal items keep their dependency-safe topological order. Ambiguous
+        cross-repo same-number items have no safe number-keyed dependency
+        representation, so they interleave with that normal sequence by
+        deferral age. The common overlap selector then gives every candidate
+        identical repo-scoped claim, snapshot, deferral, and warning behavior.
+        """
         issue_items, ambiguous = self._index_issue_items(items)
         infos = [
             IssueInfo(
@@ -1792,47 +1800,14 @@ class Coordinator:
             reverse=True,
         )
         ordered = _admission.order_for_implementation(infos)
-        dispatch = ordered
-        selected_claims: dict[int, set[_admission.PlanFileClaim]] = {}
-        if self._overlap_serialization_enabled() and ordered:
-            # Resolve each issue's owning repo from its own WorkItem: the queue is
-            # keyed by stage, so one round can hold issues from several repos (#1795).
-            repo_of = {
-                number: (self.config.org, item.repo)
-                for number, item in issue_items.items()
-                if item.repo
-            }
-            inflight_claims = self._active_implementation_file_claims()
-            selection_kwargs: dict[str, Any] = {
-                "repo_of": repo_of,
-                "selected_claims": selected_claims,
-            }
-            if inflight_claims:
-                selection_kwargs["initial_claims"] = inflight_claims
-            dispatch, deferred = _admission._select_non_overlapping(ordered, **selection_kwargs)
-            for number in deferred:
-                self._record_file_overlap_deferral(issue_items[number], f"#{number}")
-        dispatch_items = [issue_items[number] for number in dispatch]
-        submission_claims = {
-            id(issue_items[number]): set(claims) for number, claims in selected_claims.items()
-        }
-        # Cross-repo same-number items bypass only the number-keyed dependency
-        # ordering.  They still need their own repo-scoped overlap admission;
-        # otherwise a same-number collision could evade active reservations.
-        if self._overlap_serialization_enabled():
-            claimed = self._active_implementation_file_claims()
-            for claims in selected_claims.values():
-                claimed.update(claims)
-            ambiguous_items, ambiguous_claims = self._select_ambiguous_implementation_items(
-                ambiguous, claimed
-            )
-            dispatch_items.extend(ambiguous_items)
-            submission_claims.update(ambiguous_claims)
-        else:
+        normal_items = [issue_items[number] for number in ordered]
+        ambiguous_items = [item for group in ambiguous.values() for item in group]
+        if not self._overlap_serialization_enabled():
             # Cross-repo same-number items are distinct work even though the
             # shared issue-number dependency model cannot rank them (#2057).
-            dispatch_items.extend(it for group in ambiguous.values() for it in group)
-        return dispatch_items, submission_claims
+            return [*normal_items, *ambiguous_items], {}
+        candidates = self._merge_implementation_admission_priority(normal_items, ambiguous_items)
+        return self._select_file_overlap_implementation_items(candidates)
 
     def _overlap_serialization_enabled(self) -> bool:
         """Return whether this run needs parallel file-overlap reservations."""
@@ -1852,6 +1827,79 @@ class Coordinator:
             deferrals,
             _FILE_OVERLAP_WARNING_THRESHOLD,
         )
+
+    @staticmethod
+    def _file_overlap_deferral_age(item: WorkItem) -> int:
+        """Return an item's current overlap-deferral age for stable priority."""
+        return int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0))
+
+    def _merge_implementation_admission_priority(
+        self,
+        normal_items: list[WorkItem],
+        ambiguous_items: list[WorkItem],
+    ) -> list[tuple[WorkItem, str]]:
+        """Merge normal and ambiguous candidates without reversing dependencies.
+
+        ``normal_items`` is already dependency-safe, so its relative order is
+        immutable. Ambiguous items are independent of the number-keyed graph;
+        stable age ordering lets an aged one run before a younger normal peer
+        without allowing any normal dependent to overtake its prerequisite.
+        Equal ages retain the historical normal-before-ambiguous order.
+        """
+        ambiguous_by_age = sorted(
+            ambiguous_items,
+            key=self._file_overlap_deferral_age,
+            reverse=True,
+        )
+        normal_index = 0
+        ambiguous_index = 0
+        candidates: list[tuple[WorkItem, str]] = []
+        while normal_index < len(normal_items) or ambiguous_index < len(ambiguous_by_age):
+            if ambiguous_index >= len(ambiguous_by_age):
+                item = normal_items[normal_index]
+                candidates.append((item, f"#{item.issue}"))
+                normal_index += 1
+                continue
+            if normal_index >= len(normal_items):
+                item = ambiguous_by_age[ambiguous_index]
+                candidates.append((item, f"{item.repo}#{item.issue}"))
+                ambiguous_index += 1
+                continue
+            normal_item = normal_items[normal_index]
+            ambiguous_item = ambiguous_by_age[ambiguous_index]
+            if self._file_overlap_deferral_age(normal_item) >= self._file_overlap_deferral_age(
+                ambiguous_item
+            ):
+                candidates.append((normal_item, f"#{normal_item.issue}"))
+                normal_index += 1
+            else:
+                candidates.append((ambiguous_item, f"{ambiguous_item.repo}#{ambiguous_item.issue}"))
+                ambiguous_index += 1
+        return candidates
+
+    def _select_file_overlap_implementation_items(
+        self,
+        candidates: list[tuple[WorkItem, str]],
+    ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
+        """Apply one repo-scoped overlap safety rule to every candidate class."""
+        claimed = self._active_implementation_file_claims()
+        dispatch: list[WorkItem] = []
+        snapshots: dict[int, set[_admission.PlanFileClaim]] = {}
+        for item, identity in candidates:
+            if item.issue is None:  # defensive: candidate construction excludes this case
+                continue
+            repo = (self.config.org, item.repo)
+            planned = _admission._fetch_planned_files(item.issue, repo=repo)
+            item_claims = {(repo, path) for path in planned} if planned else set()
+            if item_claims and (item_claims & claimed):
+                self._record_file_overlap_deferral(item, identity)
+                continue
+            claimed.update(item_claims)
+            # Preserve an empty snapshot too: unknown plans fail open, but
+            # must not be fetched again after being admitted.
+            snapshots[id(item)] = set(item_claims)
+            dispatch.append(item)
+        return dispatch, snapshots
 
     @staticmethod
     def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
@@ -1876,36 +1924,6 @@ class Coordinator:
         for active_claims in self._inflight_implementation_claims.values():
             claims.update(active_claims)
         return claims
-
-    def _select_ambiguous_implementation_items(
-        self,
-        ambiguous: dict[int, list[WorkItem]],
-        claimed: set[_admission.PlanFileClaim],
-    ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
-        """Apply file-overlap admission to cross-repo same-number items.
-
-        Dependency order cannot represent these items under its number-only
-        keys, but file paths are repository-scoped and must still honour both
-        active reservations and earlier selections from this drain.
-        """
-        dispatch: list[WorkItem] = []
-        snapshots: dict[int, set[_admission.PlanFileClaim]] = {}
-        for group in ambiguous.values():
-            for item in group:
-                if item.issue is None:  # defensive: index construction excludes this case
-                    continue
-                repo = (self.config.org, item.repo)
-                planned = _admission._fetch_planned_files(item.issue, repo=repo)
-                item_claims = {(repo, path) for path in planned} if planned else set()
-                if item_claims and (item_claims & claimed):
-                    self._record_file_overlap_deferral(item, f"{item.repo}#{item.issue}")
-                    continue
-                claimed.update(item_claims)
-                # Preserve an empty snapshot too: unknown plans fail open,
-                # but must not be fetched again after being admitted.
-                snapshots[id(item)] = set(item_claims)
-                dispatch.append(item)
-        return dispatch, snapshots
 
     def _capture_implementation_file_claims(self, item: WorkItem) -> set[_admission.PlanFileClaim]:
         """Return the immutable claims reserved for an implementation sub-job.
