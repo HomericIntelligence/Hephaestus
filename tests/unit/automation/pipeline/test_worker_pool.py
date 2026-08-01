@@ -1919,6 +1919,7 @@ class TestGitOps:
                     MagicMock(stdout="a" * 40 + "\n"),
                     MagicMock(stdout=""),
                     MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(returncode=0),
                     MagicMock(stdout="checkout diff for A"),
                 ],
             ) as mock_run,
@@ -1934,13 +1935,59 @@ class TestGitOps:
             "diff": "checkout diff for A",
         }
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
-        assert mock_run.call_args_list[3].args[0] == [
+        assert mock_run.call_args_list[4].args[0] == [
             "git",
             "diff",
             "--no-ext-diff",
             "--binary",
             f"{'b' * 40}...{'a' * 40}",
         ]
+
+    def test_verify_pr_review_checkout_retries_when_base_drifted(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A head behind the freshly fetched base cannot be reviewed."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="a" * 40 + "\n"),
+                    MagicMock(stdout=""),
+                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(returncode=1),
+                ],
+            ) as mock_run,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "base_drift"}
+        assert mock_run.call_args_list[3].args[0] == [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            "b" * 40,
+            "a" * 40,
+        ]
+        assert mock_run.call_args_list[3].kwargs["check"] is False
 
     def test_verify_pr_review_checkout_reports_sync_failure(
         self,

@@ -2407,6 +2407,18 @@ class WorkerPool:
         ).stdout.strip()
         if not base:
             return JobResult(ok=False, error="review checkout base ref unavailable")
+        # The base can advance after the direct rebase publishes but before
+        # this barrier fetches it.  A matching PR head alone is not enough:
+        # require that it still contains the freshly fetched base, otherwise
+        # let the stage clear its rebase receipt and retry from the new base.
+        base_is_ancestor = git_utils.run(
+            ["git", "merge-base", "--is-ancestor", base, head],
+            cwd=worktree,
+            check=False,
+            timeout=job.timeout_s,
+        )
+        if base_is_ancestor.returncode != 0:
+            return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,
