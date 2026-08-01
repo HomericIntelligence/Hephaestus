@@ -1942,6 +1942,92 @@ class TestGitOps:
             f"{'b' * 40}...{'a' * 40}",
         ]
 
+    def test_verify_pr_review_checkout_retries_when_base_drifted(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A head behind the freshly fetched base cannot be reviewed."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+                "require_base_ancestor": True,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="a" * 40 + "\n"),
+                    MagicMock(stdout=""),
+                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(returncode=1),
+                ],
+            ) as mock_run,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "base_drift"}
+        assert mock_run.call_args_list[3].args[0] == [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            "b" * 40,
+            "a" * 40,
+        ]
+        assert mock_run.call_args_list[3].kwargs["check"] is False
+
+    def test_verify_pr_review_checkout_fails_when_base_ancestry_check_errors(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """An ancestry-check operational error must not trigger a rebase retry."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+                "require_base_ancestor": True,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="a" * 40 + "\n"),
+                    MagicMock(stdout=""),
+                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(returncode=128),
+                ],
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "review checkout base ancestry check failed"
+
     def test_verify_pr_review_checkout_reports_sync_failure(
         self,
         pool: WorkerPool,
@@ -2166,6 +2252,44 @@ class TestGitOps:
         )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
+
+    def test_direct_rebase_dispatch_lease_pushes_the_detached_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct-review rebase publishes only against its captured PR head."""
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "branch": "70-existing",
+                "expected_remote_sha": "a" * 40,
+                "publish_detached_head": True,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=True) as mock_rebase,
+            patch.object(pool, "_read_detached_push_head", return_value="b" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as mock_push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        mock_rebase.assert_called_once_with(cwd=tmp_path, base_branch="main", timeout=60)
+        mock_push.assert_called_once_with(
+            "70-existing",
+            "a" * 40,
+            tmp_path,
+            source_sha="b" * 40,
+            timeout=60,
+        )
+        assert result.ok is True
+        assert result.value == {"rebased": True, "published": True, "head_sha": "b" * 40}
 
     def test_push_dispatch(
         self,

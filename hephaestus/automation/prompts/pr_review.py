@@ -107,10 +107,11 @@ def get_review_validation_prompt(
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
 
-    Used by the pipeline PR-review stage to re-check, with a fresh review of
-    the current change, prior review, and implementation reply, that the
-    implementer's fixes actually resolved the previous iteration's review
-    comments. It keeps an unaddressed
+    Used by the pipeline PR-review stage for a fresh comment-review of the
+    current change, prior review, and implementation reply. It verifies that
+    the implementer responded to each thread with coherent, diff-consistent
+    evidence; the original implementation review remains the thorough
+    correctness review. It keeps an incomplete
     original thread open and supplies a concrete reviewer reply describing
     what remains; it never creates a replacement inline thread.
 

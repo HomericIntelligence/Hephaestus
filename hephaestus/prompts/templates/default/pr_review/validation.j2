@@ -1,15 +1,19 @@
 
-You are VALIDATING whether prior review comments on PR #{{ pr_number }}
-({{ review_context_kind }} #{{ issue_number }}) were actually addressed by the current diff.
+You are VALIDATING the implementation agent's handling of prior review
+comments on PR #{{ pr_number }} ({{ review_context_kind }} #{{ issue_number }}).
 
 Perform a fresh validation review of EVERY open review thread below using the
 current diff, the prior review conversation, and the implementation reply. Do
 not create replacement threads or expand the task beyond those existing
-threads. For each thread with `implementation_reply_submitted: true`, decide
-whether the CURRENT diff AND that implementation reply actually resolve it.
-Your result authorizes the coordinator to resolve only those replied-to
-threads. For a replied-to thread that remains open, your `detail` is posted as
-the reviewer response explaining what is still wrong.
+threads. This is the comment-review pass, not the original implementation
+review. Do not independently adjudicate the original code-level concern or
+perform a new thorough correctness review. For each thread with
+`implementation_reply_submitted: true`, decide only whether the implementation
+agent has responded to that thread with concrete, internally coherent evidence
+that is consistent with the current diff. Your result authorizes the
+coordinator to resolve only those replied-to threads. For a replied-to thread
+that remains open, your `detail` is posted as the reviewer response explaining
+which response or evidence requirement is still missing.
 
 Threads with `implementation_reply_submitted: false` are still open work for
 the implementation agent. Read them, but do NOT include them in either JSON
@@ -45,16 +49,27 @@ sandbox. If every receipt has `ok: true` and the current reviewed head matches
 each `head_sha`, treat them as independent local execution evidence; if any
 receipt is missing or failed, do not claim the plan passed.
 
+Evidence-provenance rule: validate whether the implementation reply supplies
+concrete, internally coherent evidence (for example, the exact command and
+result, an added regression test, or a linked artifact) that supports its
+claimed handling. Do not independently reproduce, rerun, or require host/CI
+execution of that evidence. Do not independently adjudicate the original
+code-level concern. A sandbox access failure, the absence of an independent
+execution, or a new opinion about the implementation is not a reason to leave
+a thread unresolved when the response and its evidence are internally coherent
+and consistent with the current diff.
+
 ---
 
-For EACH prior comment with `implementation_reply_submitted: true`, judge
-against the current diff into exactly ONE of two buckets:
-- ADDRESSED — the diff changes the cited code in a way that resolves the
-  comment's concern and the implementation reply accurately explains it. When
-in doubt that both do so, treat it as NOT addressed (false "addressed" is
-worse than a redundant open thread).
-- NOT ADDRESSED — the cited code is unchanged, or the change does not actually
-  resolve the concern the comment raised.
+For EACH prior comment with `implementation_reply_submitted: true`, judge the
+implementation handoff into exactly ONE of two buckets:
+- ADDRESSED — the implementation reply directly responds to the prior comment,
+  identifies what was changed or deliberately not changed, and supplies
+  concrete, internally coherent evidence consistent with the current diff.
+- NOT ADDRESSED — the implementation reply is missing, does not address the
+  prior comment, or its claimed change/evidence is materially inconsistent
+  with the current diff. Do not use this bucket merely because you would make
+  a different technical judgment about the fix.
 
 **Output format:**
 Write your reasoning in prose. At the very end, emit a single fenced JSON block
@@ -68,15 +83,15 @@ with an explicit decision for EVERY eligible thread:
 ```
 
 Rules:
-- `resolved`: an array of the thread IDs whose current diff AND
-  implementation reply resolve the concern. Echo each `thread_id` VERBATIM.
-- `unaddressed`: array of the prior comments the diff and implementation reply
-  do NOT resolve. Echo the
+- `resolved`: an array of the thread IDs whose implementation reply and
+  evidence satisfy this comment-review handoff. Echo each `thread_id` VERBATIM.
+- `unaddressed`: array of the prior comments whose implementation handoff is
+  incomplete or inconsistent. Echo the
   comment's `thread_id` VERBATIM (this is how the thread is matched — it must be
   exact); include the original `path`/`line`; `original_body` is the original
   comment text (verbatim or trimmed); `detail` states concretely what is still
-  missing. A deliberate design is still NOT ADDRESSED unless the implementation
-  response explains a change that resolves the reviewer concern; never use a
+  missing from the response or evidence. A deliberate design may be ADDRESSED
+  when the response clearly explains it with coherent evidence; never use a
   separate dismissal bucket.
 - Every eligible thread ID appears in EXACTLY ONE bucket. A missing, duplicate,
   or extra ID makes the validation unusable.
