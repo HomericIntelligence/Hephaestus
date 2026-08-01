@@ -1829,6 +1829,100 @@ class TestImplementationAdmission:
         assert run_repos == ["repo-b"]
         assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [repo_a]
 
+    def test_ambiguous_overlap_deferral_ages_then_selects_after_claim_release(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A same-number item ages while blocked and runs when its repo claim releases."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+        )
+        run_repos: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_repos.append(item.repo)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active_handle = _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        repo_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_repos == ["repo-b"]
+        assert repo_a.payload["file_overlap_deferrals"] == 1
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [repo_a]
+
+        coordinator._handle_completion(active_handle, JobResult(ok=True))
+        run_repos.clear()
+        coordinator._drain_implementation()
+
+        assert run_repos == ["repo-a"]
+        assert "file_overlap_deferrals" not in repo_a.payload
+
+    @pytest.mark.parametrize(
+        ("initial_deferrals", "expected_deferrals", "expected_level"),
+        [
+            (9, 10, logging.INFO),
+            (10, 11, logging.WARNING),
+            (11, 12, logging.WARNING),
+        ],
+        ids=("10-info", "11-warning", "12-warning"),
+    )
+    def test_ambiguous_overlap_deferral_uses_normal_warning_threshold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        initial_deferrals: int,
+        expected_deferrals: int,
+        expected_level: int,
+    ) -> None:
+        """Ambiguous overlap deferrals use the normal INFO-to-WARNING boundary."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+        )
+        _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        repo_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        repo_a.payload["file_overlap_deferrals"] = initial_deferrals
+        repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.coordinator"):
+            coordinator._drain_implementation()
+
+        assert repo_a.payload["file_overlap_deferrals"] == expected_deferrals
+        matching_records = [
+            record
+            for record in caplog.records
+            if record.message
+            == (
+                "implementation repo-a#7 deferred (file overlap); "
+                f"deferrals={expected_deferrals} threshold=10"
+            )
+        ]
+        assert [record.levelno for record in matching_records] == [expected_level]
+
     def test_overlap_gate_defers_queued_work_that_conflicts_with_inflight_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

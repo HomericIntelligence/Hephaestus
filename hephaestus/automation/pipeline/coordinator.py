@@ -1811,18 +1811,7 @@ class Coordinator:
                 selection_kwargs["initial_claims"] = inflight_claims
             dispatch, deferred = _admission._select_non_overlapping(ordered, **selection_kwargs)
             for number in deferred:
-                item = issue_items[number]
-                deferrals = int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)) + 1
-                item.payload[_FILE_OVERLAP_DEFERRALS_KEY] = deferrals
-                log_deferral = (
-                    logger.warning if deferrals > _FILE_OVERLAP_WARNING_THRESHOLD else logger.info
-                )
-                log_deferral(
-                    "implementation #%s deferred (file overlap); deferrals=%s threshold=%s",
-                    number,
-                    deferrals,
-                    _FILE_OVERLAP_WARNING_THRESHOLD,
-                )
+                self._record_file_overlap_deferral(issue_items[number], f"#{number}")
         dispatch_items = [issue_items[number] for number in dispatch]
         submission_claims = {
             id(issue_items[number]): set(claims) for number, claims in selected_claims.items()
@@ -1848,6 +1837,21 @@ class Coordinator:
     def _overlap_serialization_enabled(self) -> bool:
         """Return whether this run needs parallel file-overlap reservations."""
         return self.config.serialize_file_overlap and self.config.max_workers > 1
+
+    @staticmethod
+    def _record_file_overlap_deferral(item: WorkItem, identity: str) -> None:
+        """Age a deferred implementation item and report persistent contention."""
+        deferrals = int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)) + 1
+        item.payload[_FILE_OVERLAP_DEFERRALS_KEY] = deferrals
+        log_deferral = (
+            logger.warning if deferrals > _FILE_OVERLAP_WARNING_THRESHOLD else logger.info
+        )
+        log_deferral(
+            "implementation %s deferred (file overlap); deferrals=%s threshold=%s",
+            identity,
+            deferrals,
+            _FILE_OVERLAP_WARNING_THRESHOLD,
+        )
 
     @staticmethod
     def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
@@ -1894,9 +1898,7 @@ class Coordinator:
                 planned = _admission._fetch_planned_files(item.issue, repo=repo)
                 item_claims = {(repo, path) for path in planned} if planned else set()
                 if item_claims and (item_claims & claimed):
-                    logger.info(
-                        "implementation %s#%s deferred (file overlap)", item.repo, item.issue
-                    )
+                    self._record_file_overlap_deferral(item, f"{item.repo}#{item.issue}")
                     continue
                 claimed.update(item_claims)
                 # Preserve an empty snapshot too: unknown plans fail open,
