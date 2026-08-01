@@ -316,11 +316,13 @@ class TestOrderForImplementation:
         """Independent issues keep their dispatch-priority (input) order."""
         assert order_for_implementation([_info(3), _info(1), _info(2)]) == [3, 1, 2]
 
-    def test_out_of_set_dependency_ignored(self) -> None:
-        """A dependency outside the implementation queue is dropped (fail-open)."""
+    def test_out_of_set_dependency_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An absent dependency cannot create a false cycle or reorder queued work."""
         # #5 depends on #999 which is not admitted — #5 must still be ordered.
-        order = order_for_implementation([_info(5, dependencies=[999]), _info(6)])
-        assert sorted(order) == [5, 6]
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.admission"):
+            order = order_for_implementation([_info(5, dependencies=[999]), _info(6)])
+        assert order == [5, 6]
+        assert not any("dependency cycle" in record.message for record in caplog.records)
 
     def test_chain_fully_ordered(self) -> None:
         """A → B → C chain sorts leaf-dependency first."""
@@ -328,6 +330,11 @@ class TestOrderForImplementation:
             [_info(1, dependencies=[2]), _info(2, dependencies=[3]), _info(3)]
         )
         assert order == [3, 2, 1]
+
+    def test_newly_ready_input_priority_precedes_lower_priority_peer(self) -> None:
+        """A newly ready high-priority dependent is not stranded behind a peer."""
+        order = order_for_implementation([_info(1, dependencies=[2]), _info(2), _info(3)])
+        assert order == [2, 1, 3]
 
     def test_cycle_falls_open_to_input_order(self, caplog: pytest.LogCaptureFixture) -> None:
         """A dependency cycle keeps input order and warns (never wedges the queue)."""
