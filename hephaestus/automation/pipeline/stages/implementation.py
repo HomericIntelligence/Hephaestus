@@ -123,6 +123,8 @@ from .repo import (
     DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
     DIRECT_SCOPE_RESERVATION_COLLISION_KEY,
     DIRECT_SCOPE_RESERVATION_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
+    is_direct_scope_worktree_nonce,
     is_full_commit_sha,
 )
 
@@ -332,6 +334,23 @@ class ImplementationStage(Stage):
         }
         if not adopted and direct_base_sha is not None:
             kwargs["base_sha"] = direct_base_sha
+            direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
+            direct_branch_prefix = f"{issue}-auto-impl-direct-"
+            if item.branch.startswith(direct_branch_prefix):
+                if (
+                    not is_direct_scope_worktree_nonce(direct_worktree_nonce)
+                    or item.branch != f"{direct_branch_prefix}{direct_worktree_nonce}"
+                ):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "direct_scope_worktree_nonce_invalid",
+                    )
+                kwargs["direct_worktree_nonce"] = direct_worktree_nonce
+            elif direct_worktree_nonce is not None:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    "direct_scope_worktree_nonce_invalid",
+                )
         if adopted:
             kwargs["sync_to_remote"] = True
             kwargs["pr_number"] = item.pr

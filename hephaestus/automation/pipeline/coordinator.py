@@ -134,6 +134,7 @@ from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARG
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_BOOTSTRAP_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
     RepoIssueSource,
     is_full_commit_sha,
     product_to_work_item,
@@ -2714,10 +2715,11 @@ class Coordinator:
                 item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
                 if item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
                     # A fresh direct issue is tied to one immutable checkout
-                    # snapshot.  Its branch must be unique per cursor so a
-                    # closed predecessor on the canonical name cannot stall
-                    # a restart before implementation reaches an agent.
+                    # snapshot.  Its branch and writer-worktree identity must
+                    # be unique per cursor so a preserved predecessor cannot
+                    # stall a restart before implementation reaches an agent.
                     item.branch = f"{item.issue}-auto-impl-direct-{source.run_nonce}"
+                    item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = source.run_nonce
             if item.stage not in (StageName.REPO, StageName.FINISHED):
                 self._pass_work_count += 1
             if item.stage is StageName.FINISHED and item.result is None:

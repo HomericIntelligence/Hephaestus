@@ -70,6 +70,11 @@ def _is_full_commit_sha(ref: str) -> bool:
     return len(ref) in (40, 64) and all(ch in "0123456789abcdef" for ch in ref)
 
 
+def _is_direct_worktree_nonce(value: str) -> bool:
+    """Return whether ``value`` is the coordinator's UUID4 hex token."""
+    return len(value) == 32 and all(ch in "0123456789abcdef" for ch in value)
+
+
 class WorktreeDirtyError(Exception):
     """Raised when a worktree cannot be removed because it contains uncommitted changes."""
 
@@ -264,6 +269,7 @@ class WorktreeManager:
         remote_branch_reserved: bool = False,
         isolated: bool = False,
         isolated_generation: int = 0,
+        direct_worktree_nonce: str | None = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -291,6 +297,9 @@ class WorktreeManager:
                 A nonzero value creates a distinct path so a changed PR head
                 is reviewed from a fresh checkout without replacing the
                 preserved failed checkout.
+            direct_worktree_nonce: Trusted per-run UUID4 hex token for a
+                direct issue writer.  It creates a new direct path while
+                preserving an interrupted predecessor's checkout.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -306,15 +315,21 @@ class WorktreeManager:
             remote_branch_reserved=remote_branch_reserved,
             isolated=isolated,
             isolated_generation=isolated_generation,
+            direct_worktree_nonce=direct_worktree_nonce,
         )
         with self.lock:
             isolated_key = f"review-pr-{issue_number}"
             if isolated_generation:
                 isolated_key = f"{isolated_key}-{isolated_generation}"
-            worktree_key: int | str = isolated_key if isolated else issue_number
+            direct_key = (
+                f"{issue_number}-direct-{direct_worktree_nonce}"
+                if direct_worktree_nonce is not None
+                else issue_number
+            )
+            worktree_key: int | str = isolated_key if isolated else direct_key
             if branch_name is None:
                 branch_name = f"{issue_number}-auto"
-            worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{issue_number}")
+            worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{direct_key}")
             if base_sha is not None and (
                 refresh_base
                 or isolated
@@ -389,6 +404,7 @@ class WorktreeManager:
         remote_branch_reserved: bool,
         isolated: bool,
         isolated_generation: int,
+        direct_worktree_nonce: str | None,
     ) -> None:
         """Validate non-I/O worktree request invariants before acquiring locks."""
         if (
@@ -399,6 +415,10 @@ class WorktreeManager:
             raise RuntimeError("isolated worktree generation is invalid")
         if isolated_generation and not isolated:
             raise RuntimeError("isolated worktree generation requires isolation")
+        if direct_worktree_nonce is not None and (
+            base_sha is None or isolated or not _is_direct_worktree_nonce(direct_worktree_nonce)
+        ):
+            raise RuntimeError("direct scope worktree nonce is invalid")
         if base_sha is not None and (
             refresh_base
             or isolated

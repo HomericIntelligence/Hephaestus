@@ -190,6 +190,8 @@ class TestQuiescence:
         assert second_item.branch == f"617-auto-impl-direct-{nonce_two.hex}"
         assert first_item.branch != second_item.branch
         assert first_item.payload["_direct_scope_base_sha"] == base_sha
+        assert first_item.payload["_direct_scope_worktree_nonce"] == nonce_one.hex
+        assert second_item.payload["_direct_scope_worktree_nonce"] == nonce_two.hex
 
     def test_direct_issue_with_open_replacement_pr_does_not_allocate_a_fresh_branch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

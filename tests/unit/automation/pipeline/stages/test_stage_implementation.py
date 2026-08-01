@@ -899,6 +899,28 @@ class TestWorktreeAndAdvise:
             "base_sha": "a" * 40,
         }
 
+    def test_direct_scope_worktree_forwards_the_coordinator_run_nonce(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart-specific branch also receives a restart-specific worktree path."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        run_nonce = "d" * 32
+        item.branch = f"1-auto-impl-direct-{run_nonce}"
+        item.payload.update(
+            {
+                "_direct_scope_base_sha": "a" * 40,
+                "_direct_scope_worktree_nonce": run_nonce,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["direct_worktree_nonce"] == run_nonce
+
     def test_worktree_result_stores_path_and_dirty_state(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
