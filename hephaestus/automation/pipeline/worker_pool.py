@@ -2407,20 +2407,23 @@ class WorkerPool:
         ).stdout.strip()
         if not base:
             return JobResult(ok=False, error="review checkout base ref unavailable")
-        # The base can advance after the direct rebase publishes but before
-        # this barrier fetches it.  A matching PR head alone is not enough:
-        # require that it still contains the freshly fetched base, otherwise
-        # let the stage clear its rebase receipt and retry from the new base.
-        base_is_ancestor = git_utils.run(
-            ["git", "merge-base", "--is-ancestor", base, head],
-            cwd=worktree,
-            check=False,
-            timeout=job.timeout_s,
-        )
-        if base_is_ancestor.returncode == 1:
-            return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
-        if base_is_ancestor.returncode != 0:
-            return JobResult(ok=False, error="review checkout base ancestry check failed")
+        if job.kwargs.get("require_base_ancestor") is True:
+            # A direct, writable PR was just rebased and lease-published.  If
+            # the base advanced before this checkout barrier, retry that
+            # rewrite rather than reviewing a now-stale replacement head.
+            # Read-only fork heads and normal pipeline worktrees do not take
+            # this mutation path, so base movement must not strand them in a
+            # retry loop.
+            base_is_ancestor = git_utils.run(
+                ["git", "merge-base", "--is-ancestor", base, head],
+                cwd=worktree,
+                check=False,
+                timeout=job.timeout_s,
+            )
+            if base_is_ancestor.returncode == 1:
+                return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
+            if base_is_ancestor.returncode != 0:
+                return JobResult(ok=False, error="review checkout base ancestry check failed")
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,

@@ -1088,9 +1088,15 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_head_unavailable")
         base_branch = str(review_context.get("pr_base_branch") or "main")
         item.payload.update(review_context)
-        if item.payload.get("direct_pr_worktree") and not item.payload.get(
-            "direct_pr_rebase_attempted"
-        ):
+        # An adopted PR is not inherently writable: fork heads are checked out
+        # from the pull ref for read-only review, whereas a base-repository
+        # head may be safely rebased and lease-published before review.  Keep
+        # this mutation decision at the stage boundary so a detached checkout
+        # never becomes an implicit permission to push.
+        direct_pr_rewrite_allowed = bool(item.payload.get("direct_pr_worktree")) and (
+            ctx.github.pr_head_is_writable(item.pr)
+        )
+        if direct_pr_rewrite_allowed and not item.payload.get("direct_pr_rebase_attempted"):
             # A direct PR arrives as a detached, synchronized checkout. Rebase
             # it before binding any review inputs, then lease-push that exact
             # detached HEAD so the following context read reviews GitHub's
@@ -1123,6 +1129,11 @@ class PrReviewStage(Stage):
                 "expected_head_sha": expected_head,
                 "base_branch": base_branch,
                 "pr_number": item.pr,
+                # Only the pre-review rewrite flow needs to prove that its
+                # freshly rebased HEAD still contains the fetched base. Other
+                # worktrees may be reviewed read-only while their PR remains
+                # behind the current base.
+                "require_base_ancestor": direct_pr_rewrite_allowed,
             },
             descr="verify_pr_review_checkout",
         )

@@ -1919,7 +1919,6 @@ class TestGitOps:
                     MagicMock(stdout="a" * 40 + "\n"),
                     MagicMock(stdout=""),
                     MagicMock(stdout="b" * 40 + "\n"),
-                    MagicMock(returncode=0),
                     MagicMock(stdout="checkout diff for A"),
                 ],
             ) as mock_run,
@@ -1935,7 +1934,7 @@ class TestGitOps:
             "diff": "checkout diff for A",
         }
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
-        assert mock_run.call_args_list[4].args[0] == [
+        assert mock_run.call_args_list[3].args[0] == [
             "git",
             "diff",
             "--no-ext-diff",
@@ -1960,6 +1959,7 @@ class TestGitOps:
                 "expected_head_sha": "a" * 40,
                 "base_branch": "main",
                 "pr_number": 70,
+                "require_base_ancestor": True,
             },
         )
         with (
@@ -2006,6 +2006,7 @@ class TestGitOps:
                 "expected_head_sha": "a" * 40,
                 "base_branch": "main",
                 "pr_number": 70,
+                "require_base_ancestor": True,
             },
         )
         with (

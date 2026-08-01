@@ -295,6 +295,7 @@ class TestPrReviewStageStep:
         assert result.job.op == "verify_pr_review_checkout"
         assert result.job.kwargs["expected_head_sha"] == "a" * 40
         assert result.job.kwargs["base_branch"] == "main"
+        assert result.job.kwargs["require_base_ancestor"] is False
         assert result.on_done_state == REVIEW_CHECKOUT_WAIT
         assert "reviewed_pr_head_sha" not in item.payload
 
@@ -348,6 +349,50 @@ class TestPrReviewStageStep:
         assert isinstance(barrier, JobRequest)
         assert isinstance(barrier.job, GitJob)
         assert barrier.job.op == "verify_pr_review_checkout"
+        assert barrier.job.kwargs["require_base_ancestor"] is True
+
+    def test_read_only_direct_pr_does_not_rebase_or_publish_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A fork head is reviewed from its immutable PR ref without a write attempt."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_head_writable=False,
+            pr_review_context={
+                "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
+                "pr_description": "Closes #1",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
+            },
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="REVIEW_WAIT")
+        item.worktree = "/tmp/repo/review-worktree"
+        item.branch = "fork-review-branch"
+        item.payload["direct_pr_worktree"] = item.worktree
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "verify_pr_review_checkout"
+        assert result.job.kwargs["require_base_ancestor"] is False
+        assert "direct_pr_rebase_attempted" not in item.payload
+
+    def test_direct_pr_rebase_failure_finishes_without_reviewing_stale_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed detached rebase is terminal and cannot reach the reviewer."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=DIRECT_REBASE_WAIT)
+        item.payload["direct_pr_rebase_pending"] = True
+
+        stage.on_job_done(item, JobResult(ok=False, error="rebase conflicted"), ctx)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "direct_pr_rebase_failed"
+        )
 
     def test_direct_pr_checkout_head_drift_retries_the_rebase(
         self, make_ctx: Any, make_work_item: Any
