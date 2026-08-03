@@ -309,7 +309,11 @@ class WorktreeManager:
             RuntimeError: If worktree creation fails
 
         """
+        if branch_name is None:
+            branch_name = f"{issue_number}-auto"
         self._validate_create_worktree_request(
+            issue_number=issue_number,
+            branch_name=branch_name,
             refresh_base=refresh_base,
             base_sha=base_sha,
             remote_branch_reserved=remote_branch_reserved,
@@ -327,8 +331,6 @@ class WorktreeManager:
                 else issue_number
             )
             worktree_key: int | str = isolated_key if isolated else direct_key
-            if branch_name is None:
-                branch_name = f"{issue_number}-auto"
             worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{direct_key}")
             if base_sha is not None and (
                 refresh_base
@@ -360,6 +362,7 @@ class WorktreeManager:
                             worktree_path=worktree_path,
                             branch_name=branch_name,
                             refresh_base=refresh_base,
+                            require_exact_registered_branch=direct_worktree_nonce is not None,
                             timeout=timeout,
                         )
                     ):
@@ -399,6 +402,8 @@ class WorktreeManager:
     @staticmethod
     def _validate_create_worktree_request(
         *,
+        issue_number: int,
+        branch_name: str,
         refresh_base: bool,
         base_sha: str | None,
         remote_branch_reserved: bool,
@@ -416,7 +421,9 @@ class WorktreeManager:
         if isolated_generation and not isolated:
             raise RuntimeError("isolated worktree generation requires isolation")
         if direct_worktree_nonce is not None and (
-            base_sha is None or isolated or not _is_direct_worktree_nonce(direct_worktree_nonce)
+            isolated
+            or not _is_direct_worktree_nonce(direct_worktree_nonce)
+            or branch_name != f"{issue_number}-auto-impl-direct-{direct_worktree_nonce}"
         ):
             raise RuntimeError("direct scope worktree nonce is invalid")
         if base_sha is not None and (
@@ -511,6 +518,7 @@ class WorktreeManager:
         worktree_path: Path,
         branch_name: str,
         refresh_base: bool,
+        require_exact_registered_branch: bool,
         timeout: int | None,
     ) -> Path | None:
         """Reuse normal worktrees or clear a known-clean path before creation."""
@@ -523,6 +531,17 @@ class WorktreeManager:
                 self.worktrees[worktree_key] = existing
                 return existing
             raise BranchWorktreeOwnedError(branch_name, existing)
+        registered = (
+            self._registered_worktree_at_path(worktree_path, timeout=timeout)
+            if require_exact_registered_branch
+            else None
+        )
+        if registered is not None and registered.get("branch") != f"refs/heads/{branch_name}":
+            # The issue/nonce-derived path is only an identity when Git also
+            # proves that the path has the requested branch checked out.  A
+            # different registered branch here must never be reused when
+            # dirty or force-removed when clean.
+            raise BranchWorktreeOwnedError(branch_name, worktree_path)
         if self._reuse_existing_dirty_worktree(
             issue_number,
             worktree_key,
@@ -955,12 +974,21 @@ class WorktreeManager:
         timeout: int | None = None,
     ) -> bool:
         """Return True when ``worktree_path`` appears in git's worktree list."""
+        return self._registered_worktree_at_path(worktree_path, timeout=timeout) is not None
+
+    def _registered_worktree_at_path(
+        self,
+        worktree_path: Path,
+        *,
+        timeout: int | None = None,
+    ) -> dict[str, str] | None:
+        """Return Git's worktree record for ``worktree_path``, if registered."""
         target = worktree_path.resolve()
         for wt in self.list_worktrees(raise_on_error=True, timeout=timeout):
             path = wt.get("path")
             if path and Path(path).resolve() == target:
-                return True
-        return False
+                return wt
+        return None
 
     def _path_has_contents(self, path: Path) -> bool:
         """Return True if a path exists and contains any directory entries."""

@@ -972,6 +972,52 @@ class TestWorktreeAndAdvise:
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["direct_worktree_nonce"] == run_nonce
 
+    def test_adopted_direct_pr_reuses_the_nonce_encoded_in_its_branch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An existing direct PR returns to its original managed writer path."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        run_nonce = "d" * 32
+        item.branch = f"1-auto-impl-direct-{run_nonce}"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                # A new direct cursor has a different nonce, so recovery must
+                # derive the writer identity from the adopted PR branch.
+                "_direct_scope_worktree_nonce": "e" * 32,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs == {
+            "issue_number": 1,
+            "branch_name": f"1-auto-impl-direct-{run_nonce}",
+            "refresh_base": False,
+            "repo_root": "/tmp/repo",
+            "direct_worktree_nonce": run_nonce,
+            "sync_to_remote": True,
+            "pr_number": 1001,
+        }
+
+    def test_adopted_direct_pr_rejects_a_malformed_writer_identity(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An external lookalike branch cannot claim a managed direct path."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-not-a-trusted-nonce"
+        item.payload["existing_pr"] = True
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "direct_scope_worktree_nonce_invalid",
+        )
+
     def test_worktree_result_stores_path_and_dirty_state(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
