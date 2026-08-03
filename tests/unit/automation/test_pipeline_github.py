@@ -3160,7 +3160,7 @@ class TestRepoScoping:
             pg,
             "gh_call",
             lambda _argv, **_kwargs: SimpleNamespace(
-                stdout=json.dumps([{"number": 5, "body": "Closes #5\n"}])
+                stdout=json.dumps([{"number": 5, "body": "Closes #5\r\n"}])
             ),
         )
 
@@ -3169,7 +3169,12 @@ class TestRepoScoping:
 
     @pytest.mark.parametrize(
         "body",
-        ["Closes #5, #6\n", "Closes #5: reason\n", "Closes #5 trailing\n"],
+        [
+            "Closes #5, #6\r\n",
+            "Closes #5-extra\r\n",
+            "Closes #5: reason\r\n",
+            "Closes #5 trailing\r\n",
+        ],
     )
     def test_repo_scoped_merged_pr_lookup_rejects_trailing_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str

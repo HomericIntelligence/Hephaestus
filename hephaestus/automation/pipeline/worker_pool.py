@@ -2542,8 +2542,6 @@ class WorkerPool:
             if isinstance(publish_state, JobResult):
                 return publish_state
             if not publish_state:
-                if job.kwargs.get("expected_remote_sha") is not None:
-                    return JobResult(ok=True, value=False)
                 clean_head = self._read_publish_head(Path(worktree_path), timeout=job.timeout_s)
                 if isinstance(clean_head, JobResult):
                     return clean_head

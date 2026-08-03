@@ -722,7 +722,7 @@ class TestFindMergedClosingPr:
 
         def _side_effect(args: list[str], **kw: Any) -> MagicMock:
             captured["args"] = args
-            return _make_gh_result([{"number": 1358, "body": "Summary.\n\nCloses #1357\n"}])
+            return _make_gh_result([{"number": 1358, "body": "Summary.\r\n\r\nCloses #1357\r\n"}])
 
         with patch(
             "hephaestus.automation._review_utils._gh_call",
@@ -765,7 +765,12 @@ class TestFindMergedClosingPr:
 
     @pytest.mark.parametrize(
         "body",
-        ["Closes #12, #18\n", "Closes #12: reason\n", "Closes #12 trailing\n"],
+        [
+            "Closes #12, #18\n",
+            "Closes #12-extra\n",
+            "Closes #12: reason\n",
+            "Closes #12 trailing\n",
+        ],
     )
     def test_rejects_trailing_text_after_target_issue(self, body: str) -> None:
         """The target number must occupy the complete policy line."""

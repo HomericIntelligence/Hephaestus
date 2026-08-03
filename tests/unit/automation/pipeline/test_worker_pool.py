@@ -2509,13 +2509,15 @@ class TestGitOps:
             ),
             patch("hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged") as release,
             patch("hephaestus.automation.git_utils.push_branch") as normal_push,
+            patch.object(pool, "_read_publish_head", return_value=pin) as read_head,
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert result.value is False
+        assert result.value == {"pushed": False, "head_sha": pin}
         release.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
+        read_head.assert_called_once_with(tmp_path, timeout=60)
         normal_push.assert_not_called()
 
     def test_commit_push_returns_clean_head_without_pushing_when_nothing_committed(

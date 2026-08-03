@@ -37,6 +37,7 @@ from hephaestus.automation._review_utils import (
     find_merged_closing_pr,
     find_merged_pr_for_issue,
     get_pr_head_branch,
+    has_exact_closing_line,
 )
 from hephaestus.automation.arming_state import (
     ArmingStateStore,
@@ -480,7 +481,6 @@ class PipelineGitHub:
         candidates = json.loads(stdout)
         if not isinstance(candidates, list) or len(candidates) >= 1000:
             raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\r?$", re.MULTILINE)
         matching_pr: int | None = None
         for candidate in candidates:
             if not isinstance(candidate, dict):
@@ -489,7 +489,7 @@ class PipelineGitHub:
             number = candidate.get("number")
             if not isinstance(body, str) or not isinstance(number, int) or number <= 0:
                 raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
-            if closes_pattern.search(body):
+            if has_exact_closing_line(body, issue_number):
                 if state.lower() == "open":
                     head_branch = self._verified_open_pr_head_branch(number, issue_number)
                     open_prs = self._open_prs_for_branch(head_branch)
