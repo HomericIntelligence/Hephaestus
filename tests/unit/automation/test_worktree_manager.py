@@ -225,6 +225,26 @@ class TestWorktreeManager:
         assert result == manager.base_dir / f"issue-2460-direct-{run_nonce}"
         assert manager.worktrees[f"2460-direct-{run_nonce}"] == result
 
+    def test_adopted_direct_pr_reuses_its_matching_nonce_writer(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A later adopted-PR pass can reclaim its managed direct writer."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        run_nonce = "d" * 32
+        branch = f"2460-auto-impl-direct-{run_nonce}"
+        expected = manager.base_dir / f"issue-2460-direct-{run_nonce}"
+
+        with patch.object(manager, "_worktree_holding_branch", return_value=expected):
+            result = manager.create_worktree(
+                2460,
+                branch,
+                direct_worktree_nonce=run_nonce,
+            )
+
+        assert result == expected
+        assert manager.worktrees[f"2460-direct-{run_nonce}"] == expected
+
     def test_direct_scope_rejects_refresh_before_any_git_mutation(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:

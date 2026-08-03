@@ -309,7 +309,11 @@ class WorktreeManager:
             RuntimeError: If worktree creation fails
 
         """
+        if branch_name is None:
+            branch_name = f"{issue_number}-auto"
         self._validate_create_worktree_request(
+            issue_number=issue_number,
+            branch_name=branch_name,
             refresh_base=refresh_base,
             base_sha=base_sha,
             remote_branch_reserved=remote_branch_reserved,
@@ -327,8 +331,6 @@ class WorktreeManager:
                 else issue_number
             )
             worktree_key: int | str = isolated_key if isolated else direct_key
-            if branch_name is None:
-                branch_name = f"{issue_number}-auto"
             worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{direct_key}")
             if base_sha is not None and (
                 refresh_base
@@ -399,6 +401,8 @@ class WorktreeManager:
     @staticmethod
     def _validate_create_worktree_request(
         *,
+        issue_number: int,
+        branch_name: str,
         refresh_base: bool,
         base_sha: str | None,
         remote_branch_reserved: bool,
@@ -416,7 +420,9 @@ class WorktreeManager:
         if isolated_generation and not isolated:
             raise RuntimeError("isolated worktree generation requires isolation")
         if direct_worktree_nonce is not None and (
-            base_sha is None or isolated or not _is_direct_worktree_nonce(direct_worktree_nonce)
+            isolated
+            or not _is_direct_worktree_nonce(direct_worktree_nonce)
+            or branch_name != f"{issue_number}-auto-impl-direct-{direct_worktree_nonce}"
         ):
             raise RuntimeError("direct scope worktree nonce is invalid")
         if base_sha is not None and (
