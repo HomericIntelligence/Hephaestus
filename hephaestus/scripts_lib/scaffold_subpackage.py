@@ -2,8 +2,8 @@
 """Scaffold a new hephaestus subpackage skeleton with matching test directory.
 
 Usage:
-    python scripts/scaffold_subpackage.py <name> [--with-cli] [--dry-run] [--json]
-    python scripts/scaffold_subpackage.py --root /path/to/repo <name>
+    hephaestus-scaffold-subpackage <name> [--with-cli] [--dry-run] [--json]
+    hephaestus-scaffold-subpackage --root /path/to/repo <name>
 
 Exit codes:
     0  Files created successfully (or --dry-run completed).

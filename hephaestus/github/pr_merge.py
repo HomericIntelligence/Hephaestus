@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -74,6 +75,24 @@ class _PrMergeOutcome:
             "status": self.status.value,
             "detail": self.detail,
         }
+
+
+def choose_merge_flag(repository_settings: Mapping[str, Any]) -> str | None:
+    """Return the preferred permitted manual ``gh pr merge`` flag.
+
+    The GitHub repository payload returned by ``gh api repos/OWNER/REPO``
+    exposes the three ``allow_*`` settings.  Keep strategy selection here so
+    Python callers do not need to source a shell helper; callers retain
+    ownership of the actual merge operation.
+    """
+    for setting, flag in (
+        ("allow_rebase_merge", "--rebase"),
+        ("allow_squash_merge", "--squash"),
+        ("allow_merge_commit", "--merge"),
+    ):
+        if repository_settings.get(setting):
+            return flag
+    return None
 
 
 def detect_repo_from_remote() -> str | None:
