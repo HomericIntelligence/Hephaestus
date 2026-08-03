@@ -260,6 +260,7 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
     "pending_implementation_reply_handoff_visibility_retries"
 )
 _IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
+_HOST_VERIFICATION_PENDING = "host_verification_pending"
 
 
 @dataclass(frozen=True)
@@ -414,6 +415,7 @@ _ROUND_PAYLOAD_KEYS = (
     "reviewed_pr_base_sha",
     "host_verification_receipts",
     "host_verification_failure",
+    _HOST_VERIFICATION_PENDING,
 )
 
 
@@ -1066,6 +1068,11 @@ class PrReviewStage(Stage):
         item: WorkItem, ctx: StageContext, verification: _HostVerificationSpec
     ) -> JobRequest:
         """Submit one fixed host command from the immutable review plan."""
+        # Completion callbacks run before the coordinator installs
+        # ``on_done_state``.  Keep an explicit ownership marker instead of
+        # inferring this job's type from the current mini-state, which can
+        # also be the state that submits the primary review job.
+        item.payload[_HOST_VERIFICATION_PENDING] = verification.descr
         return JobRequest(
             BuildTestJob(
                 repo=item.repo,
@@ -1418,7 +1425,16 @@ class PrReviewStage(Stage):
             disposition = Disposition(str(outcome_value))
         except ValueError:
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_outcome_invalid")
-        self._restore_writer_worktree(item)
+        if disposition is Disposition.RETRY:
+            # A retry requires a new detached snapshot.  Do not requeue the
+            # already-consumed cleanup state, and do not temporarily expose a
+            # retained implementation checkout as reviewer input.
+            item.worktree = ""
+            if item.payload.get("writer_worktree"):
+                item.payload["reviewer_checkout_needed"] = True
+            item.state = ENTER
+        else:
+            self._restore_writer_worktree(item)
         item.payload.pop("review_worktree", None)
         item.payload.pop("direct_pr_worktree", None)
         item.payload.pop("direct_pr_worktree_dirty", None)
@@ -1442,7 +1458,7 @@ class PrReviewStage(Stage):
             return
         if self._consume_review_checkout_result(item, result):
             return
-        if item.state == HOST_VERIFICATION_WAIT:
+        if self._consume_host_verification_result(item, result):
             self._store_host_verification_result(item, result)
             return
 
@@ -1645,6 +1661,12 @@ class PrReviewStage(Stage):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready
         return True
+
+    @staticmethod
+    def _consume_host_verification_result(item: WorkItem, result: JobResult) -> bool:
+        """Claim one fixed host-check completion independent of mini-state."""
+        del result
+        return item.payload.pop(_HOST_VERIFICATION_PENDING, None) is not None
 
     @staticmethod
     def _store_host_verification_result(item: WorkItem, result: JobResult) -> None:
