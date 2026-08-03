@@ -2900,6 +2900,38 @@ class TestRepoScoping:
 
         assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            f"{PLAN_COMMENT_MARKER} appendix\n\nNot canonical.",
+            f"{PLAN_CANONICAL_MARKER} appendix\n{PLAN_COMMENT_MARKER}\nNot canonical.",
+        ],
+    )
+    def test_repo_scoped_has_existing_plan_rejects_marker_prefixes(
+        self,
+        body: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only an exact first-line marker identifies a canonical plan."""
+
+        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            if argv[:2] == ["issue", "view"]:
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "comments": [
+                                {"body": body, "viewerDidAuthor": True},
+                            ],
+                        }
+                    )
+                )
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+
+        assert not pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+
     def test_repo_scoped_has_existing_plan_ignores_foreign_plan_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
