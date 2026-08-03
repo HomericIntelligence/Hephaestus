@@ -506,12 +506,6 @@ class PipelineGitHub:
             selected_pr = self._find_open_pr_for_branch(issue_auto_impl_branch_name(issue_number))
             if selected_pr is not None:
                 return selected_pr
-        else:
-            selected_pr = self._find_pr_on_branch(
-                issue_auto_impl_branch_name(issue_number), state, issue_number
-            )
-            if selected_pr is not None:
-                return selected_pr
         return self._find_closing_pr(issue_number, state)
 
     def _repo_unresolved_threads(  # noqa: C901 - complete thread hydration is fail-closed
@@ -1561,7 +1555,7 @@ class PipelineGitHub:
         replies: dict[str, str],
         batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
-        """Post implementation-agent replies after a real fix commit reached GitHub.
+        """Post implementation-agent replies against a verified current PR head.
 
         Every target must be an ID from the complete host-provided thread
         snapshot. The method never resolves threads: the next reviewer pass

@@ -3152,14 +3152,16 @@ class TestRepoScoping:
         with pytest.raises(RuntimeError, match="could not verify existing PR state"):
             adapter.find_pr_for_issue(5)
 
-    def test_repo_scoped_merged_pr_lookup_preserves_head_branch_fallback(
+    def test_repo_scoped_merged_pr_lookup_requires_exact_closing_line(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Merged lookup still finds a PR on the canonical issue branch."""
+        """A merged PR is linked only by the exact policy closing line."""
         monkeypatch.setattr(
             pg,
             "gh_call",
-            lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps([{"number": 5}])),
+            lambda _argv, **_kwargs: SimpleNamespace(
+                stdout=json.dumps([{"number": 5, "body": "Closes #5\n"}])
+            ),
         )
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)

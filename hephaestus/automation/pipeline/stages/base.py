@@ -127,7 +127,7 @@ class ConditionalMergeResult:
 
 @dataclass(frozen=True)
 class ImplementationThreadReplyResult:
-    """Outcome of posting commit-gated implementation replies to review threads.
+    """Outcome of posting head-gated implementation replies to review threads.
 
     ``receipts`` are complete, host-read thread snapshots after the implementation
     reply is visible.  They are the only input a later reviewer-validation

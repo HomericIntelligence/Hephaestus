@@ -2518,13 +2518,13 @@ class TestGitOps:
         release.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
         normal_push.assert_not_called()
 
-    def test_commit_push_value_false_does_not_push_when_nothing_committed(
+    def test_commit_push_returns_clean_head_without_pushing_when_nothing_committed(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """commit_push reports value=False without pushing a clean tree."""
+        """commit_push reports the verified clean head without pushing it."""
         job = GitJob(
             repo="test/repo",
             op="commit_push",
@@ -2534,13 +2534,14 @@ class TestGitOps:
         with (
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=False),
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
+            patch.object(pool, "_read_publish_head", return_value="a" * 40),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
         mock_push.assert_not_called()
         assert result.ok is True
-        assert result.value is False
+        assert result.value == {"pushed": False, "head_sha": "a" * 40}
 
     def test_commit_push_publishes_agent_precommitted_change(
         self,

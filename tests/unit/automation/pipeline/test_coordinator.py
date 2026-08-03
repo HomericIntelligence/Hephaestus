@@ -269,7 +269,7 @@ class TestQuiescence:
             loops=1,
             projects_dir=tmp_path,
         )
-        gh = FakeStageGitHub(merged_pr=1851)
+        gh = FakeStageGitHub(merged_pr=1851, issue_state="CLOSED")
 
         def fake_seed(
             repos_arg: list[str], issues_arg: list[int], prs_arg: list[int]

@@ -1961,6 +1961,31 @@ class TestCommitPushAndPrCreate:
             == 1
         )
 
+        stale = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        changed_head_snapshots = [
+            {
+                **post_push_snapshots[0],
+                "pr_state": {
+                    "state": "OPEN",
+                    "headRefOid": "c" * 40,
+                    "autoMergeRequest": None,
+                },
+            }
+        ]
+        stale.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": changed_head_snapshots,
+                "remediation_thread_snapshots": changed_head_snapshots,
+            }
+        )
+
+        stale_result = stage.step(stale, ctx)
+
+        assert isinstance(stale_result, JobRequest)
+        assert stale_result.job.descr == "address_review"
+        assert "pending_implementation_reply_handoff" not in stale.payload
+
     def test_remediation_reply_handoff_retries_a_transient_journal_write_without_a_new_commit(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -2029,10 +2054,10 @@ class TestCommitPushAndPrCreate:
             == 1
         )
 
-    def test_remediation_reply_handoff_rejects_no_commit_on_the_source_review_head(
+    def test_remediation_reply_handoff_warns_when_source_review_head_is_unchanged(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A no-op run may not answer a thread against unchanged reviewed code."""
+        """A no-op run posts its reply with a warning for thorough reviewer analysis."""
         stage = ImplementationStage()
         github = FakeStageGitHub(
             pr_state={"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
@@ -2049,21 +2074,39 @@ class TestCommitPushAndPrCreate:
                         "line": 3,
                         "side": "RIGHT",
                         "body": "fix it",
-                        "review_commit_sha": "a" * 40,
+                        "review_commit_sha": "b" * 40,
+                        "pr_state": {
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                        },
                         "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
                     }
                 ],
                 "remediation_output": {
                     "addressed": ["thread-1"],
-                    "replies": {"thread-1": "[Response] This must not be posted."},
+                    "replies": {"thread-1": "[Response] The existing behavior is correct."},
                 },
             }
         )
 
-        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": False, "head_sha": "a" * 40}),
+            ctx,
+        )
 
-        assert item.payload["remediation_reply_error"] is True
-        assert "pending_implementation_reply_handoff" not in item.payload
+        assert "remediation_reply_error" not in item.payload
+        assert "pending_implementation_reply_handoff" in item.payload
+
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert github._thread_replies["thread-1"][-1]["body"] == (
+            "[Response] The existing behavior is correct.\n\n"
+            "[auto-msg] reply has no corresponding commit, review thoroughly"
+        )
 
     def test_commit_push_requests_git_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """COMMIT_PUSH_WAIT submits the commit_push GitJob."""

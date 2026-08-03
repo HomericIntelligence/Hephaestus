@@ -2542,7 +2542,15 @@ class WorkerPool:
             if isinstance(publish_state, JobResult):
                 return publish_state
             if not publish_state:
-                return JobResult(ok=True, value=False)
+                if job.kwargs.get("expected_remote_sha") is not None:
+                    return JobResult(ok=True, value=False)
+                clean_head = self._read_publish_head(Path(worktree_path), timeout=job.timeout_s)
+                if isinstance(clean_head, JobResult):
+                    return clean_head
+                return JobResult(
+                    ok=True,
+                    value={"pushed": False, "head_sha": clean_head},
+                )
             status = git_utils.run(
                 ["git", "status", "--porcelain"],
                 cwd=Path(worktree_path),

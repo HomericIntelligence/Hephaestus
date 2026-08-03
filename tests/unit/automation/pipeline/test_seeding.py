@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import state_labels
+from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
     _LABEL_RANK,
@@ -50,6 +51,7 @@ def _facts(
     pr_number: int | None = None,
     pr_is_open: bool = False,
     pr_is_merged: bool = False,
+    issue_is_closed: bool = False,
     pr_has_implementation_go: bool = False,
     pr_has_implementation_no_go: bool = False,
 ) -> IssueFacts:
@@ -62,6 +64,7 @@ def _facts(
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
+        issue_is_closed=issue_is_closed,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         body=body,
@@ -118,10 +121,24 @@ class TestClassifyIssue:
     def test_pr_merged_finished(self) -> None:
         """Merged PR is genuinely finished (pass, idempotent) — NOT an exclusion."""
         stage, reason = classify_issue(
-            _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_merged=True)
+            _facts(
+                labels={STATE_IMPLEMENTATION_GO},
+                pr_number=42,
+                pr_is_merged=True,
+                issue_is_closed=True,
+            )
         )
         assert stage is StageName.FINISHED
         assert "merged" in reason
+
+    def test_open_issue_with_historical_merged_pr_routes_by_current_label(self) -> None:
+        """An open/reopened issue must not be completed by a historic merged PR."""
+        stage, reason = classify_issue(
+            _facts(labels={STATE_PLAN_GO}, pr_number=42, pr_is_merged=True)
+        )
+
+        assert stage is StageName.IMPLEMENTATION
+        assert reason == f"#1 at-or-past {STATE_PLAN_GO}, no PR yet"
 
     def test_open_pr_with_issue_impl_go_uses_generic_pr_review_route(self) -> None:
         """An issue label alone cannot route an open PR to merge wait."""
@@ -298,11 +315,17 @@ def _fake_gh_backend(prs: list[dict[str, Any]]) -> Any:
     return _gh_call
 
 
-def _issue_info(number: int, labels: list[str], title: str = "A task") -> MagicMock:
+def _issue_info(
+    number: int,
+    labels: list[str],
+    title: str = "A task",
+    state: IssueState = IssueState.OPEN,
+) -> MagicMock:
     info = MagicMock()
     info.number = number
     info.labels = labels
     info.title = title
+    info.state = state
     return info
 
 
@@ -316,11 +339,12 @@ class TestSeedIssueFetchLayer:
         prs: list[dict[str, Any]],
         *,
         pr_labels: list[str] | None = None,
+        issue_state: IssueState = IssueState.OPEN,
     ) -> IssueFacts:
         with (
             patch(
                 "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                return_value=_issue_info(issue, labels),
+                return_value=_issue_info(issue, labels, state=issue_state),
             ),
             patch(
                 "hephaestus.automation._review_utils._gh_call",
@@ -363,6 +387,7 @@ class TestSeedIssueFetchLayer:
             7,
             [STATE_IMPLEMENTATION_GO],
             [{"number": 43, "state": "MERGED", "headRefName": "7-auto-impl", "body": "Closes #7"}],
+            issue_state=IssueState.CLOSED,
         )
         assert facts.pr_number == 43
         assert facts.pr_is_open is False
@@ -370,6 +395,18 @@ class TestSeedIssueFetchLayer:
         # And the classifier reaches the doc's "PR merged → finished" row.
         stage, _ = classify_issue(facts)
         assert stage is StageName.FINISHED
+
+    def test_merged_pr_without_exact_closes_line_is_not_terminal(self) -> None:
+        """A merged auto-implementation branch alone cannot complete an issue."""
+        facts = self._seed(
+            7,
+            [STATE_PLAN_GO],
+            [{"number": 43, "state": "MERGED", "headRefName": "7-auto-impl", "body": ""}],
+        )
+
+        assert facts.pr_number is None
+        assert facts.pr_is_merged is False
+        assert classify_issue(facts)[0] is StageName.IMPLEMENTATION
 
     def test_merged_pr_found_via_body_search(self) -> None:
         """A merged PR on a NON-canonical branch is still found via Closes-body search."""

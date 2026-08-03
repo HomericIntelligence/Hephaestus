@@ -461,14 +461,9 @@ class PlanningStage(Stage):
             logger.info("planning:%d: already plan-go; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan already approved")
 
-        # Re-housed _pr_coverage_skip gate A: merged closing PR covers the issue
-        merged_pr = ctx.github.find_merged_closing_pr(item.issue)
-        if merged_pr:
-            logger.info("planning:%d: merged PR #%d covers issue; closing", item.issue, merged_pr)
-            ctx.github.close_issue_as_covered(item.issue, merged_pr)
-            return StageOutcome(Disposition.SKIP, f"covered by merged PR #{merged_pr}")
-
-        # Re-housed _pr_coverage_skip gate B: open PR already in flight
+        # An open PR already in flight makes planning redundant. A historic
+        # merged PR is deliberately not a completion shortcut: only GitHub's
+        # current closed issue state may terminalize work at seeding.
         open_pr = ctx.github.find_pr_for_issue(item.issue)
         if open_pr:
             logger.info("planning:%d: open PR #%d exists; skipping", item.issue, open_pr)

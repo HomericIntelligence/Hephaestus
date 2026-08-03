@@ -1198,7 +1198,7 @@ globally bounded.
 
 [`seeding.py`](../hephaestus/automation/pipeline/seeding.py) is the pure
 classifier the coordinator consults on every restart. It maps
-`(labels, PR existence/state)` to a single entry stage using **ordered
+`(issue state, labels, PR existence/state)` to a single entry stage using **ordered
 label rank**:
 
 ```
@@ -1228,7 +1228,8 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 | GitHub state | Entry stage |
 |-------------------------------------------------------|----------------------------------|
 | `state:skip`/`epic` | excluded (`stage = None`) |
-| Direct PR already merged | `FINISHED` (pass, idempotent) |
+| Closed issue with a merged PR carrying exact `Closes #N` | `FINISHED` (pass, idempotent) |
+| Open/reopened issue with a historic merged PR | Treat as no open PR; route by current state label |
 | Direct PR already closed | excluded |
 | Open PR carries PR-level `state:implementation-go` | `MERGE_WAIT` |
 | Any other open PR, including one carrying only issue-level `state:implementation-go` | `PR_REVIEW` |
