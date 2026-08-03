@@ -119,6 +119,42 @@ make_install_tmpdir() {
     mktemp -d "$tmp_root/${prefix}.XXXXXX"
 }
 
+is_supported_python_version() {
+    local version="$1"
+    [[ "$version" =~ ^3\.13(\.[0-9]+)*$ ]]
+}
+
+install_python_313() {
+    echo -e "    ${BLUE}→${NC} Installing python3.13..."
+    if apt_install python3.13 \
+        && sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 13 >/dev/null 2>&1; then
+        check_pass "python3.13 installed"
+    else
+        check_fail "python3.13 — install failed"
+    fi
+}
+
+check_python_313() {
+    local python_version
+
+    if has_cmd python3; then
+        python_version="$(get_version python3 --version)"
+        if is_supported_python_version "$python_version"; then
+            check_pass "python3 $python_version (3.13)"
+        else
+            check_fail "python3 $python_version — need Python 3.13"
+            if $INSTALL; then
+                install_python_313
+            fi
+        fi
+    else
+        check_fail "python3 — NOT FOUND"
+        if $INSTALL; then
+            install_python_313
+        fi
+    fi
+}
+
 # ─── Pinned upstream-tool versions (issue #744 — verified installs) ───────────
 # Bumping any of these REQUIRES updating both the version string and the
 # corresponding SHA-256 in the same commit. Hashes are sourced from the
@@ -451,24 +487,7 @@ fi
 section "Python"
 
 # Python 3.13
-if has_cmd python3; then
-    PY_VER=$(get_version python3 --version)
-    if version_gte "$PY_VER" "3.13"; then
-        check_pass "python3 $PY_VER (>= 3.13)"
-    else
-        check_fail "python3 $PY_VER — need >= 3.13"
-        if $INSTALL; then
-            echo -e "    ${BLUE}→${NC} Installing python3.13..."
-            # shellcheck disable=SC2015  # A && B && C || D — failure of A or B → check_fail (correct)
-            apt_install python3.13 \
-                && sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 13 >/dev/null 2>&1 \
-                && check_pass "python3.13 installed" || check_fail "python3.13 — install failed"
-        fi
-    fi
-else
-    check_fail "python3 — NOT FOUND"
-    if apt_install python3; then check_pass "python3 installed"; fi
-fi
+check_python_313
 
 # pip3 (needed to install nats-py and other Python deps)
 if has_cmd pip3; then

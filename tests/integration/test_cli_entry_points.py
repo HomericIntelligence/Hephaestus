@@ -23,16 +23,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.integration
-
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # pragma: no cover — only on Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
