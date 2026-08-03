@@ -96,7 +96,6 @@ import logging
 import re
 import secrets
 from collections.abc import Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -127,6 +126,14 @@ from hephaestus.automation.session_naming import (
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
+from ..reply_handoff import (
+    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF as _PENDING_IMPLEMENTATION_REPLY_HANDOFF,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES as _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
+    implementation_reply_handoff,
+    pr_is_current_open_head,
+    retry_pending_implementation_reply_handoff,
+)
 from ..scope_retraction import scope_retraction_paths_for_threads
 from ..work_item import ItemKind
 from .base import (
@@ -153,6 +160,11 @@ from .base import (
 from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
+
+# Compatibility aliases for callers that used the former stage-local helpers.
+# The shared reply-handoff module is the sole implementation.
+_implementation_reply_handoff = implementation_reply_handoff
+_pr_is_current_open_head = pr_is_current_open_head
 
 _JSON_RESPONSE_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
@@ -227,17 +239,6 @@ def _issue_number(item: WorkItem) -> int:
     return item.issue
 
 
-def _pr_is_current_open_head(state: object, expected_head_sha: object) -> bool:
-    """Return whether a fresh PR state proves one exact open, unarmed head."""
-    return bool(
-        is_full_commit_sha(expected_head_sha)
-        and isinstance(state, dict)
-        and state.get("state") == "OPEN"
-        and state.get("autoMergeRequest") is None
-        and state.get("headRefOid") == expected_head_sha
-    )
-
-
 def _review_context_kind(item: WorkItem) -> str:
     """Return the prompt-facing numeric context kind for this review item."""
     return "PR" if item.payload.get("review_context_kind") == "PR" else "issue"
@@ -251,18 +252,6 @@ def _review_context_kind(item: WorkItem) -> str:
 REVIEW_ERROR_RETRY_CAP = 2
 REVIEW_CHECKOUT_RETRY_CAP = 2
 
-#: A pushed implementation fix must receive its review-thread explanation
-#: without requiring a second code change.  This bounded retry is host-only:
-#: it replays the exact saved thread snapshots and agent prose, never asks an
-#: implementation model to invent a new response.
-IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
-IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP = 2
-_PENDING_IMPLEMENTATION_REPLY_HANDOFF = "pending_implementation_reply_handoff"
-_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES = "pending_implementation_reply_handoff_retries"
-_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
-    "pending_implementation_reply_handoff_visibility_retries"
-)
-_IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
 _COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
 
@@ -612,46 +601,6 @@ def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict
     returned prose is posted by the host only after its fix commit is pushed.
     """
     return parse_addressed_replies(address_result, threads)
-
-
-def _implementation_reply_handoff(
-    head_sha: object,
-    threads: object,
-    replies: object,
-    batch_nonce: object,
-) -> dict[str, Any] | None:
-    """Return a replay-safe outstanding implementation-reply handoff.
-
-    The persisted value is intentionally an exact host snapshot plus the
-    model's already validated reply mapping.  It is neither a review receipt
-    nor an authority to mutate: the adapter rechecks the live PR and thread
-    state before each retry.
-    """
-    if (
-        not is_full_commit_sha(head_sha)
-        or not isinstance(threads, list)
-        or not isinstance(replies, dict)
-        or not isinstance(batch_nonce, str)
-        or _IMPLEMENTATION_REPLY_BATCH_NONCE_RE.fullmatch(batch_nonce) is None
-    ):
-        return None
-    snapshots = [dict(thread) for thread in threads if isinstance(thread, dict)]
-    if len(snapshots) != len(threads):
-        return None
-    normalized_replies = _address_replies(
-        {"addressed": list(replies), "replies": replies}, snapshots
-    )
-    if normalized_replies is None:
-        return None
-    ids = {str(snapshot.get("id") or "") for snapshot in snapshots}
-    if "" in ids or ids != set(normalized_replies) or len(ids) != len(snapshots):
-        return None
-    return {
-        "head_sha": head_sha,
-        "threads": deepcopy(snapshots),
-        "replies": dict(normalized_replies),
-        "batch_nonce": batch_nonce,
-    }
 
 
 def _validation_thread_snapshots(
@@ -2231,118 +2180,14 @@ class PrReviewStage(Stage):
 
     @staticmethod
     def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
-        """Retry one exact post-push reply batch without invoking an agent.
-
-        Returns ``none`` when no handoff exists, ``completed`` when every
-        reply has a host receipt, ``visibility_wait`` while GitHub is briefly
-        catching up with the pushed head, ``stale`` when the exact pushed head
-        can no longer safely receive the saved response, ``invalid`` for
-        malformed persisted state, and ``retry`` for a bounded
-        transient/incomplete host operation.  No outcome grants reviewer
-        authority; normal fresh review still validates and resolves the replies.
-        """
-        raw_handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
-        if raw_handoff is None:
-            return "none"
-        handoff = _implementation_reply_handoff(
-            raw_handoff.get("head_sha") if isinstance(raw_handoff, dict) else None,
-            raw_handoff.get("threads") if isinstance(raw_handoff, dict) else None,
-            raw_handoff.get("replies") if isinstance(raw_handoff, dict) else None,
-            raw_handoff.get("batch_nonce") if isinstance(raw_handoff, dict) else None,
+        """Delegate recovery to the common host-only reply handoff contract."""
+        return retry_pending_implementation_reply_handoff(
+            item.payload,
+            pr_number=item.pr,
+            issue_number=item.issue,
+            github=ctx.github,
+            logger=logger,
         )
-        if handoff is None or item.pr is None:
-            return "invalid"
-        head_sha = handoff["head_sha"]
-        threads = handoff["threads"]
-        replies = handoff["replies"]
-        batch_nonce = handoff["batch_nonce"]
-        try:
-            state = ctx.github.gh_pr_state(item.pr)
-            if not _pr_is_current_open_head(state, head_sha):
-                if (
-                    isinstance(state, dict)
-                    and state.get("state") == "OPEN"
-                    and state.get("autoMergeRequest") is None
-                ):
-                    visibility_retries = item.payload.get(
-                        _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, 0
-                    )
-                    if (
-                        isinstance(visibility_retries, int)
-                        and not isinstance(visibility_retries, bool)
-                        and visibility_retries >= 0
-                        and visibility_retries < IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP
-                    ):
-                        visibility_retries += 1
-                        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES] = (
-                            visibility_retries
-                        )
-                        item.payload["retry_delay_s"] = float(2 ** (visibility_retries - 1))
-                        logger.info(
-                            "pr_review:%s: waiting for pushed implementation head visibility "
-                            "before replying to review threads (%d/%d)",
-                            item.issue,
-                            visibility_retries,
-                            IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP,
-                        )
-                        return "visibility_wait"
-                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
-                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
-                return "stale"
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
-            result = ctx.github.post_implementation_thread_replies(
-                item.pr,
-                expected_head_sha=head_sha,
-                threads=threads,
-                replies=replies,
-                batch_nonce=batch_nonce,
-            )
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: implementation reply handoff retry failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            return "retry"
-
-        expected_ids = set(replies)
-        replied = set(getattr(result, "replied_thread_ids", ()))
-        receipts = list(getattr(result, "receipts", ()))
-        if replied == expected_ids and len(receipts) == len(replied):
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-            return "completed"
-        remaining_ids = expected_ids - replied
-        retryable = bool(getattr(result, "retryable", False))
-        result_retryable_ids = set(getattr(result, "retryable_thread_ids", ()))
-        retryable_ids = (
-            result_retryable_ids
-            if result_retryable_ids and result_retryable_ids.issubset(remaining_ids)
-            else remaining_ids
-            if retryable and not result_retryable_ids
-            else set()
-        )
-        if not retryable_ids:
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-            return "stale"
-        if not replied.issubset(expected_ids) or len(receipts) != len(replied):
-            return "invalid"
-        replacement = _implementation_reply_handoff(
-            head_sha,
-            [snapshot for snapshot in threads if str(snapshot.get("id") or "") in retryable_ids],
-            {
-                thread_id: reply
-                for thread_id, reply in replies.items()
-                if thread_id in retryable_ids
-            },
-            batch_nonce,
-        )
-        if replacement is None:
-            return "invalid"
-        item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = replacement
-        return "retry"
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate
         """EVAL [M]: apply the structural-audit gate and review budget.

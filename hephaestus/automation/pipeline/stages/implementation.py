@@ -103,6 +103,18 @@ from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from ..jobs import WORKTREE_MATERIALIZED_KEY
+from ..reply_handoff import (
+    IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP,
+    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
+    implementation_reply_handoff,
+    implementation_reply_handoff_journal_entry,
+    journaled_implementation_reply_handoff,
+    retry_pending_implementation_reply_handoff,
+)
 from ..scope_retraction import is_safe_scope_retraction_path, scope_retraction_paths_for_threads
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -602,6 +614,33 @@ class ImplementationStage(Stage):
                 item.payload["scope_retraction_paths"] = scope_retraction_paths
             else:
                 item.payload.pop("scope_retraction_paths", None)
+            snapshots = item.payload.get("remediation_thread_snapshots")
+            if isinstance(snapshots, list):
+                try:
+                    recovered_handoff = journaled_implementation_reply_handoff(
+                        ctx.github.issue_comments(issue),
+                        pr_number=item.pr,
+                        threads=snapshots,
+                    )
+                except (OSError, RuntimeError, ValueError) as error:
+                    logger.warning(
+                        "implementation:%d: could not recover implementation reply handoff "
+                        "journal (%s)",
+                        issue,
+                        type(error).__name__,
+                    )
+                    return StageOutcome(
+                        Disposition.RETRY,
+                        "implementation_reply_handoff_journal_read",
+                    )
+                if recovered_handoff is not None:
+                    item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = recovered_handoff
+                    item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                    logger.info(
+                        "implementation:%d: recovered exact GitHub-journaled review reply handoff",
+                        issue,
+                    )
+                    return Continue(next_state=PR_CREATE)
             job = AgentJob(
                 repo=item.repo,
                 issue=issue,
@@ -847,17 +886,25 @@ class ImplementationStage(Stage):
     def _post_remediation_replies_after_push(
         item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
-        """Post implementation responses only after the writer pushed a real commit."""
+        """Prepare one commit-gated reply handoff after the writer runs.
+
+        GitHub can briefly expose the previous PR head immediately after a
+        successful push.  The PR_CREATE state owns the bounded host-only
+        replay, so the exact agent responses survive that visibility lag
+        without another implementation turn or commit. Before that retry can
+        begin, this method records the exact batch in GitHub's immutable
+        journal, allowing an interrupted loop to recover the original writer
+        response without a fresh no-op implementation claim.
+        """
         if not item.payload.get("implementation_remediation"):
             return
         receipt = result.value if isinstance(result.value, dict) else {}
         head_sha = receipt.get("head_sha")
         snapshots = item.payload.get("remediation_thread_snapshots")
-        if (
-            not receipt.get("pushed")
-            or not is_full_commit_sha(head_sha)
-            or not isinstance(snapshots, list)
-        ):
+        if not isinstance(snapshots, list):
+            item.payload["remediation_reply_error"] = True
+            return
+        if not receipt.get("pushed") or not is_full_commit_sha(head_sha):
             item.payload["remediation_reply_error"] = True
             return
         replies = parse_addressed_replies(
@@ -867,28 +914,147 @@ class ImplementationStage(Stage):
         if replies is None or item.pr is None:
             item.payload["remediation_reply_error"] = True
             return
-        try:
-            reply_result = ctx.github.post_implementation_thread_replies(
-                item.pr,
-                expected_head_sha=head_sha,
-                threads=snapshots,
-                replies=replies,
-                batch_nonce=secrets.token_hex(16),
+        handoff = implementation_reply_handoff(
+            head_sha,
+            snapshots,
+            replies,
+            secrets.token_hex(16),
+        )
+        if handoff is None:
+            item.payload["remediation_reply_error"] = True
+            return
+        journal_entry = implementation_reply_handoff_journal_entry(item.pr, handoff)
+        if journal_entry is None or item.issue is None:
+            item.payload["remediation_reply_error"] = True
+            return
+        marker, body = journal_entry
+        # Persist the deterministic batch locally before the GitHub append.
+        # A transient append failure must retry this host-only write, never
+        # rerun the writer or create a second remediation commit.
+        item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
+        item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL] = {
+            "marker": marker,
+            "body": body,
+        }
+        item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES, None)
+        item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        if ImplementationStage._persist_remediation_reply_handoff_journal(item, ctx) is not None:
+            return
+
+    @staticmethod
+    def _persist_remediation_reply_handoff_journal(
+        item: WorkItem, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Durably append a prepared recovery journal with bounded host-only retries."""
+        pending = item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL)
+        if pending is None:
+            return None
+        handoff = item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF)
+        if item.issue is None or item.pr is None or not isinstance(pending, dict):
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "implementation_reply_handoff_journal_invalid"
             )
+        expected_entry = implementation_reply_handoff_journal_entry(item.pr, handoff)
+        marker = pending.get("marker")
+        body = pending.get("body")
+        if (
+            expected_entry is None
+            or not isinstance(marker, str)
+            or not isinstance(body, str)
+            or (marker, body) != expected_entry
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "implementation_reply_handoff_journal_invalid"
+            )
+        try:
+            ctx.github.append_issue_comment(item.issue, marker, body)
         except Exception as error:
+            retries = item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES, 0)
+            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "implementation_reply_handoff_journal_invalid"
+                )
+            retries += 1
+            item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES] = retries
             logger.warning(
-                "implementation:%s: failed to post review-thread responses (%s)",
+                "implementation:%d: could not persist implementation reply handoff journal; "
+                "retrying host-only append %d/%d (%s)",
                 item.issue,
+                retries,
+                IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP,
                 type(error).__name__,
             )
-            item.payload["remediation_reply_error"] = True
-            return
-        replied = set(getattr(reply_result, "replied_thread_ids", ()))
-        if replied != set(replies) or len(getattr(reply_result, "receipts", ())) != len(replied):
-            item.payload["remediation_reply_error"] = True
-            return
+            if retries <= IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP:
+                return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_journal_retry")
+            return StageOutcome(
+                Disposition.FINISH_FAIL, "implementation_reply_handoff_journal_failed"
+            )
+        item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL, None)
+        item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES, None)
+        return None
+
+    @staticmethod
+    def _complete_remediation_reply_handoff(
+        item: WorkItem, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Advance, retry, or fail one persisted host-only response handoff."""
+        handoff_status = retry_pending_implementation_reply_handoff(
+            item.payload,
+            pr_number=item.pr,
+            issue_number=item.issue,
+            github=ctx.github,
+            logger=logger,
+        )
+        if handoff_status in {"none", "completed"}:
+            if handoff_status == "completed":
+                item.payload.pop("implementation_remediation", None)
+                item.payload.pop("remediation_output", None)
+            return None
+        if handoff_status == "visibility_wait":
+            return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")
+        if handoff_status == "invalid":
+            logger.error(
+                "implementation:%d: refusing to replay malformed implementation reply handoff",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        if handoff_status == "retry":
+            retries = item.payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, 0)
+            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+            retries += 1
+            item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES] = retries
+            if retries <= IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP:
+                logger.warning(
+                    "implementation:%d: retrying exact implementation reply handoff %d/%d",
+                    item.issue,
+                    retries,
+                    IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
+                )
+                return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_retry")
+            logger.error(
+                "implementation:%d: implementation reply handoff retry cap reached",
+                item.issue,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_failed")
+
+        # The shared handoff has proved that the pushed head or one of its
+        # source threads changed.  Do not replay the old response; return the
+        # existing PR to a fresh review entry instead.
         item.payload.pop("implementation_remediation", None)
         item.payload.pop("remediation_output", None)
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        logger.info(
+            "implementation:%d: reply handoff became stale; returning PR #%d for a fresh "
+            "review snapshot",
+            item.issue,
+            item.pr,
+        )
+        return StageOutcome(
+            Disposition.ADVANCE,
+            f"PR #{item.pr} ready for fresh review after stale reply handoff",
+        )
 
     @staticmethod
     def _on_implement_done(item: WorkItem, result: JobResult) -> None:
@@ -1294,6 +1460,14 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
         if item.payload.pop("remediation_reply_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
+
+        journal_outcome = self._persist_remediation_reply_handoff_journal(item, ctx)
+        if journal_outcome is not None:
+            return journal_outcome
+
+        handoff_outcome = self._complete_remediation_reply_handoff(item, ctx)
+        if handoff_outcome is not None:
+            return handoff_outcome
 
         if item.payload.get("no_commits"):
             # An item can retain a PR after an interrupted or re-entered
