@@ -725,7 +725,15 @@ class ImplementationStage(Stage):
             "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
         }
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
-        if direct_base_sha is not None:
+        # A direct cursor's bootstrap pin reserves a newly created writer
+        # branch.  Once an existing PR is adopted, its remote branch is the
+        # writer authority; carrying the cursor pin forward must neither
+        # require a new receipt nor lease-push against the unrelated trunk
+        # SHA.
+        requires_fresh_direct_reservation = (
+            not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+        )
+        if requires_fresh_direct_reservation:
             if not is_full_commit_sha(direct_base_sha):
                 return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
             kwargs["expected_remote_sha"] = direct_base_sha
@@ -950,13 +958,17 @@ class ImplementationStage(Stage):
             else:
                 item.worktree = ""
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+            requires_fresh_direct_reservation = (
+                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+            )
             reservation = (
                 result.value.get("direct_scope_reservation")
                 if isinstance(result.value, dict)
                 else None
             )
             if (
-                is_full_commit_sha(direct_base_sha)
+                requires_fresh_direct_reservation
+                and is_full_commit_sha(direct_base_sha)
                 and isinstance(reservation, dict)
                 and reservation.get("branch") == item.branch
                 and reservation.get("base_sha") == direct_base_sha
@@ -984,7 +996,10 @@ class ImplementationStage(Stage):
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
-            if direct_base_sha is not None:
+            requires_fresh_direct_reservation = (
+                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+            )
+            if requires_fresh_direct_reservation:
                 reservation = value.get("direct_scope_reservation")
                 if (
                     not is_full_commit_sha(direct_base_sha)

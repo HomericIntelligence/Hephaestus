@@ -1067,7 +1067,7 @@ class TestWorktreeAndAdvise:
     def test_direct_worktree_rejects_missing_remote_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A protocol drift cannot let a direct agent run without its lease receipt."""
+        """A fresh direct agent cannot run without its creation lease receipt."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="WORKTREE_WAIT")
@@ -1078,6 +1078,39 @@ class TestWorktreeAndAdvise:
 
         assert item.worktree == ""
         assert item.payload["git_error"] is True
+
+    def test_adopted_direct_worktree_does_not_require_a_fresh_reservation_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An existing direct PR reuses its writer without creating a new lease."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl-direct-" + "b" * 32
+        item.payload["existing_pr"] = True
+        # The new direct cursor's bootstrap pin is still present, but it does
+        # not authorize or require a replacement reservation for this PR.
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "path": "/tmp/wt",
+                    "dirty": False,
+                    "status": "",
+                    "diff": "",
+                },
+            ),
+            ctx,
+        )
+
+        assert item.worktree == "/tmp/wt"
+        assert "git_error" not in item.payload
+        assert "_direct_scope_reservation" not in item.payload
+        item.state = "DIRTY_DECISION_WAIT"
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_WAIT")
 
     def test_worktree_string_result_stores_path(self, make_ctx: Any, make_work_item: Any) -> None:
         """A plain string worktree result is the worktree path."""
@@ -1643,6 +1676,24 @@ class TestCommitPushAndPrCreate:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["expected_remote_sha"] == "a" * 40
+
+    def test_adopted_direct_commit_push_uses_its_pr_branch_without_a_fresh_pin(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An adopted PR must not lease-push against its cursor's trunk SHA."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.branch = "1-auto-impl-direct-" + "b" * 32
+        item.worktree = "/tmp/wt"
+        item.payload["existing_pr"] = True
+        item.payload["_direct_scope_base_sha"] = "a" * 40
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert "expected_remote_sha" not in result.job.kwargs
 
     def test_commit_push_no_commit_sets_skip_payload(
         self, make_ctx: Any, make_work_item: Any
