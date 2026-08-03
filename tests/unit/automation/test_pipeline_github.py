@@ -373,6 +373,69 @@ class TestAllThreadReplyAndReviewerResolution:
         assert attached_review_ids == ["review-1"]
         assert submitted_review_ids == ["review-1"]
 
+    def test_reply_batch_retries_when_thread_snapshot_lags_the_current_pr_head(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second GitHub read seeing the old head is visibility lag, not thread drift."""
+        thread = _external_reviewer_thread("thread-one")
+        stale_live = {
+            **_open_thread_snapshot(thread),
+            "pr_state": {
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "autoMergeRequest": None,
+            },
+        }
+        graphql = MagicMock()
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", lambda _pr, _thread: stale_live)
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha="a" * 40,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard."},
+        )
+
+        assert result.replied_thread_ids == ()
+        assert result.retryable is True
+        assert result.visibility_lag is True
+        assert result.retryable_thread_ids == (thread["id"],)
+        assert result.blocked_thread_ids == ()
+        graphql.assert_not_called()
+
+    def test_reply_batch_accepts_a_full_sha256_head(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reply adapter preserves the pipeline's 40-or-64 OID contract."""
+        head_sha = "a" * 64
+        thread = _external_reviewer_thread("thread-one")
+        live = {
+            **_open_thread_snapshot(thread),
+            "pr_state": {
+                "state": "OPEN",
+                "headRefOid": head_sha,
+                "autoMergeRequest": None,
+            },
+        }
+        create_calls: list[tuple[str, str]] = []
+        monkeypatch.setattr(adapter, "_review_thread_snapshot", lambda _pr, _thread: live)
+        monkeypatch.setattr(
+            adapter,
+            "_create_pending_implementation_review",
+            lambda _pr_node, actual_head, _nonce: create_calls.append((actual_head, _nonce)),
+        )
+
+        result = adapter.post_implementation_thread_replies(
+            7,
+            expected_head_sha=head_sha,
+            threads=[thread],
+            replies={thread["id"]: "Fixed the missing guard."},
+        )
+
+        assert create_calls == [(head_sha, _BATCH_NONCE)]
+        assert result.blocked_thread_ids == (thread["id"],)
+
     def test_implementation_replies_share_one_source_attached_batch(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
