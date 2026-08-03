@@ -42,6 +42,7 @@ from hephaestus.github.client import gh_call
 from hephaestus.github.git_ops import (
     in_git_repo as _shared_in_git_repo,
     repo_root as _shared_repo_root,
+    run_git,
     working_tree_clean as _shared_working_tree_clean,
 )
 from hephaestus.github.pr_merge import detect_repo_from_remote
@@ -108,6 +109,113 @@ def _repo_root() -> Path:
     the CLI entrypoint.
     """
     return _shared_repo_root()
+
+
+def _worktree_porcelain() -> str:
+    """Return the current repository's worktree inventory."""
+    return run_git(["worktree", "list", "--porcelain"]).stdout
+
+
+def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]:
+    """Return attached, non-primary worktrees from ``git worktree`` output."""
+    worktrees: list[tuple[Path, str]] = []
+    path: Path | None = None
+    branch: str | None = None
+    for line in [*output.splitlines(), ""]:
+        if line.startswith("worktree "):
+            path = Path(line.removeprefix("worktree "))
+            branch = None
+        elif line.startswith("branch refs/heads/"):
+            branch = line.removeprefix("branch refs/heads/")
+        elif not line:
+            if path is not None and branch is not None and path != root:
+                worktrees.append((path, branch))
+            path = None
+            branch = None
+    return worktrees
+
+
+def _issue_is_closed(issue: int) -> bool:
+    """Return whether *issue* is closed, treating lookup failures as unsafe."""
+    try:
+        return (
+            gh_call(
+                ["issue", "view", str(issue), "--json", "state", "--jq", ".state"],
+            ).stdout.strip()
+            == "CLOSED"
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as e:
+        logger.warning("Could not determine state for issue #%d: %s", issue, e)
+        return False
+
+
+def _branch_is_merged(branch: str, trunk: str) -> bool:
+    """Return whether *branch* is already an ancestor of *trunk*."""
+    return run_git(
+        ["merge-base", "--is-ancestor", branch, trunk],
+        check=False,
+        log_on_error=False,
+    ).returncode == 0
+
+
+def _worktree_is_dirty(path: Path) -> bool:
+    """Return whether a worktree has uncommitted changes."""
+    return bool(run_git(["status", "--porcelain"], cwd=path).stdout.strip())
+
+
+def _worktree_is_locked(path: Path, porcelain: str) -> bool:
+    """Return whether *path* is locked in the supplied worktree inventory."""
+    stanza = False
+    for line in [*porcelain.splitlines(), ""]:
+        if line.startswith("worktree "):
+            stanza = Path(line.removeprefix("worktree ")) == path
+        elif not line:
+            stanza = False
+        elif stanza and line.startswith("locked"):
+            return True
+    return False
+
+
+def _remove_worktree(path: Path, branch: str) -> None:
+    """Remove a worktree and its local branch after operator confirmation."""
+    run_git(["worktree", "remove", str(path)])
+    run_git(["branch", "-d", branch], check=False, log_on_error=False)
+
+
+def _cleanup_stale_worktrees(root: Path, trunk: str, dry_run: bool) -> int:
+    """Interactively remove clean worktrees for closed issues or merged branches."""
+    porcelain = _worktree_porcelain()
+    candidates = _parse_worktree_porcelain(porcelain, root)
+    stale_count = 0
+    for path, branch in candidates:
+        match = re.match(r"(\d+)", branch)
+        issue = int(match.group(1)) if match else None
+        closed_issue = issue is not None and _issue_is_closed(issue)
+        merged_branch = _branch_is_merged(branch, trunk)
+        if not closed_issue and not merged_branch:
+            continue
+
+        stale_count += 1
+        reason = f"issue #{issue} is closed" if closed_issue else f"merged into {trunk}"
+        if _worktree_is_dirty(path):
+            logger.warning("Skipping dirty worktree %s (%s)", path, reason)
+            continue
+        if _worktree_is_locked(path, porcelain):
+            logger.warning("Skipping locked worktree %s (%s)", path, reason)
+            continue
+        if dry_run:
+            logger.info("Would remove stale worktree %s (branch %s; %s)", path, branch, reason)
+            continue
+        prompt = f"Remove stale worktree {path} (branch {branch}; {reason})? [y/N] "
+        if input(prompt).lower() == "y":
+            _remove_worktree(path, branch)
+            logger.info("Removed stale worktree %s", path)
+        else:
+            logger.info("Kept worktree %s", path)
+
+    if stale_count == 0:
+        logger.info("No stale worktrees found.")
+    return 0
 
 
 def parse_problem_branches(output: str) -> list[str]:
@@ -317,6 +425,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Print actions without executing",
     )
     parser.add_argument(
+        "--cleanup-stale-worktrees",
+        action="store_true",
+        help="Interactively remove clean worktrees for closed issues or merged branches",
+    )
+    parser.add_argument(
         "--trunk",
         metavar="BRANCH",
         help="Trunk branch (default: auto-detected)",
@@ -523,6 +636,9 @@ def main() -> int:
     trunk = _detect_default_branch(args.trunk)
 
     logger.info("Repo: %s  |  Trunk: %s  |  Path: %s", repo_slug, trunk, repo_path)
+
+    if args.cleanup_stale_worktrees:
+        return _cleanup_stale_worktrees(repo_path, trunk, args.dry_run)
 
     problem_branches = _run_tidy_and_find_problem_branches(trunk, args.dry_run)
     if not problem_branches:

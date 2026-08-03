@@ -55,8 +55,6 @@ through installed `hephaestus-*` console scripts.
 
 - **`choose_merge_flag.sh`** — Sourceable `choose_merge_flag()` helper that
   picks a permitted manual merge strategy for a repo (rebase → squash → merge).
-- **`shell/cleanup-stale-worktrees.sh`** — Clean up git worktrees whose issue
-  is closed or whose branch is merged into `main`.
 - **`shell/drive_prs_green_ecosystem.sh`** — Drive failing PRs to green CI
   across every non-fork HomericIntelligence repo, with per-repo logs.
 
