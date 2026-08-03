@@ -383,6 +383,14 @@ sync (#993).
 | `hephaestus-pr-diff-context` | Compute author-intent and current-base pull-request diff ranges |
 | `hephaestus-repository-evidence` | Collect bounded Git history and source-pattern evidence |
 
+`hephaestus-merge-prs` exits `0` only when every discovered PR was merged,
+successfully queued, or intentionally skipped by `--dry-run`. It exits `1`
+when any requested PR is blocked, fails, or is unexpectedly left unprocessed,
+and exits `130` when interrupted. With `--json`, every outcome—including
+failure or interruption before PR discovery—contains `results`, `totals`,
+`requested`, and `processed`; pre-discovery outcomes use an empty result list,
+zero totals, and zero requested/processed counts.
+
 ### System & Data
 
 | Command | Description |

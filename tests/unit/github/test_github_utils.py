@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.github import pr_merge as pr_merge_module
 from hephaestus.github.pr_merge import (
     checks_success_and_log,
     detect_repo_from_remote,
@@ -190,16 +191,18 @@ class TestHandleMergeResult:
     """Tests for handle_merge_result."""
 
     def test_successful_merge_logged(self):
-        """Successful merge is logged."""
+        """Successful merge is classified."""
         result = MagicMock(merged=True, sha="abc123", message="Merged")
-        # Should not raise
-        handle_merge_result(result, pr_number=42, base_branch="main")
+        outcome = handle_merge_result(result, pr_number=42, base_branch="main")
+
+        assert outcome.status is pr_merge_module._MergeStatus.MERGED
 
     def test_failed_merge_logged(self):
-        """Failed merge is logged as error."""
+        """Failed merge is classified."""
         result = MagicMock(merged=False, sha=None, message="Merge conflict")
-        # Should not raise
-        handle_merge_result(result, pr_number=42, base_branch="main")
+        outcome = handle_merge_result(result, pr_number=42, base_branch="main")
+
+        assert outcome.status is pr_merge_module._MergeStatus.FAILED
 
     def test_exception_during_result_parsing(self):
         """Handles exception during result attribute access."""
@@ -209,8 +212,9 @@ class TestHandleMergeResult:
             def merged(self):
                 raise AttributeError("no merged attr")
 
-        # Should not raise
-        handle_merge_result(BadResult(), pr_number=1, base_branch="main")
+        outcome = handle_merge_result(BadResult(), pr_number=1, base_branch="main")
+
+        assert outcome.status is pr_merge_module._MergeStatus.FAILED
 
 
 class TestTryPushHeadBranch:

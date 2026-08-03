@@ -21,6 +21,8 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from hephaestus.cli.utils import (
@@ -35,6 +37,43 @@ from hephaestus.github.git_ops import git_branch_exists, git_push, git_remote_ur
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
+
+
+class _MergeStatus(str, Enum):
+    """Terminal state for one requested pull request."""
+
+    MERGED = "merged"
+    QUEUED = "queued"
+    SKIPPED = "skipped"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
+def _escape_summary_detail(value: object) -> str:
+    """Return printable single-line text for logs and structured output."""
+    return ascii(str(value))[1:-1]
+
+
+@dataclass(frozen=True)
+class _PrMergeOutcome:
+    """Describe the terminal result of processing one pull request."""
+
+    pr_number: int | None
+    status: _MergeStatus
+    detail: str
+
+    def __post_init__(self) -> None:
+        """Normalize untrusted provider text before output."""
+        object.__setattr__(self, "detail", _escape_summary_detail(self.detail))
+
+    def as_dict(self) -> dict[str, int | str | None]:
+        """Return a JSON-serializable representation of this outcome."""
+        return {
+            "pr_number": self.pr_number,
+            "status": self.status.value,
+            "detail": self.detail,
+        }
 
 
 def detect_repo_from_remote() -> str | None:
@@ -179,13 +218,16 @@ def try_push_head_branch(head_branch: str, dry_run: bool) -> None:
         )
 
 
-def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
-    """Handle and log the result of a PR merge.
+def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> _PrMergeOutcome:
+    """Classify the result of a PR merge.
 
     Args:
         result: Merge result dict from gh api, or a legacy object-style result
         pr_number: PR number
         base_branch: Base branch name
+
+    Returns:
+        The terminal provider outcome for the pull request.
 
     """
     queued = False
@@ -200,20 +242,27 @@ def handle_merge_result(result: Any, pr_number: int, base_branch: str) -> None:
             message = getattr(result, "message", None)
             sha = getattr(result, "sha", None)
         except AttributeError:
-            # Fallback for unexpected types. `sha` is intentionally not set here:
-            # it is only read in the `if merged:` branch below, and this path
-            # forces merged=False.
             merged = False
             message = str(result)
+            sha = None
 
     if merged:
-        logger.info("  PR #%d merged into %s via squash. sha=%s", pr_number, base_branch, sha)
-    elif queued:
-        # A merge-queue repo does not merge synchronously: the PR is enqueued and
-        # the queue merges it server-side. This is success, not a failure.
-        logger.info("  PR #%d enqueued in the %s merge queue. %s", pr_number, base_branch, message)
-    else:
-        logger.error("  Failed to merge PR #%d. API message: %s", pr_number, message)
+        return _PrMergeOutcome(
+            pr_number,
+            _MergeStatus.MERGED,
+            f"merged into {base_branch} via squash; sha={sha}",
+        )
+    if queued:
+        return _PrMergeOutcome(
+            pr_number,
+            _MergeStatus.QUEUED,
+            f"enqueued in the {base_branch} merge queue; {message}",
+        )
+    return _PrMergeOutcome(
+        pr_number,
+        _MergeStatus.FAILED,
+        f"merge API did not merge PR: {message}",
+    )
 
 
 def _gh_json(args: list[str]) -> Any:
@@ -414,10 +463,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _emit_pr_merge_error(json_output: bool) -> int:
-    if json_output:
-        emit_json_status(1)
-    return 1
+def _emit_pr_merge_error(json_output: bool, message: str = "setup failed") -> int:
+    return _emit_merge_summary(
+        [],
+        requested=0,
+        json_output=json_output,
+        forced_exit_code=1,
+        message=message,
+    )
 
 
 def _resolve_repo_name(repo_arg: str | None) -> str | None:
@@ -461,26 +514,35 @@ def _attempt_pr_merge(
     head_sha: str,
     base_branch: str,
     dry_run: bool,
-) -> None:
+) -> _PrMergeOutcome:
     if dry_run:
         logger.info("[DRY-RUN] Would merge PR #%d via squash", pr_number)
-        return
+        return _PrMergeOutcome(
+            pr_number,
+            _MergeStatus.SKIPPED,
+            "dry-run suppressed merge",
+        )
 
-    try:
-        result = _merge_pr(repo_name, pr_number, head_sha)
-        handle_merge_result(result, pr_number, base_branch)
-    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
-        logger.error("  Error merging PR #%d: %s", pr_number, exc)
+    result = _merge_pr(repo_name, pr_number, head_sha)
+    return handle_merge_result(result, pr_number, base_branch)
 
 
-def _process_pr(repo_name: str, pr: dict[str, Any], push_all: bool, dry_run: bool) -> None:
+def _process_pr(
+    repo_name: str,
+    pr: dict[str, Any],
+    push_all: bool,
+    dry_run: bool,
+) -> _PrMergeOutcome:
     pr_number = int(pr["number"])
     head_branch = str(pr.get("headRefName") or "")
     head_sha = str(pr.get("headRefOid") or "")
     base_branch = str(pr.get("baseRefName") or "main")
     if not head_sha:
-        logger.error("  Unable to retrieve head commit for PR #%d", pr_number)
-        return
+        return _PrMergeOutcome(
+            pr_number,
+            _MergeStatus.FAILED,
+            "head commit is missing",
+        )
 
     logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
     success = _checks_pass_or_legacy(repo_name, pr_number, head_sha)
@@ -490,14 +552,25 @@ def _process_pr(repo_name: str, pr: dict[str, Any], push_all: bool, dry_run: boo
         try_push_head_branch(head_branch, dry_run)
 
     if not success:
-        logger.warning("  CI/CD checks not successful for PR #%d. Skipping merge.", pr_number)
-        return
+        return _PrMergeOutcome(
+            pr_number,
+            _MergeStatus.BLOCKED,
+            "CI/CD checks are not successful",
+        )
 
     logger.info("  CI/CD checks passed for PR #%d. Attempting merge...", pr_number)
     if not push_all and not dry_run:
         try_push_head_branch(head_branch, dry_run)
 
-    _attempt_pr_merge(repo_name, pr_number, head_sha, base_branch, dry_run)
+    return _attempt_pr_merge(repo_name, pr_number, head_sha, base_branch, dry_run)
+
+
+def _pr_number_or_none(pr: dict[str, Any]) -> int | None:
+    """Return the PR number when the listing row contains a valid integer."""
+    try:
+        return int(pr["number"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _process_open_prs(
@@ -505,35 +578,144 @@ def _process_open_prs(
     prs: list[dict[str, Any]],
     push_all: bool,
     dry_run: bool,
-) -> None:
+) -> list[_PrMergeOutcome]:
+    outcomes: list[_PrMergeOutcome] = []
     for pr in prs:
-        _process_pr(repo_name, pr, push_all=push_all, dry_run=dry_run)
+        try:
+            outcomes.append(_process_pr(repo_name, pr, push_all=push_all, dry_run=dry_run))
+        except KeyboardInterrupt:
+            outcomes.append(
+                _PrMergeOutcome(
+                    _pr_number_or_none(pr),
+                    _MergeStatus.INTERRUPTED,
+                    "processing interrupted",
+                )
+            )
+            break
+        except Exception as exc:
+            outcomes.append(
+                _PrMergeOutcome(
+                    _pr_number_or_none(pr),
+                    _MergeStatus.FAILED,
+                    f"{type(exc).__name__}: {exc}",
+                )
+            )
+    return outcomes
+
+
+def _merge_totals(outcomes: list[_PrMergeOutcome]) -> dict[str, int]:
+    """Count outcomes by every supported terminal status."""
+    totals = {status.value: 0 for status in _MergeStatus}
+    for outcome in outcomes:
+        totals[outcome.status.value] += 1
+    return totals
+
+
+def _merge_exit_code(
+    outcomes: list[_PrMergeOutcome],
+    requested: int,
+    *,
+    interrupted: bool = False,
+) -> int:
+    """Return the command exit status for a completed or interrupted batch."""
+    statuses = {outcome.status for outcome in outcomes}
+    if interrupted or _MergeStatus.INTERRUPTED in statuses:
+        return 130
+    if len(outcomes) != requested:
+        return 1
+    if statuses & {_MergeStatus.BLOCKED, _MergeStatus.FAILED}:
+        return 1
+    return 0
+
+
+def _emit_merge_summary(
+    outcomes: list[_PrMergeOutcome],
+    requested: int,
+    *,
+    json_output: bool,
+    interrupted: bool = False,
+    forced_exit_code: int | None = None,
+    message: str | None = None,
+) -> int:
+    """Log and optionally serialize the complete merge-batch summary."""
+    totals = _merge_totals(outcomes)
+    exit_code = (
+        forced_exit_code
+        if forced_exit_code is not None
+        else _merge_exit_code(outcomes, requested, interrupted=interrupted)
+    )
+
+    for outcome in outcomes:
+        logger.info(
+            "pr_merge_result pr=%s status=%s detail=%s",
+            outcome.pr_number,
+            outcome.status.value,
+            outcome.detail,
+        )
+    logger.info(
+        "pr_merge_summary requested=%d processed=%d totals=%s exit_code=%d",
+        requested,
+        len(outcomes),
+        totals,
+        exit_code,
+    )
+
+    if json_output:
+        emit_json_status(
+            exit_code,
+            message,
+            results=[outcome.as_dict() for outcome in outcomes],
+            totals=totals,
+            requested=requested,
+            processed=len(outcomes),
+        )
+    return exit_code
 
 
 def main() -> int:
     """Serve as the main entry point for PR merge automation."""
     parser = _build_arg_parser()
     args = parser.parse_args()
-    configure_github_throttle_from_args(args)
 
-    repo_name = _resolve_repo_name(args.repo)
-    if not repo_name:
+    try:
+        configure_github_throttle_from_args(args)
+        repo_name = _resolve_repo_name(args.repo)
+        if not repo_name:
+            return _emit_pr_merge_error(args.json, "repository could not be resolved")
+
+        logger.info("Working with repository: %s", repo_name)
+        if not _verify_repo_access(repo_name):
+            return _emit_pr_merge_error(args.json, "repository access failed")
+
+        _update_main_branch(args.dry_run)
+        prs = _list_open_prs_for_cli(repo_name)
+        if prs is None:
+            return _emit_pr_merge_error(args.json, "pull-request listing failed")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.error("PR merge setup failed: %s", exc)
         return _emit_pr_merge_error(args.json)
+    except KeyboardInterrupt:
+        logger.warning("PR merge interrupted before batch discovery completed")
+        return _emit_merge_summary(
+            [],
+            requested=0,
+            json_output=args.json,
+            interrupted=True,
+            message="interrupted before PR batch discovery completed",
+        )
 
-    logger.info("Working with repository: %s", repo_name)
-    if not _verify_repo_access(repo_name):
-        return _emit_pr_merge_error(args.json)
-
-    _update_main_branch(args.dry_run)
-    prs = _list_open_prs_for_cli(repo_name)
-    if prs is None:
-        return _emit_pr_merge_error(args.json)
-
-    _process_open_prs(repo_name, prs, push_all=args.push_all, dry_run=args.dry_run)
-    logger.info("\nDone processing all open PRs.")
-    if args.json:
-        emit_json_status(0)
-    return 0
+    outcomes = _process_open_prs(
+        repo_name,
+        prs,
+        push_all=args.push_all,
+        dry_run=args.dry_run,
+    )
+    return _emit_merge_summary(
+        outcomes,
+        requested=len(prs),
+        json_output=args.json,
+        message="PR merge batch complete",
+    )
 
 
 if __name__ == "__main__":
