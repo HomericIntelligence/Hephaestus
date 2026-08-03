@@ -93,6 +93,7 @@ _IMPLEMENTATION_REPLY_BODY_RE = re.compile(
     r"(?s)\A(.*)\n\n<!-- hephaestus-implementation-reply:[0-9a-f]{24} -->\n"
     r"<!-- hephaestus-implementation-batch:([0-9a-f]{32}) -->\Z"
 )
+_FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 def _parse_included_http_response(
@@ -827,7 +828,7 @@ class PipelineGitHub:
         """Return whether a fresh PR state is open, unarmed, and on the reviewed head."""
         return bool(
             isinstance(expected_head_sha, str)
-            and re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+            and _FULL_COMMIT_SHA_RE.fullmatch(expected_head_sha)
             and isinstance(state, dict)
             and str(state.get("state") or "").upper() == "OPEN"
             and state.get("autoMergeRequest") is None
@@ -1570,7 +1571,7 @@ class PipelineGitHub:
         candidate_ids = tuple(sorted(str(thread_id) for thread_id in replies))
         if (
             not candidate_ids
-            or not re.fullmatch(r"[0-9a-f]{40}", expected_head_sha)
+            or _FULL_COMMIT_SHA_RE.fullmatch(expected_head_sha) is None
             or re.fullmatch(r"[0-9a-f]{32}", batch_nonce) is None
         ):
             return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
@@ -1614,13 +1615,20 @@ class PipelineGitHub:
                     pr_number, expected_head_sha, thread_id, reply, batch_nonce
                 )
                 live = self._review_thread_snapshot(pr_number, thread_id)
-                if (
-                    not isinstance(live, dict)
-                    or live.get("isResolved") is not False
-                    or not self._pr_is_current_open_head(live.get("pr_state"), expected_head_sha)
-                ):
+                if not isinstance(live, dict) or live.get("isResolved") is not False:
                     blocked.append(thread_id)
                     continue
+                if not self._pr_is_current_open_head(live.get("pr_state"), expected_head_sha):
+                    # The shared handoff has just observed the exact pushed
+                    # head. A later per-thread GraphQL read can still lag that
+                    # fact briefly. Treat it as a retryable host-visibility
+                    # race; the outer retry rereads PR state and classifies a
+                    # real head move as stale before posting anything.
+                    return ImplementationThreadReplyResult(
+                        retryable_thread_ids=candidate_ids,
+                        retryable=True,
+                        visibility_lag=True,
+                    )
                 pull_request_id = live.get("pr_node_id")
                 if not isinstance(pull_request_id, str) or not pull_request_id:
                     blocked.append(thread_id)
@@ -1796,7 +1804,7 @@ class PipelineGitHub:
             or "" in expected_ids
             or set(resolved_thread_ids) & set(feedback)
             or expected_ids != set(resolved_thread_ids) | set(feedback)
-            or not re.fullmatch(r"[0-9a-f]{40}", reviewed_head_sha)
+            or _FULL_COMMIT_SHA_RE.fullmatch(reviewed_head_sha) is None
             or self._skip(
                 f"reconcile {len(candidate_ids)} reviewer-validated threads on PR #{pr_number}"
             )

@@ -135,9 +135,11 @@ class ImplementationThreadReplyResult:
     GitHub object. ``retryable_thread_ids`` identifies only replies whose host
     outcome is transport/read-ambiguous. An ordinary ``blocked_thread_ids``
     result means the saved snapshot is stale and must return through a fresh
-    reviewer pass rather than replay. Direct thread replies never create a
-    review-level envelope, so there is no review ownership conflict state to
-    recover or preserve.
+    reviewer pass rather than replay. ``visibility_lag`` distinguishes a
+    second GitHub thread read that has not yet observed the just-pushed head;
+    the caller consumes its separate bounded backoff rather than transport
+    retries. Implementation replies are submitted through one review-level
+    envelope so every response from a pass remains batched.
     """
 
     replied_thread_ids: tuple[str, ...] = ()
@@ -145,6 +147,7 @@ class ImplementationThreadReplyResult:
     receipts: tuple[dict[str, Any], ...] = ()
     retryable_thread_ids: tuple[str, ...] = ()
     retryable: bool = False
+    visibility_lag: bool = False
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, 
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
+    ImplementationThreadReplyResult,
     JobRequest,
     StageOutcome,
     implementation as implementation_module,
@@ -1591,14 +1593,22 @@ class TestCommitPushAndPrCreate:
     ) -> None:
         """The writer posts one [Response] reply per addressed review thread."""
         stage = ImplementationStage()
-        github = FakeStageGitHub()
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None}
+        )
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
         item.payload.update(
             {
                 "implementation_remediation": True,
                 "remediation_thread_snapshots": [
-                    {"id": "thread-1", "path": "a.py", "line": 3, "body": "fix it"}
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
                 ],
                 "remediation_output": {
                     "addressed": ["thread-1"],
@@ -1613,8 +1623,447 @@ class TestCommitPushAndPrCreate:
             ctx,
         )
 
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
         assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
         assert "implementation_remediation" not in item.payload
+
+    def test_remediation_reply_handoff_waits_for_github_head_visibility(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A post-push visibility lag retries the exact response batch without another commit."""
+
+        class HeadVisibilityLagGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self._states = deque(
+                    [
+                        {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
+                        {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+                    ]
+                )
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return self._states.popleft() if self._states else None
+
+        stage = ImplementationStage()
+        github = HeadVisibilityLagGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+
+        assert "pending_implementation_reply_handoff" in item.payload
+        assert "remediation_reply_error" not in item.payload
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
+        )
+        assert item.payload["retry_delay_s"] == 1.0
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
+        assert "pending_implementation_reply_handoff" not in item.payload
+        assert "implementation_remediation" not in item.payload
+
+    def test_remediation_reply_handoff_retries_a_transient_pr_state_read(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed PR-state read preserves the exact batch for one host-only retry."""
+
+        class TransientReadGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self._states = deque(
+                    [
+                        None,
+                        {
+                            "state": "OPEN",
+                            "headRefOid": "b" * 40,
+                            "autoMergeRequest": None,
+                        },
+                    ]
+                )
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return self._states.popleft() if self._states else None
+
+        stage = ImplementationStage()
+        github = TransientReadGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_retry"
+        )
+        assert "pending_implementation_reply_handoff" in item.payload
+        assert not any(
+            name == "post_implementation_thread_replies" for name, _ in github.mutation_log
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert (
+            github.mutation_log.count(("post_implementation_thread_replies", (1001, ("thread-1",))))
+            == 1
+        )
+
+    def test_remediation_reply_handoff_backoffs_for_a_lagging_thread_snapshot(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Adapter-side head lag uses the visibility delay rather than transport retries."""
+
+        class ThreadSnapshotLagGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": "b" * 40,
+                        "autoMergeRequest": None,
+                    }
+                )
+                self._reply_results = deque(
+                    [
+                        ImplementationThreadReplyResult(
+                            retryable_thread_ids=("thread-1",),
+                            retryable=True,
+                            visibility_lag=True,
+                        )
+                    ]
+                )
+
+            def post_implementation_thread_replies(
+                self,
+                pr_number: int,
+                *,
+                expected_head_sha: str,
+                threads: list[dict[str, Any]],
+                replies: dict[str, str],
+                batch_nonce: str,
+            ) -> ImplementationThreadReplyResult:
+                if self._reply_results:
+                    return self._reply_results.popleft()
+                return super().post_implementation_thread_replies(
+                    pr_number,
+                    expected_head_sha=expected_head_sha,
+                    threads=threads,
+                    replies=replies,
+                    batch_nonce=batch_nonce,
+                )
+
+        stage = ImplementationStage()
+        github = ThreadSnapshotLagGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+        item.state = "PR_CREATE"
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
+        )
+        assert item.payload["retry_delay_s"] == 1.0
+        assert "pending_implementation_reply_handoff_retries" not in item.payload
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert (
+            github.mutation_log.count(("post_implementation_thread_replies", (1001, ("thread-1",))))
+            == 1
+        )
+
+    def test_remediation_reply_handoff_reconstructs_after_restart_without_new_commit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restart replays its exact GitHub-journaled batch without another agent or commit."""
+
+        class TransientReadGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self._states = deque(
+                    [
+                        None,
+                        {
+                            "state": "OPEN",
+                            "headRefOid": "b" * 40,
+                            "autoMergeRequest": None,
+                        },
+                    ]
+                )
+
+            def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+                del pr_number
+                return self._states.popleft() if self._states else None
+
+        stage = ImplementationStage()
+        github = TransientReadGitHub()
+        ctx = make_ctx(github=github)
+        publisher = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        publisher.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "review_commit_sha": "a" * 40,
+                        "pr_state": {
+                            "state": "OPEN",
+                            "headRefOid": "a" * 40,
+                            "autoMergeRequest": None,
+                        },
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Verified the already-pushed guard."},
+                },
+            }
+        )
+
+        # The original writer records its exact, already-validated response
+        # before the process is interrupted after its push.
+        stage.on_job_done(
+            publisher,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+
+        resumed = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        # The normal restarted read sees the writer's new head and may see a
+        # relocated diff anchor.  These mutable fields must not invalidate an
+        # otherwise identical source-review conversation.
+        post_push_snapshots = [
+            {
+                **publisher.payload["remediation_thread_snapshots"][0],
+                "path": "renamed.py",
+                "line": 97,
+                "body": "fix it at its new location",
+                "pr_state": {
+                    "state": "OPEN",
+                    "headRefOid": "b" * 40,
+                    "autoMergeRequest": None,
+                },
+            }
+        ]
+        resumed.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": post_push_snapshots,
+                "remediation_thread_snapshots": post_push_snapshots,
+            }
+        )
+
+        assert stage.step(resumed, ctx) == Continue(next_state="PR_CREATE")
+        assert "pending_implementation_reply_handoff" in resumed.payload
+        assert "remediation_output" not in resumed.payload
+
+        resumed.state = "PR_CREATE"
+        assert stage.step(resumed, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_retry"
+        )
+        assert stage.step(resumed, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert (
+            github.mutation_log.count(("post_implementation_thread_replies", (1001, ("thread-1",))))
+            == 1
+        )
+
+    def test_remediation_reply_handoff_retries_a_transient_journal_write_without_a_new_commit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An immutable-journal write failure retries only the prepared batch."""
+
+        class TransientJournalGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_state={
+                        "state": "OPEN",
+                        "headRefOid": "b" * 40,
+                        "autoMergeRequest": None,
+                    }
+                )
+                self.journal_calls = 0
+
+            def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+                self.journal_calls += 1
+                if self.journal_calls == 1:
+                    raise OSError("temporary GitHub outage")
+                super().append_issue_comment(issue_number, marker, body)
+
+        stage = ImplementationStage()
+        github = TransientJournalGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+
+        assert github.journal_calls == 1
+        assert "pending_implementation_reply_handoff" in item.payload
+        assert "pending_implementation_reply_handoff_journal" in item.payload
+        assert item.attempts.get("implement", 0) == 0
+
+        item.state = "PR_CREATE"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "PR #1001 ready for review"
+        )
+        assert github.journal_calls == 2
+        assert "pending_implementation_reply_handoff_journal" not in item.payload
+        assert (
+            github.mutation_log.count(("post_implementation_thread_replies", (1001, ("thread-1",))))
+            == 1
+        )
+
+    def test_remediation_reply_handoff_rejects_no_commit_on_the_source_review_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A no-op run may not answer a thread against unchanged reviewed code."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None}
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "fix it",
+                        "review_commit_sha": "a" * 40,
+                        "comments": [{"id": "comment-1", "author": "reviewer", "body": "fix it"}],
+                    }
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] This must not be posted."},
+                },
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value=False), ctx)
+
+        assert item.payload["remediation_reply_error"] is True
+        assert "pending_implementation_reply_handoff" not in item.payload
 
     def test_commit_push_requests_git_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """COMMIT_PUSH_WAIT submits the commit_push GitJob."""

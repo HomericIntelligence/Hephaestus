@@ -17,6 +17,10 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobResult,
 )
+from hephaestus.automation.pipeline.reply_handoff import (
+    implementation_reply_handoff_journal_entry,
+    journaled_implementation_reply_handoff,
+)
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
@@ -47,6 +51,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
+from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -1950,6 +1955,15 @@ class TestReviewThreadLifecycle:
             "replies": {"thread-1": "Fixed the first concern."},
             "batch_nonce": "b" * 32,
         }
+        assert (
+            _implementation_reply_handoff(
+                "c" * 64,
+                [self._thread("thread-2", 4, "second")],
+                {"thread-2": "Fixed the second concern."},
+                "d" * 32,
+            )
+            is not None
+        )
         thread["body"] = "mutated after the handoff"
         assert handoff["threads"][0]["body"] != thread["body"]
         assert (
@@ -1961,6 +1975,68 @@ class TestReviewThreadLifecycle:
         assert _implementation_reply_handoff("a" * 40, ["not-a-thread"], {}, "b" * 32) is None
         assert (
             _implementation_reply_handoff("a" * 40, [{"id": ""}], {"": "fixed"}, "b" * 32) is None
+        )
+
+    def test_implementation_reply_handoff_journal_requires_actor_and_exact_source_comments(
+        self,
+    ) -> None:
+        """Recovery binds to our immutable source comments, not mutable anchors."""
+        thread = self._thread("thread-1", 3, "first")
+        handoff = _implementation_reply_handoff(
+            "a" * 40,
+            [thread],
+            {"thread-1": "Fixed the first concern."},
+            "b" * 32,
+        )
+        assert handoff is not None
+        entry = implementation_reply_handoff_journal_entry(1001, handoff)
+        assert entry is not None
+        _marker, body = entry
+        assert body.splitlines()[1].startswith("<!-- ")
+
+        assert (
+            journaled_implementation_reply_handoff(
+                [IssueComment(body=body, viewer_did_author=False)],
+                pr_number=1001,
+                threads=[thread],
+            )
+            is None
+        )
+        moved_thread = {
+            **thread,
+            "path": "renamed.py",
+            "line": 999,
+            "body": "a refreshed derived summary",
+            "pr_state": {
+                "state": "OPEN",
+                "headRefOid": "c" * 40,
+                "autoMergeRequest": None,
+            },
+        }
+        recovered = journaled_implementation_reply_handoff(
+            [IssueComment(body=body, viewer_did_author=True)],
+            pr_number=1001,
+            threads=[moved_thread],
+        )
+        assert recovered is not None
+        assert recovered["replies"] == handoff["replies"]
+        assert (
+            journaled_implementation_reply_handoff(
+                [IssueComment(body=body, viewer_did_author=True)],
+                pr_number=1001,
+                threads=[
+                    {
+                        **moved_thread,
+                        "comments": [
+                            {
+                                **moved_thread["comments"][0],
+                                "body": "an externally changed source comment",
+                            }
+                        ],
+                    }
+                ],
+            )
+            is None
         )
 
     def test_validation_receipts_require_one_complete_immutable_thread_snapshot(self) -> None:

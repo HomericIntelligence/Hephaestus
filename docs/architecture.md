@@ -1007,6 +1007,18 @@ Architectural contract:
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
+- A post-push implementation-reply handoff is an exact, bounded host-only
+  retry of one immutable response batch. A failed or partial PR-state read,
+  including a per-thread read that temporarily lags the just-pushed head,
+  preserves that batch for retry; a complete host read is required before it
+  can instead prove the batch stale. The scratchpad copy is intentionally not
+  a restart journal: before the first replay, the implementation stage writes
+  the exact response map, source-snapshot fingerprint, head, and batch nonce
+  to an immutable actor-owned GitHub journal record, retrying only that append
+  on a transient host failure. A restarted loop can recover only that exact
+  record when its immutable source-comment snapshots still match; the journal
+  is a machine recovery artifact, not an implementation response, so the only
+  human-facing `[Response]` remains anchored to the source review thread.
 - The reviewer validates each implementation reply against the current diff;
   it resolves validated threads or posts corrective feedback and leaves them open.
 - Validation stores an immutable fingerprint of every implementation reply
