@@ -362,6 +362,7 @@ class WorktreeManager:
                             worktree_path=worktree_path,
                             branch_name=branch_name,
                             refresh_base=refresh_base,
+                            require_exact_registered_branch=direct_worktree_nonce is not None,
                             timeout=timeout,
                         )
                     ):
@@ -517,6 +518,7 @@ class WorktreeManager:
         worktree_path: Path,
         branch_name: str,
         refresh_base: bool,
+        require_exact_registered_branch: bool,
         timeout: int | None,
     ) -> Path | None:
         """Reuse normal worktrees or clear a known-clean path before creation."""
@@ -529,6 +531,17 @@ class WorktreeManager:
                 self.worktrees[worktree_key] = existing
                 return existing
             raise BranchWorktreeOwnedError(branch_name, existing)
+        registered = (
+            self._registered_worktree_at_path(worktree_path, timeout=timeout)
+            if require_exact_registered_branch
+            else None
+        )
+        if registered is not None and registered.get("branch") != f"refs/heads/{branch_name}":
+            # The issue/nonce-derived path is only an identity when Git also
+            # proves that the path has the requested branch checked out.  A
+            # different registered branch here must never be reused when
+            # dirty or force-removed when clean.
+            raise BranchWorktreeOwnedError(branch_name, worktree_path)
         if self._reuse_existing_dirty_worktree(
             issue_number,
             worktree_key,
@@ -961,12 +974,21 @@ class WorktreeManager:
         timeout: int | None = None,
     ) -> bool:
         """Return True when ``worktree_path`` appears in git's worktree list."""
+        return self._registered_worktree_at_path(worktree_path, timeout=timeout) is not None
+
+    def _registered_worktree_at_path(
+        self,
+        worktree_path: Path,
+        *,
+        timeout: int | None = None,
+    ) -> dict[str, str] | None:
+        """Return Git's worktree record for ``worktree_path``, if registered."""
         target = worktree_path.resolve()
         for wt in self.list_worktrees(raise_on_error=True, timeout=timeout):
             path = wt.get("path")
             if path and Path(path).resolve() == target:
-                return True
-        return False
+                return wt
+        return None
 
     def _path_has_contents(self, path: Path) -> bool:
         """Return True if a path exists and contains any directory entries."""
