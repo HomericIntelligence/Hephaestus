@@ -105,6 +105,13 @@ class TestGetReferenceTargets:
         names = [t.name for t in targets]
         assert "helper.py" in names
 
+    def test_excludes_scripts_catalog(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "README.md").write_text("`orphan.py`")
+        targets = get_reference_targets(tmp_path)
+        assert scripts_dir / "README.md" not in targets
+
     def test_no_directories(self, tmp_path: Path) -> None:
         targets = get_reference_targets(tmp_path)
         assert all(t.is_file() for t in targets)
@@ -163,6 +170,36 @@ class TestFindStaleScripts:
         docs_dir.mkdir()
         (docs_dir / "guide.md").write_text("Run `python scripts/special.py` to start.")
         assert find_stale_scripts(tmp_path) == []
+
+    def test_nested_script_reference_uses_relative_path(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        nested_dir = scripts_dir / "shell"
+        nested_dir.mkdir(parents=True)
+        _write_script(nested_dir, "tool.sh")
+        (tmp_path / "README.md").write_text("Run scripts/shell/tool.sh")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_test_reference_counts_as_usage_evidence(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        _write_script(scripts_dir, "tool.py")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_tool.py").write_text("scripts/tool.py")
+        assert find_stale_scripts(tmp_path) == []
+
+    def test_catalog_entry_is_not_usage_evidence(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        _write_script(scripts_dir, "orphan.py")
+        (scripts_dir / "README.md").write_text("`orphan.py`")
+        assert find_stale_scripts(tmp_path) == ["orphan.py"]
+
+    def test_self_reference_does_not_count_as_usage(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        _write_script(scripts_dir, "orphan.py", "# scripts/orphan.py\n")
+        assert find_stale_scripts(tmp_path) == ["orphan.py"]
 
 
 class TestCheckStaleScripts:
