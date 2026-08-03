@@ -459,6 +459,46 @@ class TestPrReviewStageStep:
         )
         assert item.worktree == ""
 
+    def test_review_cleanup_retry_restarts_from_a_fresh_snapshot(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A retry never re-enters cleanup after removing its old snapshot."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            kind=ItemKind.PR,
+            state=CLEANUP_REVIEW_WORKTREE_WAIT,
+        )
+        item.worktree = "/tmp/detached-review"
+        item.branch = "review-branch"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "writer_worktree": "/tmp/implementation-writer",
+                "review_worktree": item.worktree,
+                "review_worktree_cleanup_done": "pending",
+                "review_worktree_cleanup_outcome": Disposition.RETRY.value,
+                "review_worktree_cleanup_note": "review audit format failure",
+            }
+        )
+
+        removal = stage.step(item, ctx)
+        assert isinstance(removal, JobRequest)
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.RETRY, "review audit format failure"
+        )
+        assert item.state == "ENTER"
+        assert item.worktree == ""
+        assert item.payload["writer_worktree"] == "/tmp/implementation-writer"
+
+        fresh_snapshot = stage.step(item, ctx)
+        assert isinstance(fresh_snapshot, JobRequest)
+        assert fresh_snapshot.job.descr == "direct_pr_review_worktree"
+
     def test_checkout_barrier_renews_the_proof_for_an_unchanged_head(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -954,7 +994,6 @@ class TestPrReviewStageStep:
                 "stdout_tail": f"{index + 1} passed in 0.32s",
             }
             receipts.append(receipt)
-            item.state = request.on_done_state
             stage.on_job_done(
                 item,
                 JobResult(
@@ -968,6 +1007,7 @@ class TestPrReviewStageStep:
                 ),
                 ctx,
             )
+            item.state = request.on_done_state
             request = stage.step(item, ctx)
 
         review = request
@@ -979,6 +1019,15 @@ class TestPrReviewStageStep:
         assert review.job.prompt_kwargs["host_verifications_json"] == json.dumps(
             receipts, sort_keys=True
         )
+
+        # The coordinator calls on_job_done before installing the next state.
+        # A reviewer sent from HOST_VERIFICATION_WAIT must retain its audit
+        # rather than being consumed as an additional host receipt.
+        audit = _valid_audit()
+        stage.on_job_done(item, JobResult(ok=True, value=audit), ctx)
+
+        assert item.payload["review_audit"] == audit
+        assert item.payload["host_verification_receipts"] == receipts
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
