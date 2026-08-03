@@ -39,7 +39,7 @@ _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PLANNING: set(),
     StageName.PLAN_REVIEW: {"nogo", "plan_cycles_exhausted"},
     StageName.IMPLEMENTATION: {"plan_not_go", "already_implementation_go_pr"},
-    StageName.PR_REVIEW: {"agent_error"},
+    StageName.PR_REVIEW: {"agent_error", "implementation_remediation"},
     StageName.MERGE_WAIT: {
         "not_implementation_go",
         "reviewed_head_drift",

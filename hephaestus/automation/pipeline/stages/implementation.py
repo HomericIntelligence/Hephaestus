@@ -61,16 +61,23 @@ binding contract):
 
 from __future__ import annotations
 
+import json
 import logging
+import secrets
 from collections.abc import Callable
 from typing import cast
 
+from hephaestus.automation.address_review_core import (
+    _parse_addressed_block,
+    parse_addressed_replies,
+)
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
     implementer_claude_timeout,
     implementer_model,
 )
+from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
@@ -96,6 +103,7 @@ from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
 from ..jobs import WORKTREE_MATERIALIZED_KEY
+from ..scope_retraction import is_safe_scope_retraction_path, scope_retraction_paths_for_threads
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
@@ -135,6 +143,7 @@ ENTER = "ENTER"
 GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
+REBASE_WAIT = "REBASE_WAIT"
 ADOPTED = "ADOPTED"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
@@ -148,6 +157,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     GATE: "_gate",
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
+    REBASE_WAIT: "_rebase_wait",
     ADOPTED: "_adopted",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
@@ -315,6 +325,17 @@ class ImplementationStage(Stage):
     def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
+        if (
+            item.payload.get("implementation_remediation")
+            and item.payload.pop("implementation_writer_restored", False)
+            and item.worktree
+        ):
+            # pr_review stowed this known branch writer while it created a
+            # detached, read-only snapshot.  Reuse it for remediation: trying
+            # to create a second worktree for the same PR branch would either
+            # fail the branch-ownership guard or tempt review to write there.
+            item.payload["worktree_dirty"] = False
+            return Continue(next_state=DIRTY_DECISION_WAIT)
         logger.info("implementation:%d: requesting worktree job", issue)
         adopted = bool(item.payload.get("existing_pr"))
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
@@ -416,13 +437,13 @@ class ImplementationStage(Stage):
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
             return outcome
-        # Adopted-PR path: after the (clean or salvaged) worktree is
-        # ready, skip the implement leg — the PR's code already exists;
-        # pr_review's address leg drives it from here.
+        # An adopted PR is rebased by the implementation stage before every
+        # review.  This is deliberately not reviewer work: the reviewer owns
+        # only its detached snapshot and never changes a PR branch.
         if item.payload.get("existing_pr_impl_go"):
             adopted_next = ADOPTED
         else:
-            adopted_next = ADOPTED if item.payload.get("existing_pr") else ADVISE_WAIT
+            adopted_next = REBASE_WAIT if item.payload.get("existing_pr") else ADVISE_WAIT
         if not item.payload.get("worktree_dirty"):
             return Continue(next_state=adopted_next)
         logger.info("implementation:%d: requesting dirty-worktree decision", issue)
@@ -444,6 +465,45 @@ class ImplementationStage(Stage):
             descr="dirty_decision",
         )
         return JobRequest(job, on_done_state=adopted_next)
+
+    def _rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Rebase an adopted writer branch before implementation or review.
+
+        The worker performs the deterministic, policy-preserving rebase and
+        lease-publishes the resulting head.  A reviewer therefore never
+        reuses, rebases, or pushes a writer checkout.
+        """
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_rebase_failed")
+        if item.payload.pop("rebase_complete", None):
+            return Continue(
+                next_state=(
+                    IMPLEMENT_WAIT if item.payload.get("implementation_remediation") else ADOPTED
+                )
+            )
+        state = ctx.github.gh_pr_state(item.pr)
+        if not _is_confirmed_open_unarmed(state):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_state_unverified")
+        expected_head = state.get("headRefOid") if isinstance(state, dict) else None
+        if not is_full_commit_sha(expected_head):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_head_unavailable")
+        job = GitJob(
+            repo=item.repo,
+            op="rebase",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": item.branch,
+                "expected_remote_sha": expected_head,
+            },
+            descr="rebase_writer_before_review",
+        )
+        return JobRequest(job, on_done_state=REBASE_WAIT)
 
     def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADOPTED advances to pr_review after the adopted worktree is ready."""
@@ -501,6 +561,63 @@ class ImplementationStage(Stage):
         # never replay an earlier attempt's output downstream.
         item.payload.pop("implement_error", None)
         item.payload.pop("implement_summary", None)
+        if item.payload.get("implementation_remediation"):
+            remediation_threads = item.payload.get("remediation_threads")
+            if (
+                item.pr is None
+                or not isinstance(remediation_threads, list)
+                or not remediation_threads
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "remediation_threads_invalid")
+            logger.info(
+                "implementation:%d: addressing %d review thread(s)",
+                issue,
+                len(remediation_threads),
+            )
+            scope_retraction_paths = scope_retraction_paths_for_threads(remediation_threads)
+            if scope_retraction_paths is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+            if scope_retraction_paths:
+                base_sha = item.payload.get("reviewed_pr_base_sha")
+                if not is_full_commit_sha(base_sha):
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL,
+                        "scope_retraction_base_unavailable",
+                    )
+                item.payload["scope_retraction_paths"] = scope_retraction_paths
+            else:
+                item.payload.pop("scope_retraction_paths", None)
+            job = AgentJob(
+                repo=item.repo,
+                issue=issue,
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
+                prompt_builder=get_address_review_prompt,
+                cwd=_worktree_path(item, ctx),
+                timeout_s=implementer_claude_timeout(),
+                session_agent=AGENT_IMPLEMENTER,
+                resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+                prompt_kwargs={
+                    "pr_number": item.pr,
+                    "issue_number": issue,
+                    "worktree_path": item.worktree,
+                    "threads_json": json.dumps(remediation_threads),
+                    "task_block": "\n\n".join(
+                        part
+                        for part in (
+                            f"Linked issue #{issue}: {item.payload.get('issue_title', '')}".strip(),
+                            str(item.payload.get("issue_body", "")),
+                            str(item.payload.get("pr_description", "")),
+                        )
+                        if part
+                    ),
+                    "diff_text": str(item.payload.get("pr_diff", "")),
+                    "scope_retraction_paths": scope_retraction_paths or (),
+                },
+                parse=_parse_addressed_block,
+                descr="address_review",
+            )
+            return JobRequest(job, on_done_state=TEST_WAIT)
         logger.info("implementation:%d: requesting implement job", issue)
         job = AgentJob(
             repo=item.repo,
@@ -597,6 +714,17 @@ class ImplementationStage(Stage):
             if not is_full_commit_sha(direct_base_sha):
                 return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
             kwargs["expected_remote_sha"] = direct_base_sha
+        scope_retraction_paths = item.payload.get("scope_retraction_paths")
+        if scope_retraction_paths is not None:
+            if not isinstance(scope_retraction_paths, tuple) or not all(
+                is_safe_scope_retraction_path(path) for path in scope_retraction_paths
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+            base_sha = item.payload.get("reviewed_pr_base_sha")
+            if not is_full_commit_sha(base_sha):
+                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
+            kwargs["scope_retraction_paths"] = scope_retraction_paths
+            kwargs["scope_retraction_base_sha"] = base_sha
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
@@ -630,6 +758,16 @@ class ImplementationStage(Stage):
                 item.payload["dirty_decision"] = str(result.value)
             return
 
+        if item.state == REBASE_WAIT:
+            if result.ok:
+                item.payload["rebase_complete"] = True
+            else:
+                logger.warning(
+                    "implementation:%s: writer rebase failed: %s", item.issue, result.error
+                )
+                item.payload["rebase_error"] = True
+            return
+
         if item.state == ADVISE_WAIT:
             if result.ok and result.value:
                 item.payload["advise_findings"] = result.value
@@ -648,10 +786,10 @@ class ImplementationStage(Stage):
             return
 
         if item.state == COMMIT_PUSH_WAIT:
-            self._on_commit_push_done(item, result)
+            self._on_commit_push_done(item, result, ctx)
 
     @staticmethod
-    def _on_commit_push_done(item: WorkItem, result: JobResult) -> None:
+    def _on_commit_push_done(item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Record commit+push success, no-commit skip, or git failure."""
         if result.ok:
             if not bool(result.value):
@@ -668,6 +806,7 @@ class ImplementationStage(Stage):
                 # A published branch has real commits and must not be
                 # released by terminal cleanup.
                 item.payload.pop(DIRECT_SCOPE_RESERVATION_KEY, None)
+            ImplementationStage._post_remediation_replies_after_push(item, result, ctx)
             # A successful worker result ends the consecutive-git-failure
             # streak even when no commit was produced; PR_CREATE handles skip.
             item.payload.pop("git_error_retries", None)
@@ -680,6 +819,53 @@ class ImplementationStage(Stage):
             return
         logger.warning("implementation:%s: commit+push failed: %s", item.issue, result.error)
         item.payload["git_error"] = True
+
+    @staticmethod
+    def _post_remediation_replies_after_push(
+        item: WorkItem, result: JobResult, ctx: StageContext
+    ) -> None:
+        """Post implementation responses only after the writer pushed a real commit."""
+        if not item.payload.get("implementation_remediation"):
+            return
+        receipt = result.value if isinstance(result.value, dict) else {}
+        head_sha = receipt.get("head_sha")
+        snapshots = item.payload.get("remediation_thread_snapshots")
+        if (
+            not receipt.get("pushed")
+            or not is_full_commit_sha(head_sha)
+            or not isinstance(snapshots, list)
+        ):
+            item.payload["remediation_reply_error"] = True
+            return
+        replies = parse_addressed_replies(
+            item.payload.get("remediation_output"),
+            snapshots,
+        )
+        if replies is None or item.pr is None:
+            item.payload["remediation_reply_error"] = True
+            return
+        try:
+            reply_result = ctx.github.post_implementation_thread_replies(
+                item.pr,
+                expected_head_sha=head_sha,
+                threads=snapshots,
+                replies=replies,
+                batch_nonce=secrets.token_hex(16),
+            )
+        except Exception as error:
+            logger.warning(
+                "implementation:%s: failed to post review-thread responses (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            item.payload["remediation_reply_error"] = True
+            return
+        replied = set(getattr(reply_result, "replied_thread_ids", ()))
+        if replied != set(replies) or len(getattr(reply_result, "receipts", ())) != len(replied):
+            item.payload["remediation_reply_error"] = True
+            return
+        item.payload.pop("implementation_remediation", None)
+        item.payload.pop("remediation_output", None)
 
     @staticmethod
     def _on_implement_done(item: WorkItem, result: JobResult) -> None:
@@ -699,7 +885,10 @@ class ImplementationStage(Stage):
             item.payload["implement_error"] = True
             return
         if result.value:
-            item.payload["implement_summary"] = str(result.value)
+            if item.payload.get("implementation_remediation"):
+                item.payload["remediation_output"] = result.value
+            else:
+                item.payload["implement_summary"] = str(result.value)
 
     @staticmethod
     def _on_worktree_done(item: WorkItem, result: JobResult) -> None:
@@ -1073,6 +1262,8 @@ class ImplementationStage(Stage):
         """
         if item.issue is None:  # guarded by step(); kept for type narrowing
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+        if item.payload.pop("remediation_reply_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_failed")
 
         if item.payload.get("no_commits"):
             # An item can retain a PR after an interrupted or re-entered

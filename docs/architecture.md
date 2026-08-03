@@ -146,7 +146,7 @@ flowchart LR
 
     plan_review -. "nogo (iter 3 / plan_cycles 2)" .-> planning
     implementation -. "agent_error" .-> implementation
-    pr_review -. "agent_error" .-> implementation
+    pr_review -. "agent_error / implementation_remediation" .-> implementation
     implementation -. "already_implementation_go_pr" .-> merge_wait
 ```
 
@@ -460,7 +460,8 @@ the scope's first stage so the scoped work is redone
 
 ### Cross-stage ping-pong bound
 
-Some regression edges (`pr_review → implementation` for `agent_error`)
+Some regression edges (`pr_review → implementation` for `agent_error` or
+`implementation_remediation`)
 can ping-pong. The
 [`_FAIL_BACK_CAP`](../hephaestus/automation/pipeline/coordinator.py)
 constant is the sum of every budget in
@@ -919,7 +920,13 @@ Architectural contract:
 
 PR review is the sole authority for implementation approval. Reviews and
 findings are recorded on the GitHub pull request so their history survives
-local process or agent-session loss.
+local process or agent-session loss. The implementation stage owns each PR
+branch writer, including rebase and lease-publish. PR review creates one
+detached, disposable checkout of head `H`, verifies that checkout once, submits
+one batched source-anchored review for `H`, and removes the checkout before
+handoff. A later branch push does not invalidate that posted review; only the
+final `state:implementation-go` transition requires the reviewed head to still
+be the current open, unarmed PR head.
 
 For the registered UV performance verification, the host boundary currently
 requires macOS `sandbox-exec` plus a disposable, quota-backed disk image. On
@@ -949,38 +956,40 @@ stateDiagram-v2
     [*] --> VerifyUnarmed
     VerifyUnarmed --> Review: open, complete, and unarmed
     VerifyUnarmed --> OperatorOwned: external arm or incomplete state
-    Review --> Checkout: GitHub snapshot captured
+    Review --> Checkout: GitHub snapshot H captured in detached worktree
     Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
     HostVerification --> Review: immutable snapshot verification passed
-    HostVerification --> Address: confirmed test failure or timeout, after durable no-go
-    HostVerification --> Failed: boundary/setup failure, after durable no-go
+    HostVerification --> Implementation: confirmed test failure, after durable no-go and checkout cleanup
+    HostVerification --> Failed: boundary/setup failure, after checkout cleanup
     Checkout --> Review: clean checkout matches snapshot head, no fixed check required
-    Checkout --> Review: checkout or head drift requires a fresh snapshot
+    Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
     Review --> Implementation: invalid output requires fresh implementation context
     Validate --> Post: findings normalized
-    Post --> Evaluate: GitHub review recorded
-    Evaluate --> Address: any open review thread
-    Evaluate --> Approve: no unresolved findings
-    Evaluate --> Skipped: no progress or review limit reached
-    Address --> PublishFix: changes produced
-    PublishFix --> Review: fixes published
-    Approve --> MergeReady: implementation-go durable
+    Post --> Implementation: any open review thread, after durable no-go and checkout cleanup
+    Post --> Evaluate: no open review thread
+    Evaluate --> Implementation: a late open thread, after durable no-go and checkout cleanup
+    Evaluate --> Approve: no unresolved findings; cleanup then implementation-go durable
+    Approve --> MergeReady
     MergeReady --> [*]
     Implementation --> [*]
-    Skipped --> [*]
     Failed --> [*]
 ```
 
 Architectural contract:
 
 - Every implementation review is posted to the pull request.
+- The initial review fetches and verifies one detached checkout of `H`, then
+  submits all inline findings in one GitHub review request. It neither rebases
+  nor pushes the PR branch, and its checkout is removed before it exits.
 - Actionable findings use durable inline threads. Severity describes newly
   posted findings only; it never makes an existing unresolved thread advisory.
 - Prior rounds remain visible in the PR timeline.
 - Any open review thread produces `state:implementation-no-go`; only a fresh
   review with no open threads produces `state:implementation-go`.
 - The implementation agent replies to every fixed open thread but never resolves it.
+- The implementation stage rebases and lease-publishes the writer branch before
+  review; a rebase is never performed by a reviewer checkout.
 - The reviewer validates each implementation reply against the current diff;
   it resolves validated threads or posts corrective feedback and leaves them open.
 - Validation stores an immutable fingerprint of every implementation reply
@@ -1128,7 +1137,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
-| `pr_review` | `MERGE_WAIT` | `agent_error` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
+| `pr_review` | `MERGE_WAIT` | `agent_error` or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
 

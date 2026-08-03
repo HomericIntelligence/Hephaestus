@@ -32,7 +32,6 @@ from typing import TypeGuard, cast
 
 from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
-from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.jobs import (
@@ -1829,22 +1828,27 @@ class WorkerPool:
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
 
     def _git_rebase(self, job: GitJob) -> JobResult:
-        """Rebase a checkout and optionally lease-publish a detached PR head."""
+        """Rebase an implementation writer and optionally lease-publish its head."""
         kwargs = dict(job.kwargs)
-        publish_detached_head = bool(kwargs.pop("publish_detached_head", False))
+        if "publish_detached_head" in kwargs:
+            return JobResult(
+                ok=False,
+                error="detached reviewer rebase publication is unsupported",
+            )
+        publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
         result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
         if not result:
-            if not publish_detached_head:
+            if not publish_rebased_head:
                 return JobResult(ok=False, value=False)
             return JobResult(ok=False, value={"rebased": False}, error="rebase conflicted")
-        if not publish_detached_head:
+        if not publish_rebased_head:
             return JobResult(ok=True, value=True)
         cwd = Path(str(kwargs.get("cwd") or ""))
         if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
-            return JobResult(ok=False, error="direct rebase publish arguments invalid")
-        source_sha = self._read_detached_push_head(cwd, timeout=job.timeout_s)
+            return JobResult(ok=False, error="writer rebase publish arguments invalid")
+        source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
         git_utils.push_head_to_branch(
@@ -2418,23 +2422,6 @@ class WorkerPool:
         ).stdout.strip()
         if not base:
             return JobResult(ok=False, error="review checkout base ref unavailable")
-        if job.kwargs.get("require_base_ancestor") is True:
-            # A direct, writable PR was just rebased and lease-published.  If
-            # the base advanced before this checkout barrier, retry that
-            # rewrite rather than reviewing a now-stale replacement head.
-            # Read-only fork heads and normal pipeline worktrees do not take
-            # this mutation path, so base movement must not strand them in a
-            # retry loop.
-            base_is_ancestor = git_utils.run(
-                ["git", "merge-base", "--is-ancestor", base, head],
-                cwd=worktree,
-                check=False,
-                timeout=job.timeout_s,
-            )
-            if base_is_ancestor.returncode == 1:
-                return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
-            if base_is_ancestor.returncode != 0:
-                return JobResult(ok=False, error="review checkout base ancestry check failed")
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,
@@ -2502,9 +2489,11 @@ class WorkerPool:
                 ok=False,
                 error="commit_push requires non-empty 'worktree_path' and 'issue_number' kwargs",
             )
-        retry_result = self._detached_push_retry_result(job, Path(worktree_path))
-        if retry_result is not None:
-            return retry_result
+        if "publish_detached_head" in job.kwargs:
+            return JobResult(
+                ok=False,
+                error="detached reviewer commit publication is unsupported",
+            )
         # ``commit_if_changes`` returns False for a clean worktree.  An agent
         # is instructed to leave its edits uncommitted, but a defensive
         # recovery still recognizes a clean branch that is ahead of its
@@ -2617,26 +2606,9 @@ class WorkerPool:
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is not None and not _is_full_commit_sha(expected_remote_sha):
             return JobResult(ok=False, error="direct scope base pin invalid")
-        source_sha = self._read_detached_push_head(worktree_path, timeout=job.timeout_s)
+        source_sha = self._read_publish_head(worktree_path, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
-        if bool(job.kwargs.get("publish_detached_head", False)):
-            if not isinstance(expected_remote_sha, str):
-                return JobResult(
-                    ok=False,
-                    error="detached PR push requires the reviewed remote head",
-                )
-            detached_push_result = self._publish_detached_head(
-                job,
-                branch,
-                expected_remote_sha,
-                worktree_path,
-                source_sha=source_sha,
-                timeout=job.timeout_s,
-            )
-            return detached_push_result or JobResult(
-                ok=True, value={"pushed": True, "head_sha": source_sha}
-            )
         if isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
@@ -2648,24 +2620,9 @@ class WorkerPool:
             git_utils.push_branch(branch, worktree_path, timeout=job.timeout_s)
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
-    def _detached_push_retry_result(self, job: GitJob, worktree_path: Path) -> JobResult | None:
-        """Return the push-only retry result when a detached retry receipt exists."""
-        retry_head_sha = job.kwargs.get("detached_push_retry_head_sha")
-        if retry_head_sha is None:
-            return None
-        return self._retry_detached_head_push(
-            job=job,
-            branch=str(job.kwargs.get("branch") or ""),
-            expected_remote_sha=job.kwargs.get("expected_remote_sha"),
-            source_sha=retry_head_sha,
-            worktree_path=worktree_path,
-            timeout=job.timeout_s,
-            publish_detached_head=bool(job.kwargs.get("publish_detached_head", False)),
-        )
-
     @staticmethod
-    def _read_detached_push_head(worktree_path: Path, *, timeout: int) -> str | JobResult:
-        """Read the immutable commit a detached review push is allowed to publish."""
+    def _read_publish_head(worktree_path: Path, *, timeout: int) -> str | JobResult:
+        """Read the immutable commit the implementation writer will publish."""
         try:
             head = git_utils.run(
                 ["git", "rev-parse", "HEAD"],
@@ -2674,164 +2631,10 @@ class WorkerPool:
                 timeout=timeout,
             ).stdout.strip()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return JobResult(ok=False, error="cannot bind detached review push head")
+            return JobResult(ok=False, error="cannot bind implementation publish head")
         if not _is_full_commit_sha(head):
-            return JobResult(ok=False, error="cannot bind detached review push head")
+            return JobResult(ok=False, error="cannot bind implementation publish head")
         return head
-
-    def _retry_detached_head_push(
-        self,
-        *,
-        job: GitJob,
-        branch: str,
-        expected_remote_sha: object,
-        source_sha: object,
-        worktree_path: Path,
-        timeout: int,
-        publish_detached_head: bool,
-    ) -> JobResult:
-        """Retry only the exact detached commit captured before the first push."""
-        if (
-            not publish_detached_head
-            or not branch
-            or not _is_full_commit_sha(expected_remote_sha)
-            or not _is_full_commit_sha(source_sha)
-        ):
-            return JobResult(ok=False, error="detached review retry receipt is invalid")
-        try:
-            status = git_utils.run(
-                ["git", "status", "--porcelain"],
-                cwd=worktree_path,
-                capture_output=True,
-                timeout=timeout,
-            )
-            current_head = git_utils.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=worktree_path,
-                capture_output=True,
-                timeout=timeout,
-            ).stdout.strip()
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return JobResult(
-                ok=False,
-                value={"detached_push_failure": "retry_checkout_unconfirmed"},
-                error="detached review retry checkout could not be verified",
-            )
-        if status.stdout.strip() or current_head != source_sha:
-            return JobResult(
-                ok=False,
-                value={"detached_push_failure": "retry_checkout_changed"},
-                error="detached review retry checkout changed after the failed push",
-            )
-        result = self._publish_detached_head(
-            job,
-            branch,
-            expected_remote_sha,
-            worktree_path,
-            source_sha=source_sha,
-            timeout=timeout,
-        )
-        return result or JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
-
-    def _publish_detached_head(
-        self,
-        job: GitJob,
-        branch: str,
-        expected_remote_sha: str,
-        worktree_path: Path,
-        *,
-        source_sha: str,
-        timeout: int,
-    ) -> JobResult | None:
-        """Publish a detached review commit, classifying only verified failures."""
-        try:
-            git_utils.push_head_to_branch(
-                branch,
-                expected_remote_sha,
-                worktree_path,
-                source_sha=source_sha,
-                timeout=timeout,
-            )
-        except git_utils.DetachedHeadPushRemoteHeadChangedError as exc:
-            recovery_error = self._record_detached_push_recovery(
-                job=job,
-                branch=branch,
-                worktree_path=worktree_path,
-                expected_remote_sha=expected_remote_sha,
-                source_sha=source_sha,
-            )
-            if recovery_error is not None:
-                return JobResult(
-                    ok=False,
-                    value={
-                        "detached_push_failure": "remote_changed_unrecorded",
-                        "detached_push_head_sha": source_sha,
-                    },
-                    error=f"{exc}; recovery receipt could not be recorded: {recovery_error}",
-                )
-            return JobResult(
-                ok=False,
-                value={
-                    "detached_push_failure": "remote_changed",
-                    "detached_push_head_sha": source_sha,
-                },
-                error=str(exc),
-            )
-        except git_utils.DetachedHeadPushRemoteHeadUnchangedError as exc:
-            return JobResult(
-                ok=False,
-                value={
-                    "detached_push_failure": "remote_unchanged",
-                    "detached_push_head_sha": source_sha,
-                },
-                error=str(exc),
-            )
-        except git_utils.DetachedHeadPushRemoteProbeError as exc:
-            return JobResult(
-                ok=False,
-                value={
-                    "detached_push_failure": "remote_unconfirmed",
-                    "detached_push_head_sha": source_sha,
-                },
-                error=str(exc),
-            )
-        return None
-
-    @staticmethod
-    def _record_detached_push_recovery(
-        *,
-        job: GitJob,
-        branch: str,
-        worktree_path: Path,
-        expected_remote_sha: str,
-        source_sha: str,
-    ) -> str | None:
-        """Record a drifted detached checkout before allowing a fresh review."""
-        issue = job.kwargs.get("issue_number")
-        pr = job.kwargs.get("pr_number")
-        repo_root = job.kwargs.get("repo_root")
-        if (
-            isinstance(issue, bool)
-            or not isinstance(issue, int)
-            or isinstance(pr, bool)
-            or not isinstance(pr, int)
-            or not isinstance(repo_root, str)
-            or not repo_root
-        ):
-            return "detached review recovery receipt context is invalid"
-        try:
-            record_direct_review_recovery(
-                repo_root=Path(repo_root),
-                issue=issue,
-                pr=pr,
-                worktree=worktree_path,
-                branch=branch,
-                expected_remote_sha=expected_remote_sha,
-                source_sha=source_sha,
-            )
-        except (OSError, RuntimeError, ValueError) as error:
-            return str(error)
-        return None
 
     @staticmethod
     def _commit_push_requires_publish(
@@ -2863,12 +2666,6 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot verify direct scope branch ancestry")
         if ahead.stdout.strip() != "0":
             return True
-        if bool(job.kwargs.get("publish_detached_head", False)):
-            # ``expected_remote_sha`` is the reviewed PR head in this mode,
-            # not a coordinator-created direct-scope reservation. A clean
-            # checkout at that head has nothing to publish, and releasing the
-            # branch would delete an adopted open PR.
-            return False
         released = git_utils.delete_reserved_branch_if_unchanged(
             branch,
             expected_remote_sha,
