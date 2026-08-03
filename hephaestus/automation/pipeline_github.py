@@ -65,8 +65,6 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.review_journal import (
     IssueComment,
     blocked_audit_recovery_body,
-    is_plan_comment,
-    is_plan_review_comment,
 )
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
@@ -383,9 +381,10 @@ class PipelineGitHub:
             if not isinstance(body, str):
                 continue
             stripped = body.lstrip()
-            if is_plan_review_comment(stripped):
+            first_line = stripped.splitlines()[0] if stripped else ""
+            if first_line in {PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX}:
                 continue
-            if is_plan_comment(stripped):
+            if first_line in {PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER}:
                 return True
         return False
 
