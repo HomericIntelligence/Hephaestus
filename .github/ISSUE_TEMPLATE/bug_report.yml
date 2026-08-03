@@ -37,7 +37,7 @@ body:
       label: Environment
       description: Python version, OS, hephaestus version.
       placeholder: |
-        - Python: 3.10
+        - Python: 3.13
         - OS: Ubuntu 22.04
         - hephaestus: 0.3.0
     validations:

@@ -7,7 +7,7 @@ to avoid defeating the lazy-export design of the package __init__.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -166,4 +166,4 @@ class ImplementerStateProtocol(Protocol):
 # structural Protocol cannot match both. StateStoreProtocol is a real union
 # TypeAlias — usable as a type hint (``def f(s: StateStoreProtocol)``) and in
 # ``isinstance(x, (PlannerStateProtocol, ImplementerStateProtocol))``.
-StateStoreProtocol: TypeAlias = "PlannerStateProtocol | ImplementerStateProtocol"
+type StateStoreProtocol = "PlannerStateProtocol | ImplementerStateProtocol"

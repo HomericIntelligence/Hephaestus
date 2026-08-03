@@ -28,7 +28,7 @@ setup() {
 # ── python3-venv fallback (install.sh:259-264 rewrite) ────────────────────────
 @test "python3-venv: first attempt succeeds → 1 pass, 0 fail" {
     apt_install() { return 0; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
@@ -39,7 +39,7 @@ setup() {
 @test "python3-venv: first fails, fallback succeeds → 1 pass, 0 fail" {
     _n=0
     apt_install() { _n=$((_n+1)); [ "$_n" -eq 1 ] && return 1; return 0; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
@@ -49,7 +49,7 @@ setup() {
 
 @test "python3-venv: both fail → 0 pass, 1 fail" {
     apt_install() { return 1; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
@@ -122,7 +122,7 @@ setup() {
 #    The rewritten if-block must NOT exhibit that behaviour. ─────────────────
 @test "regression: success path always increments exactly one counter" {
     apt_install() { return 0; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"

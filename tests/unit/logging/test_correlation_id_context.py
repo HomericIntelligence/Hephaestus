@@ -15,7 +15,7 @@ from hephaestus.logging.utils import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_correlation_id() -> Generator[None, None, None]:
+def _reset_correlation_id() -> Generator[None]:
     """Reset correlation ID to None before each test."""
     token = _correlation_id_var.set(None)
     try:

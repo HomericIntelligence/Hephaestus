@@ -62,7 +62,6 @@ ALLOWED_EXTRA_COPYLEFT: dict[str, frozenset[str]] = {
 # test suite cross-checks both keys and values against NOTICE and against real
 # installed metadata when the dep is actually installable.
 STATIC_FALLBACK_LICENSES: dict[str, list[str]] = {
-    "tomli": ["MIT"],  # python_version < '3.11'; NOTICE:58
     "tzdata": ["Apache-2.0"],  # platform_system == 'Windows'; NOTICE:28
 }
 
@@ -98,7 +97,7 @@ LICENSE_ALIASES: dict[str, str] = {
 # Marker matrix: any-satisfiable => the dep is distributed somewhere, so its
 # license must be checked. Spans Python floor..current AND platforms, so a
 # platform-gated dep (e.g. tzdata on Windows) is NOT silently dropped on Linux CI.
-_PY = ("3.10", "3.13")
+_PY = ("3.13",)
 _PLAT = (
     {"sys_platform": "linux", "platform_system": "Linux"},
     {"sys_platform": "win32", "platform_system": "Windows"},
@@ -121,8 +120,8 @@ def _installable_in_current_env(req: Requirement) -> bool:
     """True if req.marker holds for the CURRENT interpreter/platform (some extra).
 
     A dep selected by the cross-version scope matrix may still be correctly
-    absent in this interpreter — e.g. ``tomli; python_version < '3.11'`` is not
-    installed on Python 3.13. We only demand metadata for deps that THIS env
+    absent in this interpreter due to an environment marker. We only demand metadata for deps that
+    THIS env
     would actually install; others are classified on a different CI Python row.
     """
     if req.marker is None:

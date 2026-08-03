@@ -25,8 +25,8 @@ Classic branch protection requires:
 | Required context | Source |
 |------------------|--------|
 | `required-checks-gate` | `.github/workflows/_required.yml` |
-| `test (ubuntu-latest, 3.12, unit)` | `.github/workflows/test.yml` |
-| `test (ubuntu-latest, 3.12, integration)` | `.github/workflows/test.yml` |
+| `test (ubuntu-latest, 3.13, unit)` | `.github/workflows/test.yml` |
+| `test (ubuntu-latest, 3.13, integration)` | `.github/workflows/test.yml` |
 
 The active ruleset requires these direct contexts:
 

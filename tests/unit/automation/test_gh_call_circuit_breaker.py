@@ -12,7 +12,7 @@ import hephaestus.github.client as client_module
 
 
 @pytest.fixture(autouse=True)
-def _reset_breaker() -> Generator[None, None, None]:
+def _reset_breaker() -> Generator[None]:
     """Reset the GitHub API circuit breaker before each test."""
     client_module._GH_BREAKER.reset()
     yield

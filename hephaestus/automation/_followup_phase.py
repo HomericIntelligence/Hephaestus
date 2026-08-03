@@ -11,7 +11,7 @@ compacting it, filing follow-up issues, and finally marking the issue
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -94,7 +94,7 @@ class FollowUpPhase(StageMixin):
         # Mark as completed
         with self.state_lock:
             state.phase = ImplementationPhase.COMPLETED
-            state.completed_at = datetime.now(timezone.utc)
+            state.completed_at = datetime.now(UTC)
         impl._save_state(state)
 
     def _parse_follow_up_items(self, text: str) -> list[dict[str, Any]]:

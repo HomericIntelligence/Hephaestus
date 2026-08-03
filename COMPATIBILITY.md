@@ -10,8 +10,8 @@ Upgrading across a major version? See the [migration guide](docs/MIGRATION.md).
 
 ## Supported Python Versions
 
-Hephaestus supports **Python 3.10+** (`requires-python = ">=3.10"` in
-`pyproject.toml`). CI exercises the package on 3.10, 3.11, 3.12, and 3.13. Dropping
+Hephaestus supports **Python 3.13** (`requires-python = ">=3.13,<3.14"` in
+`pyproject.toml`). CI exercises the package on Python 3.13. Dropping
 support for a Python minor version is treated as a backwards-incompatible change and
 follows the deprecation policy below.
 

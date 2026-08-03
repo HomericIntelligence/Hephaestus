@@ -2242,7 +2242,7 @@ class TestGhCallThrottle:
     """Tests for the per-thread `gh` call throttle inside _gh_call."""
 
     @pytest.fixture(autouse=True)
-    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
         # Reset the per-thread throttle state and force a known rate so tests
         # don't inherit clock state from earlier suite calls.
         client_module._GH_THROTTLE = threading.local()

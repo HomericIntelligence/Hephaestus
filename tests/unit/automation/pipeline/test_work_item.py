@@ -1,6 +1,6 @@
 """Tests for WorkItem, ItemKind, ItemResult, and HistoryEvent."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -35,7 +35,7 @@ class TestHistoryEvent:
 
     def test_history_event_creation(self) -> None:
         """Create a HistoryEvent with required and optional fields."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         event = HistoryEvent(
             timestamp=now, stage=StageName.PLANNING, state="in_progress", note="test"
         )
@@ -46,16 +46,12 @@ class TestHistoryEvent:
 
     def test_history_event_default_note(self) -> None:
         """HistoryEvent.note defaults to empty string."""
-        event = HistoryEvent(
-            timestamp=datetime.now(timezone.utc), stage=StageName.REPO, state="queued"
-        )
+        event = HistoryEvent(timestamp=datetime.now(UTC), stage=StageName.REPO, state="queued")
         assert event.note == ""
 
     def test_history_event_frozen(self) -> None:
         """HistoryEvent is frozen (immutable)."""
-        event = HistoryEvent(
-            timestamp=datetime.now(timezone.utc), stage=StageName.REPO, state="queued"
-        )
+        event = HistoryEvent(timestamp=datetime.now(UTC), stage=StageName.REPO, state="queued")
         with pytest.raises(AttributeError):
             event.state = "modified"  # type: ignore
 
@@ -164,9 +160,9 @@ class TestWorkItem:
     def test_work_item_add_history_event(self) -> None:
         """add_history_event records stage transitions."""
         item = WorkItem(repo="repo", kind=ItemKind.REPO)
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         item.add_history_event(StageName.PLANNING, "running", note="started")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         assert len(item.history) == 1
         event = item.history[0]

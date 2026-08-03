@@ -8,8 +8,8 @@ Defines data structures for:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -28,7 +28,7 @@ from .protocol import PLAN_COMMENT_MARKER as PLAN_COMMENT_MARKER
 __all__ = ["PLAN_COMMENT_MARKER"]
 
 
-class IssueState(str, Enum):
+class IssueState(StrEnum):
     """GitHub issue/PR state.
 
     ``MERGED`` only ever applies to pull requests, but PRs share the issues
@@ -75,7 +75,7 @@ class IssueInfo(BaseModel):
         return self.number == other.number
 
 
-class ImplementationPhase(str, Enum):
+class ImplementationPhase(StrEnum):
     """Phase of issue implementation."""
 
     PLANNING = "planning"
@@ -102,7 +102,7 @@ class ImplementationState(BaseModel):
     pr_number: int | None = None
     session_id: str | None = None
     session_agent: str | None = None
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     error: str | None = None
     attempts: int = 0

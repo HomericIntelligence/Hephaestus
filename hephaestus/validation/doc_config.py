@@ -37,7 +37,7 @@ _tomllib = import_tomllib()
 
 
 def _load_pyproject(repo_root: Path) -> dict[str, Any]:
-    """Load ``pyproject.toml`` using tomllib/tomli.
+    """Load ``pyproject.toml`` using the standard-library ``tomllib``.
 
     Args:
         repo_root: Root directory of the repository.
@@ -57,8 +57,7 @@ def _load_pyproject(repo_root: Path) -> dict[str, Any]:
 
     if _tomllib is None:
         print(
-            "ERROR: tomllib/tomli is required to parse pyproject.toml. "
-            "Install tomli for Python < 3.11: pip install tomli",
+            "ERROR: tomllib is required to parse pyproject.toml.",
             file=sys.stderr,
         )
         sys.exit(1)

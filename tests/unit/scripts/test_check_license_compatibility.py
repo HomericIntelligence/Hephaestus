@@ -140,19 +140,6 @@ class TestLoudFailure:
                     scan(None)
         assert exc.value.code == 2
 
-    def test_uninstalled_other_python_dep_with_fallback_classifies_not_fails(self):
-        # installable_now=False + known static fallback => classified compatible,
-        # not a coverage hole. tomli's fallback is MIT.
-        with patch(
-            "check_license_compatibility.distributed_requirements",
-            return_value=[("tomli", False)],
-        ):
-            with patch(
-                "check_license_compatibility.md.metadata",
-                side_effect=md.PackageNotFoundError("tomli"),
-            ):
-                assert scan(None) == []
-
 
 class TestDistributedScope:
     """distributed_requirements selects the distributed set, excludes dev."""
@@ -270,18 +257,6 @@ class TestStaticFallback:
       authoritative human-readable analysis per the script's own docstring).
     """
 
-    def test_tomli_fallback_classifies_as_compatible(self):
-        # tomli: python_version < '3.11' marker; installable_now=False on Python 3.13.
-        with patch(
-            "check_license_compatibility.distributed_requirements",
-            return_value=[("tomli", False)],
-        ):
-            with patch(
-                "check_license_compatibility.md.metadata",
-                side_effect=md.PackageNotFoundError("tomli"),
-            ):
-                assert scan(None) == []
-
     def test_tzdata_fallback_classifies_as_compatible(self):
         # tzdata: platform_system == 'Windows' marker; installable_now=False on Linux.
         with patch(
@@ -325,8 +300,8 @@ class TestStaticFallback:
 
     @pytest.mark.parametrize("pkg", list(STATIC_FALLBACK_LICENSES))
     def test_static_values_match_installed_metadata(self, pkg: str) -> None:
-        # Staleness mitigation: when the dep IS installed (e.g. tomli on Python 3.10,
-        # tzdata on Windows), the static value must match real importlib.metadata.
+        # Staleness mitigation: when the dependency is installed (e.g. tzdata on Windows),
+        # the static value must match real importlib.metadata.
         # On Python 3.13/Linux these deps are absent — skip, not fail.
         try:
             real_ids = set(resolve_license(md.metadata(pkg)))

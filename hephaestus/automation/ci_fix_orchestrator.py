@@ -20,7 +20,7 @@ import logging
 import re
 import subprocess
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -247,7 +247,7 @@ class CIFixOrchestrator:
                         "pr_number": pr_number,
                         "pr_head_branch": pr_head_branch,
                         "failing_required_checks": failing_check_names,
-                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                        "recorded_at": datetime.now(UTC).isoformat(),
                     },
                     indent=2,
                 )

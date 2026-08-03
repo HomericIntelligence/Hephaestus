@@ -132,7 +132,7 @@ def test_required_context_names_remain_stable() -> None:
     test_job = _load_workflow("test.yml")["jobs"]["test"]
     matrix = test_job["strategy"]["matrix"]
     assert matrix["os"] == ["ubuntu-latest"]
-    assert matrix["python-version"] == ["3.10", "3.11", "3.12", "3.13"]
+    assert matrix["python-version"] == ["3.13"]
     assert matrix["test-type"] == ["unit", "integration"]
 
 

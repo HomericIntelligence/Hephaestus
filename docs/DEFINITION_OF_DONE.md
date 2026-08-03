@@ -19,7 +19,7 @@ A piece of work is **done** when every item below is true.
 | 6 | `uv run ruff check hephaestus/ tests/` passes | CI job `lint` |
 | 7 | `uv run ruff format --check hephaestus/ tests/` passes (no files would be reformatted) | CI job `lint` |
 | 8 | `uv run mypy hephaestus/ scripts/ tests/` returns `Success: no issues found in N source files` | CI job `lint` |
-| 9 | Full unit suite passes: `uv run pytest tests/unit` (currently 2,500+ tests across 4 Python versions) | CI jobs `unit-tests`, `test (ubuntu-latest, 3.10/3.11/3.12/3.13, unit)` |
+| 9 | Full unit suite passes: `uv run pytest tests/unit` (currently 2,500+ tests on Python 3.13) | CI jobs `unit-tests`, `test (ubuntu-latest, 3.13, unit)` |
 | 10 | Coverage gate satisfied: `--cov-fail-under=83` (configured in `pyproject.toml [tool.coverage.report].fail_under`) | CI job `unit-tests` |
 | 11 | No new warnings introduced (pytest, deprecation, ruff) | PR reviewer |
 | 12 | Integration tests pass: `uv run pytest tests/integration` | CI job `integration-tests` |
@@ -35,7 +35,7 @@ A piece of work is **done** when every item below is true.
 | 22 | Every review thread is resolved (including bot-authored threads) | Org ruleset `required_review_thread_resolution` |
 
 > **Which of these actually block the merge button?** Both the classic branch
-> protection contexts (`required-checks-gate` and the two Python 3.12 matrix
+> protection contexts (`required-checks-gate` and the two Python 3.13 matrix
 > contexts) and the direct GitHub ruleset contexts documented in
 > [`docs/ci/required-checks.md`](ci/required-checks.md) do. The aggregate gate
 > excludes advisory `auto-merge-policy`. Review output is audit evidence only;

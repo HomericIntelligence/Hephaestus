@@ -109,7 +109,7 @@ agent or GitHub CLIs.
 
 ### Language Preference
 
-**Python 3.10+** is the implementation language for all Hephaestus code:
+**Python 3.13** is the implementation language for all Hephaestus code:
 
 - Shared utility scripts and helpers
 - Configuration management tools
@@ -167,7 +167,7 @@ def function_name(param: str, optional_param: Optional[int] = None) -> bool:
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.13
 - Type hints required for all functions
 - Clear docstrings for public functions and classes
 - Comprehensive error handling

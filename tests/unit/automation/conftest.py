@@ -27,7 +27,7 @@ from hephaestus.resilience.circuit_breaker import reset_all_circuit_breakers
 
 
 @pytest.fixture(autouse=True)
-def _reset_circuit_breakers_for_automation_tests() -> Generator[None, None, None]:
+def _reset_circuit_breakers_for_automation_tests() -> Generator[None]:
     """Reset all circuit breakers before each automation test.
 
     Prevents cross-test contamination when a prior test trips a breaker via
@@ -48,7 +48,7 @@ class GitMocks:
     repo_root: MagicMock
 
 
-def _patch_run_and_repo_root(module: str) -> Generator[GitMocks, None, None]:
+def _patch_run_and_repo_root(module: str) -> Generator[GitMocks]:
     """Patch ``<module>.run`` and ``<module>.get_repo_root`` for one test (#1417).
 
     Replaces the 30+ duplicated ``@patch`` decorator pairs that every test
@@ -62,12 +62,12 @@ def _patch_run_and_repo_root(module: str) -> Generator[GitMocks, None, None]:
 
 
 @pytest.fixture
-def git_utils_mocks() -> Generator[GitMocks, None, None]:
+def git_utils_mocks() -> Generator[GitMocks]:
     """Mock ``run`` + ``get_repo_root`` as seen by ``git_utils`` (#1417)."""
     yield from _patch_run_and_repo_root("hephaestus.automation.git_utils")
 
 
 @pytest.fixture
-def worktree_mocks() -> Generator[GitMocks, None, None]:
+def worktree_mocks() -> Generator[GitMocks]:
     """Mock ``run`` + ``get_repo_root`` as seen by ``worktree_manager`` (#1417)."""
     yield from _patch_run_and_repo_root("hephaestus.automation.worktree_manager")

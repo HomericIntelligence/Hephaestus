@@ -120,7 +120,7 @@ def get_current_correlation_id() -> str | None:
 
 
 @contextmanager
-def correlation_id_scope(correlation_id: str) -> Generator[None, None, None]:
+def correlation_id_scope(correlation_id: str) -> Generator[None]:
     """Context manager to set an ambient correlation ID for subprocess propagation.
 
     The correlation ID is set on entry and restored on exit (thread- and

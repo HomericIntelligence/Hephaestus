@@ -17,15 +17,11 @@ Usage:
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
 from hephaestus.utils.helpers import get_repo_root as _get_repo_root
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - exercised only on Python 3.10
-    import tomli as tomllib
 
 
 def get_repo_root() -> Path:

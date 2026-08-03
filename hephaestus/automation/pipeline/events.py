@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias
-
-EventField: TypeAlias = str | int | bool
-StageEvent: TypeAlias = object
+type EventField = str | int | bool
+type StageEvent = object
 
 
 def encode_stage_event(event: StageEvent) -> tuple[str, dict[str, EventField]]:

@@ -37,7 +37,7 @@ import json
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Tier-3, local-only state. Tiers 1-2 are re-derived, not archived (ADR-0012).
@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "backup":
         repo_root = args.repo_root or _default_repo_root()
         output_dir = args.output or _default_output_dir()
-        timestamp = args.timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        timestamp = args.timestamp or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         archive = cmd_backup(repo_root, output_dir, timestamp)
         print(f"Wrote backup: {archive}")
         return 0

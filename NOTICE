@@ -55,9 +55,6 @@ These packages are installed only when the corresponding extra is requested
   nats extra
     nats-py     Apache-2.0
 
-  toml extra
-    tomli       MIT (used only on Python < 3.11; stdlib tomllib on >= 3.11)
-
   xml extra
     defusedxml  PSF-2.0
 

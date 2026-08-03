@@ -450,19 +450,19 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 section "Python"
 
-# Python 3.10+
+# Python 3.13
 if has_cmd python3; then
     PY_VER=$(get_version python3 --version)
-    if version_gte "$PY_VER" "3.10"; then
-        check_pass "python3 $PY_VER (>= 3.10)"
+    if version_gte "$PY_VER" "3.13"; then
+        check_pass "python3 $PY_VER (>= 3.13)"
     else
-        check_fail "python3 $PY_VER — need >= 3.10"
+        check_fail "python3 $PY_VER — need >= 3.13"
         if $INSTALL; then
-            echo -e "    ${BLUE}→${NC} Installing python3.10..."
+            echo -e "    ${BLUE}→${NC} Installing python3.13..."
             # shellcheck disable=SC2015  # A && B && C || D — failure of A or B → check_fail (correct)
-            apt_install python3.10 \
-                && sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 10 >/dev/null 2>&1 \
-                && check_pass "python3.10 installed" || check_fail "python3.10 — install failed"
+            apt_install python3.13 \
+                && sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 13 >/dev/null 2>&1 \
+                && check_pass "python3.13 installed" || check_fail "python3.13 — install failed"
         fi
     fi
 else
@@ -484,13 +484,13 @@ else
     fi
 fi
 
-# python3.12-venv (required for isolated virtual environments)
+# python3.13-venv (required for isolated virtual environments)
 if python3 -c "import venv" 2>/dev/null; then
     check_pass "python3 venv module available"
 else
     check_fail "python3-venv — NOT FOUND"
     if $INSTALL; then
-        if apt_install python3.12-venv || apt_install python3-venv; then
+        if apt_install python3.13-venv || apt_install python3-venv; then
             check_pass "python3-venv installed"
         else
             check_fail "python3-venv — install failed"

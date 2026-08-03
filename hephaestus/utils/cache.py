@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -18,7 +18,7 @@ V = TypeVar("V")
 DEFAULT_TTL_SECONDS = 300.0
 
 
-class ThreadSafeCache(Generic[K, V]):
+class ThreadSafeCache[K, V]:
     """A lock-protected cache with per-entry TTL expiry.
 
     Entries expire ``ttl_seconds`` after they are stored (measured with

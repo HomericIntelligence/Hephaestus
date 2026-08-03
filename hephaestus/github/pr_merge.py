@@ -23,7 +23,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from hephaestus.cli.utils import (
@@ -40,7 +40,7 @@ from hephaestus.logging.utils import get_logger
 logger = get_logger(__name__)
 
 
-class _MergeStatus(str, Enum):
+class _MergeStatus(StrEnum):
     """Terminal state for one requested pull request."""
 
     MERGED = "merged"

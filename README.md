@@ -154,7 +154,7 @@ ignored generated output such as `.git/`, `.venv/`, `.pytest_cache/`, and
 
 This project uses [uv](https://uv.sh) for environment management, which automatically handles dependencies and creates isolated environments.
 
-> **Platform note:** uv supports this project's Python 3.10+ development
+> **Platform note:** uv supports this project's Python 3.13 development
 > environment on Linux, macOS, and Windows. The required GitHub Actions jobs
 > currently run on Linux; POSIX-specific tests are marked to skip on native
 > Windows. See [CONTRIBUTING.md#platform-support](CONTRIBUTING.md#platform-support).

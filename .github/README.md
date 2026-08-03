@@ -11,7 +11,7 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 **Matrix:**
 
 - OS: `ubuntu-latest`
-- Python: `3.10` / `3.11` / `3.12` / `3.13`
+- Python: `3.13`
 - Test types: `unit`, `integration`
 
 **Jobs:**

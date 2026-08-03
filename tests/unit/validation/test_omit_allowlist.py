@@ -1,14 +1,9 @@
 """Test that the omit-allowlist in pyproject.toml is frozen and documented."""
 
-import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 
 def get_pyproject_toml_path() -> Path:

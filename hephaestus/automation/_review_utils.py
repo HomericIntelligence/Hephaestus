@@ -44,7 +44,7 @@ from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from pydantic import BaseModel
 
@@ -80,18 +80,16 @@ _REVIEW_PARSE_FAILED = {
     "summary": "Failed to parse structured output from analysis",
 }
 
-_StateModelT = TypeVar("_StateModelT", bound=BaseModel)
-
 
 @overload
-def load_state_file(
+def load_state_file[StateModelT: BaseModel](
     state_dir: Path,
     prefix: str,
     issue_number: int,
-    model_class: type[_StateModelT],
+    model_class: type[StateModelT],
     *,
     state_logger: logging.Logger | None = None,
-) -> _StateModelT | None:
+) -> StateModelT | None:
     pass
 
 
@@ -107,14 +105,14 @@ def load_state_file(
     pass
 
 
-def load_state_file(
+def load_state_file[StateModelT: BaseModel](
     state_dir: Path,
     prefix: str,
     issue_number: int,
-    model_class: type[_StateModelT] | None = None,
+    model_class: type[StateModelT] | None = None,
     *,
     state_logger: logging.Logger | None = None,
-) -> _StateModelT | dict[str, Any] | None:
+) -> StateModelT | dict[str, Any] | None:
     """Load ``<prefix>-<issue_number>.json`` as a JSON object or Pydantic model.
 
     Args:
