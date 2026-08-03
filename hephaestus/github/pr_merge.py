@@ -691,6 +691,9 @@ def main() -> int:
         prs = _list_open_prs_for_cli(repo_name)
         if prs is None:
             return _emit_pr_merge_error(args.json, "pull-request listing failed")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.error("PR merge setup failed: %s", exc)
+        return _emit_pr_merge_error(args.json)
     except KeyboardInterrupt:
         logger.warning("PR merge interrupted before batch discovery completed")
         return _emit_merge_summary(

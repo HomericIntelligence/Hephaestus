@@ -811,6 +811,49 @@ class TestMainJson:
         assert payload["requested"] == payload["processed"] == 0
 
     @pytest.mark.parametrize(
+        "git_side_effect",
+        [
+            [subprocess.CalledProcessError(1, ["git", "checkout", "main"])],
+            [None, subprocess.CalledProcessError(1, ["git", "pull", "origin", "main"])],
+        ],
+        ids=["checkout", "pull"],
+    )
+    def test_main_update_failure_json_emits_complete_empty_summary(
+        self,
+        monkeypatch,
+        capsys,
+        git_side_effect: list[subprocess.CalledProcessError | None],
+    ) -> None:
+        """A failed checkout or pull emits the documented setup error envelope."""
+        run_git = MagicMock(side_effect=git_side_effect)
+        list_prs = MagicMock(return_value=[])
+        monkeypatch.setattr("sys.argv", ["prog", "--repo", "owner/repo", "--json"])
+        monkeypatch.setattr(pr_merge_module, "_verify_repo_access", lambda _repo: True)
+        monkeypatch.setattr(pr_merge_module, "run_git_cmd", run_git)
+        monkeypatch.setattr(pr_merge_module, "_list_open_prs_for_cli", list_prs)
+
+        assert pr_merge_module.main() == 1
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload == {
+            "status": "error",
+            "exit_code": 1,
+            "message": "setup failed",
+            "results": [],
+            "totals": {
+                "merged": 0,
+                "queued": 0,
+                "skipped": 0,
+                "blocked": 0,
+                "failed": 0,
+                "interrupted": 0,
+            },
+            "requested": 0,
+            "processed": 0,
+        }
+        list_prs.assert_not_called()
+
+    @pytest.mark.parametrize(
         "interrupt_target",
         ["_update_main_branch", "_list_open_prs_for_cli"],
     )
