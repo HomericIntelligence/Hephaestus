@@ -21,10 +21,13 @@ prose or a stale PR snapshot.
 
 ## Decision
 
-1. Every open review thread enters implementation remediation without regard
-   to author, severity marker, or historical receipt ownership. The
-   implementation agent investigates each actionable thread, fixes it, and
-   returns a concise reply describing the change. It never resolves a thread.
+1. Every open review thread without a valid current-head implementation
+   response enters implementation remediation without regard to author,
+   severity marker, or historical receipt ownership. The implementation agent
+   investigates each actionable thread, fixes it, and returns a concise reply
+   describing the change. It never resolves a thread. A complete response set
+   enters reviewer comment validation directly; it does not trigger another
+   broad review batch before that validation.
 2. The host posts an implementation reply only after a real fix commit is
    pushed. Before and after each reply it requires a complete thread snapshot
    and an open, unarmed PR at the exact expected head. A later pass may recover

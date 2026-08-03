@@ -921,12 +921,18 @@ Architectural contract:
 PR review is the sole authority for implementation approval. Reviews and
 findings are recorded on the GitHub pull request so their history survives
 local process or agent-session loss. The implementation stage owns each PR
-branch writer, including rebase and lease-publish. PR review creates one
-detached, disposable checkout of head `H`, verifies that checkout once, submits
-one batched source-anchored review for `H`, and removes the checkout before
-handoff. A later branch push does not invalidate that posted review; only the
-final `state:implementation-go` transition requires the reviewed head to still
-be the current open, unarmed PR head.
+branch writer, including rebase and lease-publish. At entry, and again
+immediately before submitting a broad audit, PR review reads the complete
+open-thread set. Threads without a current-head implementation response go
+directly to writer remediation and do not create another broad review batch. A
+complete set of current-head responses creates a detached,
+disposable checkout for comment validation only; the reviewer resolves the
+validated threads or leaves corrective feedback. A thread-free entry creates a
+detached checkout of head `H`, verifies that checkout once, submits one batched
+source-anchored review for `H`, and removes the checkout before handoff. A
+later branch push does not invalidate that posted review; only the final
+`state:implementation-go` transition requires the reviewed head to still be
+the current open, unarmed PR head.
 
 For the registered UV performance verification, the host boundary currently
 requires macOS `sandbox-exec` plus a disposable, quota-backed disk image. On
@@ -939,11 +945,15 @@ unsandboxed fallback.
 
 ```mermaid
 flowchart LR
-    PR["PR diff and requirements"] --> Snapshot["Immutable host verification"] --> Review
+    PR["PR diff and requirements"] --> ThreadGate{"Open thread state"}
+    ThreadGate -->|"no thread"| Snapshot["Immutable host verification"] --> Review
+    ThreadGate -->|"unreplied thread"| Address["Implementation fixes and replies"]
+    ThreadGate -->|"all threads replied"| Validate["Reviewer validates reply + diff"]
     Review --> GitHub["GitHub review and inline threads"]
-    GitHub --> Gate{"Open review thread?"}
-    Gate -->|"open thread"| Address["Implementation fixes and replies"] --> Validate["Reviewer validates reply + diff"]
-    Validate -->|"resolved"| Review
+    GitHub --> Gate{"New open review thread?"}
+    Gate -->|"open thread"| Address
+    Address --> Validate
+    Validate -->|"resolved"| ThreadGate
     Validate -->|"needs work"| Address
     Gate -->|"none"| Approve["state:implementation-go"]
     Approve --> MergeWait
@@ -954,9 +964,13 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> VerifyUnarmed
-    VerifyUnarmed --> Review: open, complete, and unarmed
+    VerifyUnarmed --> ThreadGate: open, complete, and unarmed
     VerifyUnarmed --> OperatorOwned: external arm or incomplete state
-    Review --> Checkout: GitHub snapshot H captured in detached worktree
+    ThreadGate --> Implementation: thread lacks current-head response; durable no-go
+    ThreadGate --> Checkout: no open threads; broad audit
+    ThreadGate --> Checkout: all threads have current-head responses; comment validation
+    Checkout --> Review: broad audit entry and clean snapshot matches H
+    Checkout --> Validate: comment-validation entry and clean snapshot matches H
     Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
     HostVerification --> Review: immutable snapshot verification passed
     HostVerification --> Implementation: confirmed test failure, after durable no-go and checkout cleanup
@@ -985,8 +999,11 @@ Architectural contract:
 - Actionable findings use durable inline threads. Severity describes newly
   posted findings only; it never makes an existing unresolved thread advisory.
 - Prior rounds remain visible in the PR timeline.
-- Any open review thread produces `state:implementation-no-go`; only a fresh
-  review with no open threads produces `state:implementation-go`.
+- Any open review thread without a current-head implementation response
+  produces `state:implementation-no-go` and is handed to implementation
+  before another broad review. A fresh broad audit of a thread-free PR, or a
+  fresh comment-validation pass that resolves every current thread, may produce
+  `state:implementation-go`.
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
@@ -1002,16 +1019,18 @@ Architectural contract:
 - The review decision proof is a fresh GitHub snapshot plus a clean checkout
   at that snapshot's head. A GitHub marker can recover only a candidate reply
   after restart; it is never a substitute for that fresh proof.
-- Review agents stay read-only. For an applicable Python change, the host runs
-  its complete fixed, repository-owned `uv` validation plan (Ruff check and
-  format, mypy, unit pytest, applicable integration pytest, plus any registered
-  regression) against the checkout-proven head and supplies bounded receipts to
-  the fresh reviewer and validator. Tool/dependency configuration changes also
-  select that plan. If the running `uv` environment is inside the review
-  checkout, the host first seals a verifier-owned copy outside every worktree;
-  the untracked local environment is never accepted as evidence. The receipts
-  are evidence only: they are cleared on a new head and cannot grant
-  `state:implementation-go` without the ordinary audit and GitHub checks.
+- Review agents stay read-only. For an applicable Python change, the original
+  broad audit receives the host's fixed, repository-owned `uv` validation
+  receipts from the checkout-proven head. Comment validation instead evaluates
+  the complete current-head implementation-response receipts, thread history,
+  and checkout-bound diff; it does not create a second broad audit or demand
+  an independent rerun of an implementation claim. Tool/dependency
+  configuration changes also select the host validation plan. If the running
+  `uv` environment is inside the review checkout, the host first seals a
+  verifier-owned copy outside every worktree; the untracked local environment
+  is never accepted as evidence. The receipts are evidence only: they are
+  cleared on a new head and cannot grant `state:implementation-go` without the
+  relevant fresh audit or comment-validation and GitHub checks.
 - No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait
