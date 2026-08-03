@@ -5,6 +5,8 @@ import json
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.github import pr_merge as pr_merge_module
 from hephaestus.github.pr_merge import (
     _enqueue_pr,
@@ -299,21 +301,25 @@ class TestHandleMergeResult:
     """Tests for handle_merge_result."""
 
     def test_logs_success_when_merged(self) -> None:
-        """Does not raise when merge result indicates success."""
+        """Returns a merged outcome when the provider confirms success."""
         result = MagicMock()
         result.merged = True
         result.message = "Merged"
         result.sha = "abc123"
-        # Should not raise
-        handle_merge_result(result, pr_number=42, base_branch="main")
+        outcome = handle_merge_result(result, pr_number=42, base_branch="main")
+
+        assert outcome.status is pr_merge_module._MergeStatus.MERGED
+        assert outcome.pr_number == 42
 
     def test_logs_error_when_not_merged(self) -> None:
-        """Does not raise when merge result indicates failure."""
+        """Returns a failed outcome when the provider rejects the merge."""
         result = MagicMock()
         result.merged = False
         result.message = "Merge conflict"
         result.sha = None
-        handle_merge_result(result, pr_number=42, base_branch="main")
+        outcome = handle_merge_result(result, pr_number=42, base_branch="main")
+
+        assert outcome.status is pr_merge_module._MergeStatus.FAILED
 
 
 class TestProcessPr:
@@ -330,15 +336,17 @@ class TestProcessPr:
             "try_push_head_branch",
             lambda branch, dry_run: pushes.append((branch, dry_run)),
         )
-        monkeypatch.setattr(
-            pr_merge_module,
-            "_attempt_pr_merge",
-            lambda repo, number, sha, base, dry_run: merges.append(
-                (repo, number, sha, base, dry_run)
-            ),
-        )
+        expected = pr_merge_module._PrMergeOutcome(1, pr_merge_module._MergeStatus.MERGED, "merged")
 
-        pr_merge_module._process_pr(
+        def attempt_merge(
+            repo: str, number: int, sha: str, base: str, dry_run: bool
+        ) -> pr_merge_module._PrMergeOutcome:
+            merges.append((repo, number, sha, base, dry_run))
+            return expected
+
+        monkeypatch.setattr(pr_merge_module, "_attempt_pr_merge", attempt_merge)
+
+        outcome = pr_merge_module._process_pr(
             "owner/repo",
             {
                 "number": 1,
@@ -352,6 +360,7 @@ class TestProcessPr:
 
         assert pushes == [("feature", False)]
         assert merges == [("owner/repo", 1, "abc123", "main", False)]
+        assert outcome is expected
 
     def test_process_pr_missing_head_sha_skips_checks_and_merge(self, monkeypatch) -> None:
         """PRs without a head SHA skip check and merge work."""
@@ -360,7 +369,7 @@ class TestProcessPr:
         monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", check)
         monkeypatch.setattr(pr_merge_module, "_attempt_pr_merge", merge)
 
-        pr_merge_module._process_pr(
+        outcome = pr_merge_module._process_pr(
             "owner/repo",
             {"number": 1, "headRefName": "feature", "baseRefName": "main"},
             push_all=False,
@@ -369,6 +378,141 @@ class TestProcessPr:
 
         check.assert_not_called()
         merge.assert_not_called()
+        assert outcome.status is pr_merge_module._MergeStatus.FAILED
+
+    @pytest.mark.parametrize(
+        ("checks_pass", "expected_events", "expected_status"),
+        [
+            (False, ["checks", "push"], pr_merge_module._MergeStatus.BLOCKED),
+            (True, ["checks", "push", "merge"], pr_merge_module._MergeStatus.MERGED),
+        ],
+    )
+    def test_push_all_preserves_check_push_merge_sequence(
+        self,
+        monkeypatch,
+        checks_pass: bool,
+        expected_events: list[str],
+        expected_status: pr_merge_module._MergeStatus,
+    ) -> None:
+        """Push-all pushes once after checks, including when checks block merging."""
+        events: list[str] = []
+
+        def checks(*_args: object) -> bool:
+            events.append("checks")
+            return checks_pass
+
+        def push(_branch: str, _dry_run: bool) -> None:
+            events.append("push")
+
+        def merge(*_args: object) -> pr_merge_module._PrMergeOutcome:
+            events.append("merge")
+            return pr_merge_module._PrMergeOutcome(1, pr_merge_module._MergeStatus.MERGED, "merged")
+
+        monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", checks)
+        monkeypatch.setattr(pr_merge_module, "try_push_head_branch", push)
+        monkeypatch.setattr(pr_merge_module, "_attempt_pr_merge", merge)
+
+        outcome = pr_merge_module._process_pr(
+            "owner/repo",
+            {
+                "number": 1,
+                "headRefName": "feature",
+                "headRefOid": "abc123",
+                "baseRefName": "main",
+            },
+            push_all=True,
+            dry_run=False,
+        )
+
+        assert events == expected_events
+        assert outcome.status is expected_status
+
+
+class TestMergeBatchOutcomes:
+    """Tests for batch outcome collection and exit-status selection."""
+
+    def test_all_success_returns_zero_with_merged_results(self) -> None:
+        outcomes = [
+            pr_merge_module._PrMergeOutcome(1, pr_merge_module._MergeStatus.MERGED, "merged"),
+            pr_merge_module._PrMergeOutcome(2, pr_merge_module._MergeStatus.QUEUED, "queued"),
+        ]
+
+        assert pr_merge_module._merge_exit_code(outcomes, requested=2) == 0
+
+    def test_partial_failure_continues_and_returns_one(self, monkeypatch) -> None:
+        process = MagicMock(
+            side_effect=[
+                RuntimeError("merge failed"),
+                pr_merge_module._PrMergeOutcome(2, pr_merge_module._MergeStatus.MERGED, "merged"),
+            ]
+        )
+        monkeypatch.setattr(pr_merge_module, "_process_pr", process)
+
+        outcomes = pr_merge_module._process_open_prs(
+            "owner/repo",
+            [{"number": 1}, {"number": 2}],
+            push_all=False,
+            dry_run=False,
+        )
+
+        assert [outcome.status for outcome in outcomes] == [
+            pr_merge_module._MergeStatus.FAILED,
+            pr_merge_module._MergeStatus.MERGED,
+        ]
+        assert process.call_count == 2
+        assert pr_merge_module._merge_exit_code(outcomes, requested=2) == 1
+
+    def test_all_eligible_prs_in_dry_run_are_skipped_and_exit_zero(self, monkeypatch) -> None:
+        monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", lambda *_args: True)
+        merge = MagicMock()
+        monkeypatch.setattr(pr_merge_module, "_merge_pr", merge)
+
+        outcomes = pr_merge_module._process_open_prs(
+            "owner/repo",
+            [
+                {
+                    "number": 1,
+                    "headRefName": "one",
+                    "headRefOid": "sha-one",
+                    "baseRefName": "main",
+                },
+                {
+                    "number": 2,
+                    "headRefName": "two",
+                    "headRefOid": "sha-two",
+                    "baseRefName": "main",
+                },
+            ],
+            push_all=False,
+            dry_run=True,
+        )
+
+        assert [outcome.status for outcome in outcomes] == [
+            pr_merge_module._MergeStatus.SKIPPED,
+            pr_merge_module._MergeStatus.SKIPPED,
+        ]
+        assert pr_merge_module._merge_exit_code(outcomes, requested=2) == 0
+        merge.assert_not_called()
+
+    def test_interruption_records_current_pr_stops_batch_and_returns_130(self, monkeypatch) -> None:
+        process = MagicMock(side_effect=KeyboardInterrupt)
+        monkeypatch.setattr(pr_merge_module, "_process_pr", process)
+
+        outcomes = pr_merge_module._process_open_prs(
+            "owner/repo",
+            [{"number": 1}, {"number": 2}],
+            push_all=False,
+            dry_run=False,
+        )
+
+        assert [outcome.status for outcome in outcomes] == [
+            pr_merge_module._MergeStatus.INTERRUPTED
+        ]
+        assert pr_merge_module._merge_exit_code(outcomes, requested=2) == 130
+        assert process.call_count == 1
+
+    def test_incomplete_batch_returns_one(self) -> None:
+        assert pr_merge_module._merge_exit_code([], requested=1) == 1
 
 
 class TestMain:
@@ -434,13 +578,13 @@ class TestMain:
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     @patch("hephaestus.github.pr_merge.gh_call")
     def test_skips_pr_when_checks_fail(self, mock_gh_call, _mock_git, mock_push) -> None:
-        """main() skips merge when CI checks fail."""
+        """main() returns failure when CI checks block a requested merge."""
         mock_gh_call.side_effect = self._make_pr(bucket="fail")
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
             with patch("sys.argv", ["prog"]):
                 from hephaestus.github.pr_merge import main
 
-                assert main() == 0
+                assert main() == 1
 
         assert len(mock_gh_call.call_args_list) == 3
         mock_push.assert_not_called()
@@ -510,7 +654,7 @@ class TestMain:
             with patch("sys.argv", ["prog", "--push-all"]):
                 from hephaestus.github.pr_merge import main
 
-                assert main() == 0
+                assert main() == 1
 
         mock_push.assert_called_once_with("feature", False)
 
@@ -539,7 +683,7 @@ class TestMain:
             with patch("sys.argv", ["prog"]):
                 from hephaestus.github.pr_merge import main
 
-                assert main() == 0
+                assert main() == 1
         mock_push.assert_called_once_with("good", False)
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
@@ -574,7 +718,7 @@ class TestMain:
             with patch("sys.argv", ["prog"]):
                 from hephaestus.github.pr_merge import main
 
-                assert main() == 0
+                assert main() == 1
 
         merge_paths = [
             call.args[0][3]
@@ -599,7 +743,22 @@ class TestMainJson:
             with patch("sys.argv", ["prog", "--json"]):
                 assert main() == 1
         payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == "error"
+        assert payload == {
+            "status": "error",
+            "exit_code": 1,
+            "message": "repository could not be resolved",
+            "results": [],
+            "totals": {
+                "merged": 0,
+                "queued": 0,
+                "skipped": 0,
+                "blocked": 0,
+                "failed": 0,
+                "interrupted": 0,
+            },
+            "requested": 0,
+            "processed": 0,
+        }
 
     @patch("hephaestus.github.pr_merge.gh_call")
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
@@ -616,8 +775,22 @@ class TestMainJson:
 
                 assert main() == 0
         payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == "ok"
-        assert payload["exit_code"] == 0
+        assert payload == {
+            "status": "ok",
+            "exit_code": 0,
+            "message": "PR merge batch complete",
+            "results": [],
+            "totals": {
+                "merged": 0,
+                "queued": 0,
+                "skipped": 0,
+                "blocked": 0,
+                "failed": 0,
+                "interrupted": 0,
+            },
+            "requested": 0,
+            "processed": 0,
+        }
 
     @patch("hephaestus.github.pr_merge.gh_call")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
@@ -634,6 +807,139 @@ class TestMainJson:
                 assert main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
+        assert payload["results"] == []
+        assert payload["requested"] == payload["processed"] == 0
+
+    @pytest.mark.parametrize(
+        "git_side_effect",
+        [
+            [subprocess.CalledProcessError(1, ["git", "checkout", "main"])],
+            [None, subprocess.CalledProcessError(1, ["git", "pull", "origin", "main"])],
+        ],
+        ids=["checkout", "pull"],
+    )
+    def test_main_update_failure_json_emits_complete_empty_summary(
+        self,
+        monkeypatch,
+        capsys,
+        git_side_effect: list[subprocess.CalledProcessError | None],
+    ) -> None:
+        """A failed checkout or pull emits the documented setup error envelope."""
+        run_git = MagicMock(side_effect=git_side_effect)
+        list_prs = MagicMock(return_value=[])
+        monkeypatch.setattr("sys.argv", ["prog", "--repo", "owner/repo", "--json"])
+        monkeypatch.setattr(pr_merge_module, "_verify_repo_access", lambda _repo: True)
+        monkeypatch.setattr(pr_merge_module, "run_git_cmd", run_git)
+        monkeypatch.setattr(pr_merge_module, "_list_open_prs_for_cli", list_prs)
+
+        assert pr_merge_module.main() == 1
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload == {
+            "status": "error",
+            "exit_code": 1,
+            "message": "setup failed",
+            "results": [],
+            "totals": {
+                "merged": 0,
+                "queued": 0,
+                "skipped": 0,
+                "blocked": 0,
+                "failed": 0,
+                "interrupted": 0,
+            },
+            "requested": 0,
+            "processed": 0,
+        }
+        list_prs.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "interrupt_target",
+        ["_update_main_branch", "_list_open_prs_for_cli"],
+    )
+    def test_setup_interrupt_json_emits_complete_empty_summary(
+        self,
+        monkeypatch,
+        capsys,
+        interrupt_target: str,
+    ) -> None:
+        monkeypatch.setattr("sys.argv", ["prog", "--repo", "owner/repo", "--json"])
+        monkeypatch.setattr(pr_merge_module, "_verify_repo_access", lambda _repo: True)
+        monkeypatch.setattr(pr_merge_module, "_update_main_branch", MagicMock())
+        monkeypatch.setattr(
+            pr_merge_module,
+            "_list_open_prs_for_cli",
+            MagicMock(return_value=[]),
+        )
+        monkeypatch.setattr(
+            pr_merge_module,
+            interrupt_target,
+            MagicMock(side_effect=KeyboardInterrupt),
+        )
+
+        assert pr_merge_module.main() == 130
+        payload = json.loads(capsys.readouterr().out)
+
+        assert payload == {
+            "status": "error",
+            "exit_code": 130,
+            "message": "interrupted before PR batch discovery completed",
+            "results": [],
+            "totals": {
+                "merged": 0,
+                "queued": 0,
+                "skipped": 0,
+                "blocked": 0,
+                "failed": 0,
+                "interrupted": 0,
+            },
+            "requested": 0,
+            "processed": 0,
+        }
+
+    def test_json_summary_contains_per_pr_results_and_totals(self, capsys) -> None:
+        outcomes = [
+            pr_merge_module._PrMergeOutcome(
+                7,
+                pr_merge_module._MergeStatus.FAILED,
+                "line one\nline two",
+            )
+        ]
+
+        assert (
+            pr_merge_module._emit_merge_summary(
+                outcomes,
+                requested=1,
+                json_output=True,
+            )
+            == 1
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["results"] == [
+            {
+                "pr_number": 7,
+                "status": "failed",
+                "detail": r"line one\nline two",
+            }
+        ]
+        assert payload["totals"]["failed"] == 1
+        assert payload["requested"] == 1
+        assert payload["processed"] == 1
+
+    def test_multiline_exception_is_escaped_in_one_summary_record(self, monkeypatch) -> None:
+        process = MagicMock(side_effect=RuntimeError("line one\nline two"))
+        monkeypatch.setattr(pr_merge_module, "_process_pr", process)
+
+        outcomes = pr_merge_module._process_open_prs(
+            "owner/repo",
+            [{"number": 7}],
+            push_all=False,
+            dry_run=False,
+        )
+
+        assert outcomes[0].detail == r"RuntimeError: line one\nline two"
+        assert "\n" not in outcomes[0].detail
 
 
 class TestSquashOnlyInvariant:
@@ -763,15 +1069,14 @@ class TestMergeQueueHandling:
         ]
 
     def test_handle_merge_result_logs_queued_as_success(self) -> None:
-        """A queued result must not be logged as a failure."""
-        with patch.object(pr_merge_module, "logger") as mock_logger:
-            handle_merge_result(
-                {"queued": True, "message": "enqueued in merge queue"},
-                pr_number=7,
-                base_branch="main",
-            )
-        mock_logger.error.assert_not_called()
-        mock_logger.info.assert_called_once()
+        """A queued result is explicitly classified as provider success."""
+        outcome = handle_merge_result(
+            {"queued": True, "message": "enqueued in merge queue"},
+            pr_number=7,
+            base_branch="main",
+        )
+
+        assert outcome.status is pr_merge_module._MergeStatus.QUEUED
 
 
 class TestCanonicalGitOps:
