@@ -20,7 +20,7 @@ def _dist_name(spec: str) -> str:
 
     Args:
         spec: A PEP 508 dependency specifier, e.g.
-            ``"tzdata; platform_system == 'Windows'"``.
+            ``"tzdata>=2026.2,<2027; platform_system == 'Windows'"``.
 
     Returns:
         The PEP 503-normalized distribution name (lowercase; runs of ``-``,

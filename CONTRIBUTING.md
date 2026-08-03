@@ -144,10 +144,10 @@ Platform notes:
   `pyproject.toml` describes what `pip install` accepts; no platform-restriction
   classifier is published.
 - **Windows wheels pull in `tzdata` automatically.** The
-  `"tzdata; platform_system == 'Windows'"` marker in `[project.dependencies]`
-  exists because `hephaestus.github.rate_limit` uses `zoneinfo.ZoneInfo`,
-  which has no IANA database bundled on Windows. POSIX installs skip this
-  dependency.
+  `"tzdata>=2026.2,<2027; platform_system == 'Windows'"` marker in
+  `[project.dependencies]` exists because `hephaestus.github.rate_limit` uses
+  `zoneinfo.ZoneInfo`, which has no IANA database bundled on Windows. POSIX
+  installs skip this dependency.
 
 Use `uv sync` to develop and run the test suite on macOS, Linux, or Windows.
 Native-Windows runs skip only the tests explicitly marked `requires_posix`; do
