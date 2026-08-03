@@ -271,27 +271,11 @@ class _HostVerificationSpec:
     descr: str
 
 
-_HOST_SAFE_UNIT_TEST_ARGS = (
-    "-o",
-    "addopts=",
-    "tests/unit",
-    "-q",
-    # These test the host's own mutation-capable Git/CI facilities or recurse
-    # into host verification itself. They require GitHub CLI access or Bash's
-    # global /tmp and are therefore intentionally left to normal CI, not this
-    # read-only immutable reviewer boundary.
-    "--ignore=tests/unit/ci/test_workflows.py",
-    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps",
-    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::"
-    "TestWorkerPoolSubmitComplete::test_immutable_build_test_runs_from_disposable_head_snapshot",
-)
-
-
 #: Python reviews run read-only by design.  The host therefore performs the
-#: complete fixed Python validation plan against an immutable snapshot before
-#: the reviewer sees it.  These commands deliberately cover the local work
-#: normally selected by ``$athena:pr-review`` without granting that agent a
-#: writable source tree, cache, or temporary directory.
+#: deterministic static validation against an immutable snapshot before the
+#: reviewer sees it.  Full test suites belong to the implementation stage and
+#: CI: a repository's unit tests can legitimately require controlled service,
+#: Git, or process fixtures that the no-network reviewer boundary must deny.
 _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
         changed_path=None,
@@ -316,11 +300,6 @@ _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
         ),
         descr="review_python_mypy",
     ),
-    _HostVerificationSpec(
-        changed_path=None,
-        argv=("uv", "run", "pytest", *_HOST_SAFE_UNIT_TEST_ARGS),
-        descr="review_python_unit_tests",
-    ),
 )
 _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
     {
@@ -334,13 +313,6 @@ _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
         "tox.ini",
     }
 )
-_INTEGRATION_HOST_VERIFICATION_SPEC = _HostVerificationSpec(
-    changed_path=None,
-    argv=("uv", "run", "pytest", "tests/integration", "-q"),
-    descr="review_python_integration_tests",
-)
-
-
 #: Some Python regressions require additional bounded execution beyond the
 #: baseline review plan.  Their path trigger is derived only from a real Git
 #: diff header, never from reviewer or GitHub prose.
@@ -378,11 +350,6 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
         return ()
     return (
         *_PYTHON_HOST_VERIFICATION_SPECS,
-        *(
-            (_INTEGRATION_HOST_VERIFICATION_SPEC,)
-            if any(path.startswith("tests/integration/") for path in changed_paths)
-            else ()
-        ),
         *(spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths),
     )
 

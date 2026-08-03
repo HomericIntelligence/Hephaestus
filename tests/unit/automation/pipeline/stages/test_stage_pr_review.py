@@ -881,7 +881,7 @@ class TestPrReviewStageStep:
     def test_checkout_runs_registered_host_verification_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A changed regression receives the complete fixed host plan first."""
+        """A changed regression receives only hermetic host checks first."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -918,22 +918,6 @@ class TestPrReviewStageStep:
                     "hephaestus/",
                     "scripts/",
                     "tests/",
-                ),
-            ),
-            (
-                "review_python_unit_tests",
-                (
-                    "uv",
-                    "run",
-                    "pytest",
-                    "-o",
-                    "addopts=",
-                    "tests/unit",
-                    "-q",
-                    "--ignore=tests/unit/ci/test_workflows.py",
-                    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::TestGitOps",
-                    "--deselect=tests/unit/automation/pipeline/test_worker_pool.py::"
-                    "TestWorkerPoolSubmitComplete::test_immutable_build_test_runs_from_disposable_head_snapshot",
                 ),
             ),
             (
@@ -999,7 +983,7 @@ class TestPrReviewStageStep:
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A read-only Python review receives Ruff, mypy, and pytest receipts."""
+        """A read-only Python review receives deterministic static receipts."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -1043,10 +1027,10 @@ class TestPrReviewStageStep:
         assert isinstance(result.job, BuildTestJob)
         assert result.job.descr == "review_python_ruff_check"
 
-    def test_integration_changes_add_integration_host_receipt(
+    def test_integration_changes_do_not_add_a_nonhermetic_host_suite(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Changed integration coverage receives the matching fixed command."""
+        """Integration suites remain with CI rather than the no-network reviewer."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -1060,7 +1044,7 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
-        for _ in range(4):
+        for _ in range(3):
             assert isinstance(request, JobRequest)
             item.state = request.on_done_state
             stage.on_job_done(
@@ -1078,8 +1062,8 @@ class TestPrReviewStageStep:
             request = stage.step(item, ctx)
 
         assert isinstance(request, JobRequest)
-        assert isinstance(request.job, BuildTestJob)
-        assert request.job.argv == ("uv", "run", "pytest", "tests/integration", "-q")
+        assert isinstance(request.job, AgentJob)
+        assert request.job.descr == "review"
 
     def test_actionable_host_failure_hands_remediation_to_implementation(
         self, make_ctx: Any, make_work_item: Any
@@ -1144,7 +1128,7 @@ class TestPrReviewStageStep:
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
-        for _ in range(4):
+        for _ in range(3):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
@@ -1210,7 +1194,7 @@ class TestPrReviewStageStep:
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
-        for _ in range(4):
+        for _ in range(3):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
