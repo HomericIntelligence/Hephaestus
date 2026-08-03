@@ -281,10 +281,13 @@ jobs:
 
   pr-policy:
     name: pr-policy
-    # Enforces the two HARD repo PR policies on every PR. Both checks are gated
+    # Enforces the HARD repo PR policies on every PR. All checks are gated
     # by `if: always()` so one failure still surfaces the other:
     #   1. PR body contains `Closes #N` on its own line.
     #   2. Every commit on the PR has a verified signature.
+    #   3. The PR title and every branch commit subject follow the accepted
+    #      Conventional Commit policy.
+    #   4. Every branch commit carries a DCO sign-off.
     # `auto-merge-policy` is a separate observational job. It reports live PR
     # state only; it has no review or merge authority and is intentionally NOT
     # in the required-checks ruleset.
@@ -334,14 +337,14 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          # `gh pr view --json body` exposes the PR body (for the Closes #N
+          # `gh pr view --json body,title` exposes the PR body (for the Closes #N
           # check) but DOES NOT expose per-commit signatures; we use the GraphQL
           # API for that. Two separate queries are fine here — the workflow runs
           # at most once per PR event and the policy gate must be cheap to read
           # and debug. Auto-merge state is reported separately and never grants
           # review or merge authority.
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json body \
+            --json body,title \
             > pr.json
           gh api graphql \
             -f query='query($owner:String!,$name:String!,$pr:Int!) {
@@ -417,22 +420,21 @@ jobs:
           fi
           echo "OK: all commits have verified signatures"
 
-      - name: "Check 3: commit subjects follow Conventional Commits"
+      - name: "Check 3: PR title and commit subjects follow Conventional Commits"
         if: >-
           github.event_name == 'pull_request' && always() &&
           steps.fetch.outcome == 'success'
-        env:
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # Dependabot subjects are auto-generated; exempt like Check 1 (#1070).
-          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
-            echo "OK: Dependabot PR — Conventional Commit check is not applicable"
-            exit 0
-          fi
+          # The PR title becomes the main-branch subject after the required
+          # squash merge, so Git-generated machinery exceptions are disabled.
+          jq -r '.title // ""' pr.json \
+            | python3 scripts/check_conventional_commit.py --strict -
           # Subject = first line of each commit message (GraphQL .commit.message
-          # verified to resolve). Pipe on stdin, one per line, into the shared
-          # validator (DoD row 5 / issue #1209). Empty set passes by design.
+          # verified to resolve). Branch commits retain the validator's
+          # Git-machinery compatibility. Pipe on stdin, one per line, into the
+          # shared validator (DoD row 5 / issue #1209). Empty set passes by
+          # design.
           jq -r '.data.repository.pullRequest.commits.nodes[]
                  | .commit.message | split("\n")[0]' commits.json \
             | python3 scripts/check_conventional_commit.py -
@@ -446,7 +448,7 @@ jobs:
         run: |
           set -euo pipefail
           # Dependabot commits are bot-authored, not human DCO attestations;
-          # exempt like Check 1 / Check 3 (#1070).
+          # exempt like Check 1 (#1070).
           if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
             echo "OK: Dependabot PR — DCO sign-off check is not applicable"
             exit 0

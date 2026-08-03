@@ -2265,7 +2265,21 @@ class TestCommitPushAndPrCreate:
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
         assert "uv run pytest tests -q --tb=short" in github.prs[1001]["body"]
-        assert github.prs[1001]["title"] == "Add the widget"
+        assert github.prs[1001]["title"] == "chore: Add the widget"
+
+    def test_pr_create_preserves_conventional_issue_title(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Existing authored issue titles are passed through unchanged."""
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, state="PR_CREATE")
+        item.branch = "9-auto-impl"
+        item.payload["issue_title"] = "fix(ci): align commit enforcement"
+
+        ImplementationStage().step(item, ctx)
+
+        assert github.prs[1001]["title"] == "fix(ci): align commit enforcement"
 
     def test_pr_create_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any

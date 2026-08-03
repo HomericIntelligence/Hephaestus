@@ -15,6 +15,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import pr_manager
+from hephaestus.automation.commit_policy import (
+    ALLOWED_CONVENTIONAL_TYPES,
+    normalize_conventional_type,
+)
 from hephaestus.automation.github_api import OpenPrDiscoveryIncompleteError
 from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
 
@@ -1014,29 +1018,25 @@ class TestPrIsGenuinelyStuck:
 
 
 class TestNormalizeConventionalType:
-    """``_normalize_conventional_type`` keeps the commit/PR type pr-policy-legal (#1587)."""
+    """The shared helper keeps commit and PR types pr-policy-legal (#1587)."""
 
     def test_disallowed_type_normalized_scope_preserved(self) -> None:
         assert (
-            pr_manager._normalize_conventional_type("security(audit): add threat model")
+            normalize_conventional_type("security(audit): add threat model")
             == "chore(audit): add threat model"
         )
 
     def test_allowed_type_unchanged(self) -> None:
-        assert (
-            pr_manager._normalize_conventional_type("fix(io): handle EOF") == "fix(io): handle EOF"
-        )
+        assert normalize_conventional_type("fix(io): handle EOF") == "fix(io): handle EOF"
 
     def test_no_prefix_gets_default(self) -> None:
-        assert (
-            pr_manager._normalize_conventional_type("add threat model") == "chore: add threat model"
-        )
+        assert normalize_conventional_type("add threat model") == "chore: add threat model"
 
     def test_breaking_bang_preserved(self) -> None:
-        assert pr_manager._normalize_conventional_type("security!: drop API") == "chore!: drop API"
+        assert normalize_conventional_type("security!: drop API") == "chore!: drop API"
 
     def test_disallowed_no_scope(self) -> None:
-        assert pr_manager._normalize_conventional_type("wip: stuff") == "chore: stuff"
+        assert normalize_conventional_type("wip: stuff") == "chore: stuff"
 
     def test_allowlist_matches_pr_policy_gate(self) -> None:
         """The mirrored allowlist MUST equal the pr-policy gate's source of truth."""
@@ -1046,4 +1046,4 @@ class TestNormalizeConventionalType:
         sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
         from check_conventional_commit import ALLOWED_TYPES
 
-        assert set(pr_manager.ALLOWED_CONVENTIONAL_TYPES) == set(ALLOWED_TYPES)
+        assert set(ALLOWED_CONVENTIONAL_TYPES) == set(ALLOWED_TYPES)

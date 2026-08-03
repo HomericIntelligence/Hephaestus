@@ -21,9 +21,10 @@ links to the full section below.
    GitHub issue, then branch as `<issue-number>-description`.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
    make it pass, keep coverage at 83%+ (target 90%).
-5. **Open the PR** ([Pull Request Process](#pull-request-process)) — sign every
-   commit (`git commit -S`), put `Closes #<issue-number>` on its own line in the
-   body, and keep auto-merge disabled. `$athena:pr-review` output is audit
+5. **Open the PR** ([Pull Request Process](#pull-request-process)) — use a
+   Conventional Commit PR title, sign every commit (`git commit -S`), put
+   `Closes #<issue-number>` on its own line in the body, and keep auto-merge
+   disabled. `$athena:pr-review` output is audit
    evidence, not authorization. The loop applies `state:implementation-go`
    only after a structural audit and fresh live GitHub facts confirm the exact
    open, unarmed reviewed head, complete thread state, and exclusive label
@@ -282,7 +283,12 @@ valid issue reference, signed commits, or DCO sign-offs:
 2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
    (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are **not** accepted.
-3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
+3. **Use a Conventional Commit PR title**:
+   `type(scope)!: concise description`. The title becomes the `main` subject
+   when the PR is squash-merged. Every authored branch commit follows the same
+   form; see the [Definition of Done](docs/DEFINITION_OF_DONE.md) for the
+   narrow Git-generated exceptions and the pre-#2157 history cutover.
+4. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
    with `git commit -s -S`.
 
 Do not enable auto-merge manually. The queue applies
