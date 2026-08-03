@@ -114,7 +114,11 @@ def get_reference_targets(repo_root: Path) -> list[Path]:
     for directory in (".github", "docs", "hephaestus", "tests", "scripts"):
         candidate = repo_root / directory
         if candidate.is_dir():
-            targets.extend(path for path in candidate.rglob("*") if path.is_file())
+            targets.extend(
+                path
+                for path in candidate.rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            )
 
     non_usage_documents = {repo_root / "scripts" / "README.md"}
     return sorted({target for target in targets if target not in non_usage_documents})
@@ -132,6 +136,7 @@ def _script_referenced_by_name(script_path: str, targets: list[Path], own_path: 
         True if an external reference exists.
 
     """
+    reference = re.compile(r"(?<![A-Za-z0-9_.-])" + re.escape(script_path) + r"(?![A-Za-z0-9_.-])")
     for target in targets:
         if target.resolve() == own_path:
             continue
@@ -139,7 +144,7 @@ def _script_referenced_by_name(script_path: str, targets: list[Path], own_path: 
             content = target.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if script_path in content:
+        if reference.search(content):
             return True
     return False
 

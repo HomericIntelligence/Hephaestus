@@ -15,9 +15,6 @@ through installed `hephaestus-*` console scripts.
 > `python3 -m hephaestus.<module>` instead.
 
 ### Validation / pre-commit checks
-
-- **`validate_readme_commands.py`** — Validate that commands shown in README
-  code blocks actually run.
 - **`check-symlinks.sh`** — Detect broken symlinks in the repo.
 - **`check_build_dir_untracked.py`** — Fail if anything becomes tracked under
   `build/` (sanctioned gitignored scratch dir; issue #1214).
@@ -32,22 +29,8 @@ through installed `hephaestus-*` console scripts.
 - **`check_security_policy_no_hardcoded_date.py`** — Reject hard-coded
   `As of YYYY-MM-DD` stamps in `SECURITY.md` (issue #730).
 
-### Markdown
-
-- **`fix_invalid_links.py`** — Fix invalid absolute-path links in markdown
-  files (wraps `hephaestus.markdown.link_fixer`).
-
-### Versioning
-
-- **`update_version.py`** — Update secondary version files (`VERSION`,
-  `__init__.py`) via `hephaestus.version.manager`. The canonical version comes
-  from git tags via hatch-vcs — see [`../docs/RELEASING.md`](../docs/RELEASING.md).
-
 ### Scaffolding / automation introspection
 
-- **`scaffold_subpackage.py`** — CLI shim for
-  `hephaestus.scripts_lib.scaffold_subpackage`: scaffold a new `hephaestus`
-  subpackage with matching test structure.
 - **`show_prompt.py`** — Display the automation-pipeline agent prompt for a
   given GitHub issue and stage (planning, implementation, pr-review, …).
 
@@ -58,10 +41,6 @@ through installed `hephaestus-*` console scripts.
   (see `../docs/INSTALLER_ARCHITECTURE.md`).
 - **`shell/lib/install_helpers.sh`** — Sourceable helper library (colors,
   counters, check helpers) shared by the installer scripts.
-- **`shell/install_hooks.sh`** — Install this repo's git hooks via the
-  `pre-commit` framework (wraps `uv run pre-commit install`).
-- **`shell/setup_api_key.sh`** — Export `ANTHROPIC_API_KEY` from Claude CLI
-  credentials for container execution.
 
 ### Disaster recovery
 
@@ -69,19 +48,6 @@ through installed `hephaestus-*` console scripts.
   state (`build/.issue_implementer/`); stdlib-only so it runs in a broken
   environment. See `../docs/adr/0012-backup-and-disaster-recovery-policy.md`
   and `../docs/runbooks/backup-restore.md`.
-
-### Forensics / crash debugging
-
-- **`shell/coredump-host-handler.sh`** — Pipe-mode `core_pattern` handler that
-  captures container coredumps to a host-side directory.
-- **`shell/run-under-gdb.sh`** — Run a command under gdb so fatal signals are
-  caught before in-process handlers swallow them.
-
-### Benchmarks / demos
-
-- **`compare_benchmarks.py`** — Compare benchmark results across runs.
-- **`demo_cli.py`** — Demo CLI functionality.
-- **`example_usage.py`** — Usage examples.
 
 ### Pi smoke validation
 
@@ -101,9 +67,6 @@ through installed `hephaestus-*` console scripts.
 hephaestus-check-test-structure
 python3 -m hephaestus.scripts_lib.check_version_single_source
 python3 -m hephaestus.scripts_lib.check_cli_table_sync
-
-# Markdown link fixer
-python3 scripts/fix_invalid_links.py .
 
 # Symlink check
 scripts/check-symlinks.sh

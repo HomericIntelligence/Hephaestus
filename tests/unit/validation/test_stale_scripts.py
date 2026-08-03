@@ -112,6 +112,18 @@ class TestGetReferenceTargets:
         targets = get_reference_targets(tmp_path)
         assert scripts_dir / "README.md" not in targets
 
+    def test_excludes_bytecode_caches(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        cache_dir = scripts_dir / "__pycache__"
+        cache_dir.mkdir()
+        bytecode = cache_dir / "orphan.cpython-313.pyc"
+        bytecode.write_bytes(b"scripts/orphan.py")
+
+        targets = get_reference_targets(tmp_path)
+
+        assert bytecode not in targets
+
     def test_no_directories(self, tmp_path: Path) -> None:
         targets = get_reference_targets(tmp_path)
         assert all(t.is_file() for t in targets)
@@ -133,6 +145,16 @@ class TestFindStaleScripts:
         _write_script(scripts_dir, "orphan.py")
         result = find_stale_scripts(tmp_path)
         assert "orphan.py" in result
+
+    def test_test_filename_substring_is_not_a_script_reference(self, tmp_path: Path) -> None:
+        scripts_dir = tmp_path / "scripts"
+        tests_dir = tmp_path / "tests"
+        scripts_dir.mkdir()
+        tests_dir.mkdir()
+        _write_script(scripts_dir, "show_prompt.py")
+        (tests_dir / "test_structure.py").write_text("test_show_prompt.py\n")
+
+        assert find_stale_scripts(tmp_path) == ["show_prompt.py"]
 
     def test_always_active_excluded(self, tmp_path: Path) -> None:
         scripts_dir = tmp_path / "scripts"
