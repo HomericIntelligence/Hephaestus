@@ -20,6 +20,26 @@ from hephaestus.github.tidy import (
 
 tidy_module = importlib.import_module("hephaestus.github.tidy")
 
+WORKTREE_PORCELAIN = """\
+worktree /repo
+HEAD abcdef
+branch refs/heads/main
+
+worktree /repo/.worktrees/123-finished
+HEAD 123456
+branch refs/heads/123-finished
+
+worktree /repo/.worktrees/topic
+HEAD 789abc
+branch refs/heads/topic
+
+worktree /repo/.worktrees/detached
+HEAD deadbeef
+detached
+
+bare
+"""
+
 
 def test_tidy_swarm_model_matches_canonical_sonnet() -> None:
     """Drift guard: the tidy swarm model mirrors claude_models.SONNET.
@@ -127,6 +147,37 @@ def test_no_problem_header_at_all() -> None:
     """Output with no warning header returns empty list."""
     result = parse_problem_branches("Finished tidying!\n")
     assert result == []
+
+
+def test_parse_worktree_porcelain_skips_main_and_detached_worktrees() -> None:
+    """Cleanup candidates require a non-main worktree with an attached branch."""
+    assert hasattr(tidy_module, "_parse_worktree_porcelain")
+    assert tidy_module._parse_worktree_porcelain(WORKTREE_PORCELAIN, Path("/repo")) == [
+        (Path("/repo/.worktrees/123-finished"), "123-finished"),
+        (Path("/repo/.worktrees/topic"), "topic"),
+    ]
+
+
+def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dry-run reports a closed-issue worktree and never invokes git removal."""
+    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    if not hasattr(tidy_module, "_cleanup_stale_worktrees"):
+        pytest.fail("tidy does not yet implement stale-worktree cleanup")
+    monkeypatch.setattr(tidy_module, "_worktree_porcelain", lambda: WORKTREE_PORCELAIN)
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert hasattr(tidy_module, "_cleanup_stale_worktrees")
+    assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=True) == 0
+    assert "Would remove stale worktree" in caplog.text
+    remove.assert_not_called()
 
 
 @pytest.mark.parametrize(
