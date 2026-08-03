@@ -353,20 +353,35 @@ class ImplementationStage(Stage):
             "refresh_base": not adopted and direct_base_sha is None,
             "repo_root": str(ctx.paths.repo_root),
         }
-        if not adopted and direct_base_sha is not None:
+        direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
+        direct_branch_prefix = f"{issue}-auto-impl-direct-"
+        direct_branch_nonce = (
+            item.branch.removeprefix(direct_branch_prefix)
+            if item.branch.startswith(direct_branch_prefix)
+            else None
+        )
+        if direct_branch_nonce is not None and not is_direct_scope_worktree_nonce(
+            direct_branch_nonce
+        ):
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "direct_scope_worktree_nonce_invalid",
+            )
+        if adopted and direct_branch_nonce is not None:
+            # A direct source receives a new cursor nonce on every invocation,
+            # but an already-open PR retains the nonce that identifies its
+            # original managed writer. Recover that writer by the immutable
+            # branch identity, not by the new source cursor.
+            kwargs["direct_worktree_nonce"] = direct_branch_nonce
+        elif not adopted and direct_base_sha is not None:
             kwargs["base_sha"] = direct_base_sha
-            direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
-            direct_branch_prefix = f"{issue}-auto-impl-direct-"
-            if item.branch.startswith(direct_branch_prefix):
-                if (
-                    not is_direct_scope_worktree_nonce(direct_worktree_nonce)
-                    or item.branch != f"{direct_branch_prefix}{direct_worktree_nonce}"
-                ):
+            if direct_branch_nonce is not None:
+                if direct_worktree_nonce != direct_branch_nonce:
                     return StageOutcome(
                         Disposition.FINISH_FAIL,
                         "direct_scope_worktree_nonce_invalid",
                     )
-                kwargs["direct_worktree_nonce"] = direct_worktree_nonce
+                kwargs["direct_worktree_nonce"] = direct_branch_nonce
             elif direct_worktree_nonce is not None:
                 return StageOutcome(
                     Disposition.FINISH_FAIL,
