@@ -972,6 +972,43 @@ class TestWorkerPoolSubmitComplete:
         assert (sealed / "bin" / "python").read_text(encoding="utf-8") == "host interpreter\n"
         assert not ((sealed / "bin" / "python").stat().st_mode & 0o222)
 
+    def test_verifier_runtime_does_not_reuse_a_different_dependency_set(
+        self, tmp_path: Path
+    ) -> None:
+        """A changed installed package set receives a fresh sealed runtime."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        cache_temp = tmp_path / "cache-temp"
+
+        def make_runtime(name: str, record: str) -> Path:
+            runtime = tmp_path / name
+            (runtime / "bin").mkdir(parents=True)
+            (runtime / "bin" / "python").write_text("host interpreter\n", encoding="utf-8")
+            (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+            dist_info = runtime / "lib" / "python3.13" / "site-packages" / "demo-1.0.dist-info"
+            dist_info.mkdir(parents=True)
+            (dist_info / "RECORD").write_text(record, encoding="utf-8")
+            return runtime
+
+        first_runtime = make_runtime("runtime-first", "demo.py,sha256=first,1\n")
+        second_runtime = make_runtime("runtime-second", "demo.py,sha256=second,2\n")
+
+        with (
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+            patch(f"{_WP}.sys.prefix", str(first_runtime)),
+        ):
+            first = _verifier_owned_runtime_environment(checkout)
+        with (
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+            patch(f"{_WP}.sys.prefix", str(second_runtime)),
+        ):
+            second = _verifier_owned_runtime_environment(checkout)
+
+        assert second != first
+        assert (
+            second / "lib" / "python3.13" / "site-packages" / "demo-1.0.dist-info" / "RECORD"
+        ).read_text(encoding="utf-8") == "demo.py,sha256=second,2\n"
+
     def test_verifier_runtime_dereferences_the_python_launcher(self, tmp_path: Path) -> None:
         """The sealed copy does not retain a launcher back into its source runtime."""
         checkout = tmp_path / "checkout"
