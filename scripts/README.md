@@ -105,6 +105,16 @@ through installed `hephaestus-*` console scripts.
   `pi_smoke.py` on a cluster node with a fixed export list and no shared
   scheduler artifact (copy and fill partition/account locally).
 
+## Athena consumers
+
+Athena has no direct dependency on a path in this directory. The
+[Athena `tidy` skill](https://github.com/HomericIntelligence/Athena/blob/main/skills/tidy/SKILL.md)
+invokes the installed **`hephaestus-tidy`** console command from its resolved
+Hephaestus checkout; its implementation is
+`hephaestus.github.tidy`, not a `scripts/` wrapper. The lifecycle audit records
+the checked Athena main revision and open-PR scan in
+[`../docs/SCRIPT_LIFECYCLE_AUDIT.md`](../docs/SCRIPT_LIFECYCLE_AUDIT.md).
+
 ## Usage
 
 ```bash

@@ -1,12 +1,15 @@
-"""Detect scripts in ``scripts/`` with no references in CI configs or other scripts.
+"""Detect scripts in ``scripts/`` with no usage references.
 
 A script is considered potentially stale if its filename does not appear in any of:
 
-- ``.github/**/*.yml`` (GitHub Actions workflows)
-- ``justfile``
-- ``.pre-commit-config.yaml``
-- other ``scripts/*.py`` files (cross-references)
-- ``docs/**/*.md`` (documentation)
+- GitHub Actions workflows and repository configuration
+- root documentation and ``docs/``
+- package source, tests, and other scripts (cross-references)
+
+``scripts/README.md`` and the lifecycle-audit matrix are deliberately
+excluded. Their complete inventories are documentation invariants, not
+evidence that an operator or automation invokes a script. This command reports
+leads for lifecycle review; it does not prove that a script is safe to remove.
 
 Known utility/library scripts (``common.py``, ``conftest.py``, ``__init__.py``) are
 excluded from consideration.
@@ -63,18 +66,18 @@ def get_all_scripts(
     scripts_dir: Path,
     extensions: tuple[str, ...] = (".py", ".sh", ".mojo"),
 ) -> list[str]:
-    """Return basenames of all script files in *scripts_dir*.
+    """Return paths relative to *scripts_dir* for all script files.
 
     Args:
         scripts_dir: Path to the ``scripts/`` directory.
         extensions: File suffixes to include.
 
     Returns:
-        Sorted list of basenames.
+        Sorted POSIX paths relative to *scripts_dir*.
 
     """
     return sorted(
-        p.name
+        p.relative_to(scripts_dir).as_posix()
         for p in scripts_dir.rglob("*")
         if p.is_file() and p.suffix in extensions and not p.name.startswith(".")
     )
@@ -83,8 +86,10 @@ def get_all_scripts(
 def get_reference_targets(repo_root: Path) -> list[Path]:
     """Collect files that may reference script names.
 
-    Includes GitHub Actions workflows, justfile, pre-commit config, other scripts,
-    and documentation.
+    Includes workflows, root configuration and documentation, package source,
+    tests, other scripts, and documentation. The scripts catalog and lifecycle
+    audit are excluded because merely listing a script must not suppress a
+    lifecycle-review lead.
 
     Args:
         repo_root: Root of the repository.
@@ -95,31 +100,35 @@ def get_reference_targets(repo_root: Path) -> list[Path]:
     """
     targets: list[Path] = []
 
-    github_dir = repo_root / ".github"
-    if github_dir.is_dir():
-        targets.extend(github_dir.rglob("*.yml"))
-
-    for name in ("justfile", ".pre-commit-config.yaml"):
+    for name in (
+        "README.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "justfile",
+        "pyproject.toml",
+        ".pre-commit-config.yaml",
+    ):
         candidate = repo_root / name
         if candidate.is_file():
             targets.append(candidate)
 
-    scripts_dir = repo_root / "scripts"
-    if scripts_dir.is_dir():
-        targets.extend(scripts_dir.rglob("*.py"))
+    for directory in (".github", "docs", "hephaestus", "tests", "scripts"):
+        candidate = repo_root / directory
+        if candidate.is_dir():
+            targets.extend(path for path in candidate.rglob("*") if path.is_file())
 
-    docs_dir = repo_root / "docs"
-    if docs_dir.is_dir():
-        targets.extend(docs_dir.rglob("*.md"))
+    non_usage_documents = {
+        repo_root / "scripts" / "README.md",
+        repo_root / "docs" / "SCRIPT_LIFECYCLE_AUDIT.md",
+    }
+    return sorted({target for target in targets if target not in non_usage_documents})
 
-    return targets
 
-
-def _script_referenced_by_name(script_name: str, targets: list[Path], own_path: Path) -> bool:
+def _script_referenced_by_name(script_path: str, targets: list[Path], own_path: Path) -> bool:
     """Return True if *script_name* appears in at least one target file (not itself).
 
     Args:
-        script_name: Basename to search for.
+        script_path: Path relative to ``scripts/`` to search for.
         targets: Files to search through.
         own_path: Resolved path of the script itself (excluded from search).
 
@@ -134,7 +143,7 @@ def _script_referenced_by_name(script_name: str, targets: list[Path], own_path: 
             content = target.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if script_name in content:
+        if script_path in content:
             return True
     return False
 
@@ -193,18 +202,19 @@ def find_stale_scripts(
     targets = get_reference_targets(repo_root)
 
     stale: list[str] = []
-    for script_name in all_scripts:
+    for script_path in all_scripts:
+        script_name = Path(script_path).name
         if _is_always_active(script_name):
             continue
-        if exclude_pattern and exclude_pattern in script_name:
+        if exclude_pattern and exclude_pattern in script_path:
             continue
-        own_path = (scripts_dir / script_name).resolve()
+        own_path = (scripts_dir / script_path).resolve()
         stem = Path(script_name).stem
         referenced = _script_referenced_by_name(
-            script_name, targets, own_path
+            script_path, targets, own_path
         ) or _script_referenced_by_import(stem, targets, own_path)
         if not referenced:
-            stale.append(script_name)
+            stale.append(script_path)
 
     return stale
 
