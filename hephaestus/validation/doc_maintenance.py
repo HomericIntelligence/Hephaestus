@@ -60,7 +60,7 @@ class Finding:
 
 @dataclass(frozen=True)
 class SourceContract:
-    """Describe a source file and semantic selector cited by a document."""
+    """Describe a source path and semantic selector cited by a document."""
 
     document: str
     source: str
@@ -84,6 +84,16 @@ SOURCE_CONTRACTS: tuple[SourceContract, ...] = (
         selector="jobs",
     ),
     SourceContract(
+        document="docs/ci/required-checks.md",
+        source=".github/workflows/test.yml",
+        selector="jobs",
+    ),
+    SourceContract(
+        document="docs/specs/2026-07-16-jinja-prompt-templates-design.md",
+        source="hephaestus/prompts/templates/default",
+        selector="",
+    ),
+    SourceContract(
         document="docs/ROADMAP.md",
         source="docs/RELEASING.md",
         selector="Pre-Release Checklist",
@@ -92,6 +102,17 @@ SOURCE_CONTRACTS: tuple[SourceContract, ...] = (
 
 _EXCLUDED_DOCUMENT_DIRS = ("docs/adr/", "docs/release-notes/")
 _LIVING_RECORD_NAMES = frozenset({"README.md", "index.md"})
+_ADR_STATUS_RE = re.compile(
+    r"^\s*(?:[-*+]\s+)?(?:\*\*Status\*\*\s*:|\*\*Status:\*\*|Status\s*:)"
+    r"\s*(?P<status>.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ACCEPTED_ADR_STATUS_RE = re.compile(
+    r"Accepted(?:\s*\([^\r\n)]+\))?",
+    re.IGNORECASE,
+)
+_MARKDOWN_SECTION_RE = re.compile(r"^##\s+", re.MULTILINE)
+_ROADMAP_UPDATE_SECTION_RE = re.compile(r"^##\s+Updating This Roadmap\s*$", re.MULTILINE)
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _DATE_STATE_RE = re.compile(r"\b(?:as of|last updated:)\s+\d{4}-\d{2}-\d{2}\b", re.IGNORECASE)
 _TEMPORARY_STATE_RE = re.compile(
@@ -141,12 +162,25 @@ def _relative_path(path: Path, repo_root: Path) -> str:
     return path.relative_to(repo_root).as_posix()
 
 
-def _is_excluded(relative_path: str) -> bool:
+def _is_accepted_adr(file_path: Path) -> bool:
+    """Return whether *file_path* declares an accepted ADR status."""
+    content = file_path.read_text(encoding="utf-8", errors="replace")
+    first_section = _MARKDOWN_SECTION_RE.search(content)
+    metadata = content[: first_section.start()] if first_section else content
+    statuses = [
+        match.group("status").strip().strip("*_` ") for match in _ADR_STATUS_RE.finditer(metadata)
+    ]
+    return bool(statuses) and all(
+        _ACCEPTED_ADR_STATUS_RE.fullmatch(status) is not None for status in statuses
+    )
+
+
+def _is_excluded(relative_path: str, file_path: Path) -> bool:
     """Return whether a repository-relative path is outside the scan boundary."""
     if any(relative_path.startswith(prefix) for prefix in EXCLUDED_PREFIXES):
         return True
     if relative_path.startswith(_EXCLUDED_DOCUMENT_DIRS[0]):
-        return Path(relative_path).name not in _LIVING_RECORD_NAMES
+        return Path(relative_path).name not in _LIVING_RECORD_NAMES and _is_accepted_adr(file_path)
     if relative_path.startswith(_EXCLUDED_DOCUMENT_DIRS[1]):
         return Path(relative_path).name not in _LIVING_RECORD_NAMES
     return False
@@ -165,7 +199,7 @@ def discover_normative_markdown(repo_root: Path) -> list[Path]:
     return sorted(
         path
         for path in repo_root.rglob("*.md")
-        if path.is_file() and not _is_excluded(_relative_path(path, repo_root))
+        if path.is_file() and not _is_excluded(_relative_path(path, repo_root), path)
     )
 
 
@@ -251,6 +285,10 @@ def validate_volatile_claims(file_path: Path, repo_root: Path) -> list[Finding]:
 
 def _source_selector_exists(source_path: Path, selector: str) -> bool:
     """Check a Python symbol, YAML key, or Markdown heading selector."""
+    if source_path.is_dir():
+        return not selector and any(path.is_file() for path in source_path.rglob("*"))
+    if not selector:
+        return source_path.exists()
     suffix = source_path.suffix.lower()
     text = source_path.read_text(encoding="utf-8", errors="replace")
     if suffix == ".py":
@@ -327,7 +365,7 @@ def validate_source_contracts(
                 )
             )
             continue
-        if not source_path.is_file():
+        if not source_path.exists():
             findings.append(
                 _source_finding(
                     contract, "source-path", f"source does not exist: {contract.source}"
@@ -358,6 +396,16 @@ def _quarter_for(value: date) -> tuple[int, int]:
     return value.year, (value.month - 1) // 3 + 1
 
 
+def _roadmap_update_section(content: str) -> str:
+    """Return the normalized ``Updating This Roadmap`` section body."""
+    section_match = _ROADMAP_UPDATE_SECTION_RE.search(content)
+    if section_match is None:
+        return ""
+    next_section = _MARKDOWN_SECTION_RE.search(content, section_match.end())
+    section_end = next_section.start() if next_section else len(content)
+    return re.sub(r"\s+", " ", content[section_match.end() : section_end]).casefold()
+
+
 def _validate_roadmap_sections(content: str) -> list[Finding]:
     """Validate roadmap ownership, trigger, focus, and source metadata."""
     findings: list[Finding] = []
@@ -370,18 +418,26 @@ def _validate_roadmap_sections(content: str) -> list[Finding]:
                 "roadmap must state a current focus quarter",
             )
         )
+    update_section = _roadmap_update_section(content)
     required_phrases = {
-        "roadmap-ownership": ("Trigger", "Responsibility"),
+        "roadmap-cadence": ("release-driven", "Auto Tag Release", "not date-driven"),
+        "roadmap-ownership": ("Trigger", "Responsibility", "maintainer"),
         "roadmap-source": ("RELEASING.md",),
     }
     for rule, phrases in required_phrases.items():
-        if not all(phrase.lower() in content.lower() for phrase in phrases):
+        if not all(phrase.casefold() in update_section for phrase in phrases):
+            message = (
+                "roadmap update cadence must be release-driven through Auto Tag Release, "
+                "not date-driven"
+                if rule == "roadmap-cadence"
+                else "roadmap must document its owner, review trigger, and maintained source"
+            )
             findings.append(
                 Finding(
                     "docs/ROADMAP.md",
                     1,
                     rule,
-                    "roadmap must document its owner, review trigger, and maintained source",
+                    message,
                 )
             )
     return findings

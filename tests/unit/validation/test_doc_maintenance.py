@@ -44,19 +44,34 @@ def test_specs_are_normative_and_test_fixtures_are_excluded(tmp_path: Path) -> N
 def test_historical_adr_and_release_note_bodies_are_excluded(tmp_path: Path) -> None:
     """Accepted records may retain point-in-time claims without being living docs."""
     accepted_adr = tmp_path / "docs" / "adr" / "0001-example.md"
+    proposed_adr = tmp_path / "docs" / "adr" / "0002-proposed.md"
+    draft_adr = tmp_path / "docs" / "adr" / "0003-draft.md"
     adr_index = tmp_path / "docs" / "adr" / "README.md"
     release_note = tmp_path / "docs" / "release-notes" / "v1.md"
     release_index = tmp_path / "docs" / "release-notes" / "README.md"
     release_index_alias = tmp_path / "docs" / "release-notes" / "index.md"
-    for path in (accepted_adr, adr_index, release_note, release_index, release_index_alias):
+    for path in (adr_index, release_note, release_index, release_index_alias):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# Record\nAs of 2026-01-01, issue #12 was closed.\n", encoding="utf-8")
+    accepted_adr.parent.mkdir(parents=True, exist_ok=True)
+    accepted_adr.write_text(
+        "# Accepted ADR\n\n- Status: Accepted\n\nAs of 2026-01-01, issue #12 was closed.\n",
+        encoding="utf-8",
+    )
+    proposed_adr.write_text(
+        "# Proposed ADR\n\n- Status: Proposed\n\nCurrently inactive.\n", encoding="utf-8"
+    )
+    draft_adr.write_text(
+        "# Draft ADR\n\n- Status: Draft\n\nCurrently inactive.\n", encoding="utf-8"
+    )
 
     discovered = {
         path.relative_to(tmp_path).as_posix() for path in discover_normative_markdown(tmp_path)
     }
 
     assert "docs/adr/0001-example.md" not in discovered
+    assert "docs/adr/0002-proposed.md" in discovered
+    assert "docs/adr/0003-draft.md" in discovered
     assert "docs/release-notes/v1.md" not in discovered
     assert "docs/adr/README.md" in discovered
     assert "docs/release-notes/README.md" in discovered
@@ -142,6 +157,25 @@ def test_roadmap_contract_reports_deterministic_boundary_errors(
     findings = validate_roadmap_maintenance(tmp_path, today=date(2026, 8, 3))
 
     assert any(finding.rule == rule for finding in findings)
+
+
+def test_roadmap_cadence_is_validated_inside_update_section(tmp_path: Path) -> None:
+    """Unrelated roadmap prose cannot satisfy the release-driven cadence guard."""
+    roadmap = tmp_path / "docs" / "ROADMAP.md"
+    roadmap.parent.mkdir(parents=True)
+    roadmap.write_text(
+        "# Roadmap\n\n"
+        "## Current Focus (Q3 2026)\n\n"
+        "The release-driven plan references Auto Tag Release and is not date-driven.\n\n"
+        "## Notes\n\nTrigger and maintainer references may appear elsewhere.\n\n"
+        "## Updating This Roadmap\n\nTypically monthly, when convenient.\n\n"
+        "Last updated: 2026-07-20\n",
+        encoding="utf-8",
+    )
+
+    findings = validate_roadmap_maintenance(tmp_path, today=date(2026, 8, 3))
+
+    assert any(finding.rule == "roadmap-cadence" for finding in findings)
 
 
 def test_json_output_is_machine_readable(
