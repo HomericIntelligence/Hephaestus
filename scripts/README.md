@@ -15,6 +15,7 @@ through installed `hephaestus-*` console scripts.
 > `python3 -m hephaestus.<module>` instead.
 
 ### Validation / pre-commit checks
+
 - **`check-symlinks.sh`** — Detect broken symlinks in the repo.
 - **`check_build_dir_untracked.py`** — Fail if anything becomes tracked under
   `build/` (sanctioned gitignored scratch dir; issue #1214).

@@ -151,11 +151,14 @@ def _issue_is_closed(issue: int) -> bool:
 
 def _branch_is_merged(branch: str, trunk: str) -> bool:
     """Return whether *branch* is already an ancestor of *trunk*."""
-    return run_git(
-        ["merge-base", "--is-ancestor", branch, trunk],
-        check=False,
-        log_on_error=False,
-    ).returncode == 0
+    return (
+        run_git(
+            ["merge-base", "--is-ancestor", branch, trunk],
+            check=False,
+            log_on_error=False,
+        ).returncode
+        == 0
+    )
 
 
 def _worktree_is_dirty(path: Path) -> bool:
