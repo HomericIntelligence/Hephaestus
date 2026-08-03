@@ -45,6 +45,17 @@ The active ruleset requires these direct contexts:
 `auto-merge-policy` is advisory. It reports GitHub state but does not grant
 automation authority and is not a required context.
 
+## Maintenance
+
+- **Owner:** The `.github/` owner in
+  [CODEOWNERS](../../.github/CODEOWNERS).
+- **Versioned source:** The `jobs` mapping in
+  [`_required.yml`](../../.github/workflows/_required.yml).
+- **External source:** The live branch-protection and ruleset output collected
+  by the commands under [Live audit](#live-audit).
+- **Trigger:** Reconcile this document whenever a workflow context,
+  branch-protection rule, or ruleset changes, and during the pre-release review.
+
 ## Aggregate workflow coverage
 
 `required-checks-gate` depends on the code-validation jobs in

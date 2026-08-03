@@ -7,10 +7,17 @@ The [`docs/adr/`](adr/) records remain the bind-points for individual
 architectural decisions (`0006-queue-based-in-process-automation-pipeline`,
 …) — this document is the unified reference; ADRs are the historical record.
 This file is source-grounded: every operational claim links to the module
-that backs it, in the form ``module/file.py`` or
-``§module/Class.func``. Per the project convention
+that backs it. Source citations use the forms
+`module/file.py` and `§module/Class.func`, each paired with a relative link.
+Per the project convention
 (`"Code References": 'DO'` in [`AGENTS.md`](../AGENTS.md) §"Claude Code
 Optimization"), file paths are repo-relative.
+
+> **Maintenance:** Ownership follows
+> [CODEOWNERS](../.github/CODEOWNERS). Changes to a cited pipeline module,
+> route, stage, template, or workflow trigger review of the corresponding
+> section. Local source targets and selected semantic source symbols are checked
+> by `hephaestus.validation.doc_maintenance`.
 
 ---
 

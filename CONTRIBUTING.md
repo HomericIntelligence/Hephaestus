@@ -20,7 +20,9 @@ links to the full section below.
 3. **Pick an issue** ([Code Contributions](#code-contributions)) — pick or open a
    GitHub issue, then branch as `<issue-number>-description`.
 4. **Make the change test-first** ([Testing](#testing)) — write a failing test,
-   make it pass, keep coverage at 83%+ (target 90%).
+   make it pass, and keep coverage at the configured floor in
+   [`pyproject.toml`](pyproject.toml) while working toward the target in
+   [`AGENTS.md`](AGENTS.md).
 5. **Open the PR** ([Pull Request Process](#pull-request-process)) — use a
    Conventional Commit PR title, sign every commit (`git commit -S`), put
    `Closes #<issue-number>` on its own line in the body, and keep auto-merge
@@ -52,6 +54,8 @@ Before opening a PR, locate the work in:
 - [`.github/pull_request_template.md`](.github/pull_request_template.md)
   — the PR scaffolding (`Closes #N` line is enforced by the
   `pr-policy` CI gate).
+- [`docs/documentation-maintenance.md`](docs/documentation-maintenance.md) —
+  ownership, sources, review triggers, and automated guards for living docs.
 
 Hephaestus uses trunk-based development: create one short-lived feature
 branch per issue, open a pull request, squash-merge it back to `main`, and cut

@@ -48,7 +48,7 @@ SLA the project does not hold would itself be an audit finding.
 | Astral (`astral-sh/setup-uv`) | Provisions the uv toolchain in CI (ADR-0008) | High for CI — uv is the sole environment manager | Pin the action by SHA; uv binaries are cached by `actions/cache` | Release-artifact availability | GitHub-hosted release artifacts — best-effort |
 | Third-party GitHub Actions (`astral-sh/setup-uv`, `pypa/gh-action-pypi-publish`, `crazy-max/ghaction-import-gpg`, `softprops/action-gh-release`, `extractions/setup-just`) | uv provisioning, PyPI publishing, GPG import, release creation, `just` provisioning | Medium — release and CI ergonomics | SHA-pinning (done — see `release.yml` and `_required.yml`), `github-actions` Dependabot updates (ADR-0003) | Correctness of the pinned action code | Not a hosted service — vendored, pinned code |
 | Dependabot (`.github/dependabot.yml`) | Automated `uv` and `github-actions` dependency-update PRs | Low — dependency hygiene | Keep the ecosystem list correct; review update PRs (ADR-0003) | Update-generation availability | GitHub-native — best-effort |
-| Renovate (Mend app) | Historical audit record: it owned the retired Pixi/conda ecosystem (ADR-0003) and is not configured after the uv-only migration (ADR-0008) | None — not used by the project | None — no project configuration | Not applicable | Not applicable |
+| Renovate (Mend app) | Historical pixi/conda ownership per ADR-0003; no `renovate.json` is tracked after the uv-only migration in ADR-0008 | None while no configuration is tracked | If pixi/conda returns, add a scoped `renovate.json` per ADR-0003 and update this row in the same change | App availability when configured | Best-effort when configured |
 
 ## Responsibility policy
 

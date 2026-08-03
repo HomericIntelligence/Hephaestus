@@ -140,3 +140,13 @@ def test_doc_is_linked_from_index() -> None:
     """The inventory must be discoverable from the docs index."""
     text = INDEX.read_text(encoding="utf-8")
     assert "third-party-services.md" in text
+
+
+def test_renovate_inventory_matches_tracked_configuration() -> None:
+    """The inventory must change when Renovate configuration is introduced."""
+    row = next(row for row in _inventory_table_rows()[1:] if "Renovate" in row[0])
+    has_configuration = any(
+        (REPO_ROOT / name).is_file() for name in ("renovate.json", "renovate.json5", ".renovaterc")
+    )
+
+    assert ("no `renovate.json` is tracked" in " ".join(row)) is not has_configuration
