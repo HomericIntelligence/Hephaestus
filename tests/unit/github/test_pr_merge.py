@@ -31,6 +31,44 @@ def _gh_result(payload: object) -> MagicMock:
     return result
 
 
+def test_choose_merge_flag_prefers_the_first_repository_permitted_strategy() -> None:
+    """Manual callers can choose a permitted merge flag without a shell helper."""
+    assert hasattr(pr_merge_module, "choose_merge_flag")
+    choose_merge_flag = pr_merge_module.choose_merge_flag
+
+    assert (
+        choose_merge_flag(
+            {
+                "allow_rebase_merge": True,
+                "allow_squash_merge": True,
+                "allow_merge_commit": True,
+            }
+        )
+        == "--rebase"
+    )
+    assert (
+        choose_merge_flag(
+            {
+                "allow_rebase_merge": False,
+                "allow_squash_merge": True,
+                "allow_merge_commit": True,
+            }
+        )
+        == "--squash"
+    )
+    assert (
+        choose_merge_flag(
+            {
+                "allow_rebase_merge": False,
+                "allow_squash_merge": False,
+                "allow_merge_commit": True,
+            }
+        )
+        == "--merge"
+    )
+    assert choose_merge_flag({}) is None
+
+
 class TestDetectRepoFromRemote:
     """Tests for detect_repo_from_remote."""
 

@@ -51,13 +51,6 @@ through installed `hephaestus-*` console scripts.
 - **`show_prompt.py`** — Display the automation-pipeline agent prompt for a
   given GitHub issue and stage (planning, implementation, pr-review, …).
 
-### Git / GitHub workflow helpers
-
-- **`choose_merge_flag.sh`** — Sourceable `choose_merge_flag()` helper that
-  picks a permitted manual merge strategy for a repo (rebase → squash → merge).
-- **`shell/drive_prs_green_ecosystem.sh`** — Drive failing PRs to green CI
-  across every non-fork HomericIntelligence repo, with per-repo logs.
-
 ### Installation / environment
 
 - **`shell/install.sh`** — HomericIntelligence ecosystem installer: check (and
