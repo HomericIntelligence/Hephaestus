@@ -1831,9 +1831,12 @@ class WorkerPool:
     def _git_rebase(self, job: GitJob) -> JobResult:
         """Rebase an implementation writer and optionally lease-publish its head."""
         kwargs = dict(job.kwargs)
-        publish_rebased_head = bool(
-            kwargs.pop("publish_rebased_head", False) or kwargs.pop("publish_detached_head", False)
-        )
+        if "publish_detached_head" in kwargs:
+            return JobResult(
+                ok=False,
+                error="legacy publish_detached_head rebase mode is unsupported",
+            )
+        publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
         result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)

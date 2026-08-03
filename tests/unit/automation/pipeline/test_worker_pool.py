@@ -2205,13 +2205,13 @@ class TestGitOps:
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
 
-    def test_direct_rebase_dispatch_lease_pushes_the_detached_head(
+    def test_direct_rebase_dispatch_rejects_the_retired_publish_mode(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """A direct-review rebase publishes only against its captured PR head."""
+        """The reviewer-only detached publish mode has no compatibility path."""
         job = GitJob(
             repo="test/repo",
             op="rebase",
@@ -2224,24 +2224,13 @@ class TestGitOps:
                 "publish_detached_head": True,
             },
         )
-        with (
-            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=True) as mock_rebase,
-            patch.object(pool, "_read_detached_push_head", return_value="b" * 40),
-            patch(f"{_WP}.git_utils.push_head_to_branch") as mock_push,
-        ):
+        with patch(f"{_WP}.git_utils.rebase_worktree_onto") as mock_rebase:
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
 
-        mock_rebase.assert_called_once_with(cwd=tmp_path, base_branch="main", timeout=60)
-        mock_push.assert_called_once_with(
-            "70-existing",
-            "a" * 40,
-            tmp_path,
-            source_sha="b" * 40,
-            timeout=60,
-        )
-        assert result.ok is True
-        assert result.value == {"rebased": True, "published": True, "head_sha": "b" * 40}
+        mock_rebase.assert_not_called()
+        assert result.ok is False
+        assert result.error == "legacy publish_detached_head rebase mode is unsupported"
 
     def test_push_dispatch(
         self,
