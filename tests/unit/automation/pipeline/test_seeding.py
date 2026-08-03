@@ -462,6 +462,7 @@ class TestSeedIssueFetchLayer:
             "number": 102,
             "title": "A task",
             "body": "",
+            "state": "OPEN",
             "labels": [{"name": STATE_NEEDS_PLAN}],
         }
         github.issue_comments.side_effect = AssertionError("comments are not state authority")

@@ -81,6 +81,31 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
+def _closed_issue_entry_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    """Fail closed on malformed state and terminalize a fresh close/merge race."""
+    if item.issue is None:  # Defensive; on_enter rejects this before calling.
+        return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+    issue_snapshot = ctx.github.gh_issue_json(item.issue)
+    if not isinstance(issue_snapshot, dict) or issue_snapshot.get("number") != item.issue:
+        logger.error("planning:%d: malformed issue snapshot", item.issue)
+        return StageOutcome(Disposition.FINISH_FAIL, "malformed issue snapshot")
+    issue_state = issue_snapshot.get("state")
+    if not isinstance(issue_state, str) or issue_state.upper() not in {"OPEN", "CLOSED"}:
+        logger.error("planning:%d: malformed issue state", item.issue)
+        return StageOutcome(Disposition.FINISH_FAIL, "malformed issue snapshot state")
+    if issue_state.upper() == "OPEN":
+        return None
+    merged_pr = ctx.github.find_merged_pr_for_issue(item.issue)
+    if merged_pr is None:
+        logger.error("planning:%d: closed without an exact merged closing PR", item.issue)
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            "closed issue has no exact merged closing PR",
+        )
+    logger.info("planning:%d: closed by merged PR #%d; finishing", item.issue, merged_pr)
+    return StageOutcome(Disposition.FINISH_PASS, f"closed by merged PR #{merged_pr}")
+
+
 def build_plan_prompt(
     issue_number: int,
     issue_title: str = "",
@@ -402,7 +427,8 @@ class PlanningStage(Stage):
     - ``state:skip`` -> SKIP (checked BEFORE plan-go; skip wins over
       everything, even a contradictory plan-go, logging a WARNing — #1835)
     - already at-or-past ``state:plan-go`` -> ADVANCE (zero jobs)
-    - merged closing PR -> close issue as covered, SKIP
+    - freshly closed issue + exact merged closing PR -> FINISH_PASS
+    - open issue + historic merged closing PR -> continue planning
     - open PR -> SKIP (PR already covers implementation)
     - unlabeled entry -> idempotent bare add of ``state:needs-plan``; entry
       carrying ``state:plan-no-go`` (or a stale ``state:plan-go``) after a
@@ -430,6 +456,9 @@ class PlanningStage(Stage):
         if not item.issue:
             logger.warning("planning: work item has no issue number")
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+
+        if issue_outcome := _closed_issue_entry_outcome(item, ctx):
+            return issue_outcome
 
         labels = _require_issue_labels(item, ctx)
 

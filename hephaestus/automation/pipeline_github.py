@@ -480,7 +480,7 @@ class PipelineGitHub:
         candidates = json.loads(stdout)
         if not isinstance(candidates, list) or len(candidates) >= 1000:
             raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        closes_pattern = re.compile(rf"^Closes #{issue_number}\r?$", re.MULTILINE)
         matching_pr: int | None = None
         for candidate in candidates:
             if not isinstance(candidate, dict):

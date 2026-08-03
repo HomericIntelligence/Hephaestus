@@ -68,6 +68,7 @@ from collections.abc import Callable
 from typing import cast
 
 from hephaestus.automation.address_review_core import (
+    MAX_ADDRESS_REPLY_CHARS,
     _parse_addressed_block,
     parse_addressed_replies,
 )
@@ -208,6 +209,17 @@ PRE_PR_TEST_TIMEOUT_S = 1800
 PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
 
 NO_COMMIT_REPLY_WARNING = "[auto-msg] reply has no corresponding commit, review thoroughly"
+_TRUNCATED_REPLY_WARNING = "[auto-msg] reply truncated to fit review limit"
+
+
+def _append_no_commit_reply_warning(reply: str) -> str:
+    """Append the reviewer warning while preserving the reply-size contract."""
+    suffix = f"\n\n{NO_COMMIT_REPLY_WARNING}"
+    if len(reply) + len(suffix) <= MAX_ADDRESS_REPLY_CHARS:
+        return f"{reply}{suffix}"
+    bounded_suffix = f"\n\n{_TRUNCATED_REPLY_WARNING}{suffix}"
+    content_budget = MAX_ADDRESS_REPLY_CHARS - len(bounded_suffix)
+    return f"{reply[:content_budget].rstrip()}{bounded_suffix}"
 
 
 def _remediation_reply_head(
@@ -955,7 +967,7 @@ class ImplementationStage(Stage):
             return
         if not pushed:
             replies = {
-                thread_id: f"{reply}\n\n{NO_COMMIT_REPLY_WARNING}"
+                thread_id: _append_no_commit_reply_warning(reply)
                 for thread_id, reply in replies.items()
             }
             item.payload.pop("no_commits", None)

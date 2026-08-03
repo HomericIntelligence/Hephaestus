@@ -763,6 +763,18 @@ class TestFindMergedClosingPr:
 
         assert result is None
 
+    @pytest.mark.parametrize(
+        "body",
+        ["Closes #12, #18\n", "Closes #12: reason\n", "Closes #12 trailing\n"],
+    )
+    def test_rejects_trailing_text_after_target_issue(self, body: str) -> None:
+        """The target number must occupy the complete policy line."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([{"number": 5000, "body": body}]),
+        ):
+            assert find_merged_closing_pr(12) is None
+
     def test_returns_none_when_no_merged_pr(self) -> None:
         """No merged PR found → None."""
         with patch(
@@ -824,6 +836,18 @@ class TestFindMergedPrForIssue:
             result = find_merged_pr_for_issue(7)
 
         assert result == 44
+
+    @pytest.mark.parametrize(
+        "body",
+        ["Closes #7, #8\n", "Closes #7: reason\n", "Closes #7 trailing\n"],
+    )
+    def test_rejects_trailing_text_after_target_issue(self, body: str) -> None:
+        """Merged lookup follows the same whole-line PR policy contract."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([{"number": 44, "body": body}]),
+        ):
+            assert find_merged_pr_for_issue(7) is None
 
     def test_returns_none_when_no_merged_pr(self) -> None:
         """Neither strategy finds a merged PR → None (closed PRs stay invisible)."""

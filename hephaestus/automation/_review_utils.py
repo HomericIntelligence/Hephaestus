@@ -796,7 +796,7 @@ def find_pr_for_issue(
         # line boundaries (re.MULTILINE) so ``Closes #1234`` cannot match a
         # query for #12, and grouped ``Closes #12, #18`` cannot match either
         # — only PRs that follow ``pr-policy``'s exact-line format match.
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        closes_pattern = re.compile(rf"^Closes #{issue_number}\r?$", re.MULTILINE)
         for candidate in pr_data:
             body = candidate.get("body") or ""
             if closes_pattern.search(body):
@@ -849,7 +849,7 @@ def find_merged_closing_pr(issue_number: int) -> int | None:
             check=False,
         )
         pr_data = json.loads(result.stdout or "[]")
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
+        closes_pattern = re.compile(rf"^Closes #{issue_number}\r?$", re.MULTILINE)
         for candidate in pr_data:
             body = candidate.get("body") or ""
             if closes_pattern.search(body):

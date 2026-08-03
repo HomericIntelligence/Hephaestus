@@ -393,19 +393,28 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
 
     """
     issue_data = github.gh_issue_json(issue_number)
-    raw_labels = issue_data.get("labels", []) if isinstance(issue_data, dict) else []
-    labels = {
-        str(label.get("name", ""))
+    if not isinstance(issue_data, dict):
+        raise TypeError("issue snapshot must be a JSON object")
+    if issue_data.get("number") != issue_number:
+        raise ValueError("issue snapshot number does not match the requested issue")
+    state = issue_data.get("state")
+    if not isinstance(state, str) or state.upper() not in {
+        IssueState.OPEN.value,
+        IssueState.CLOSED.value,
+    }:
+        raise ValueError("issue snapshot state must be exactly OPEN or CLOSED")
+    raw_labels = issue_data.get("labels")
+    if not isinstance(raw_labels, list):
+        raise ValueError("issue snapshot labels must be a list")
+    if any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str)
         for label in raw_labels
-        if isinstance(label, dict) and label.get("name")
-    }
-    title = str(issue_data.get("title") or "") if isinstance(issue_data, dict) else ""
-    body = str(issue_data.get("body") or "") if isinstance(issue_data, dict) else ""
-    issue_is_closed = (
-        str(issue_data.get("state") or "").upper() == IssueState.CLOSED.value
-        if isinstance(issue_data, dict)
-        else False
-    )
+    ):
+        raise ValueError("issue snapshot labels must contain string names")
+    labels = {label["name"] for label in raw_labels if label["name"]}
+    title = str(issue_data.get("title") or "")
+    body = str(issue_data.get("body") or "")
+    issue_is_closed = state.upper() == IssueState.CLOSED.value
     epic = is_epic(sorted(labels), title)
     pr_is_open = False
     pr_is_merged = False

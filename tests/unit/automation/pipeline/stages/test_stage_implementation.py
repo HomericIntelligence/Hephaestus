@@ -2108,6 +2108,14 @@ class TestCommitPushAndPrCreate:
             "[auto-msg] reply has no corresponding commit, review thoroughly"
         )
 
+    def test_no_commit_warning_reserves_space_at_reply_limit(self) -> None:
+        """Appending the required warning never invalidates a maximal reply."""
+        reply = implementation_module._append_no_commit_reply_warning("x" * 4_000)
+
+        assert len(reply) <= 4_000
+        assert "[auto-msg] reply truncated to fit review limit" in reply
+        assert reply.endswith("[auto-msg] reply has no corresponding commit, review thoroughly")
+
     def test_commit_push_requests_git_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """COMMIT_PUSH_WAIT submits the commit_push GitJob."""
         stage = ImplementationStage()

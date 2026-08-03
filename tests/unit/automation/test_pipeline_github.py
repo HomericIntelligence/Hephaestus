@@ -3167,6 +3167,25 @@ class TestRepoScoping:
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
         assert adapter.find_merged_pr_for_issue(5) == 5
 
+    @pytest.mark.parametrize(
+        "body",
+        ["Closes #5, #6\n", "Closes #5: reason\n", "Closes #5 trailing\n"],
+    )
+    def test_repo_scoped_merged_pr_lookup_rejects_trailing_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    ) -> None:
+        """Repo-scoped merged lookup requires the complete canonical line."""
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda _argv, **_kwargs: SimpleNamespace(
+                stdout=json.dumps([{"number": 5, "body": body}])
+            ),
+        )
+
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        assert adapter.find_merged_pr_for_issue(5) is None
+
     def test_repo_scoped_unresolved_threads_returns_every_open_thread(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
