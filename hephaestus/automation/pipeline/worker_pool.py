@@ -118,7 +118,7 @@ _TRUSTED_GIT_CANDIDATES = (
     Path("/usr/bin/git"),
 )
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
-_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v4-all-worker-environments"
+_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v5-dependency-manifest"
 
 # The host verification handles code from an untrusted pull request.  Bound
 # the Git archive before extraction and bound every child output/write path.
@@ -210,6 +210,18 @@ def _host_runtime_fingerprint(runtime: Path) -> str:
         hasher.update((runtime / "pyvenv.cfg").read_bytes())
     except OSError:
         hasher.update(str(runtime).encode())
+    manifests = sorted(
+        (
+            *runtime.rglob("*.dist-info/RECORD"),
+            *runtime.rglob("*.egg-info/PKG-INFO"),
+        ),
+        key=lambda path: path.as_posix(),
+    )
+    for manifest in manifests:
+        hasher.update(manifest.relative_to(runtime).as_posix().encode())
+        hasher.update(b"\0")
+        hasher.update(manifest.read_bytes())
+        hasher.update(b"\0")
     return hasher.hexdigest()
 
 
