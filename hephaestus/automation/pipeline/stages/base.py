@@ -363,13 +363,15 @@ class StageGitHub(Protocol):
         threads: list[dict[str, Any]],
         *,
         expected_head_sha: str,
+        review_diff: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Post findings only on the fresh reviewed open, unarmed head.
+        """Post one source-anchored batch for the immutable reviewed snapshot.
 
-        The accessor verifies ``expected_head_sha`` immediately before the
-        write and binds the provider's review request to that commit.  A
-        stage-side guard is intentionally duplicated here: a direct adapter
-        call must not regain a stale-head publication path.
+        ``expected_head_sha`` identifies the exact detached checkout the
+        reviewer inspected.  A later PR push does not invalidate that review:
+        GitHub accepts a review bound to the older commit and marks affected
+        comments outdated when appropriate.  Eligibility for the GO label is
+        checked separately against the current head.
         """
         ...
 

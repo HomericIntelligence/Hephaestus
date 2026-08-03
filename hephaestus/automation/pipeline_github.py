@@ -2594,8 +2594,9 @@ class PipelineGitHub:
         threads: list[dict[str, Any]],
         *,
         expected_head_sha: str,
+        review_diff: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Post review threads only on a fresh, exact reviewed PR head."""
+        """Post one source-anchored review batch for an immutable snapshot."""
         # GitHub renders a review-level ``body`` as an unanchored general
         # comment. Publish only reviews that contain source-positioned threads.
         if not threads:
@@ -2606,19 +2607,19 @@ class PipelineGitHub:
             return []
         if self._skip(f"post {len(threads)} review thread(s) on PR #{pr_number}"):
             return []
-        if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
-            raise RuntimeError("review publication head is stale, closed, or auto-merge armed")
         if self._repo_slug is not None:
-            if threads:
-                diff_result = self._gh(["pr", "diff", str(pr_number)], check=False)
-                postable_threads = github_api._filter_comments_to_diff(
-                    threads, diff_result.stdout or ""
+            snapshot_diff = review_diff
+            if snapshot_diff is None:
+                # Direct callers that do not own a detached checkout retain
+                # compatibility. The review stage always supplies its local
+                # snapshot, so its anchors never move with the remote PR.
+                snapshot_diff = self._gh(["pr", "diff", str(pr_number)], check=False).stdout or ""
+            postable_threads = github_api._filter_comments_to_diff(threads, snapshot_diff)
+            if len(postable_threads) != len(threads):
+                raise RuntimeError(
+                    "review-thread batch contains an anchor outside the reviewed diff"
                 )
-                if len(postable_threads) != len(threads):
-                    raise RuntimeError(
-                        "review-thread batch contains an anchor outside the current PR diff"
-                    )
-                threads = postable_threads
+            threads = postable_threads
             review_comments = [
                 {
                     "path": c["path"],
@@ -2636,12 +2637,6 @@ class PipelineGitHub:
                     "comments": review_comments,
                 }
             )
-            # Diff filtering can take long enough for a push, close, or
-            # auto-merge arm to invalidate the original state proof. Check
-            # immediately before the irreversible review publication, then
-            # retain the post-write readback below for receipt proof.
-            if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
-                raise RuntimeError("review publication head is stale, closed, or auto-merge armed")
             with github_api._body_file(request_body) as input_path:
                 result = gh_call(
                     [
@@ -2672,8 +2667,6 @@ class PipelineGitHub:
                     pr_number,
                     len(review_comments),
                 )
-            if not self._pr_is_current_open_head(self.gh_pr_state(pr_number), expected_head_sha):
-                raise RuntimeError("review publication head changed during receipt proof")
             return receipts
         return []
 
