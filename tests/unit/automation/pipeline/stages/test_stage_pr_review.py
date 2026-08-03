@@ -23,12 +23,14 @@ from hephaestus.automation.pipeline.stages import (
     ImplementationThreadReplyResult,
     JobRequest,
     StageOutcome,
+    pr_review as stage_module,
 )
 from hephaestus.automation.pipeline.stages.pr_review import (
     ADOPT_WORKTREE_WAIT,
     CLEANUP_REVIEW_WORKTREE_WAIT,
     DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
     DIRECT_PUSH_RETRY_CAP,
+    HOST_VERIFICATION_WAIT,
     REVIEW_CHECKOUT_WAIT,
     REVIEW_ERROR_RETRY_CAP,
     PrReviewStage,
@@ -268,6 +270,217 @@ class TestPrReviewStageOnEnter:
         assert isinstance(request.job, GitJob)
         assert request.job.op == "create_worktree"
         assert request.job.kwargs["isolated"] is True
+
+    def test_on_enter_routes_unreplied_threads_to_implementation_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Existing threads without current-head responses never trigger a new audit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
+        )
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+        assert item.branch == "1-auto-impl-direct-" + "b" * 32
+        assert item.payload["existing_pr"] is True
+        assert item.payload["implementation_remediation"] is True
+        assert item.payload["remediation_threads"] == [
+            {
+                "thread_id": "live-thread-1001-0",
+                "path": "a.py",
+                "line": 1,
+                "body": "<!-- hephaestus-severity: major -->\nfinding",
+            }
+        ]
+        assert item.payload["remediation_thread_snapshots"][0]["id"] == "live-thread-1001-0"
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
+
+    def test_on_enter_routes_fully_replied_threads_to_comment_validation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A current-head implementation reply proceeds to reviewer validation only."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            unresolved=[(1, 0)], pr_head_branch="1-auto-impl-direct-" + "b" * 32
+        )
+        github._thread_replies["live-thread-1001-0"] = [
+            {
+                "id": "implementation-reply-live-thread-1001-0",
+                "author": "hephaestus[bot]",
+                "body": "[Response] Fixed and tested.",
+            }
+        ]
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+        ctx = make_ctx(github=github)
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.payload["existing_pr"] is True
+        assert item.payload["reviewer_comment_validation_only"] is True
+
+        item.state = REVIEW_CHECKOUT_WAIT
+        item.payload["review_checkout_ready"] = True
+        item.payload["review_checkout_expected_head"] = "a" * 40
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        assert "review_audit" not in item.payload
+
+    def test_on_enter_fails_closed_when_existing_thread_read_fails(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed thread read cannot be bypassed by starting a new review."""
+
+        class ThreadReadFailsGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                raise RuntimeError("GitHub unavailable")
+
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+
+        assert stage.on_enter(item, make_ctx(github=ThreadReadFailsGitHub())) == StageOutcome(
+            Disposition.FINISH_FAIL, "review_threads_unavailable"
+        )
+
+    def test_checkout_rechecks_new_unreplied_thread_before_submitting_a_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A thread appearing after entry goes to implementation, not a broad audit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(1, 0)])
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_checkout_ready": True,
+                "review_checkout_expected_head": "a" * 40,
+                "pr_diff": "",
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
+
+    def test_host_verification_rechecks_new_unreplied_thread_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A thread appearing during host checks cannot lead to a broad review batch."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(1, 0)])
+        item = make_work_item(issue=1, pr=1001, state=HOST_VERIFICATION_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
+            }
+        )
+        specs = stage_module._host_verification_specs(item.payload["pr_diff"])
+        item.payload["host_verification_receipts"] = [
+            {
+                "head_sha": "a" * 40,
+                "argv": list(spec.argv),
+                "immutable_source": True,
+                "ok": True,
+                "stdout_tail": "",
+                "stderr_tail": "",
+            }
+            for spec in specs
+        ]
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
+
+    def test_comment_validation_resolves_threads_without_posting_a_second_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Comment validation reconciles the original thread instead of publishing findings."""
+
+        class ResolvingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live = [
+                    {
+                        "id": "thread-1",
+                        "path": "a.py",
+                        "line": 3,
+                        "side": "RIGHT",
+                        "body": "[Review] Fix the guard.",
+                        "comments": [
+                            {
+                                "id": "review-comment-1",
+                                "author": "reviewer",
+                                "body": "[Review] Fix the guard.",
+                            },
+                            {
+                                "id": "implementation-reply-thread-1",
+                                "author": "hephaestus[bot]",
+                                "body": "[Response] Added the guard and tests.",
+                            },
+                        ],
+                    }
+                ]
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread) for thread in self.live]
+
+            def reviewer_validation_receipts(
+                self,
+                pr_number: int,
+                *,
+                reviewed_head_sha: str,
+                threads: list[dict[str, Any]],
+            ) -> list[dict[str, Any]]:
+                del pr_number
+                return [
+                    {
+                        **thread,
+                        "implementation_reply_id": "implementation-reply-thread-1",
+                        "implementation_reply_body": "[Response] Added the guard and tests.",
+                        "implementation_head_sha": reviewed_head_sha,
+                    }
+                    for thread in threads
+                ]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                del args, kwargs
+                self.live = []
+                return SimpleNamespace(
+                    resolved_thread_ids=("thread-1",),
+                    feedback_thread_ids=(),
+                    blocked_thread_ids=(),
+                )
+
+        github = ResolvingGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="POST")
+        item.payload.update(
+            {
+                "reviewer_comment_validation_only": True,
+                "reviewed_pr_head_sha": "a" * 40,
+                "validation_result": '{"resolved":["thread-1"],"unaddressed":[]}',
+            }
+        )
+
+        result = PrReviewStage().step(item, ctx)
+
+        assert result == Continue(next_state="EVAL")
+        assert 1001 not in github.reviews
+        assert item.payload["review_audit"] == ReviewAudit(
+            grade="A",
+            summary="Reviewer validated the implementation responses to all open threads.",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
 
     def test_on_enter_double_call_rechecks_unarmed_state_without_mutation(
         self, make_ctx: Any, make_work_item: Any
@@ -793,7 +1006,7 @@ class TestPrReviewStageStep:
         """Structured comments survive the worker boundary and are actionable."""
         events: list[Any] = []
         stage = PrReviewStage()
-        github = FakeStageGitHub(unresolved=[(1, 0)], by_severity=[(1, 0, 0)])
+        github = FakeStageGitHub(by_severity=[(0, 0, 0), (1, 0, 0)])
         ctx = make_ctx(github=github, event_fn=events.append)
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
         item.worktree = "/tmp/wt"
@@ -4027,11 +4240,10 @@ class TestFullWalks:
     """Full pool-driven walks of the whole stage (canonical FakeWorkerPool)."""
 
     def test_nogo_round_then_clean_go_walk(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A non-GO review exits to the implementation-owned remediation pass."""
+        """An existing open thread exits directly to implementation remediation."""
         stage = PrReviewStage()
-        # Each fresh review snapshot consumes one scripted thread shape.
-        # The first review finds blocking threads and transfers them directly
-        # to implementation after one batched review submission.
+        # Existing open threads must be handled by the writer before any new
+        # broad review batch is scheduled.
         github = FakeStageGitHub(
             by_severity=[
                 (2, 0, 0),
@@ -4050,21 +4262,11 @@ class TestFullWalks:
         item.worktree = "/tmp/wt21"
 
         pool = FakeWorkerPool()
-        pool.script(
-            JobResult(ok=True, value=_valid_audit()),  # review round 1
-            JobResult(ok=True, value='{"resolved": [], "unaddressed": []}'),  # validate round 1
-            JobResult(ok=True, value=True),  # remove detached review worktree
-        )
-
         outcome = _drive(stage, item, ctx, pool)
 
         assert isinstance(outcome, StageOutcome)
         assert outcome == StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
-        assert [h.job.descr for h in pool.submitted] == [
-            "review",
-            "validate",
-            "remove_read_only_review_worktree",
-        ]
+        assert pool.submitted == []
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_unresolved_thread_walk_exhausts_without_terminal_handoff(

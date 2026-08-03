@@ -3,11 +3,14 @@
 The queue stage is the sole live implementation of the review/validate/address
 state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
 
-- Normal path: ENTER creates a detached review checkout, REVIEW_WAIT binds it
+- Normal path: ENTER first reads every open thread. Any thread without a
+  current-head implementation response writes NO-GO and fails directly back
+  to ``implementation``; it never triggers another broad review. Fully
+  replied threads create a detached checkout for comment validation only.
+  A thread-free entry creates a detached review checkout, REVIEW_WAIT binds it
   once to PR head ``H``, then REVIEW_WAIT -> VALIDATE_WAIT -> POST -> EVAL.
   A clean audit writes GO and removes the checkout before advancing to
-  ``merge_wait``. Any open thread writes NO-GO, removes the checkout, and
-  fails back to ``implementation`` for the branch-writer remediation pass.
+  ``merge_wait``.
   Recovery-only mini-states for interrupted older items preserve their
   original routing but cannot grant the review stage writer capability.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
@@ -38,9 +41,9 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   author—is implementation work. The implementation agent investigates and
   fixes each thread, then returns a concise reply. The host posts that reply
   only after the fix commit is pushed and never resolves the thread. The
-  reviewer then performs a fresh review of the current change, prior review,
-  implementation reply, and every open thread. The reviewer is the sole actor
-  that can resolve a valid
+  reviewer then performs a fresh comment validation of the current change,
+  prior review, implementation reply, and every open thread. The reviewer is
+  the sole actor that can resolve a valid
   thread or post precise rejection feedback while leaving it open. Any open
   thread -> no-go label, review-checkout cleanup, and implementation handoff. A clean audit ->
   ``_write_go`` performs one final complete-thread live-read, requires a
@@ -261,6 +264,7 @@ _PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES = (
 )
 _IMPLEMENTATION_REPLY_BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 _HOST_VERIFICATION_PENDING = "host_verification_pending"
+_COMMENT_VALIDATION_ONLY = "reviewer_comment_validation_only"
 
 
 @dataclass(frozen=True)
@@ -825,8 +829,9 @@ class PrReviewStage(Stage):
 
     State machine (doc section "5. pr_review"):
 
-    - ENTER: retain any implementation writer and create a detached review
-      checkout of the PR head.
+    - ENTER: route live review threads before retaining any implementation
+      writer and creating a detached review checkout of the PR head. The
+      stage repeats that thread gate immediately before a broad audit.
     - REVIEW_WAIT: clear stale round payload, submit the inline-review job
       (verdict parsed in-worker; review text is the verdict's ``raw``).
     - VALIDATE_WAIT: submit the prior-comment validation job (skipped
@@ -868,6 +873,10 @@ class PrReviewStage(Stage):
             arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
             if arm_outcome is not None:
                 return arm_outcome
+            if item.state == ENTER:
+                thread_outcome = self._route_existing_threads_before_audit(item, ctx)
+                if thread_outcome is not None:
+                    return thread_outcome
             # The implementation worktree is a branch writer. Never review
             # from it: preserve it for a possible remediation pass and create
             # a detached, disposable checkout below.
@@ -885,6 +894,120 @@ class PrReviewStage(Stage):
             # consumed at the GATE, bounds the total number of cycles).
             item.payload.pop("review_error_retries", None)
         return None
+
+    @staticmethod
+    def _route_existing_threads_before_audit(
+        item: WorkItem, ctx: StageContext
+    ) -> StageOutcome | None:
+        """Route inherited threads to their responsible role before a new audit.
+
+        An unresolved thread lacking a current-head implementation response is
+        writer work, not input for another broad review.  Conversely, a
+        complete current-head response set enters the detached checkout only
+        for reviewer comment validation, where the reviewer may resolve the
+        threads or explain why they remain open.
+        """
+        if item.pr is None:  # guarded by on_enter; keeps type narrowing local
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        entry = PrReviewStage._read_existing_thread_entry(item, ctx)
+        if entry is None:
+            return None
+        if isinstance(entry, StageOutcome):
+            return entry
+        live_threads, remediation_threads, snapshots = entry
+
+        branch = item.branch or ctx.github.get_pr_head_branch(item.pr)
+        if not branch:
+            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
+        item.branch = branch
+        item.payload["existing_pr"] = True
+
+        if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
+            item.payload[_COMMENT_VALIDATION_ONLY] = True
+            return None
+
+        # Scope-retraction remediation needs a base proof that only the
+        # detached checkout can derive.  Preserve the safe established path
+        # for this exceptional directive instead of sending an unprovable
+        # retraction to a writer.
+        scope_retraction_paths = _scope_retraction_paths(remediation_threads)
+        if scope_retraction_paths is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
+        if scope_retraction_paths:
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            item.payload.pop("reviewed_pr_head_sha", None)
+            return None
+
+        item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+        item.payload["remediation_threads"] = remediation_threads
+        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
+        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        no_go_outcome = PrReviewStage._write_no_go(item, ctx)
+        if no_go_outcome is not None:
+            if isinstance(no_go_outcome, StageOutcome):
+                return no_go_outcome
+            return StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_drift")
+        item.payload["implementation_remediation"] = True
+        return StageOutcome(Disposition.FAIL_BACK, "implementation_remediation")
+
+    @staticmethod
+    def _read_existing_thread_entry(
+        item: WorkItem, ctx: StageContext
+    ) -> (
+        tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
+        | StageOutcome
+        | None
+    ):
+        """Return a current-head complete thread snapshot for entry routing."""
+        if item.pr is None:  # guarded by on_enter; keeps type narrowing local
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        try:
+            initial_threads = ctx.github.list_unresolved_review_threads(item.pr)
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not read existing review threads at entry (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "review_threads_unavailable")
+        if not initial_threads:
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return None
+        bind_outcome = PrReviewStage._bind_current_head_for_negative(item, ctx)
+        if bind_outcome is not None:
+            return bind_outcome
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+            receipts = ctx.github.reviewer_validation_receipts(
+                item.pr,
+                reviewed_head_sha=reviewed_head,
+                threads=live_threads,
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not read existing thread responses at entry (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable")
+        if not live_threads:
+            # The thread set changed while its negative transition was being
+            # bound.  The normal checkout path obtains the only valid clean
+            # review proof; do not reuse this negative-only head binding.
+            item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return None
+        snapshots = _validation_thread_snapshots(live_threads, receipts)
+        remediation_threads = _normalize_remediation_threads(live_threads)
+        if (
+            snapshots is None
+            or _validation_receipt_fingerprints(receipts) is None
+            or len(remediation_threads) != len(live_threads)
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_invalid")
+        return (live_threads, remediation_threads, snapshots)
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Execute the next PR-review action for the item's current state.
@@ -1052,6 +1175,11 @@ class PrReviewStage(Stage):
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
+        if item.payload.get(_COMMENT_VALIDATION_ONLY):
+            # The original audit already left these threads.  At this point
+            # the reviewer only validates the implementation's current-head
+            # replies, so do not create a second broad review batch.
+            return Continue(next_state=VALIDATE_WAIT)
         verifications = _host_verification_specs(item.payload.get("pr_diff"))
         if verifications:
             logger.info(
@@ -1061,7 +1189,7 @@ class PrReviewStage(Stage):
             )
             item.payload["host_verification_receipts"] = []
             return self._submit_host_verification(item, ctx, verifications[0])
-        return self._submit_review_job(item, ctx)
+        return self._route_threads_before_broad_review(item, ctx)
 
     @staticmethod
     def _submit_host_verification(
@@ -1138,6 +1266,67 @@ class PrReviewStage(Stage):
         )
         item.payload["review_job_pending"] = True
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
+
+    def _route_threads_before_broad_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Recheck threads immediately before dispatching a broad audit.
+
+        ``on_enter`` owns the first routing decision, but a reviewer checkout
+        and its fixed host verification can take long enough for a new thread
+        to appear.  Never schedule a second broad audit for that new work:
+        give unreplied threads to implementation, or send a complete response
+        set to comment validation on the already-proven detached checkout.
+        """
+        if item.pr is None:
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "no_pr"),
+            )
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        if not is_full_commit_sha(reviewed_head):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_unavailable"),
+            )
+        try:
+            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
+            receipts = ctx.github.reviewer_validation_receipts(
+                item.pr,
+                reviewed_head_sha=reviewed_head,
+                threads=live_threads,
+            )
+        except Exception as error:
+            logger.warning(
+                "pr_review:%s: could not reread threads before broad review (%s)",
+                item.issue,
+                type(error).__name__,
+            )
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
+            )
+        if not live_threads:
+            return self._submit_review_job(item, ctx)
+        snapshots = _validation_thread_snapshots(live_threads, receipts)
+        remediation_threads = _normalize_remediation_threads(live_threads)
+        if (
+            snapshots is None
+            or _validation_receipt_fingerprints(receipts) is None
+            or len(remediation_threads) != len(live_threads)
+            or _scope_retraction_paths(remediation_threads) is None
+        ):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_invalid"),
+            )
+        if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
+            item.payload[_COMMENT_VALIDATION_ONLY] = True
+            return Continue(next_state=VALIDATE_WAIT)
+        item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
+        item.payload["remediation_threads"] = remediation_threads
+        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
+        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        return Continue(next_state=ADDRESS_WAIT)
 
     def _validate_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Perform a fresh review of implementation replies before resolution."""
@@ -1243,7 +1432,7 @@ class PrReviewStage(Stage):
                 None,
                 "host_verification_receipt_invalid",
             )
-        return self._submit_review_job(item, ctx)
+        return self._route_threads_before_broad_review(item, ctx)
 
     def _handle_host_verification_failure(
         self,
@@ -1803,11 +1992,14 @@ class PrReviewStage(Stage):
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        validation_only = bool(item.payload.get(_COMMENT_VALIDATION_ONLY))
         audit = item.payload.get("review_audit")
-        if not isinstance(audit, ReviewAudit) or not audit.valid:
+        if not validation_only and (not isinstance(audit, ReviewAudit) or not audit.valid):
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        raw_threads = [dict(t) for t in item.payload.get("review_threads") or []]
+        raw_threads = (
+            [] if validation_only else [dict(t) for t in item.payload.get("review_threads") or []]
+        )
         # Validation controls only the reviewer-owned reconciliation of
         # implementation replies. Fresh audit findings are independently
         # deduplicated against live threads below; a validator must never
@@ -1976,6 +2168,19 @@ class PrReviewStage(Stage):
         item.payload["remediation_threads"] = remediation_threads
         item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
+        if validation_only:
+            # The validator has made the exhaustive current-head decisions
+            # for the original review's threads.  It is now the fresh review
+            # evidence for this comment-validation-only pass; no new broad
+            # audit findings are invented or posted.
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            item.payload["review_audit"] = ReviewAudit(
+                grade="A",
+                summary="Reviewer validated the implementation responses to all open threads.",
+                findings=(),
+                raw_feedback="",
+                valid=True,
+            )
         if not remediation_threads:
             return Continue(next_state=EVAL)
         # The original review has already been submitted as one batch. Do not
