@@ -121,6 +121,7 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.MERGE_WAIT,
         fail_routes={
             "agent_error": StageName.IMPLEMENTATION,
+            "implementation_remediation": StageName.IMPLEMENTATION,
             "exhaustion": StageName.FINISHED,
             "*": StageName.PR_REVIEW,
         },

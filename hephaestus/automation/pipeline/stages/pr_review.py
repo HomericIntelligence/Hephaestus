@@ -1,13 +1,15 @@
-"""PR-review stage: review, validate, post, address, and evaluate.
+"""PR-review stage: detached read-only review, validation, and approval.
 
 The queue stage is the sole live implementation of the review/validate/address
 state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
 
-- States: ENTER -> REVIEW_WAIT -> VALIDATE_WAIT -> POST -> DIFFICULTY_WAIT
-  -> ADDRESS_WAIT -> PUSH_WAIT -> EVAL -> COMPACT_REVIEWER_WAIT
-  -> COMPACT_WRITER_WAIT -> REVIEW_WAIT or terminal advance to ``merge_wait``.
-  The legacy follow-up mini-states have been retired (#2140); a clean GO
-  advances to ``merge_wait`` from EVAL.
+- Normal path: ENTER creates a detached review checkout, REVIEW_WAIT binds it
+  once to PR head ``H``, then REVIEW_WAIT -> VALIDATE_WAIT -> POST -> EVAL.
+  A clean audit writes GO and removes the checkout before advancing to
+  ``merge_wait``. Any open thread writes NO-GO, removes the checkout, and
+  fails back to ``implementation`` for the branch-writer remediation pass.
+  Recovery-only mini-states for interrupted older items preserve their
+  original routing but cannot grant the review stage writer capability.
 - Budgets: ``pr_review_iter`` = 3 (soft cap), ``pr_review_hard`` = 6 (hard
   cap; rounds 4-6 are admitted ONLY while the unresolved-thread count
   strictly decreases under the progress-aware extension contract).
@@ -28,7 +30,11 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   pattern). At the cap the item fails back ``agent_error`` (routes to
   implementation: a fresh implement pass, bounded by the ``implement``
   budget, is the doc's designated agent-error recovery).
-- Review-thread ownership semantics: every open review thread—regardless of
+- Review snapshot and thread ownership semantics: the reviewer fetches a
+  detached checkout of `H`, verifies it once, and submits all newly found
+  source-anchored findings in a single GitHub review request. A later push
+  does not invalidate that published review; exact-current-head checks remain
+  exclusively for implementation-state labels. Every open review thread—regardless of
   author—is implementation work. The implementation agent investigates and
   fixes each thread, then returns a concise reply. The host posts that reply
   only after the fix commit is pushed and never resolves the thread. The
@@ -36,7 +42,7 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   implementation reply, and every open thread. The reviewer is the sole actor
   that can resolve a valid
   thread or post precise rejection feedback while leaving it open. Any open
-  thread -> no-go label and address + re-review. A clean audit ->
+  thread -> no-go label, review-checkout cleanup, and implementation handoff. A clean audit ->
   ``_write_go`` performs one final complete-thread live-read, requires a
   confirmed-unarmed live PR, and applies ``state:implementation-go``.
   The checkout GitJob-proven reviewed head accompanies that label;
@@ -57,33 +63,20 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
 - POST publishes only genuinely new blocking audit findings. Validation does
   not recreate, replace, or suppress existing threads; it only gives the
   reviewer the authority to reconcile current implementation replies.
-- Real-commit gating (#1575): PUSH_WAIT's commit_push result is inspected
-  in EVAL. A push that produced NO commit (the fix agent punted or
-  self-reported a phantom fix) is NOT treated as addressed: the address
-  step is retried ONCE with the ``build_unaddressed_directive`` block
-  (via ``get_address_review_prompt``'s ``unaddressed_findings``), and a
-  second consecutive no-commit turn is evaluated as an unaddressed round.
-- Reply-handoff recovery: an ambiguous GitHub transport/read failure after a
-  fix reaches its verified head preserves the exact outstanding snapshot and
-  reply batch for bounded host-only retry. A complete but mismatched read is
-  stale evidence, not retryable: the host clears it and routes through fresh
-  review so a changed conversation cannot wedge on an unreplayable snapshot.
-- If the one-shot no-commit retry's address/push leg hard-fails, EVAL treats
-  that as an explicit agent infrastructure failure, not as a second no-commit
-  review round: it consumes the retry sentinel/directive, fails back
-  ``agent_error`` without burning ``pr_review_iter``, and relies on the bounded
-  implementation re-adoption path to run a fresh REVIEW->VALIDATE cycle.
-- agent_error fail-backs (address failure, reviewer-error cap, missing
-  PR/worktree) set ``payload["agent_error_failback"]`` so the
-  implementation GATE consumes the ``implement`` budget on re-adoption —
-  the cross-stage ping-pong bound (M1). ``review_error_retries`` is reset
-  by ``on_enter`` on each fresh implementation cycle.
+- The implementation stage owns rebase, commit/push, and reply handoff. It
+  posts the `[Response]` reply only after a real writer-branch commit reaches
+  GitHub; the review stage does not commit, push, or rebase.
+- Recovery for interrupted pre-migration items is read-only and fail-closed:
+  it may preserve an already-pushed reply handoff or take a fresh detached
+  snapshot, but it cannot dispatch a writer agent or publish a branch from
+  this stage.
+- agent_error fail-backs (reviewer-error cap or missing PR/worktree) set
+  ``payload["agent_error_failback"]`` so the implementation GATE consumes the
+  ``implement`` budget on re-adoption. ``review_error_retries`` is reset by
+  ``on_enter`` on each fresh implementation cycle.
 - Prompt functions (imported, never re-authored):
   ``prompts/pr_review.py get_pr_review_analysis_prompt`` /
-  ``get_review_validation_prompt`` / ``get_comment_difficulty_prompt``,
-  ``prompts/implementation.py get_impl_resume_feedback_prompt`` (fresh-PR
-  address path), and ``prompts/address_review.py get_address_review_prompt``
-  (existing-PR address path).
+  ``get_review_validation_prompt``.
 - The structural audit is parsed IN-WORKER (carried as the review job's
   ``parse`` callable; symbol-scoped zero-I/O exemption mirrors plan_review's).
   REVIEW_WAIT clears all stale round-scoped payload at submission so a failed
@@ -104,20 +97,18 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
-from hephaestus.automation.address_review_core import _parse_addressed_block
+from hephaestus.automation.address_review_core import (
+    parse_addressed_replies,
+)
 from hephaestus.automation.agent_config import (
-    address_review_claude_timeout,
     implementer_claude_timeout,
     implementer_model,
     pr_reviewer_claude_timeout,
     reviewer_model,
 )
-from hephaestus.automation.prompts.address_review import get_address_review_prompt
-from hephaestus.automation.prompts.implementation import get_impl_resume_feedback_prompt
 from hephaestus.automation.prompts.pr_review import (
     BLOCKING_SEVERITIES,
     VALID_SEVERITIES,
-    get_comment_difficulty_prompt,
     get_pr_review_analysis_prompt,
     get_review_validation_prompt,
 )
@@ -128,16 +119,12 @@ from hephaestus.automation.review_audit import (
 )
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
-    AGENT_COMMENT_CLASSIFIER,
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
 from hephaestus.automation.state_labels import STATE_SKIP
 
-from ..scope_retraction import (
-    is_safe_scope_retraction_path,
-    scope_retraction_paths_from_body,
-)
+from ..scope_retraction import scope_retraction_paths_for_threads
 from ..work_item import ItemKind
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -172,20 +159,7 @@ _JSON_RESPONSE_BLOCK_RE = re.compile(
 
 def _scope_retraction_paths(threads: list[dict[str, Any]]) -> tuple[str, ...] | None:
     """Extract host-enforced retractions from explicit scope-control findings."""
-    paths: set[str] = set()
-    for thread in threads:
-        scope_paths = scope_retraction_paths_from_body(thread.get("body"))
-        if scope_paths == ():
-            continue
-        path = thread.get("path")
-        if (
-            scope_paths is None
-            or not is_safe_scope_retraction_path(path)
-            or path not in scope_paths
-        ):
-            return None
-        paths.update(scope_paths)
-    return tuple(sorted(paths))
+    return scope_retraction_paths_for_threads(threads)
 
 
 @dataclass(frozen=True)
@@ -204,17 +178,16 @@ def _parse_review_response(response: str) -> _ParsedReviewResponse:
 ENTER = "ENTER"
 ADOPT_WORKTREE_WAIT = "ADOPT_WORKTREE_WAIT"
 REVIEW_WAIT = "REVIEW_WAIT"
-DIRECT_REBASE_WAIT = "DIRECT_REBASE_WAIT"
 REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
-DIFFICULTY_WAIT = "DIFFICULTY_WAIT"
 ADDRESS_WAIT = "ADDRESS_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
 COMPACT_REVIEWER_WAIT = "COMPACT_REVIEWER_WAIT"
 COMPACT_WRITER_WAIT = "COMPACT_WRITER_WAIT"
+CLEANUP_REVIEW_WORKTREE_WAIT = "CLEANUP_REVIEW_WORKTREE_WAIT"
 
 # A failed push with an unchanged live remote may be a transient local
 # pre-push-hook or transport failure. Retry the already-created detached
@@ -231,17 +204,16 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     ENTER: "_enter",
     ADOPT_WORKTREE_WAIT: "_adopt_worktree_wait",
     REVIEW_WAIT: "_review_wait",
-    DIRECT_REBASE_WAIT: "_direct_rebase_wait",
     REVIEW_CHECKOUT_WAIT: "_review_checkout_wait",
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
-    DIFFICULTY_WAIT: "_difficulty_wait",
     ADDRESS_WAIT: "_address",
     PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
     COMPACT_REVIEWER_WAIT: "_compact_reviewer_wait",
     COMPACT_WRITER_WAIT: "_compact_writer_wait",
+    CLEANUP_REVIEW_WORKTREE_WAIT: "_cleanup_review_worktree_wait",
 }
 
 
@@ -459,7 +431,6 @@ _ROUND_PAYLOAD_KEYS = (
     "posted_thread_ids",
     "remediation_threads",
     "remediation_thread_snapshots",
-    "difficulty_tiers",
     "address_error",
     "address_output",
     "direct_push_retries",
@@ -667,37 +638,7 @@ def _address_replies(address_result: Any, threads: list[dict[str, Any]]) -> dict
     snapshot ID to a bounded reply.  The agent may not resolve a thread; the
     returned prose is posted by the host only after its fix commit is pushed.
     """
-    if not isinstance(address_result, dict):
-        return None
-    addressed = address_result.get("addressed")
-    replies = address_result.get("replies")
-    if not isinstance(addressed, list) or not isinstance(replies, dict):
-        return None
-    known_ids: list[str] = []
-    for thread in threads:
-        if not isinstance(thread, dict):
-            return None
-        thread_id = str(thread.get("thread_id") or thread.get("id") or "").strip()
-        if not thread_id or thread_id in known_ids:
-            return None
-        known_ids.append(thread_id)
-    claimed_ids: list[str] = []
-    for thread_id in addressed:
-        if not isinstance(thread_id, str) or not thread_id.strip():
-            return None
-        normalized_id = thread_id.strip()
-        if normalized_id in claimed_ids:
-            return None
-        claimed_ids.append(normalized_id)
-    if set(claimed_ids) != set(known_ids) or set(replies) != set(known_ids):
-        return None
-    normalized_replies: dict[str, str] = {}
-    for thread_id in known_ids:
-        reply = replies.get(thread_id)
-        if not isinstance(reply, str) or not 0 < len(reply.strip()) <= 4_000:
-            return None
-        normalized_replies[thread_id] = reply.strip()
-    return normalized_replies
+    return parse_addressed_replies(address_result, threads)
 
 
 def _implementation_reply_handoff(
@@ -911,23 +852,22 @@ def _address_review_feedback(item: WorkItem) -> str:
 
 
 class PrReviewStage(Stage):
-    """Stage: review -> validate -> post -> address -> EVAL.
+    """Stage: one detached review snapshot -> validation -> post -> approval.
 
     State machine (doc section "5. pr_review"):
 
-    - ENTER: route to REVIEW_WAIT.
+    - ENTER: retain any implementation writer and create a detached review
+      checkout of the PR head.
     - REVIEW_WAIT: clear stale round payload, submit the inline-review job
       (verdict parsed in-worker; review text is the verdict's ``raw``).
     - VALIDATE_WAIT: submit the prior-comment validation job (skipped
       straight to EVAL when the review job failed — the ERROR path burns
       no downstream work).
-    - POST [M]: durably post surviving review threads, refresh the
-      unresolved-thread counts; zero open review threads skip the
-      address leg straight to EVAL.
-    - DIFFICULTY_WAIT: submit the comment-difficulty classification job.
-    - ADDRESS_WAIT: fresh-PR path resumes the implementer with the review
-      feedback; existing-PR path runs the address-review session.
-    - PUSH_WAIT: commit+push the addressing changes.
+    - POST [M]: durably post all surviving source-anchored findings in one
+      review batch, then refresh the unresolved-thread snapshot.
+    - ADDRESS_WAIT: writes NO-GO and hands the complete thread snapshot to
+      implementation after removing the detached checkout. It never invokes
+      a writer agent from this stage.
     - EVAL [M]: re-housed ``_evaluate_go_verdict`` + budget gate (see
       module docstring). A clean GO advances to ``merge_wait`` from EVAL.
     """
@@ -959,6 +899,13 @@ class PrReviewStage(Stage):
             arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
             if arm_outcome is not None:
                 return arm_outcome
+            # The implementation worktree is a branch writer. Never review
+            # from it: preserve it for a possible remediation pass and create
+            # a detached, disposable checkout below.
+            if item.worktree and not item.payload.get("direct_pr_worktree"):
+                item.payload["writer_worktree"] = item.worktree
+                item.payload["reviewer_checkout_needed"] = True
+                item.worktree = ""
         cycle = item.attempts.get("implement", 0)
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
@@ -991,7 +938,12 @@ class PrReviewStage(Stage):
         if (
             item.state == "ENTER"
             and not item.worktree
-            and (item.kind is ItemKind.PR or bool(item.payload.get("existing_pr")))
+            and item.pr is not None
+            and (
+                item.kind is ItemKind.PR
+                or item.payload.get("existing_pr")
+                or item.payload.get("reviewer_checkout_needed")
+            )
         ):
             # A PR-review entry has no adopted checkout yet. It must never be
             # reviewed from the shared repository root, including when an
@@ -1021,7 +973,7 @@ class PrReviewStage(Stage):
         """Create a synchronized isolated checkout for an existing PR."""
         if item.pr is None:  # guarded by step(); keeps type narrowing local
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        branch = ctx.github.get_pr_head_branch(item.pr)
+        branch = ctx.github.get_pr_head_branch(item.pr) or item.branch
         if not branch:
             logger.error("pr_review:%s: no head branch for direct PR #%d", item.issue, item.pr)
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
@@ -1040,7 +992,7 @@ class PrReviewStage(Stage):
             "issue_number": _issue_number(item),
             "branch_name": branch,
             "refresh_base": False,
-            # This mutable review checkout cannot reuse the writer's branch
+            # A detached reviewer checkout cannot reuse the writer's branch
             # checkout.
             "isolated": True,
             "sync_to_remote": True,
@@ -1065,10 +1017,13 @@ class PrReviewStage(Stage):
         """Advance only from a clean, synchronized direct-PR checkout."""
         del ctx
         if item.payload.pop("direct_pr_worktree_error", None):
+            self._restore_writer_worktree(item)
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_failed")
         if not item.worktree:
+            self._restore_writer_worktree(item)
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_unfinished")
         if item.payload.get("direct_pr_worktree_dirty"):
+            self._restore_writer_worktree(item)
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_dirty")
         return Continue(next_state=REVIEW_WAIT)
 
@@ -1088,35 +1043,6 @@ class PrReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_head_unavailable")
         base_branch = str(review_context.get("pr_base_branch") or "main")
         item.payload.update(review_context)
-        # An adopted PR is not inherently writable: fork heads are checked out
-        # from the pull ref for read-only review, whereas a base-repository
-        # head may be safely rebased and lease-published before review.  Keep
-        # this mutation decision at the stage boundary so a detached checkout
-        # never becomes an implicit permission to push.
-        direct_pr_rewrite_allowed = bool(item.payload.get("direct_pr_worktree")) and (
-            ctx.github.pr_head_is_writable(item.pr)
-        )
-        if direct_pr_rewrite_allowed and not item.payload.get("direct_pr_rebase_attempted"):
-            # A direct PR arrives as a detached, synchronized checkout. Rebase
-            # it before binding any review inputs, then lease-push that exact
-            # detached HEAD so the following context read reviews GitHub's
-            # current base-compatible head rather than a local-only rewrite.
-            item.payload["direct_pr_rebase_attempted"] = True
-            item.payload["direct_pr_rebase_pending"] = True
-            job = GitJob(
-                repo=item.repo,
-                op="rebase",
-                timeout_s=GIT_JOB_TIMEOUT_S,
-                kwargs={
-                    "cwd": _worktree_path(item, ctx),
-                    "base_branch": base_branch,
-                    "branch": item.branch,
-                    "expected_remote_sha": expected_head,
-                    "publish_detached_head": True,
-                },
-                descr="rebase_direct_pr_before_review",
-            )
-            return JobRequest(job, on_done_state=DIRECT_REBASE_WAIT)
         item.payload["review_checkout_expected_head"] = expected_head
         item.payload["review_checkout_pending"] = True
         job = GitJob(
@@ -1129,25 +1055,10 @@ class PrReviewStage(Stage):
                 "expected_head_sha": expected_head,
                 "base_branch": base_branch,
                 "pr_number": item.pr,
-                # Only the pre-review rewrite flow needs to prove that its
-                # freshly rebased HEAD still contains the fetched base. Other
-                # worktrees may be reviewed read-only while their PR remains
-                # behind the current base.
-                "require_base_ancestor": direct_pr_rewrite_allowed,
             },
             descr="verify_pr_review_checkout",
         )
         return JobRequest(job, on_done_state=REVIEW_CHECKOUT_WAIT)
-
-    def _direct_rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Refresh context only after a direct PR rebase is durably published."""
-        del ctx
-        error = str(item.payload.pop("direct_pr_rebase_error", "") or "")
-        if error:
-            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_rebase_failed")
-        if not item.payload.pop("direct_pr_rebase_published", False):
-            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_rebase_unpublished")
-        return Continue(next_state=REVIEW_WAIT)
 
     def _review_checkout_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Submit review only after the fresh snapshot matches a clean checkout."""
@@ -1155,22 +1066,18 @@ class PrReviewStage(Stage):
         error = str(item.payload.pop("review_checkout_error", "") or "")
         ready = bool(item.payload.pop("review_checkout_ready", False))
         if error:
-            return StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable")
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_checkout_unavailable"),
+            )
         if not ready:
-            if item.payload.get("direct_pr_worktree"):
-                # A failed checkout barrier may have synchronized a newer
-                # remote PR head after the prior rebase. Re-run the direct
-                # rebase before reviewing that unverified replacement head.
-                item.payload.pop("direct_pr_rebase_attempted", None)
-                item.payload.pop("direct_pr_rebase_pending", None)
-                item.payload.pop("direct_pr_rebase_published", None)
-                item.payload.pop("direct_pr_rebase_error", None)
-            retries = int(item.payload.get("review_checkout_retries", 0)) + 1
-            item.payload["review_checkout_retries"] = retries
-            if retries <= REVIEW_CHECKOUT_RETRY_CAP:
-                return Continue(next_state=REVIEW_WAIT)
-            return StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift")
-        item.payload.pop("review_checkout_retries", None)
+            # A review is a one-shot immutable snapshot.  Do not retry by
+            # mutating the PR branch (or repeatedly re-fetching it) here: the
+            # next loop item will take a fresh detached snapshot if needed.
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "review_checkout_head_drift"),
+            )
         item.payload["reviewed_pr_head_sha"] = expected_head
         prior_generation = item.payload.get("reviewed_pr_proof_generation", 0)
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
@@ -1364,8 +1271,8 @@ class PrReviewStage(Stage):
             )
         return self._submit_review_job(item, ctx)
 
-    @staticmethod
     def _handle_host_verification_failure(
+        self,
         item: WorkItem,
         ctx: StageContext,
         verification: _HostVerificationSpec | None,
@@ -1397,7 +1304,12 @@ class PrReviewStage(Stage):
         item.payload["host_verification_failure"] = diagnostic
         no_go_outcome = PrReviewStage._write_no_go(item, ctx)
         if no_go_outcome is not None:
-            return no_go_outcome
+            if isinstance(no_go_outcome, StageOutcome):
+                return self._cleanup_review_worktree_then(item, no_go_outcome)
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_drift"),
+            )
 
         # Only a confirmed fixed-tool validation failure may be repaired by
         # the implementation agent. UV/sandbox/bootstrap errors share a
@@ -1414,78 +1326,20 @@ class PrReviewStage(Stage):
                     {"path": diagnostic["path"], "line": None, "body": detail}
                 ]
             return Continue(next_state=ADDRESS_WAIT)
-        return StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed")
-
-    def _difficulty_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """DIFFICULTY_WAIT submits the comment-difficulty job."""
-        issue = _issue_number(item)
-        logger.info("pr_review:%d: requesting difficulty job", issue)
-        job = AgentJob(
-            repo=item.repo,
-            issue=issue,
-            agent=agent_provider(ctx),
-            model=stage_model(ctx, "reviewer", reviewer_model),
-            prompt_builder=get_comment_difficulty_prompt,
-            cwd=_worktree_path(item, ctx),
-            timeout_s=pr_reviewer_claude_timeout(),
-            session_agent=AGENT_COMMENT_CLASSIFIER,
-            sandbox="read-only",
-            prompt_kwargs={
-                "issue_number": item.issue,
-                "comments_json": json.dumps(item.payload.get("remediation_threads", [])),
-                "review_context_kind": _review_context_kind(item),
-            },
-            descr="difficulty",
+        return self._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.FINISH_FAIL, "host_verification_failed"),
         )
-        return JobRequest(job, on_done_state=ADDRESS_WAIT)
 
     def _push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """PUSH_WAIT submits the commit+push job for the addressing changes."""
-        issue = _issue_number(item)
-        logger.info("pr_review:%d: requesting push job", issue)
-        agent = agent_provider(ctx)
-        kwargs: dict[str, object] = {
-            "issue_number": issue,
-            "pr_number": item.pr,
-            "repo_root": str(ctx.paths.repo_root),
-            "worktree_path": item.worktree,
-            "branch": item.branch,
-            "agent": agent,
-            "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
-        }
-        if item.payload.get("direct_pr_worktree"):
-            # Direct review addresses findings from a detached checkout; the
-            # coordinator may publish that exact HEAD only while the remote
-            # still equals the checkout-proven reviewed head. This permits a
-            # deliberate rebase without overwriting a concurrent writer.
-            kwargs["publish_detached_head"] = True
-            kwargs["expected_remote_sha"] = item.payload.get("reviewed_pr_head_sha")
-            retry_head_sha = item.payload.get("detached_push_retry_head_sha")
-            if retry_head_sha is not None:
-                if not is_full_commit_sha(retry_head_sha):
-                    return StageOutcome(
-                        Disposition.FINISH_FAIL, "detached_push_retry_receipt_invalid"
-                    )
-                kwargs["detached_push_retry_head_sha"] = retry_head_sha
-        scope_retraction_paths = item.payload.get("scope_retraction_paths")
-        if scope_retraction_paths is not None:
-            if not isinstance(scope_retraction_paths, tuple) or not all(
-                is_safe_scope_retraction_path(path) for path in scope_retraction_paths
-            ):
-                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
-            base_sha = item.payload.get("reviewed_pr_base_sha")
-            if not is_full_commit_sha(base_sha):
-                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
-            kwargs["scope_retraction_paths"] = scope_retraction_paths
-            kwargs["scope_retraction_base_sha"] = base_sha
-        git_job = GitJob(
-            repo=item.repo,
-            op="commit_push",
-            timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs=kwargs,
-            descr="push_fixes",
+        """Hand an interrupted legacy writer state to implementation safely."""
+        # This legacy state can be resumed after an interrupted older run.
+        # Never let it regain a writer capability in the review stage.
+        item.payload["implementation_remediation"] = True
+        return self._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.FAIL_BACK, "implementation_remediation"),
         )
-        return JobRequest(git_job, on_done_state=EVAL)
 
     def _compact_reviewer_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Compact the reviewer before the next retry continues its session."""
@@ -1524,6 +1378,86 @@ class PrReviewStage(Stage):
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 
+    @staticmethod
+    def _restore_writer_worktree(item: WorkItem) -> None:
+        """Restore the implementation-owned checkout after reviewer cleanup.
+
+        The reviewer always receives a detached disposable checkout.  A writer
+        checkout may exist only because an earlier implementation pass created
+        it; keeping its path in the item lets the implementation stage resume
+        the same branch without making the reviewer a writer or creating a
+        second worktree for that branch.
+        """
+        writer_worktree = item.payload.pop("writer_worktree", None)
+        if isinstance(writer_worktree, str) and writer_worktree:
+            item.worktree = writer_worktree
+            item.payload["implementation_writer_restored"] = True
+        elif item.payload.get("review_worktree") == item.worktree:
+            item.worktree = ""
+
+    def _cleanup_review_worktree_then(
+        self,
+        item: WorkItem,
+        outcome: StageOutcome,
+    ) -> StepResult:
+        """Remove the detached review snapshot before leaving this stage.
+
+        A reviewer may inspect exactly one fetched PR head.  Its checkout is
+        evidence, not a recovery branch, so it must be removed before either
+        a writer handoff or a terminal outcome.  We retain the intended stage
+        disposition in memory until the removal job completes; cleanup failure
+        is terminal so a potentially dirty snapshot is never silently lost.
+        """
+        review_worktree = item.payload.get("review_worktree")
+        if not isinstance(review_worktree, str) or not review_worktree:
+            self._restore_writer_worktree(item)
+            return outcome
+        item.payload["review_worktree_cleanup_outcome"] = outcome.disposition.value
+        item.payload["review_worktree_cleanup_note"] = outcome.note
+        item.payload["review_worktree_cleanup_done"] = "pending"
+        return Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+
+    def _cleanup_review_worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Remove the detached reviewer checkout and continue its saved outcome."""
+        review_worktree = item.payload.get("review_worktree")
+        if not isinstance(review_worktree, str) or not review_worktree:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_invalid")
+        if item.payload.pop("review_worktree_cleanup_error", None):
+            # Keep the disposable checkout visible to Finished's diagnostic
+            # preservation path.  The writer remains separately recorded and
+            # cannot be confused for reviewer evidence.
+            item.worktree = review_worktree
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_failed")
+        cleanup_state = item.payload.get("review_worktree_cleanup_done")
+        if cleanup_state == "pending":
+            job = GitJob(
+                repo=item.repo,
+                op="remove_worktree",
+                timeout_s=GIT_JOB_TIMEOUT_S,
+                kwargs={
+                    "worktree_path": review_worktree,
+                    "repo_root": str(ctx.paths.repo_root),
+                    "force": False,
+                },
+                descr="remove_read_only_review_worktree",
+            )
+            return JobRequest(job, on_done_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        if cleanup_state is not True:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_state_invalid")
+
+        outcome_value = item.payload.pop("review_worktree_cleanup_outcome", None)
+        note = str(item.payload.pop("review_worktree_cleanup_note", "") or "")
+        try:
+            disposition = Disposition(str(outcome_value))
+        except ValueError:
+            return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_outcome_invalid")
+        self._restore_writer_worktree(item)
+        item.payload.pop("review_worktree", None)
+        item.payload.pop("direct_pr_worktree", None)
+        item.payload.pop("direct_pr_worktree_dirty", None)
+        item.payload.pop("review_worktree_cleanup_done", None)
+        return StageOutcome(disposition, note)
+
     def on_job_done(  # noqa: C901
         self, item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
@@ -1535,9 +1469,9 @@ class PrReviewStage(Stage):
             ctx: Stage context.
 
         """
-        if self._consume_direct_worktree_result(item, result):
+        if self._consume_review_worktree_cleanup_result(item, result):
             return
-        if self._consume_direct_pr_rebase_result(item, result):
+        if self._consume_direct_worktree_result(item, result):
             return
         if self._consume_review_checkout_result(item, result):
             return
@@ -1701,8 +1635,6 @@ class PrReviewStage(Stage):
             self._store_review_result(item, result.value)
         elif item.state == VALIDATE_WAIT and result.value is not None:
             item.payload["validation_result"] = result.value
-        elif item.state == DIFFICULTY_WAIT and result.value is not None:
-            item.payload["difficulty_tiers"] = str(result.value)
         elif item.state == ADDRESS_WAIT and result.value is not None:
             item.payload["address_output"] = result.value
 
@@ -1715,18 +1647,14 @@ class PrReviewStage(Stage):
         return True
 
     @staticmethod
-    def _consume_direct_pr_rebase_result(item: WorkItem, result: JobResult) -> bool:
-        """Store the single direct-PR rebase/publish result before state changes."""
-        if not item.payload.pop("direct_pr_rebase_pending", None):
+    def _consume_review_worktree_cleanup_result(item: WorkItem, result: JobResult) -> bool:
+        """Store one disposable-review-worktree cleanup result."""
+        if item.payload.get("review_worktree_cleanup_done") != "pending":
             return False
-        if not result.ok:
-            item.payload["direct_pr_rebase_error"] = result.error or "rebase job failed"
-            return True
-        value = result.value
-        if not isinstance(value, dict) or not value.get("published"):
-            item.payload["direct_pr_rebase_error"] = "rebase job did not publish a detached head"
-            return True
-        item.payload["direct_pr_rebase_published"] = True
+        if result.ok:
+            item.payload["review_worktree_cleanup_done"] = True
+        else:
+            item.payload["review_worktree_cleanup_error"] = result.error or "remove worktree failed"
         return True
 
     @staticmethod
@@ -1829,10 +1757,12 @@ class PrReviewStage(Stage):
             item.payload["direct_pr_worktree_dirty"] = bool(value.get("dirty"))
             if item.worktree and not item.payload["direct_pr_worktree_dirty"]:
                 item.payload["direct_pr_worktree"] = item.worktree
+                item.payload["review_worktree"] = item.worktree
         elif isinstance(value, str):
             item.worktree = value
             if item.worktree:
                 item.payload["direct_pr_worktree"] = item.worktree
+                item.payload["review_worktree"] = item.worktree
         else:
             item.payload["direct_pr_worktree_error"] = "worktree job returned no path"
 
@@ -2016,10 +1946,6 @@ class PrReviewStage(Stage):
         # The surviving audit set is what gets posted. Classification and
         # addressing use the normalized live read-back installed below.
         item.payload["review_threads"] = threads
-        if threads and is_full_commit_sha(reviewed_head):
-            publication_guard = self._require_reviewed_unarmed(item, ctx)
-            if publication_guard is not None:
-                return publication_guard
         post_receipts: list[dict[str, Any]] = []
         if threads:
             try:
@@ -2028,6 +1954,7 @@ class PrReviewStage(Stage):
                         item.pr,
                         list(threads),
                         expected_head_sha=reviewed_head,
+                        review_diff=str(item.payload.get("pr_diff") or ""),
                     )
                 )
             except Exception as error:
@@ -2062,116 +1989,33 @@ class PrReviewStage(Stage):
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
         if not remediation_threads:
             return Continue(next_state=EVAL)
-        return Continue(next_state=DIFFICULTY_WAIT)
+        # The original review has already been submitted as one batch. Do not
+        # keep the detached reviewer checkout for a second classifier pass:
+        # implementation receives this complete snapshot directly.
+        return Continue(next_state=ADDRESS_WAIT)
 
     def _address(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """ADDRESS_WAIT: dispatch the fresh-PR or existing-PR address job.
+        """Record a NO-GO and hand immutable review findings to the writer.
 
-        Fresh-PR path (this pipeline created the PR): resume the implementer
-        session with the review feedback (doc step 5,
-        ``get_impl_resume_feedback_prompt``). Existing-PR path (adopted by
-        the implementation GATE fast path): run the address-review session
-        against the PR's unresolved threads (``get_address_review_prompt``,
-        with any carried ``unaddressed_findings`` rendering the
-        ``build_unaddressed_directive`` retry block, #1575).
-
-        Fail-closed worktree guard: address jobs EDIT code, so they must
-        never run in the shared checkout (wrong branch — it would commit
-        fixes onto whatever the shared tree has checked out). Without a
-        worktree the item fails back to implementation, whose GATE/worktree
-        leg is the designated recovery (bounded by the M1 agent_error
-        budget consumption).
+        This stage owns review evidence only.  It never dispatches a writer
+        agent, rebases, commits, or pushes: implementation receives the full
+        unresolved-thread snapshot after the detached reviewer checkout has
+        been removed.
         """
         if item.pr is None:  # guarded by step(); kept for restart safety
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        if item.payload.get("existing_pr") and not ctx.github.pr_head_is_writable(item.pr):
-            logger.warning(
-                "pr_review:%s: PR #%d head is not writable through this repository; "
-                "refusing to address a fork from the base origin",
-                item.issue,
-                item.pr,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_not_writable")
-        if not item.worktree:
-            logger.warning(
-                "pr_review:%s: no worktree for the address step; failing back "
-                "(never edit in the shared checkout)",
-                item.issue,
-            )
-            return self._fail_back_agent_error(item)
-        if item.payload.get("existing_pr"):
-            remediation_threads = item.payload.get("remediation_threads") or []
-            if not isinstance(remediation_threads, list):
-                return StageOutcome(Disposition.FINISH_FAIL, "remediation_threads_invalid")
-            scope_retraction_paths = _scope_retraction_paths(remediation_threads)
-            if scope_retraction_paths is None:
-                return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_path_invalid")
-            if scope_retraction_paths:
-                base_sha = item.payload.get("reviewed_pr_base_sha")
-                if not is_full_commit_sha(base_sha):
-                    return StageOutcome(
-                        Disposition.FINISH_FAIL,
-                        "scope_retraction_base_unavailable",
-                    )
-                item.payload["scope_retraction_paths"] = scope_retraction_paths
-            else:
-                item.payload.pop("scope_retraction_paths", None)
-            task_parts = [
-                f"Linked issue #{item.issue}: {item.payload.get('issue_title', '')}".strip(),
-                str(item.payload.get("issue_body", "")),
-            ]
-            pr_description = str(item.payload.get("pr_description", ""))
-            if pr_description:
-                task_parts.append(f"PR description:\n{pr_description}")
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue if item.issue is not None else 0,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "implementer", implementer_model),
-                prompt_builder=get_address_review_prompt,
-                cwd=_worktree_path(item, ctx),
-                timeout_s=address_review_claude_timeout(),
-                session_agent=AGENT_ADDRESS_REVIEW,
-                resume_session_id=item.session_ids.get(AGENT_ADDRESS_REVIEW),
-                prompt_kwargs={
-                    "pr_number": item.pr,
-                    "issue_number": item.issue,
-                    "worktree_path": item.worktree,
-                    "threads_json": json.dumps(item.payload.get("remediation_threads", [])),
-                    "todo_block": item.payload.get("difficulty_tiers", ""),
-                    "task_block": "\n\n".join(part for part in task_parts if part),
-                    "diff_text": str(item.payload.get("pr_diff", "")),
-                    "scope_retraction_paths": scope_retraction_paths or (),
-                    "host_verification_failure": item.payload.get("host_verification_failure"),
-                    # No-commit retry directive (#1575): non-empty ONLY on
-                    # the one retry after a no-commit address turn;
-                    # get_address_review_prompt renders it via
-                    # build_unaddressed_directive.
-                    "unaddressed_findings": list(item.payload.get("unaddressed_findings") or []),
-                },
-                parse=_parse_addressed_block,
-                descr="address",
-            )
-            return JobRequest(job, on_done_state=PUSH_WAIT)
-        job = AgentJob(
-            repo=item.repo,
-            issue=item.issue if item.issue is not None else 0,
-            agent=agent_provider(ctx),
-            model=stage_model(ctx, "implementer", implementer_model),
-            prompt_builder=get_impl_resume_feedback_prompt,
-            cwd=_worktree_path(item, ctx),
-            timeout_s=implementer_claude_timeout(),
-            session_agent=AGENT_IMPLEMENTER,
-            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
-            prompt_kwargs={
-                "issue_number": item.issue,
-                "prev_iteration": item.payload.get("pr_review_round", 0),
-                "review_feedback": _address_review_feedback(item),
-            },
-            parse=_parse_addressed_block,
-            descr="address",
+        # Review worktrees are immutable evidence. The implementation stage
+        # owns the branch writer, its fix commit, and the subsequent
+        # [Response] replies; pr_review only records the negative state and
+        # hands the complete host thread snapshot back to that writer.
+        no_go_outcome = self._write_no_go(item, ctx)
+        if isinstance(no_go_outcome, StageOutcome):
+            return self._cleanup_review_worktree_then(item, no_go_outcome)
+        item.payload["implementation_remediation"] = True
+        return self._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.FAIL_BACK, "implementation_remediation"),
         )
-        return JobRequest(job, on_done_state=PUSH_WAIT)
 
     @staticmethod
     def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None:
@@ -2185,10 +2029,6 @@ class PrReviewStage(Stage):
         item.payload["existing_pr"] = True
         item.payload.pop("direct_pr_worktree", None)
         item.payload.pop("direct_pr_worktree_dirty", None)
-        item.payload.pop("direct_pr_rebase_attempted", None)
-        item.payload.pop("direct_pr_rebase_pending", None)
-        item.payload.pop("direct_pr_rebase_published", None)
-        item.payload.pop("direct_pr_rebase_error", None)
         item.payload["direct_pr_worktree_generation"] = generation + 1
         item.session_ids.pop(AGENT_PR_REVIEWER, None)
         item.session_ids.pop(AGENT_ADDRESS_REVIEW, None)
@@ -2636,7 +2476,10 @@ class PrReviewStage(Stage):
             item.issue,
             item.pr,
         )
-        return self._write_go(item, ctx)
+        outcome = self._write_go(item, ctx)
+        if isinstance(outcome, StageOutcome):
+            return self._cleanup_review_worktree_then(item, outcome)
+        return outcome
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -2681,7 +2524,7 @@ class PrReviewStage(Stage):
             payload.pop("unaddressed_findings", None)
         return None
 
-    def _handle_error_verdict(self, item: WorkItem, verdict: Any) -> StageOutcome:
+    def _handle_error_verdict(self, item: WorkItem, verdict: Any) -> StepResult:
         """Handle a missing/ERROR verdict: bounded RETRY, then fail back.
 
         Reviewer-infrastructure failure: labels untouched, no round burned,
@@ -2717,7 +2560,10 @@ class PrReviewStage(Stage):
             retries,
             REVIEW_ERROR_RETRY_CAP,
         )
-        return StageOutcome(Disposition.RETRY, reason)
+        return self._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.RETRY, reason),
+        )
 
     @staticmethod
     def _fail_back_agent_error(item: WorkItem) -> StageOutcome:

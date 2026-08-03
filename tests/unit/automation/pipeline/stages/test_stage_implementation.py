@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -511,7 +512,7 @@ class TestGate:
     def test_adopted_clean_worktree_advances_to_pr_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A clean adopted worktree skips the implement leg and ADVANCEs."""
+        """A clean adopted worktree is rebased before review."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
@@ -520,7 +521,7 @@ class TestGate:
         result = stage.step(item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "ADOPTED"
+        assert result.next_state == "REBASE_WAIT"
 
         item.state = "ADOPTED"
         outcome = stage.step(item, ctx)
@@ -530,7 +531,7 @@ class TestGate:
     def test_adopted_dirty_worktree_salvages_then_advances(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A dirty adopted worktree runs the salvage decision, then ADVANCEs."""
+        """A dirty adopted worktree runs the salvage decision, then rebases."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
@@ -541,7 +542,35 @@ class TestGate:
 
         assert isinstance(result, JobRequest)
         assert result.job.descr == "dirty_decision"
-        assert result.on_done_state == "ADOPTED"
+        assert result.on_done_state == "REBASE_WAIT"
+
+    def test_rebase_wait_rebases_and_lease_publishes_the_writer_before_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The implementation stage, not the reviewer, owns branch rebasing."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.op == "rebase"
+        assert result.job.descr == "rebase_writer_before_review"
+        assert result.job.kwargs == {
+            "cwd": Path("/tmp/implementation-writer"),
+            "base_branch": "main",
+            "remote": "origin",
+            "publish_rebased_head": True,
+            "branch": "1-auto-impl",
+            "expected_remote_sha": "a" * 40,
+        }
+
+        stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
+        assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
 
 class TestImplementationStateSkipGate:
@@ -877,6 +906,28 @@ class TestWorktreeAndAdvise:
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
+    def test_remediation_reuses_the_writer_stowed_for_read_only_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A review handoff never creates a second worktree for the PR branch."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "implementation_writer_restored": True,
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="DIRTY_DECISION_WAIT")
+        assert item.payload["worktree_dirty"] is False
+        assert "implementation_writer_restored" not in item.payload
+
     def test_direct_scope_worktree_uses_its_bootstrap_pin_without_refresh(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1140,6 +1191,75 @@ class TestWorktreeAndAdvise:
 class TestImplementBudget:
     """IMPLEMENT_WAIT budget semantics: agent_error consumes the budget."""
 
+    def test_existing_pr_remediation_uses_the_writer_agent_and_review_threads(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Review findings are fixed by the implementation stage, never pr_review."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.branch = "review-branch"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "implementation_remediation": True,
+                "remediation_threads": [
+                    {"thread_id": "thread-1", "path": "a.py", "line": 3, "body": "fix it"}
+                ],
+                "pr_diff": "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-old\n+new\n",
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "address_review"
+        assert result.job.session_agent == "implementer"
+        assert result.job.prompt_kwargs["pr_number"] == 1001
+        assert '"thread_id": "thread-1"' in result.job.prompt_kwargs["threads_json"]
+        assert result.on_done_state == "TEST_WAIT"
+
+    def test_remediation_preserves_the_scope_retraction_publish_guard(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Scope-control findings are checked by the writer before publishing."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "reviewed_pr_base_sha": "a" * 40,
+                "remediation_threads": [
+                    {
+                        "thread_id": "thread-1",
+                        "path": "out-of-scope.py",
+                        "line": 3,
+                        "body": (
+                            "Remove this unrelated change.\n"
+                            "<!-- hephaestus-scope-retraction-paths: "
+                            '["out-of-scope.py"] -->'
+                        ),
+                    }
+                ],
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_kwargs["scope_retraction_paths"] == ("out-of-scope.py",)
+        item.state = "COMMIT_PUSH_WAIT"
+        push = stage.step(item, ctx)
+        assert isinstance(push, JobRequest)
+        assert isinstance(push.job, GitJob)
+        assert push.job.kwargs["scope_retraction_paths"] == ("out-of-scope.py",)
+        assert push.job.kwargs["scope_retraction_base_sha"] == "a" * 40
+
     def test_implement_requests_job_with_advise_findings(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1386,6 +1506,36 @@ class TestTestsAndFix:
 
 class TestCommitPushAndPrCreate:
     """COMMIT_PUSH_WAIT / PR_CREATE: durable journal entry + deferral order."""
+
+    def test_remediation_push_posts_response_replies_after_the_commit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The writer posts one [Response] reply per addressed review thread."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="COMMIT_PUSH_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_thread_snapshots": [
+                    {"id": "thread-1", "path": "a.py", "line": 3, "body": "fix it"}
+                ],
+                "remediation_output": {
+                    "addressed": ["thread-1"],
+                    "replies": {"thread-1": "[Response] Fixed the missing guard."},
+                },
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
+            ctx,
+        )
+
+        assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
+        assert "implementation_remediation" not in item.payload
 
     def test_commit_push_requests_git_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """COMMIT_PUSH_WAIT submits the commit_push GitJob."""

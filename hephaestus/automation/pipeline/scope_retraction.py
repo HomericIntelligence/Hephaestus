@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import PurePosixPath
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 SCOPE_RETRACTION_MARKER_PREFIX = "<!-- hephaestus-scope-retraction-paths:"
 _SCOPE_ACTION_RE = re.compile(r"\b(?:drop|remove|split)\b", re.IGNORECASE)
@@ -76,3 +76,29 @@ def scope_retraction_paths_from_body(body: object) -> tuple[str, ...] | None:
         return normalize_scope_retraction_paths(json.loads(marker_payloads[0]))
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def scope_retraction_paths_for_threads(
+    threads: list[dict[str, Any]],
+) -> tuple[str, ...] | None:
+    """Return the complete safe retraction manifest requested by *threads*.
+
+    A scope-control finding must carry one complete manifest which includes
+    its anchored file.  The host uses this result both when building the
+    implementation prompt and when configuring the commit/push verification;
+    an incomplete or unsafe request is therefore never inferred from prose.
+    """
+    paths: set[str] = set()
+    for thread in threads:
+        scope_paths = scope_retraction_paths_from_body(thread.get("body"))
+        if scope_paths == ():
+            continue
+        path = thread.get("path")
+        if (
+            scope_paths is None
+            or not is_safe_scope_retraction_path(path)
+            or path not in scope_paths
+        ):
+            return None
+        paths.update(scope_paths)
+    return tuple(sorted(paths))

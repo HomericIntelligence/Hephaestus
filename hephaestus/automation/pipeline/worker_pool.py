@@ -1829,21 +1829,23 @@ class WorkerPool:
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
 
     def _git_rebase(self, job: GitJob) -> JobResult:
-        """Rebase a checkout and optionally lease-publish a detached PR head."""
+        """Rebase an implementation writer and optionally lease-publish its head."""
         kwargs = dict(job.kwargs)
-        publish_detached_head = bool(kwargs.pop("publish_detached_head", False))
+        publish_rebased_head = bool(
+            kwargs.pop("publish_rebased_head", False) or kwargs.pop("publish_detached_head", False)
+        )
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
         result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
         if not result:
-            if not publish_detached_head:
+            if not publish_rebased_head:
                 return JobResult(ok=False, value=False)
             return JobResult(ok=False, value={"rebased": False}, error="rebase conflicted")
-        if not publish_detached_head:
+        if not publish_rebased_head:
             return JobResult(ok=True, value=True)
         cwd = Path(str(kwargs.get("cwd") or ""))
         if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
-            return JobResult(ok=False, error="direct rebase publish arguments invalid")
+            return JobResult(ok=False, error="writer rebase publish arguments invalid")
         source_sha = self._read_detached_push_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
@@ -2418,23 +2420,6 @@ class WorkerPool:
         ).stdout.strip()
         if not base:
             return JobResult(ok=False, error="review checkout base ref unavailable")
-        if job.kwargs.get("require_base_ancestor") is True:
-            # A direct, writable PR was just rebased and lease-published.  If
-            # the base advanced before this checkout barrier, retry that
-            # rewrite rather than reviewing a now-stale replacement head.
-            # Read-only fork heads and normal pipeline worktrees do not take
-            # this mutation path, so base movement must not strand them in a
-            # retry loop.
-            base_is_ancestor = git_utils.run(
-                ["git", "merge-base", "--is-ancestor", base, head],
-                cwd=worktree,
-                check=False,
-                timeout=job.timeout_s,
-            )
-            if base_is_ancestor.returncode == 1:
-                return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
-            if base_is_ancestor.returncode != 0:
-                return JobResult(ok=False, error="review checkout base ancestry check failed")
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,

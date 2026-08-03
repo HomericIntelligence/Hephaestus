@@ -3784,7 +3784,7 @@ class TestRepoScoping:
             "gh_pr_state",
             lambda _pr: {"state": "OPEN", "headRefOid": "a" * 40, "autoMergeRequest": None},
         )
-        with pytest.raises(RuntimeError, match="anchor outside the current PR diff"):
+        with pytest.raises(RuntimeError, match="anchor outside the reviewed diff"):
             adapter.post_review_threads(
                 7,
                 [
@@ -3797,10 +3797,10 @@ class TestRepoScoping:
         assert len(calls) == 1
         assert calls[0][:3] == ["pr", "diff", "7"]
 
-    def test_repo_scoped_review_post_rechecks_head_immediately_before_write(
+    def test_repo_scoped_review_post_does_not_reject_a_reviewed_commit_after_a_push(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A head change while deriving anchors prevents stale publication."""
+        """A later push does not discard the one review batch for the snapshot."""
         calls: list[list[str]] = []
         head_changed = False
         diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
@@ -3811,7 +3811,9 @@ class TestRepoScoping:
             if argv[:2] == ["pr", "diff"]:
                 head_changed = True
                 return SimpleNamespace(stdout=diff)
-            raise AssertionError(f"stale review publication attempted: {argv}")
+            if argv[:3] == ["api", "-X", "POST"]:
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            raise AssertionError(f"unexpected GitHub call: {argv}")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
@@ -3825,15 +3827,50 @@ class TestRepoScoping:
             },
         )
 
-        with pytest.raises(RuntimeError, match="review publication head is stale"):
-            adapter.post_review_threads(
-                7,
-                [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
-                expected_head_sha="a" * 40,
-            )
+        monkeypatch.setattr(adapter, "_repo_review_thread_receipts_for_review", lambda *_args: [])
+        adapter.post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+            expected_head_sha="a" * 40,
+        )
 
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert calls[0][:3] == ["pr", "diff", "7"]
+        assert calls[1][:3] == ["api", "-X", "POST"]
+
+    def test_repo_scoped_review_post_submits_the_reviewed_snapshot_after_head_advances(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A review bound to H is still submitted once another writer advances the PR."""
+        review_payloads: list[dict[str, object]] = []
+        snapshot_diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+ok\n"
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            if argv[:3] == ["api", "-X", "POST"]:
+                review_payloads.append(json.loads(Path(argv[-1]).read_text()))
+                return SimpleNamespace(stdout=json.dumps({"node_id": "review-node"}))
+            raise AssertionError(f"unexpected GitHub call: {argv}")
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "gh_pr_state",
+            lambda _pr: {"state": "OPEN", "headRefOid": "b" * 40, "autoMergeRequest": None},
+        )
+        monkeypatch.setattr(adapter, "_repo_review_thread_receipts_for_review", lambda *_args: [])
+
+        adapter.post_review_threads(
+            7,
+            [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "finding"}],
+            expected_head_sha="a" * 40,
+            review_diff=snapshot_diff,
+        )
+
+        assert review_payloads[0]["commit_id"] == "a" * 40
+        comments = review_payloads[0]["comments"]
+        assert isinstance(comments, list)
+        assert len(comments) == 1
 
     def test_repo_scoped_review_post_warns_on_zero_matched_threads(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

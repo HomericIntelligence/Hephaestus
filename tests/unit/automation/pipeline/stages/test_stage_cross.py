@@ -47,6 +47,18 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
+            if (
+                isinstance(result.job, GitJob)
+                and result.job.op == "create_worktree"
+                and result.job.descr == "direct_pr_review_worktree"
+            ):
+                stage.on_job_done(
+                    item,
+                    JobResult(ok=True, value={"path": "/tmp/detached-review", "dirty": False}),
+                    ctx,
+                )
+                item.state = result.on_done_state
+                continue
             if isinstance(result.job, GitJob) and result.job.op == "verify_pr_review_checkout":
                 stage.on_job_done(
                     item,
