@@ -973,7 +973,21 @@ class ImplementationStage(Stage):
             item.payload.get("remediation_output"),
             snapshots,
         )
-        if replies is None or item.pr is None:
+        if replies is None:
+            if pushed and item.pr is not None:
+                logger.warning(
+                    "implementation:%d: pushed remediation %s returned an invalid reply "
+                    "mapping; posting no replies and returning PR #%d for fresh review",
+                    item.issue,
+                    head_sha,
+                    item.pr,
+                )
+                item.payload.pop("implementation_remediation", None)
+                item.payload.pop("remediation_output", None)
+                return
+            item.payload["remediation_reply_error"] = True
+            return
+        if item.pr is None:
             item.payload["remediation_reply_error"] = True
             return
         if not pushed:
