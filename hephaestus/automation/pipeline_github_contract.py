@@ -19,47 +19,63 @@ if TYPE_CHECKING:
         _arming: ArmingStateStore
 
         @property
-        def _repo_slug(self) -> str | None: ...
+        def _repo_slug(self) -> str | None:
+            pass
 
-        def _owner_name(self) -> tuple[str, str]: ...
+        def _owner_name(self) -> tuple[str, str]:
+            pass
 
-        def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool: ...
+        def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
+            pass
 
-        def _graphql(self, query: str, **fields: int | str) -> dict[str, Any]: ...
+        def _graphql(self, query: str, **fields: int | str) -> dict[str, Any]:
+            pass
 
-        def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]: ...
+        def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            pass
 
-        def _label_names(self) -> set[str]: ...
+        def _label_names(self) -> set[str]:
+            pass
 
-        def _create_label(self, name: str) -> None: ...
+        def _create_label(self, name: str) -> None:
+            pass
 
-        def _add_labels(self, issue_number: int, labels: list[str]) -> None: ...
+        def _add_labels(self, issue_number: int, labels: list[str]) -> None:
+            pass
 
-        def _remove_labels(self, issue_number: int, labels: list[str]) -> None: ...
+        def _remove_labels(self, issue_number: int, labels: list[str]) -> None:
+            pass
 
         @staticmethod
-        def _label_names_from_payload(payload: dict[str, Any]) -> list[str]: ...
+        def _label_names_from_payload(payload: dict[str, Any]) -> list[str]:
+            pass
 
-        def _skip(self, what: str) -> bool: ...
+        def _skip(self, what: str) -> bool:
+            pass
 
-        def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]: ...
+        def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
+            pass
 
-        def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]: ...
+        def _repo_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
+            pass
 
-        def find_pr_for_issue(self, issue_number: int) -> int | None: ...
+        def find_pr_for_issue(self, issue_number: int) -> int | None:
+            pass
 
-        def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]: ...
+        def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+            pass
 
-        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None: ...
+        def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:
+            pass
 
         @staticmethod
         def _thread_comment_snapshot(
             thread: dict[str, Any],
-        ) -> tuple[tuple[str, str], ...] | None: ...
+        ) -> tuple[tuple[str, str], ...] | None:
+            pass
 
-        def _review_thread_snapshot(
-            self, pr_number: int, thread_id: str
-        ) -> dict[str, Any] | None: ...
+        def _review_thread_snapshot(self, pr_number: int, thread_id: str) -> dict[str, Any] | None:
+            pass
 
         def upsert_issue_comment(
             self,
@@ -68,7 +84,8 @@ if TYPE_CHECKING:
             body: str,
             *,
             legacy_marker: str | None = None,
-        ) -> None: ...
+        ) -> None:
+            pass
 
 else:
 

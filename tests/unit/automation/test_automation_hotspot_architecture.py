@@ -69,6 +69,12 @@ _SHARED_NAMESPACE_MODULES = (
     "hephaestus/automation/pipeline_github_transport.py",
 )
 
+_CONTRACT_MODULES = (
+    "hephaestus/automation/ci_fix_contract.py",
+    "hephaestus/automation/pipeline/coordinator_contract.py",
+    "hephaestus/automation/pipeline_github_contract.py",
+)
+
 
 def test_hotspot_file_budgets_are_non_increasing() -> None:
     """Keep each façade and collaborator below its architecture budget."""
@@ -125,4 +131,20 @@ def test_shared_namespaces_declare_static_exports() -> None:
             for element in exports[0].elts
         ):
             violations.append(relative)
+    assert violations == []
+
+
+def test_contract_methods_do_not_use_no_effect_ellipsis_statements() -> None:
+    """Keep executable contract modules free of analyzer-visible no-op expressions."""
+    violations: list[str] = []
+    for relative in _CONTRACT_MODULES:
+        path = _ROOT / relative
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is Ellipsis
+            ):
+                violations.append(f"{relative}:{node.lineno}")
     assert violations == []
