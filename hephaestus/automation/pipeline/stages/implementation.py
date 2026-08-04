@@ -64,6 +64,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import shlex
 from collections.abc import Callable
 from typing import cast
 
@@ -754,8 +755,10 @@ class ImplementationStage(Stage):
             return Continue(next_state=COMMIT_PUSH_WAIT)
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
+        item.payload.pop("test_receipt", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
         test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+        item.payload["test_command"] = shlex.join(test_argv)
         test_job = BuildTestJob(
             repo=item.repo,
             cwd=_worktree_path(item, ctx),
@@ -1258,6 +1261,9 @@ class ImplementationStage(Stage):
         if result.ok and result.value in (0, None, True):
             item.payload.pop("tests_failed", None)
             item.payload.pop("test_output", None)
+            command = item.payload.pop("test_command", None)
+            if isinstance(command, str) and command:
+                item.payload["test_receipt"] = f"`{command}` — passed"
             return
         item.payload["tests_failed"] = True
         item.payload["test_output"] = "\n".join(
@@ -1567,7 +1573,7 @@ class ImplementationStage(Stage):
                 summary=item.payload.get("implement_summary", "")
                 or f"Automated implementation for issue #{item.issue}.",
                 changes="See the PR diff for the full change set.",
-                testing=item.payload.get("test_output") or "uv run pytest tests -q --tb=short",
+                testing=item.payload.get("test_receipt") or "Not run by the automation pipeline.",
             )
             pr_number = ctx.github.create_pr(item.issue, item.branch, title, body)
             item.pr = pr_number
