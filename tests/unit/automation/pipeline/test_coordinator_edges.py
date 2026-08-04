@@ -128,20 +128,34 @@ class TestWiring:
         created: dict[str, Any] = {}
 
         class SpyPool:
-            def __init__(self, size: int, shutdown: Any, completion_q: Any) -> None:
+            def __init__(
+                self,
+                size: int,
+                shutdown: Any,
+                completion_q: Any,
+                gh_extra_path_root: Path | None = None,
+            ) -> None:
                 created["size"] = size
                 created["shutdown"] = shutdown
                 created["completion_q"] = completion_q
+                created["gh_extra_path_root"] = gh_extra_path_root
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
+        gh_root = tmp_path / "custom-gh"
         config = PipelineConfig(
-            org="org", repos=["r"], parallel_repos=3, max_workers=4, projects_dir=tmp_path
+            org="org",
+            repos=["r"],
+            parallel_repos=3,
+            max_workers=4,
+            projects_dir=tmp_path,
+            gh_extra_path_root=gh_root,
         )
         coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
         assert created["size"] == 12
         assert created["shutdown"] is coordinator.shutdown
         assert created["completion_q"] is coordinator.completion_q
+        assert created["gh_extra_path_root"] == gh_root
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

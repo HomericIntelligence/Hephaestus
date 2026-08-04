@@ -25,14 +25,22 @@ class _RecordingWorkerPool:
         shutdown: Event,
         completion_q: Any,
         lock_dir: Path | None = None,
+        gh_extra_path_root: Path | None = None,
     ) -> None:
         del lock_dir
         self.size = size
         self.shutdown_event = shutdown
         self.completion_q = completion_q
+        self.gh_extra_path_root = gh_extra_path_root
 
 
-def _config(tmp_path: Path, *, parallel_repos: int = 2, max_workers: int = 3) -> PipelineConfig:
+def _config(
+    tmp_path: Path,
+    *,
+    parallel_repos: int = 2,
+    max_workers: int = 3,
+    gh_extra_path_root: Path | None = None,
+) -> PipelineConfig:
     """Build a configuration whose global work capacity is easy to inspect."""
     return PipelineConfig(
         org="org",
@@ -40,6 +48,7 @@ def _config(tmp_path: Path, *, parallel_repos: int = 2, max_workers: int = 3) ->
         parallel_repos=parallel_repos,
         max_workers=max_workers,
         projects_dir=tmp_path,
+        gh_extra_path_root=gh_extra_path_root,
     )
 
 
@@ -59,6 +68,21 @@ def test_coordinator_uses_one_capacity_for_all_queues_and_worker_pool(
     assert coordinator.completion_q.maxsize == capacity
     assert coordinator.pool.size == capacity
     assert coordinator.pool.completion_q is coordinator.completion_q
+    assert coordinator.pool.gh_extra_path_root is None
+
+
+def test_coordinator_passes_extra_gh_root_to_worker_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI-admitted GitHub root reaches the worker-pool trust boundary."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
+
+    monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
+    config = _config(tmp_path, gh_extra_path_root=tmp_path)
+
+    coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
+
+    assert coordinator.pool.gh_extra_path_root == tmp_path
 
 
 def test_admission_rejects_when_global_worker_capacity_is_live(tmp_path: Path) -> None:
