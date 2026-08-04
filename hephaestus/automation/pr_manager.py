@@ -29,7 +29,11 @@ from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
 from .claude_invoke import invoke_claude_with_session
 from .claude_models import implementer_model
-from .commit_policy import ALLOWED_CONVENTIONAL_TYPES, normalize_conventional_type
+from .commit_policy import (
+    ALLOWED_CONVENTIONAL_TYPES,
+    normalize_conventional_type,
+    normalize_strict_conventional_title,
+)
 from .git_utils import get_repo_slug, issue_ref, run
 from .github_api import (
     OpenPrDiscoveryIncompleteError,
@@ -1057,7 +1061,7 @@ def create_pr(
         agent_model=agent_model,
         git_message_timeout=git_message_timeout,
     )
-    pr_title = pr_message.title
+    pr_title = normalize_strict_conventional_title(pr_message.title)
     pr_body = get_pr_description(
         issue_number=issue_number,
         summary=pr_message.summary,
