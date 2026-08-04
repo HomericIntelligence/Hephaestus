@@ -1570,8 +1570,10 @@ class ImplementationStage(Stage):
             title = normalize_strict_conventional_title(str(raw_title))
             body = get_pr_description(
                 item.issue,
-                summary=item.payload.get("implement_summary", "")
-                or f"Automated implementation for issue #{item.issue}.",
+                # Agent summaries may contain local paths, stale working-tree
+                # state, or unbound test totals. The durable PR journal must
+                # be deterministic; the reviewed diff carries the detail.
+                summary=f"Implements the requested changes for issue #{item.issue}.",
                 changes="See the PR diff for the full change set.",
                 testing=item.payload.get("test_receipt") or "Not run by the automation pipeline.",
             )

@@ -267,11 +267,9 @@ class _HostVerificationSpec:
     descr: str
 
 
-#: Python reviews run read-only by design.  The host therefore performs the
-#: deterministic static validation against an immutable snapshot before the
-#: reviewer sees it.  Full test suites belong to the implementation stage and
-#: CI: a repository's unit tests can legitimately require controlled service,
-#: Git, or process fixtures that the no-network reviewer boundary must deny.
+#: Python reviews run read-only by design. The host therefore performs a
+#: deterministic validation plan against an immutable snapshot before the
+#: reviewer sees it, including pytest evidence bound to the reviewed head.
 _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
         changed_path=None,
@@ -295,6 +293,11 @@ _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "tests/",
         ),
         descr="review_python_mypy",
+    ),
+    _HostVerificationSpec(
+        changed_path=None,
+        argv=("uv", "run", "pytest", "tests/", "-q", "--tb=short"),
+        descr="review_python_pytest",
     ),
 )
 _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(

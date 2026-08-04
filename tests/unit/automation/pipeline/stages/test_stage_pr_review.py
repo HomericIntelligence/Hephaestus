@@ -1187,6 +1187,10 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_python_pytest",
+                ("uv", "run", "pytest", "tests/", "-q", "--tb=short"),
+            ),
+            (
                 "review_stalled_consumer_verification",
                 (
                     "uv",
@@ -1319,7 +1323,7 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
-        for _ in range(3):
+        for _ in range(4):
             assert isinstance(request, JobRequest)
             item.state = request.on_done_state
             stage.on_job_done(
@@ -1403,7 +1407,7 @@ class TestPrReviewStageStep:
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
-        for _ in range(3):
+        for _ in range(4):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
@@ -1469,7 +1473,7 @@ class TestPrReviewStageStep:
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
-        for _ in range(3):
+        for _ in range(4):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
