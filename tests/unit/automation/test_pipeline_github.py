@@ -4565,6 +4565,7 @@ class TestReadSurface:
                 return SimpleNamespace(
                     stdout=json.dumps(
                         {
+                            "title": "docs(policy): current metadata",
                             "body": "Closes #1899\n",
                             "headRefOid": "a" * 40,
                             "baseRefName": "main",
@@ -4580,6 +4581,7 @@ class TestReadSurface:
         )
 
         assert context == {
+            "pr_title": "docs(policy): current metadata",
             "pr_description": "Closes #1899\n",
             "pr_head_sha": "a" * 40,
             "pr_base_branch": "main",
@@ -4590,7 +4592,7 @@ class TestReadSurface:
                 "view",
                 "1984",
                 "--json",
-                "body,headRefOid,baseRefName",
+                "title,body,headRefOid,baseRefName",
                 "--repo",
                 "org/repo-a",
             ],
@@ -4607,6 +4609,7 @@ class TestReadSurface:
             return SimpleNamespace(
                 stdout=json.dumps(
                     {
+                        "title": "current title",
                         "body": "Closes #1899",
                         "headRefOid": "a" * 40,
                         "baseRefName": "main",
