@@ -13,6 +13,13 @@ from hephaestus.automation.session_naming import AGENT_CI_DRIVER, session_uuid
 class TestCompactSession:
     """Test suite for compact_session helper."""
 
+    @pytest.fixture(autouse=True)
+    def _stable_checkout_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "hephaestus.automation.agent_config._checkout_identity",
+            lambda _cwd: "test-checkout",
+        )
+
     def test_compact_session_issues_resume_and_print(self, tmp_path: Path) -> None:
         """Verify compact_session invokes claude with --resume and --print /compact."""
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
@@ -54,7 +61,7 @@ class TestCompactSession:
             actual_uuid = cmd[resume_idx + 1]
 
             # Compare to the real session_uuid function
-            expected_uuid = session_uuid(repo, issue, agent)
+            expected_uuid = session_uuid(repo, issue, agent, cwd=tmp_path)
             assert actual_uuid == expected_uuid
 
     def test_compact_session_forwards_cwd(self, tmp_path: Path) -> None:

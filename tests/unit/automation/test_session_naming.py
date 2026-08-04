@@ -7,9 +7,12 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation import agent_config
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
     AGENT_ADVISE,
@@ -20,6 +23,7 @@ from hephaestus.automation.session_naming import (
     AGENT_PLANNER,
     AGENT_PR_REVIEWER,
     current_trunk_githash,
+    resolve_session_jsonl_path,
     reviewer_agent,
     session_jsonl_path,
     session_name,
@@ -143,6 +147,47 @@ class TestSessionUUID:
         b = session_uuid("R", 1, AGENT_PLANNER, "claude-opus-4-8")
         assert a != b
 
+    def test_registered_worktree_family_gets_same_checkout_uuid(self, tmp_path: Path) -> None:
+        """Repo-root and linked-worktree callers share their common-dir identity."""
+        repo_root = tmp_path / "owner-a" / "Repo"
+        worktree = tmp_path / "worktrees" / "issue-2284"
+        common_dir = repo_root / ".git"
+        repo_root.mkdir(parents=True)
+        worktree.mkdir(parents=True)
+
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            return_value=MagicMock(stdout=f"{common_dir}\n"),
+        ):
+            root_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable", cwd=repo_root)
+            worktree_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable", cwd=worktree)
+
+        assert root_sid == worktree_sid
+
+    def test_implicit_cwd_is_checkout_scoped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting cwd still isolates sessions when callers run in each checkout."""
+        dotted = tmp_path / "owner.a" / "Repo"
+        dashed = tmp_path / "owner-a" / "Repo"
+        dotted.mkdir(parents=True)
+        dashed.mkdir(parents=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.agent_config._checkout_identity",
+            lambda cwd: str(cwd.resolve()),
+        )
+
+        monkeypatch.chdir(dotted)
+        dotted_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable")
+        monkeypatch.chdir(dashed)
+        dashed_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable")
+
+        assert dotted_sid != dashed_sid
+        assert (
+            session_jsonl_path(dotted_sid, dotted).parent
+            == session_jsonl_path(dashed_sid, dashed).parent
+        )
+
     def test_omitting_model_preserves_legacy_key(self) -> None:
         """Backward compat: no model reproduces the historical (repo, issue, agent) id."""
         from hephaestus.automation.session_naming import session_name
@@ -186,7 +231,7 @@ class TestSessionUUID:
         to the now-githash-free signatures — otherwise this very test
         would itself be flagged as "wrong arg name" on every PR scan.
         """
-        bad_kwargs = {"githash": "abc1234"}
+        bad_kwargs: dict[str, Any] = {"githash": "abc1234"}
         with pytest.raises(TypeError):
             session_uuid("R", 1, AGENT_PLANNER, **bad_kwargs)
         with pytest.raises(TypeError):
@@ -289,6 +334,180 @@ class TestSessionJsonlPath:
         p = session_jsonl_path("u", target)
         assert "v1-2-3" in p.parent.name
         assert "v1.2.3" not in p.parent.name
+
+    @pytest.mark.parametrize("created_in", ["repo_root", "worktree"])
+    def test_registered_family_cwds_resolve_same_existing_transcript(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        created_in: str,
+    ) -> None:
+        """Repo-root and worktree callers resolve one existing transcript."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner-a" / "Repo"
+        worktree = repo_root / "build" / ".worktrees" / "issue-2284"
+        worktree.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+
+        source = repo_root if created_in == "repo_root" else worktree
+        transcript = session_jsonl_path(sid, source)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text("{}\n", encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(repo_root.resolve(), worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(sid, repo_root) == transcript
+            assert resolve_session_jsonl_path(sid, worktree) == transcript
+
+    def test_same_slug_unrelated_checkout_transcript_is_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A same-key transcript from an unrelated checkout is not resumed."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        local = tmp_path / "owner-a" / "Repo"
+        local_worktree = local / "build" / ".worktrees" / "issue-2284"
+        unrelated = tmp_path / "owner-b" / "Repo"
+        local_worktree.mkdir(parents=True)
+        unrelated.mkdir(parents=True)
+
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        foreign_transcript = session_jsonl_path(sid, unrelated)
+        foreign_transcript.parent.mkdir(parents=True, exist_ok=True)
+        foreign_transcript.write_text("{}\n", encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(local.resolve(), local_worktree.resolve()),
+        ):
+            resolved = resolve_session_jsonl_path(sid, local_worktree)
+
+        assert resolved == session_jsonl_path(sid, local_worktree)
+        assert resolved != foreign_transcript
+        assert not resolved.exists()
+
+    def test_lossy_path_pair_cannot_resume_unregistered_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dotted/dashed checkouts isolate sessions but registered worktrees resume."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        dotted = tmp_path / "owner.a" / "Repo"
+        dotted_worktree = dotted / "build" / ".worktrees" / "issue-2284"
+        dashed = tmp_path / "owner-a" / "Repo"
+        dotted_worktree.mkdir(parents=True)
+        dashed.mkdir(parents=True)
+
+        legacy_sid = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                session_name("Repo", 2284, AGENT_PLAN_REVIEWER, "fable"),
+            )
+        )
+        assert session_jsonl_path(legacy_sid, dotted) == session_jsonl_path(legacy_sid, dashed)
+
+        git_failure = subprocess.CalledProcessError(128, ["git"])
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            side_effect=git_failure,
+        ):
+            dotted_sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable", cwd=dotted)
+            dashed_sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable", cwd=dashed)
+
+        dotted_path = session_jsonl_path(dotted_sid, dotted)
+        dashed_path = session_jsonl_path(dashed_sid, dashed)
+        assert dotted_path.parent == dashed_path.parent
+        assert dotted_path != dashed_path
+        assert dotted_sid != dashed_sid
+
+        dashed_path.parent.mkdir(parents=True, exist_ok=True)
+        dashed_path.write_text("{}\n", encoding="utf-8")
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(dotted.resolve(),),
+        ):
+            resolved = resolve_session_jsonl_path(dotted_sid, dotted)
+
+        assert resolved == dotted_path
+        assert resolved != dashed_path
+        assert not resolved.exists()
+
+        dotted_path.parent.mkdir(parents=True, exist_ok=True)
+        dotted_path.write_text("{}\n", encoding="utf-8")
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(dotted.resolve(), dotted_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(dotted_sid, dotted_worktree) == dotted_path
+
+    def test_worktree_discovery_parses_nul_output_and_scrubs_git_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Discovery uses the explicit cwd and parses Git's NUL records."""
+        repo_root = tmp_path / "Repo"
+        worktree = tmp_path / "worktree"
+        repo_root.mkdir()
+        worktree.mkdir()
+        monkeypatch.setenv("GIT_DIR", str(tmp_path / "foreign.git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "foreign-tree"))
+        output = (
+            f"worktree {repo_root}\0HEAD deadbeef\0branch refs/heads/main\0\0"
+            f"worktree {worktree}\0HEAD cafefood\0branch refs/heads/issue\0\0"
+        )
+
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            return_value=MagicMock(stdout=output),
+        ) as run:
+            roots = agent_config._registered_worktree_roots(worktree)
+
+        assert roots == tuple(sorted((repo_root.resolve(), worktree.resolve()), key=str))
+        argv = run.call_args.args[0]
+        assert argv[:3] == ["git", "-C", str(worktree.resolve())]
+        assert argv[-2:] == ["--porcelain", "-z"]
+        kwargs = run.call_args.kwargs
+        assert kwargs["timeout"] == 5
+        assert "GIT_DIR" not in kwargs["env"]
+        assert "GIT_WORK_TREE" not in kwargs["env"]
+
+    def test_git_discovery_failure_falls_back_to_exact_cwd_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed Git probe preserves the old exact-cwd create behavior."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        cwd = tmp_path / "not-a-repository"
+        cwd.mkdir()
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            side_effect=subprocess.CalledProcessError(128, ["git"]),
+        ):
+            assert resolve_session_jsonl_path(sid, cwd) == session_jsonl_path(sid, cwd)
+
+    def test_historical_duplicates_choose_lexicographically_first_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Duplicate same-family transcripts have deterministic selection."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        repo_root = tmp_path / "owner-a" / "Repo"
+        worktree_a = repo_root / "build" / ".worktrees" / "a"
+        worktree_b = repo_root / "build" / ".worktrees" / "b"
+        worktree_b.mkdir(parents=True)
+        worktree_a.mkdir(parents=True)
+        sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable")
+        paths = [session_jsonl_path(sid, root) for root in (repo_root, worktree_a, worktree_b)]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=tuple(root.resolve() for root in (repo_root, worktree_a, worktree_b)),
+        ):
+            expected = min(paths, key=str)
+            assert resolve_session_jsonl_path(sid, repo_root) == expected
+            assert resolve_session_jsonl_path(sid, worktree_b) == expected
 
 
 @pytest.mark.requires_posix
