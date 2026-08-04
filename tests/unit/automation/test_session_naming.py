@@ -164,6 +164,30 @@ class TestSessionUUID:
 
         assert root_sid == worktree_sid
 
+    def test_implicit_cwd_is_checkout_scoped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitting cwd still isolates sessions when callers run in each checkout."""
+        dotted = tmp_path / "owner.a" / "Repo"
+        dashed = tmp_path / "owner-a" / "Repo"
+        dotted.mkdir(parents=True)
+        dashed.mkdir(parents=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.agent_config._checkout_identity",
+            lambda cwd: str(cwd.resolve()),
+        )
+
+        monkeypatch.chdir(dotted)
+        dotted_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable")
+        monkeypatch.chdir(dashed)
+        dashed_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable")
+
+        assert dotted_sid != dashed_sid
+        assert (
+            session_jsonl_path(dotted_sid, dotted).parent
+            == session_jsonl_path(dashed_sid, dashed).parent
+        )
+
     def test_omitting_model_preserves_legacy_key(self) -> None:
         """Backward compat: no model reproduces the historical (repo, issue, agent) id."""
         from hephaestus.automation.session_naming import session_name

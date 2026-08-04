@@ -533,14 +533,16 @@ def session_uuid(
 ) -> str:
     """Return the deterministic UUIDv5 session ID for one artifact and checkout.
 
-    When ``cwd`` is provided, unrelated checkouts get distinct session IDs even
-    if Claude's lossy cwd encoding maps their project directories to the same
-    path. A repository root and its linked worktrees share the Git common-dir
-    identity and therefore keep one resumable session lineage.
+    Unrelated checkouts get distinct session IDs even if Claude's lossy cwd
+    encoding maps their project directories to the same path. A repository
+    root and its linked worktrees share the Git common-dir identity and
+    therefore keep one resumable session lineage. When callers omit ``cwd``,
+    the process working directory supplies the checkout identity; session IDs
+    are never unscoped by accident.
     """
     name = session_name(repo, issue, agent, model)
-    if cwd is not None:
-        name = f"{name}@{_checkout_identity(cwd)}"
+    checkout_cwd = cwd if cwd is not None else Path.cwd()
+    name = f"{name}@{_checkout_identity(checkout_cwd)}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 
