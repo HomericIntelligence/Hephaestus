@@ -1249,11 +1249,6 @@ class PrReviewStage(Stage):
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
-        if item.payload.get(_COMMENT_VALIDATION_ONLY):
-            # The original audit already left these threads.  At this point
-            # the reviewer only validates the implementation's current-head
-            # replies, so do not create a second broad review batch.
-            return Continue(next_state=VALIDATE_WAIT)
         verifications = _host_verification_specs(item.payload.get("pr_diff"))
         if verifications:
             logger.info(
