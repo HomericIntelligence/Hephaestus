@@ -508,7 +508,7 @@ jobs:
           # commits.json already fetched above. Empty set passes by design.
           jq -j '.data.repository.pullRequest.commits.nodes[]
                  | .commit.message + "\u0000"' commits.json \
-            | python3 scripts/check_dco_signoff.py -
+            | python3 policy-base/scripts/check_dco_signoff.py -
 
   auto-merge-policy:
     name: auto-merge-policy

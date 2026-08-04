@@ -40,6 +40,10 @@ def test_pr_policy_validates_title_and_commit_subjects() -> None:
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert checkout["with"]["path"] == "policy-base"
     assert "policy-base/scripts/check_conventional_commit.py" in run
+    dco_run = str(
+        _pr_policy_step("Check 4: every commit carries a DCO Signed-off-by trailer")["run"]
+    )
+    assert "policy-base/scripts/check_dco_signoff.py" in dco_run
     assert "strict Conventional Commits form" in run
     assert "commit.message | split" in run
     assert "dependabot[bot]" not in run
