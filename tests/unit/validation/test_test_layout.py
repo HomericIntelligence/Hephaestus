@@ -1,5 +1,8 @@
 """Tests for hephaestus.validation.test_layout."""
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 from hephaestus.validation import test_layout, test_structure as legacy_test_structure
@@ -35,6 +38,43 @@ def test_legacy_test_structure_imports_match_canonical_module() -> None:
     )
     for name in public_names:
         assert getattr(legacy_test_structure, name) is getattr(test_layout, name)
+
+
+def test_legacy_test_structure_module_invocation_returns_validation_exit_status(
+    tmp_path: Path,
+) -> None:
+    """``python -m hephaestus.validation.test_structure`` preserves CLI behavior."""
+    package = tmp_path / "mypkg"
+    missing_mirror = package / "missing_mirror"
+    test_root = tmp_path / "tests" / "unit"
+    missing_mirror.mkdir(parents=True)
+    test_root.mkdir(parents=True)
+    (package / "__init__.py").touch()
+    (missing_mirror / "__init__.py").touch()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "hephaestus.validation.test_structure",
+            "--repo-root",
+            str(tmp_path),
+            "--src-package",
+            "mypkg",
+            "--json",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "status": "error",
+        "exit_code": 1,
+        "passed": False,
+    }
+    assert "missing_mirror" in result.stderr
 
 
 def _make_package(root: Path, name: str) -> Path:

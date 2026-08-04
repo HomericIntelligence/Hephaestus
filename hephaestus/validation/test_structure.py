@@ -1,5 +1,7 @@
 """Backward-compatibility shim for hephaestus.validation.test_layout."""
 
+import sys
+
 from hephaestus.validation.test_layout import (
     ALLOWED_ROOT_FILES as ALLOWED_ROOT_FILES,
     SANCTIONED_EXTRA_TEST_DIRS as SANCTIONED_EXTRA_TEST_DIRS,
@@ -27,3 +29,7 @@ __all__ = [
     "check_test_structure",
     "main",
 ]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
