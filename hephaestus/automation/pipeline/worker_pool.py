@@ -120,6 +120,7 @@ _TRUSTED_GIT_CANDIDATES = (
 )
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
 _HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v6-shell-launchers"
+_HOST_RUNTIME_MANIFEST_HEADER = "sealed-runtime-file-manifest-v1"
 
 # The host verification handles code from an untrusted pull request.  Bound
 # the Git archive before extraction and bound every child output/write path.
@@ -284,6 +285,11 @@ def _sealed_runtime_marker(target: Path) -> Path:
     return target.with_name(f"{target.name}.sealed")
 
 
+def _sealed_runtime_manifest(target: Path) -> Path:
+    """Return the verifier-owned file manifest for a cached runtime."""
+    return target.with_name(f"{target.name}.manifest")
+
+
 def _sealed_runtime_marker_matches(target: Path) -> bool:
     """Return whether *target* has this verifier's structurally valid marker."""
     marker = _sealed_runtime_marker(target)
@@ -300,21 +306,60 @@ def _sealed_runtime_marker_matches(target: Path) -> bool:
         return False
 
 
-def _runtime_manifest_files_exist(runtime: Path) -> bool:
-    """Return whether installed RECORD entries still exist inside *runtime*."""
+def _runtime_manifest_entries(runtime: Path) -> tuple[str, ...]:
+    """Return verifier-owned relative paths that must exist in a runtime cache."""
+    root = runtime.resolve()
+    entries: set[str] = set()
+    for required in (runtime / "pyvenv.cfg", runtime / "bin" / "python"):
+        candidate = required.resolve()
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            raise FileNotFoundError(required)
+        entries.add(candidate.relative_to(root).as_posix())
+    for path in runtime.rglob("*"):
+        if not path.is_file():
+            continue
+        candidate = path.resolve()
+        if not candidate.is_relative_to(root):
+            raise FileNotFoundError(path)
+        entries.add(candidate.relative_to(root).as_posix())
+    return tuple(sorted(entries))
+
+
+def _write_sealed_runtime_manifest(target: Path) -> None:
+    """Persist the expected runtime-cache files outside the sealed directory."""
+    content = io.StringIO()
+    writer = csv.writer(content, lineterminator="\n")
+    writer.writerow([_HOST_RUNTIME_MANIFEST_HEADER, target.name])
+    for entry in _runtime_manifest_entries(target):
+        writer.writerow([entry])
+    write_secure(
+        _sealed_runtime_manifest(target),
+        content.getvalue(),
+        permissions=0o400,
+    )
+
+
+def _sealed_runtime_manifest_matches(target: Path) -> bool:
+    """Return whether the verifier-owned manifest matches files in *target*."""
+    manifest_path = _sealed_runtime_manifest(target)
     try:
-        root = runtime.resolve()
-        if not (runtime / "pyvenv.cfg").is_file() or not (runtime / "bin" / "python").is_file():
+        root = target.resolve()
+        if (
+            not manifest_path.is_file()
+            or manifest_path.is_symlink()
+            or manifest_path.stat().st_mode & 0o222
+        ):
             return False
-        for record in runtime.rglob("*.dist-info/RECORD"):
-            site_packages = record.parent.parent
-            with record.open(encoding="utf-8", newline="") as manifest:
-                for row in csv.reader(manifest):
-                    if not row or not row[0]:
-                        continue
-                    candidate = (site_packages / row[0]).resolve()
-                    if not candidate.is_relative_to(root) or not candidate.is_file():
-                        return False
+        with manifest_path.open(encoding="utf-8", newline="") as manifest:
+            reader = csv.reader(manifest)
+            if next(reader, None) != [_HOST_RUNTIME_MANIFEST_HEADER, target.name]:
+                return False
+            for row in reader:
+                if len(row) != 1 or not row[0]:
+                    return False
+                candidate = (root / row[0]).resolve()
+                if not candidate.is_relative_to(root) or not candidate.is_file():
+                    return False
     except (OSError, csv.Error):
         return False
     return True
@@ -322,7 +367,7 @@ def _runtime_manifest_files_exist(runtime: Path) -> bool:
 
 def _is_sealed_runtime_cache(target: Path) -> bool:
     """Return whether *target* is marked, sealed, and manifest-complete."""
-    return _sealed_runtime_marker_matches(target) and _runtime_manifest_files_exist(target)
+    return _sealed_runtime_marker_matches(target) and _sealed_runtime_manifest_matches(target)
 
 
 def _remove_corrupted_sealed_runtime(target: Path) -> None:
@@ -333,6 +378,7 @@ def _remove_corrupted_sealed_runtime(target: Path) -> None:
         path.chmod(path.stat().st_mode | (0o700 if path.is_dir() else 0o600))
     shutil.rmtree(target)
     _sealed_runtime_marker(target).unlink()
+    _sealed_runtime_manifest(target).unlink(missing_ok=True)
 
 
 def _verifier_owned_runtime_environment(checkout: Path) -> Path:
@@ -379,13 +425,18 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
                 copied.replace(target)
                 try:
                     _rewrite_runtime_launchers(target, runtime)
+                    _write_sealed_runtime_manifest(target)
                     _seal_host_runtime(target)
                     write_secure(
                         _sealed_runtime_marker(target),
                         f"{target.name}\n",
                         permissions=0o400,
                     )
+                    if not _is_sealed_runtime_cache(target):
+                        raise OSError("sealed runtime cache failed validation")
                 except OSError:
+                    _sealed_runtime_manifest(target).unlink(missing_ok=True)
+                    _sealed_runtime_marker(target).unlink(missing_ok=True)
                     shutil.rmtree(target, ignore_errors=True)
                     raise
             finally:

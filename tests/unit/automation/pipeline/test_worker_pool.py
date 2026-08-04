@@ -1044,11 +1044,51 @@ class TestWorkerPoolSubmitComplete:
             sealed_site_packages.chmod(sealed_site_packages.stat().st_mode | 0o200)
             (sealed_site_packages / "demo.py").unlink()
             rebuilt = _verifier_owned_runtime_environment(checkout)
+            with patch(f"{_WP}.shutil.copytree", side_effect=AssertionError("unexpected copy")):
+                reused = _verifier_owned_runtime_environment(checkout)
 
         assert rebuilt == sealed
+        assert reused == sealed
         assert (rebuilt / "lib" / "python3.13" / "site-packages" / "demo.py").read_text(
             encoding="utf-8"
         ) == "value = 1\n"
+
+    def test_verifier_runtime_rebuilds_cache_missing_record_manifest(self, tmp_path: Path) -> None:
+        """A missing RECORD file cannot make a sealed cache self-validate."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        runtime = tmp_path / "runtime"
+        site_packages = runtime / "lib" / "python3.13" / "site-packages"
+        dist_info = site_packages / "demo-1.0.dist-info"
+        (runtime / "bin").mkdir(parents=True)
+        dist_info.mkdir(parents=True)
+        (runtime / "bin" / "python").write_text("host interpreter\n", encoding="utf-8")
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        (site_packages / "demo.py").write_text("value = 1\n", encoding="utf-8")
+        (dist_info / "RECORD").write_text(
+            "demo.py,sha256=fixture,10\ndemo-1.0.dist-info/RECORD,,\n",
+            encoding="utf-8",
+        )
+        cache_temp = tmp_path / "cache-temp"
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+        ):
+            sealed = _verifier_owned_runtime_environment(checkout)
+            sealed_dist_info = (
+                sealed / "lib" / "python3.13" / "site-packages" / "demo-1.0.dist-info"
+            )
+            sealed_dist_info.chmod(sealed_dist_info.stat().st_mode | 0o200)
+            (sealed_dist_info / "RECORD").unlink()
+            rebuilt = _verifier_owned_runtime_environment(checkout)
+
+        assert rebuilt == sealed
+        assert (
+            rebuilt / "lib" / "python3.13" / "site-packages" / "demo-1.0.dist-info" / "RECORD"
+        ).read_text(encoding="utf-8") == (
+            "demo.py,sha256=fixture,10\ndemo-1.0.dist-info/RECORD,,\n"
+        )
 
     def test_verifier_runtime_reuses_intact_manifest_cache(self, tmp_path: Path) -> None:
         """Integrity checks do not recopy an intact sealed environment."""
