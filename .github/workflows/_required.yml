@@ -11,6 +11,7 @@ on:
     types:
       - opened
       - synchronize
+      - edited
       - reopened
       - ready_for_review
   push:
@@ -316,17 +317,15 @@ jobs:
         run: >-
           echo "PR policy applies to the source PR; merge-group checks validate the synthetic commit."
 
-      # Check 3 invokes scripts/check_conventional_commit.py from the repo tree,
-      # so the source must be on disk. Pin the checkout to the PR head SHA: the
-      # default bare checkout resolves refs/pull/N/merge, which GitHub computes
-      # asynchronously and can lag a fresh push — checking out a merge commit
-      # that predates the validator and so misses the script. The head SHA is an
-      # immutable object id (not an attacker-controllable ref name), and the
-      # validator ships with the PR until it lands on main.
+      # The policy validator must come from the trusted base revision, never
+      # from the PR head. The base checkout also provides the bootstrap path for
+      # this rollout: the strict title shape is checked below while the strict
+      # validator interface is introduced by this PR.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         if: github.event_name == 'pull_request'
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy-base
           persist-credentials: false
 
       - name: "Fetch PR metadata"
@@ -346,23 +345,60 @@ jobs:
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json body,title \
             > pr.json
-          gh api graphql \
-            -f query='query($owner:String!,$name:String!,$pr:Int!) {
-              repository(owner:$owner, name:$name) {
-                pullRequest(number:$pr) {
-                  commits(first:100) {
-                    nodes {
-                      commit {
-                        oid
-                        message
-                        signature { isValid state }
-                      }
+          query='query($owner:String!,$name:String!,$pr:Int!,$after:String) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                commits(first:100, after:$after) {
+                  nodes {
+                    commit {
+                      oid
+                      message
+                      signature { isValid state }
                     }
                   }
+                  pageInfo { hasNextPage endCursor }
                 }
               }
-            }' \
-            -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+            }
+          }'
+          nodes_file="$RUNNER_TEMP/pr-commit-nodes.jsonl"
+          page_file="$RUNNER_TEMP/pr-commit-page.json"
+          : > "$nodes_file"
+          cursor=""
+          while true; do
+            if [ -n "$cursor" ]; then
+              gh api graphql \
+                -f query="$query" \
+                -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+                -F after="$cursor" > "$page_file"
+            else
+              gh api graphql \
+                -f query="$query" \
+                -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+                > "$page_file"
+            fi
+            jq -c '.data.repository.pullRequest.commits.nodes[]' "$page_file" \
+              >> "$nodes_file"
+            has_next=$(jq -r '.data.repository.pullRequest.commits.pageInfo.hasNextPage' \
+              "$page_file")
+            case "$has_next" in
+              false) break ;;
+              true)
+                cursor=$(jq -r '.data.repository.pullRequest.commits.pageInfo.endCursor // empty' \
+                  "$page_file")
+                if [ -z "$cursor" ]; then
+                  echo '::error::Commit page omitted endCursor while hasNextPage=true'
+                  exit 1
+                fi
+                ;;
+              *)
+                echo '::error::Commit page omitted a valid pageInfo.hasNextPage value'
+                exit 1
+                ;;
+            esac
+          done
+          jq -n --slurpfile nodes "$nodes_file" \
+            '{data:{repository:{pullRequest:{commits:{nodes:$nodes}}}}}' \
             > commits.json
           echo "Fetched metadata for PR #$PR_NUMBER"
 
@@ -428,16 +464,30 @@ jobs:
           set -euo pipefail
           # The PR title becomes the main-branch subject after the required
           # squash merge, so Git-generated machinery exceptions are disabled.
-          jq -r '.title // ""' pr.json \
-            | python3 scripts/check_conventional_commit.py --strict -
+          # The validator is read from the trusted base checkout. During the
+          # rollout of strict title mode (#2157), the base validator predates
+          # --strict; the anchored shape check below is the explicit bootstrap
+          # path and remains a defense-in-depth check after the rollout.
+          title=$(jq -r '.title // ""' pr.json)
+          if [[ "$title" == *$'\n'* || "$title" == *$'\r'* ]]; then
+            echo '::error::PR title must be a single line'
+            exit 1
+          fi
+          printf '%s\n' "$title" \
+            | python3 policy-base/scripts/check_conventional_commit.py -
+          if ! printf '%s\n' "$title" | grep -qE \
+            '^(feat|fix|docs|refactor|test|chore|ci|build|perf|style|revert)(\([^()]+\))?!?: .+$'; then
+            echo '::error::PR title must match strict Conventional Commits form'
+            exit 1
+          fi
           # Subject = first line of each commit message (GraphQL .commit.message
           # verified to resolve). Branch commits retain the validator's
           # Git-machinery compatibility. Pipe on stdin, one per line, into the
-          # shared validator (DoD row 5 / issue #1209). Empty set passes by
-          # design.
+          # trusted base validator (DoD row 5 / issue #1209). Empty set passes
+          # by design.
           jq -r '.data.repository.pullRequest.commits.nodes[]
                  | .commit.message | split("\n")[0]' commits.json \
-            | python3 scripts/check_conventional_commit.py -
+            | python3 policy-base/scripts/check_conventional_commit.py -
 
       - name: "Check 4: every commit carries a DCO Signed-off-by trailer"
         if: >-

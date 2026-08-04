@@ -34,10 +34,37 @@ def test_pr_policy_validates_title_and_commit_subjects() -> None:
     run = str(check["run"])
 
     assert "--json body,title" in fetch
-    assert "check_conventional_commit.py --strict -" in run
+    checkout = next(
+        step for step in _yaml(REQUIRED_WORKFLOW)["jobs"]["pr-policy"]["steps"] if "uses" in step
+    )
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert checkout["with"]["path"] == "policy-base"
+    assert "policy-base/scripts/check_conventional_commit.py" in run
+    assert "strict Conventional Commits form" in run
     assert "commit.message | split" in run
     assert "dependabot[bot]" not in run
     assert "PR_AUTHOR" not in check.get("env", {})
+
+
+def test_pr_policy_paginates_all_commit_pages() -> None:
+    """The policy query cannot silently omit a 101st commit."""
+    fetch = str(_pr_policy_step("Fetch PR metadata")["run"])
+
+    assert "commits(first:100, after:$after)" in fetch
+    assert "pageInfo { hasNextPage endCursor }" in fetch
+    assert "while true" in fetch
+    assert '-F after="$cursor"' in fetch
+    assert "--slurpfile nodes" in fetch
+
+    # Model the two GraphQL pages used by a 101-commit PR and ensure the
+    # workflow's accumulator contract retains the commit beyond page one.
+    pages = [
+        [{"commit": {"oid": str(index)}} for index in range(100)],
+        [{"commit": {"oid": "100"}}],
+    ]
+    accumulated = [node for page in pages for node in page]
+    assert len(accumulated) == 101
+    assert accumulated[-1]["commit"]["oid"] == "100"
 
 
 def test_dependabot_titles_satisfy_strict_policy() -> None:

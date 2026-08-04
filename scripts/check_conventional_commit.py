@@ -51,8 +51,8 @@ def validate_subject(subject: str, *, allow_machinery: bool = True) -> str | Non
     if ":" not in subject:
         return f"missing 'type(scope): ' prefix in: {subject!r}"
     prefix, message = subject.split(":", 1)
-    if not message.strip():
-        return f"empty description after ':' in: {subject!r}"
+    if not message.startswith(" ") or not message[1:].strip():
+        return f"description must follow ': ' and be nonblank in: {subject!r}"
     if "(" in prefix and prefix.rstrip().endswith((")", ")!")):
         # Strip a trailing breaking-change '!' before scope extraction.
         core = prefix[:-1] if prefix.rstrip().endswith("!") else prefix

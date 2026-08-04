@@ -18,6 +18,7 @@ from hephaestus.automation import pr_manager
 from hephaestus.automation.commit_policy import (
     ALLOWED_CONVENTIONAL_TYPES,
     normalize_conventional_type,
+    normalize_strict_conventional_title,
 )
 from hephaestus.automation.github_api import OpenPrDiscoveryIncompleteError
 from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
@@ -1047,3 +1048,18 @@ class TestNormalizeConventionalType:
         from check_conventional_commit import ALLOWED_TYPES
 
         assert set(ALLOWED_CONVENTIONAL_TYPES) == set(ALLOWED_TYPES)
+
+
+class TestNormalizeStrictConventionalTitle:
+    """Strict PR titles repair malformed scopes and descriptions."""
+
+    @pytest.mark.parametrize(
+        ("title", "expected"),
+        [
+            ("fix(): repair title normalization", "fix: repair title normalization"),
+            ("security(): repair title normalization", "chore: repair title normalization"),
+            ("fix: ", "fix: update"),
+        ],
+    )
+    def test_repairs_strict_title_violations(self, title: str, expected: str) -> None:
+        assert normalize_strict_conventional_title(title) == expected

@@ -2267,19 +2267,31 @@ class TestCommitPushAndPrCreate:
         assert "uv run pytest tests -q --tb=short" in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "chore: Add the widget"
 
-    def test_pr_create_preserves_conventional_issue_title(
-        self, make_ctx: Any, make_work_item: Any
+    @pytest.mark.parametrize(
+        ("issue_title", "expected_title"),
+        [
+            ("fix(ci): align commit enforcement", "fix(ci): align commit enforcement"),
+            ("fix(): repair title normalization", "fix: repair title normalization"),
+            ("fix: ", "fix: update"),
+        ],
+    )
+    def test_pr_create_normalizes_issue_title_to_strict_conventional_form(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        issue_title: str,
+        expected_title: str,
     ) -> None:
-        """Existing authored issue titles are passed through unchanged."""
+        """The created PR title always satisfies the strict squash-title gate."""
         github = FakeStageGitHub()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=9, state="PR_CREATE")
         item.branch = "9-auto-impl"
-        item.payload["issue_title"] = "fix(ci): align commit enforcement"
+        item.payload["issue_title"] = issue_title
 
         ImplementationStage().step(item, ctx)
 
-        assert github.prs[1001]["title"] == "fix(ci): align commit enforcement"
+        assert github.prs[1001]["title"] == expected_title
 
     def test_pr_create_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any

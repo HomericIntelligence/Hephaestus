@@ -76,6 +76,18 @@ class TestValidateSubject:
 class TestMain:
     """Tests for command-line validation modes."""
 
+    @pytest.mark.parametrize(
+        "subject",
+        ["fix:description", "fix:\tdescription", "fix:"],
+    )
+    def test_strict_mode_rejects_nonconforming_description(
+        self,
+        subject: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(subject + "\n"))
+        assert main(["--strict", "-"]) == 1
+
     def test_strict_mode_rejects_machinery_from_stdin(
         self,
         monkeypatch: pytest.MonkeyPatch,
