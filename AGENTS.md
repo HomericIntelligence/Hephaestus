@@ -347,6 +347,11 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
    DCO `Signed-off-by` trailer.
 
+PR titles MUST follow `type(scope)!: description` because the title becomes the
+squash-merge subject on `main`. Scope and `!` are optional; Check 3 also
+validates every branch commit subject. See the [Definition of Done](docs/DEFINITION_OF_DONE.md)
+for accepted forms and the grandfathered pre-#2157 history policy.
+
 `pr-policy` blocks PRs that fail those checks. The queue runs
 `$athena:pr-review` in its normal default profile when available. Its prose,
 grades, and decision-shaped output are audit evidence, not authorization.
@@ -527,6 +532,7 @@ Make sure all temporary files are in the build/ directory.
 
 The remainder of this document is a single-page map of the AI-agent topology and
 conventions used by Hephaestus and the wider HomericIntelligence ecosystem.
+The queue topology below is implemented as seven in-memory stage queues.
 
 ## Agents the codebase orchestrates
 

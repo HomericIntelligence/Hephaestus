@@ -93,9 +93,10 @@ Hephaestus ships two layers from one distribution:
 
 ## Repository navigation
 
-This index covers every tracked top-level path except `README.md` itself. The
-navigation guard in `tests/unit/validation/test_readme_subpackage_tree.py`
-requires new tracked root entries to be added here. Checkout-only state and
+This index covers every tracked top-level path except `README.md` itself and
+the legacy compatibility pointer. The navigation guard in
+`tests/unit/validation/test_readme_subpackage_tree.py` requires new tracked
+root entries to be added here. Checkout-only state and
 ignored generated output such as `.git/`, `.venv/`, `.pytest_cache/`, and
 `build/` are intentionally outside this index.
 
@@ -116,7 +117,6 @@ ignored generated output such as `.git/`, `.venv/`, `.pytest_cache/`, and
 | Path | Purpose |
 | --- | --- |
 | [AGENTS.md](AGENTS.md) | Authoritative repository and agent-development contract. |
-| [CLAUDE.md](CLAUDE.md) | Claude Code entry point to the authoritative agent contract. |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community conduct expectations. |
 | [COMPATIBILITY.md](COMPATIBILITY.md) | Supported versions and compatibility policy. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contributor setup, development, and pull-request workflow. |

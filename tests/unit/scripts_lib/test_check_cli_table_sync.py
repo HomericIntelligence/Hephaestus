@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hephaestus.scripts_lib import check_cli_table_sync as mod
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_readme_command_extraction_uses_inline_command_references(tmp_path: Path) -> None:
@@ -71,3 +74,35 @@ def test_docs_reference_to_unknown_command_is_reported(tmp_path: Path) -> None:
         "docs/runbook.md: references `hephaestus-ghost-command` "
         "which is not in pyproject.toml [project.scripts]"
     ]
+
+
+def test_docs_reference_check_scans_agents_md(tmp_path: Path) -> None:
+    """The documentation guard treats AGENTS.md as an authoritative source."""
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text(
+        "Run `hephaestus-ghost-command`.\n",
+        encoding="utf-8",
+    )
+
+    assert mod.check_docs_command_references(tmp_path, {"hephaestus-real"}) == [
+        "AGENTS.md: references `hephaestus-ghost-command` "
+        "which is not in pyproject.toml [project.scripts]"
+    ]
+
+
+def test_precommit_hook_runs_when_agents_md_changes() -> None:
+    """AGENTS.md edits must trigger the CLI sync guard."""
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    hook = next(
+        h
+        for repo in config["repos"]
+        for h in repo.get("hooks", [])
+        if h.get("id") == "check-cli-table-sync"
+    )
+
+    assert hook["entry"] == "uv run python -m hephaestus.scripts_lib.check_cli_table_sync"
+    assert hook["language"] == "system"
+    assert hook["pass_filenames"] is False
+    assert hook["files"] == (
+        r"^(README\.md|COMPATIBILITY\.md|AGENTS\.md|CLAUDE\.md|pyproject\.toml|docs/.*\.md)$"
+    )
