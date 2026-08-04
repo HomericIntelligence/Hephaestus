@@ -1188,7 +1188,16 @@ class TestPrReviewStageStep:
             ),
             (
                 "review_python_pytest",
-                ("uv", "run", "pytest", "tests/", "-q", "--tb=short"),
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    "tests/",
+                    "-q",
+                    "--tb=short",
+                ),
             ),
             (
                 "review_stalled_consumer_verification",

@@ -296,7 +296,7 @@ _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     ),
     _HostVerificationSpec(
         changed_path=None,
-        argv=("uv", "run", "pytest", "tests/", "-q", "--tb=short"),
+        argv=("uv", "run", "pytest", "-o", "addopts=", "tests/", "-q", "--tb=short"),
         descr="review_python_pytest",
     ),
 )
