@@ -1989,6 +1989,74 @@ class TestImplementationAdmission:
             (("org", "repo-a"), "new.py"),
         }
 
+    def test_remediation_candidate_does_not_block_itself_but_blocks_peer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A returning PR keeps exclusive ownership without self-deadlocking."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        plan_claim = (("org", "repo-a"), "planned.py")
+        realized_claim = (("org", "repo-a"), "shared.py")
+        returning = _issue_item(21, StageName.PR_REVIEW)
+        assert coordinator._push_item(returning, StageName.PR_REVIEW, enter=True)
+        returning.payload["_implementation_file_claims"] = {plan_claim}
+        returning.payload["review_changed_paths"] = ["shared.py"]
+        coordinator._implementation_file_claims[id(returning)] = {plan_claim}
+        coordinator._route(returning, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+        assert returning.stage is StageName.IMPLEMENTATION
+        overlapping = _issue_item(22, StageName.IMPLEMENTATION)
+        overlapping.payload["_implementation_file_claims"] = {realized_claim}
+        independent = _issue_item(23, StageName.IMPLEMENTATION)
+        independent_claim = (("org", "repo-a"), "independent.py")
+        independent.payload["_implementation_file_claims"] = {independent_claim}
+
+        dispatch, snapshots = coordinator._select_file_overlap_implementation_items(
+            [(returning, "#21"), (overlapping, "#22"), (independent, "#23")]
+        )
+
+        assert dispatch == [returning, independent]
+        assert snapshots == {
+            id(returning): {plan_claim, realized_claim},
+            id(independent): {independent_claim},
+        }
+        assert returning.payload["_implementation_file_claims"] == {
+            plan_claim,
+            realized_claim,
+        }
+        assert coordinator._implementation_file_claims[id(returning)] == {
+            plan_claim,
+            realized_claim,
+        }
+        assert coordinator._capture_implementation_file_claims(returning) == {
+            plan_claim,
+            realized_claim,
+        }
+        later_dispatch, _ = coordinator._select_file_overlap_implementation_items(
+            [(overlapping, "#22")]
+        )
+        assert later_dispatch == []
+        assert overlapping.payload["file_overlap_deferrals"] == 2
+
+    def test_remediation_candidate_still_honors_same_claim_owned_by_peer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Excluding self ownership must not subtract a peer's equal claim."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        claim = (("org", "repo-a"), "shared.py")
+        returning = _issue_item(21, StageName.IMPLEMENTATION)
+        returning.payload["_implementation_file_claims"] = {claim}
+        coordinator._implementation_file_claims[id(returning)] = {claim}
+        peer = _issue_item(20, StageName.PR_REVIEW)
+        peer.payload["_implementation_file_claims"] = {claim}
+        coordinator._implementation_file_claims[id(peer)] = {claim}
+        assert coordinator._push_item(peer, StageName.PR_REVIEW, enter=True)
+
+        dispatch, _snapshots = coordinator._select_file_overlap_implementation_items(
+            [(returning, "#21")]
+        )
+
+        assert dispatch == []
+        assert returning.payload["file_overlap_deferrals"] == 1
+
     def test_overlap_claims_survive_review_and_merge_wait_until_finished(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
