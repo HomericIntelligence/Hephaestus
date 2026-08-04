@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import queue
 import re
+import threading
+from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
-from hephaestus.automation.pipeline.routing import Disposition
+from hephaestus.automation.pipeline.queues import CompletionQueue
+from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     build_plan_prompt,
 )
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import (
@@ -570,6 +576,51 @@ class TestPlanningStageStep:
         assert result.job.agent == "codex"
         assert result.job.sandbox == "read-only"
         assert result.job.allowed_tools == "Read,Glob,Grep"
+
+    def test_codex_advise_job_reaches_direct_runner_as_read_only(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+    ) -> None:
+        """The planning job's read-only contract reaches the Codex runtime."""
+        stage = PlanningStage()
+        ctx = make_ctx()
+        ctx.config.agent = "codex"
+        item = make_work_item(issue=3, state="ADVISE_WAIT")
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+
+        completion_q: CompletionQueue = queue.Queue()
+        pool = WorkerPool(
+            size=1,
+            shutdown=threading.Event(),
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        session_result = MagicMock(stdout="advice", session_id="codex-session")
+        try:
+            with (
+                patch(
+                    "hephaestus.automation.pipeline.worker_pool.resolve_agent",
+                    return_value="codex",
+                ),
+                patch(
+                    "hephaestus.automation.pipeline.worker_pool.run_agent_session",
+                    return_value=session_result,
+                ) as direct_runner,
+            ):
+                pool.submit(request.job, StageName.PLANNING)
+                _handle, result = completion_q.get(timeout=10)
+        finally:
+            pool.shutdown()
+
+        assert result.ok is True
+        direct_runner.assert_called_once()
+        assert direct_runner.call_args.kwargs["sandbox"] == "read-only"
+        assert direct_runner.call_args.kwargs["approval"] == "never"
 
     def test_plan_wait_requests_plan_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """PLAN_WAIT submits the plan job (planner session) and lands in VERIFY."""

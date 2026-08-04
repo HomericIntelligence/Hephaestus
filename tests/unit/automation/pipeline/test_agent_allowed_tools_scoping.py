@@ -102,6 +102,11 @@ def _discover_agent_jobs() -> dict[tuple[str, str, str], str]:
                         f"{self.relative_path}:{node.lineno}: AgentJob in {function}() "
                         f"({builder_source}) allowed_tools must be a string literal"
                     )
+                if not scope.value.strip():
+                    pytest.fail(
+                        f"{self.relative_path}:{node.lineno}: AgentJob in {function}() "
+                        f"({builder_source}) allowed_tools must be non-empty"
+                    )
                 key = (self.relative_path, function, builder_source)
                 if key in discovered:
                     pytest.fail(
