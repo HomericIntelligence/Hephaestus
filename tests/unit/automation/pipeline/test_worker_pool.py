@@ -1545,6 +1545,7 @@ class TestGitOps:
     @pytest.fixture(autouse=True)
     def _mock_trusted_gh_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keep checkout-sync tests independent of the host's gh install layout."""
+
         def executable(_root: Path | None = None) -> str:
             return "/usr/bin/gh"
 

@@ -629,6 +629,12 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "Run the implementation-stage pre-PR test gate before committing and creating PRs.",
         ),
         _action_spec(
+            ("--gh-extra-path-root",),
+            "gh_extra_path_root",
+            "_StoreAction",
+            None,
+        ),
+        _action_spec(
             ("--model",),
             "model",
             "_StoreAction",
