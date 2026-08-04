@@ -1156,6 +1156,8 @@ class TestPrReviewStageStep:
                 "review_checkout_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "pr_diff": (
+                    "diff --git a/tests/unit/automation/pipeline/stages/test_stage_pr_review.py "
+                    "b/tests/unit/automation/pipeline/stages/test_stage_pr_review.py\n"
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
                     "--- a/tests/performance/test_worker_pool_load.py\n"
@@ -1187,14 +1189,14 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
-                "review_python_pytest",
+                "review_changed_unit_test_0",
                 (
                     "uv",
                     "run",
                     "pytest",
                     "-o",
                     "addopts=",
-                    "tests/",
+                    "tests/unit/automation/pipeline/stages/test_stage_pr_review.py",
                     "-q",
                     "--tb=short",
                 ),
@@ -1332,7 +1334,7 @@ class TestPrReviewStageStep:
             }
         )
         request = stage.step(item, ctx)
-        for _ in range(4):
+        for _ in range(3):
             assert isinstance(request, JobRequest)
             item.state = request.on_done_state
             stage.on_job_done(
@@ -1416,7 +1418,7 @@ class TestPrReviewStageStep:
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
         assert isinstance(request.job, BuildTestJob)
-        for _ in range(4):
+        for _ in range(3):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,
@@ -1482,7 +1484,7 @@ class TestPrReviewStageStep:
         )
         request = stage.step(item, ctx)
         assert isinstance(request, JobRequest)
-        for _ in range(4):
+        for _ in range(3):
             item.state = request.on_done_state
             stage.on_job_done(
                 item,

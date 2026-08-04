@@ -267,9 +267,10 @@ class _HostVerificationSpec:
     descr: str
 
 
-#: Python reviews run read-only by design. The host therefore performs a
-#: deterministic validation plan against an immutable snapshot before the
-#: reviewer sees it, including pytest evidence bound to the reviewed head.
+#: Python reviews run read-only by design. The host therefore performs the
+#: deterministic static validation against an immutable snapshot before the
+#: reviewer sees it. Changed unit tests are added separately below; broader
+#: suites can legitimately require host capabilities denied to the reviewer.
 _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
         changed_path=None,
@@ -293,11 +294,6 @@ _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
             "tests/",
         ),
         descr="review_python_mypy",
-    ),
-    _HostVerificationSpec(
-        changed_path=None,
-        argv=("uv", "run", "pytest", "-o", "addopts=", "tests/", "-q", "--tb=short"),
-        descr="review_python_pytest",
     ),
 )
 _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
@@ -347,8 +343,23 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
         path.endswith(".py") or path in _PYTHON_VALIDATION_CONFIG_PATHS for path in changed_paths
     ):
         return ()
+    changed_unit_tests = tuple(
+        _HostVerificationSpec(
+            changed_path=path,
+            argv=("uv", "run", "pytest", "-o", "addopts=", path, "-q", "--tb=short"),
+            descr=f"review_changed_unit_test_{index}",
+        )
+        for index, path in enumerate(
+            sorted(
+                path
+                for path in changed_paths
+                if path.startswith("tests/unit/") and path.endswith(".py")
+            )
+        )
+    )
     return (
         *_PYTHON_HOST_VERIFICATION_SPECS,
+        *changed_unit_tests,
         *(spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths),
     )
 
