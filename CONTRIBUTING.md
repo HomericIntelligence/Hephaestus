@@ -34,8 +34,8 @@ links to the full section below.
    reviewed-head proof and conditionally squash-merges that exact head without
    mutating native auto-merge. Normal review may collect CI/CD evidence as
    context, but the loop does not change CI/CD. Required CI/CD checks are the
-   merge contract; review prose and the advisory auto-merge policy do not
-   independently authorize a merge. Do not enable auto-merge manually.
+   merge contract; review prose does not independently authorize a merge. Do
+   not enable auto-merge manually.
 
 If anything in steps 1–2 fails, see [Platform Support](#platform-support) for
 the supported Python versions and platform-specific test behavior.
@@ -280,19 +280,20 @@ use one of the update commands above to refresh the lock before committing.
 
 ## Pull Request Process
 
-The `main` branch is protected. CI's `pr-policy` gate blocks a PR that lacks a
-valid issue reference, signed commits, or DCO sign-offs:
+The `main` branch is protected. The active `homeric-main-baseline` ruleset
+blocks unsigned commits. CI's `pr-policy` gate separately enforces the issue
+reference, the Conventional Commit PR title and branch subjects, and DCO
+sign-offs:
 
-1. **Sign every commit**: `git commit -S`. Verify with `git log --show-signature -1`.
-2. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
+1. **Reference the issue**: the PR body must contain the literal line `Closes #<n>`
    (capital `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are **not** accepted.
-3. **Use a Conventional Commit PR title**:
+2. **Use a Conventional Commit PR title**:
    `type(scope)!: concise description`. The title becomes the `main` subject
    when the PR is squash-merged. Every authored branch commit follows the same
    form; see the [Definition of Done](docs/DEFINITION_OF_DONE.md) for the
    narrow Git-generated exceptions and the pre-#2157 history cutover.
-4. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
+3. **Sign off every commit**: include a DCO `Signed-off-by` trailer, normally
    with `git commit -s -S`.
 
 Do not enable auto-merge manually. The queue applies
@@ -305,8 +306,8 @@ reviewed-head proof and conditionally squash-merges that exact head; it does
 not create, disable, adopt, or poll an auto-merge request. A restart has no
 proof and returns the PR to review without mutating labels. Normal review may
 collect CI/CD evidence as context, but the loop does not change CI/CD. Required
-CI/CD checks are the merge contract; the advisory `auto-merge-policy` is not a
-required check or authorization mechanism.
+CI/CD checks are the merge contract and do not independently authorize the
+loop-owned approval transition.
 
 Also: ensure tests pass locally (`uv run pytest`), keep commits to logical units with
 [conventional commit](https://www.conventionalcommits.org/) messages, and never bypass
@@ -328,7 +329,7 @@ This is **distinct** from the cryptographic signature requirement above, and bot
 - **`-s` (`Signed-off-by:` trailer)** — the *DCO*. A legal attestation that you have the right to
   contribute the change and license it inbound to the project. It proves *provenance of the grant*.
 - **`-S` (GPG/SSH signature)** — *cryptographic authorship/integrity*. It proves *who* authored the
-  commit and that its contents were not tampered with. The `pr-policy` CI gate enforces `-S`.
+  commit and that its contents were not tampered with. The `homeric-main-baseline` ruleset enforces `-S`.
 
 You can set them together so you never forget:
 
@@ -337,7 +338,7 @@ git config commit.gpgsign true   # always -S
 # add the sign-off per commit with -s (or via a prepare-commit-msg hook)
 ```
 
-Both are now mechanically enforced: the `pr-policy` CI gate (Check 4) fails any PR
+Both are now mechanically enforced: the `pr-policy` CI gate (Check 3) fails any PR
 whose commits lack a valid `Signed-off-by: Name <email>` trailer, and the local
 `dco-signoff-msg` `commit-msg` pre-commit hook rejects an un-signed-off commit
 before it is created. To re-sign existing commits run:

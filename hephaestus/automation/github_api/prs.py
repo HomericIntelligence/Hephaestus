@@ -106,7 +106,7 @@ def _assert_branch_commits_signed(branch: str, base: str = "main") -> None:
         # (e.g. pushed to origin but checked out in a separate worktree). This is
         # a resolution failure, NOT a policy violation: never crash create_pr and
         # strand already-pushed, signed work. GitHub's server-side signature
-        # verification and the pr-policy gate remain the backstop. (#2108)
+        # verification remains the authoritative server-side backstop. (#2108)
         _api.logger.warning(
             "Could not resolve any commit range for branch %r (vs %s); "
             "skipping local sign check and deferring to GitHub verification.",
@@ -251,9 +251,9 @@ def gh_pr_create(
     the separately reviewed #2419 path, queue stages do not create, disable,
     adopt, or poll automatic-merge requests.
 
-    The CI gate (``.github/workflows/_required.yml`` job ``pr-policy``) and the
-    PR review prompt re-check the same three properties, so a slip past one
-    layer will surface at the next.
+    The local signature guard and the active ``homeric-main-baseline`` ruleset
+    enforce cryptographic signatures. The CI gate re-checks the PR body,
+    Conventional Commit subjects, and DCO trailers.
 
     Args:
         branch: Branch name

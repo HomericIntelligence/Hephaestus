@@ -344,11 +344,14 @@ The required CI gate `pr-policy` and the PR reviewer enforce:
 1. The PR body MUST contain the literal line `Closes #<issue-number>` (capital
    `C`, no colon, on its own line). `Fixes`, `Resolves`, `closes`, and
    `Closes:` are NOT accepted.
-2. Every commit MUST be cryptographically signed (`git commit -S`) and carry a
-   DCO `Signed-off-by` trailer.
+2. Commit subjects MUST follow Conventional Commits.
+3. Every commit MUST carry a DCO `Signed-off-by` trailer.
+
+The active `homeric-main-baseline` ruleset requires cryptographically signed
+commits (`required_signatures`).
 
 PR titles MUST follow `type(scope)!: description` because the title becomes the
-squash-merge subject on `main`. Scope and `!` are optional; Check 3 also
+squash-merge subject on `main`. Scope and `!` are optional; Check 2 also
 validates every branch commit subject. See the [Definition of Done](docs/DEFINITION_OF_DONE.md)
 for accepted forms and the grandfathered pre-#2157 history policy.
 
@@ -372,9 +375,9 @@ merge gate.
 # 1. Create feature branch
 git checkout -b <issue-number>-description
 
-# 2. Make changes and commit (signed)
+# 2. Make changes and commit (cryptographically signed and DCO-signed)
 git add <files>
-git commit -S -m "type(scope): description"
+git commit -s -S -m "type(scope): description"
 git log --show-signature -1   # verify the signature took
 
 # 3. Push feature branch
