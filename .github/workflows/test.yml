@@ -17,20 +17,20 @@ name: Test
 #
 # The authoritative required gate is `.github/workflows/_required.yml`: it runs
 # lint (ruff/yamllint/mypy), the canonical unit-tests + integration-tests jobs
-# (Python 3.12, coverage gated by [tool.coverage.report].fail_under in pyproject.toml + per-module coverage floors), the
+# (Python 3.13, coverage gated by [tool.coverage.report].fail_under in pyproject.toml + per-module coverage floors), the
 # build smoke test, and the security/schema/pr-policy gates.
 #
 # To fix the DRY violation (and ~2x runner cost) flagged in #687, this workflow
 # no longer re-runs the `lint` job (ruff check/format + mypy) — that lives in
 # `_required.yml` and is the required check. What remains here is ONLY the
 # multi-interpreter test matrix that `_required.yml` does NOT cover: it proves
-# the library imports and its tests pass on every supported Python (3.10–3.13).
+# the library imports and its tests pass on the supported Python 3.13 runtime.
 #
 # Coverage gating, the coverage upload, and the build smoke test were also
-# dropped here — `_required.yml` already gates all three on 3.12. Do NOT re-add
+# dropped here — `_required.yml` already gates all three on 3.13. Do NOT re-add
 # a lint job, coverage gating, or a build step to this file.
 #
-# NOTE: the full classifier set (3.10/3.11/3.12/3.13) is intentionally kept in
+# NOTE: the Python 3.13 classifier is intentionally kept in
 # the matrix below. The `hephaestus-check-python-version` check (and its
 # pre-commit hook) require this workflow's python-version matrix to cover every
 # `Programming Language :: Python :: 3.x` classifier in pyproject.toml. Adding a
@@ -62,7 +62,7 @@ jobs:
         # cross-OS port is a multi-session effort, not blocking 1.0. The
         # runtime fixes already in place (#533/#534/#536/#537/#538) stay.
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.13"]
         test-type: [unit, integration]
     # `shell: bash` is harmless on ubuntu and keeps the matrix re-expansion
     # trivial once #539 is picked up.

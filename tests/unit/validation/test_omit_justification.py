@@ -23,15 +23,10 @@ tests/unit/automation/test_automation_parsers.py and test_options_contract.py.
 from __future__ import annotations
 
 import ast
-import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 _AUTOMATION_PKG = "hephaestus.automation"
 _MODULE_PREFIX = "hephaestus/automation/"

@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import sys
+import tomllib  # type: ignore[no-redef, unused-ignore]
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
 
 
 def test_tooling_dependencies_are_versioned_in_the_dev_group() -> None:

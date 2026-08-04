@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
 from hephaestus.automation.review_journal import IssueComment
@@ -513,8 +513,8 @@ class JobRequest:
     on_done_state: str
 
 
-StepResult: TypeAlias = "Continue | JobRequest | StageOutcome"
-BranchWorktreeOwnerStatus: TypeAlias = Literal["verified", "pending", "unverified"]
+type StepResult = "Continue | JobRequest | StageOutcome"
+type BranchWorktreeOwnerStatus = Literal["verified", "pending", "unverified"]
 
 
 @dataclass(frozen=True)

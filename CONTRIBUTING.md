@@ -130,13 +130,13 @@ they are using:
 
 | Install path                        | Platforms supported                    | Python      |
 | ----------------------------------- | -------------------------------------- | ----------- |
-| `uv sync` (development) | Linux, macOS, Windows | 3.10+ (see `requires-python` in `pyproject.toml`) |
-| `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.10+ (see `requires-python` in `pyproject.toml`) |
+| `uv sync` (development) | Linux, macOS, Windows | 3.13 (see `requires-python` in `pyproject.toml`) |
+| `pip install HomericIntelligence-Hephaestus` (wheel) | Linux, macOS, Windows (any OS) | 3.13 (see `requires-python` in `pyproject.toml`) |
 
 Platform notes:
 
 - **uv manages the development environment on every platform supported by its
-  selected Python interpreter.** The project requires Python 3.10+; `uv sync`
+  selected Python interpreter.** The project requires Python 3.13; `uv sync`
   installs the editable checkout and the default development groups.
 - **Required CI currently runs on Linux.** Native-Windows runs skip tests marked
   `requires_posix`; Linux, macOS, and WSL run those POSIX subprocess checks.
@@ -171,7 +171,7 @@ We follow these style guidelines:
 - Python code: Formatted and linted with [Ruff](https://docs.astral.sh/ruff/)
 - Type hints: Required for all public functions (enforced by mypy strict mode)
 - Line length: 100 characters
-- Target Python: 3.10+
+- Target Python: 3.13
 
 Run the development tools:
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING
 
 from hephaestus.automation.dependency_resolver import CyclicDependencyError, DependencyResolver
 from hephaestus.automation.github_api import (
@@ -55,7 +55,7 @@ _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IG
 # A source path only conflicts with work in the same repository.  The
 # implementation queue is shared across repositories, so a bare path string
 # would incorrectly serialize independent ``repo-a`` and ``repo-b`` changes.
-PlanFileClaim: TypeAlias = tuple[tuple[str, str] | None, str]
+type PlanFileClaim = tuple[tuple[str, str] | None, str]
 
 
 def _parse_planned_files(plan_body: str) -> set[str]:

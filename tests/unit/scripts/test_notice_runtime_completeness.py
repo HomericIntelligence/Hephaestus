@@ -6,13 +6,8 @@ dependencies") and are intentionally NOT checked here.
 """
 
 import re
-import sys
+import tomllib
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 _OPERATORS = ("<=", ">=", "==", "!=", "~=", "<", ">", "=")
 

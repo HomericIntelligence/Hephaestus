@@ -103,7 +103,7 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
 
     try:
         asyncio.run(asyncio.wait_for(_drain(), timeout=agent_rebase_timeout()))
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("  Claude conflict agent timed out for PR #%d", pr_number)
         return None
     return "\n".join(output) or None

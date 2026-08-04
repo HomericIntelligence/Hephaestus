@@ -14,7 +14,7 @@ regression cycles remain globally bounded.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 #: Default for the ``merge`` budget. Mirrors ``LoopConfig.drive_green_loops``
 #: and the ``--drive-green-loops`` CLI default in ``loop_runner.py``; the
@@ -23,7 +23,7 @@ from enum import Enum
 DEFAULT_DRIVE_GREEN_LOOPS = 5
 
 
-class StageName(str, Enum):
+class StageName(StrEnum):
     """Pipeline stage identifiers.
 
     Members are declared in pipeline order and MUST NOT be reordered.
@@ -45,7 +45,7 @@ class StageName(str, Enum):
 PIPELINE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 
-class Disposition(str, Enum):
+class Disposition(StrEnum):
     """Outcome classification for a stage execution."""
 
     ADVANCE = "advance"

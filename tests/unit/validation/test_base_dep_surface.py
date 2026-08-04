@@ -9,12 +9,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 _PYPROJECT = Path(__file__).resolve().parents[3] / "pyproject.toml"
 

@@ -50,7 +50,7 @@ import contextlib
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
@@ -146,7 +146,7 @@ def _log(log_dir: Path, message: str) -> None:
         message: The line to append (a timestamp is prepended).
 
     """
-    stamp = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(UTC).isoformat()
     # No safe way to surface a logging failure here — see the function docstring.
     with contextlib.suppress(OSError):
         with open(log_dir / "handler.log", "a", encoding="utf-8") as handle:

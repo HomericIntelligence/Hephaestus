@@ -92,7 +92,7 @@ def is_transient_subprocess_error(error: BaseException) -> bool:
     return False
 
 
-def resilient_call(
+def resilient_call[R](
     func: Callable[..., R],
     *args: Any,
     circuit_breaker_name: str | None = None,

@@ -8,22 +8,22 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, TypeAlias
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
 
 from .routing import StageName, budget_keys
 
 #: Maximum retained history events per item (oldest dropped first).
 HISTORY_CAP = 200
 
-PreservedWorktree: TypeAlias = tuple[str, int, str]
+type PreservedWorktree = tuple[str, int, str]
 """Repository, issue/PR number, and path for a preserved worktree."""
 
 
 def _utcnow() -> datetime:
     """Return the current tz-aware UTC time (automation-layer convention)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _default_attempts() -> dict[str, int]:
@@ -31,7 +31,7 @@ def _default_attempts() -> dict[str, int]:
     return dict.fromkeys(budget_keys(), 0)
 
 
-class ItemKind(str, Enum):
+class ItemKind(StrEnum):
     """Work item type."""
 
     REPO = "repo"

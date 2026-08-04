@@ -22,7 +22,7 @@ from hephaestus.logging.utils import (
 
 
 @pytest.fixture(autouse=True)
-def _clean_test_loggers() -> Generator[None, None, None]:
+def _clean_test_loggers() -> Generator[None]:
     """Remove test loggers and their handlers after each test to prevent pollution."""
     yield
     # Teardown: clear handlers on any test loggers we created

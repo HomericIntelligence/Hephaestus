@@ -13,7 +13,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,7 +82,7 @@ def _write_learn_record(
     error: str = "",
 ) -> None:
     """Persist explicit implementer ``/learn`` attempt evidence."""
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
     record: dict[str, object] = {
         "issue_number": issue_number,
         "learn_attempted_at": timestamp,

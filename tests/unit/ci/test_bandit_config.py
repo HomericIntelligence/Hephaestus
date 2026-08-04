@@ -3,16 +3,10 @@
 from __future__ import annotations
 
 import json
-import sys
+import tomllib  # type: ignore[no-redef, unused-ignore]
 from pathlib import Path
 
 import yaml
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 

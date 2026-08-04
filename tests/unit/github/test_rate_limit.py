@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import patch
 
@@ -327,9 +328,9 @@ class TestDetectClaudeUsageCap:
         # Build the date dynamically — a hardcoded "May 8, 5pm" fails by
         # date drift (the original assertion was "epoch > now-86400", which
         # only held if the test ran within ~24h of May 8).
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        future = datetime.now(timezone.utc) + timedelta(days=2)
+        future = datetime.now(UTC) + timedelta(days=2)
         date_str = future.strftime("%b %-d")  # e.g. "May 12"
         text = f"You're out of extra usage \xb7 resets {date_str}, 5pm (America/Los_Angeles)"
         epoch = detect_claude_usage_cap(text)

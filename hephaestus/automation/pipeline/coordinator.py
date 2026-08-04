@@ -87,7 +87,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 from jinja2 import TemplateNotFound
 
@@ -231,7 +231,7 @@ _DIRECT_ISSUE_ENTRY_STAGES: frozenset[StageName] = frozenset(
     }
 )
 
-StageStepResult: TypeAlias = Continue | JobRequest | StageOutcome
+type StageStepResult = Continue | JobRequest | StageOutcome
 
 
 def _budget_lookup(name: str) -> int:

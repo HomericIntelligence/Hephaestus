@@ -28,14 +28,10 @@ Module enumeration and entry-point discovery verified at plan time:
 
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 
 def _omitted_modules() -> list[str]:

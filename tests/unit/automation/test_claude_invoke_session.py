@@ -38,7 +38,7 @@ def _argv(call_args_list_entry: Any) -> list[str]:
 
 
 @pytest.fixture
-def stub_run() -> Generator[MagicMock, None, None]:
+def stub_run() -> Generator[MagicMock]:
     """Patch subprocess.run to return a successful result."""
     with patch("hephaestus.automation.claude_invoke._run_tracked") as m:
         m.return_value = MagicMock(stdout="ok", stderr="", returncode=0)
@@ -416,7 +416,7 @@ class TestModelCapFallback:
     """
 
     @pytest.fixture(autouse=True)
-    def _clean_registry(self) -> Generator[None, None, None]:
+    def _clean_registry(self) -> Generator[None]:
         reset_capped_models()
         yield
         reset_capped_models()

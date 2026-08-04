@@ -39,7 +39,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
@@ -49,7 +49,7 @@ from hephaestus.cli.utils import create_validation_parser, resolve_repo_root
 # ---------------------------------------------------------------------------
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     """Violation severity levels."""
 
     CRITICAL = "CRITICAL"

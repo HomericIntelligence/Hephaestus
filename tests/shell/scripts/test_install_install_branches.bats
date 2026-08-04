@@ -25,10 +25,60 @@ setup() {
     [ "${_FAIL+x}" = x ]
 }
 
+# ── Python 3.13-only enforcement ─────────────────────────────────────────────
+@test "Python 3.12 is rejected" {
+    has_cmd() { return 0; }
+    get_version() { echo "3.12.11"; }
+    INSTALL=false
+
+    check_python_313
+
+    [ "$_PASS" -eq 0 ]
+    [ "$_FAIL" -eq 1 ]
+}
+
+@test "Python 3.14 is rejected" {
+    has_cmd() { return 0; }
+    get_version() { echo "3.14.0"; }
+    INSTALL=false
+
+    check_python_313
+
+    [ "$_PASS" -eq 0 ]
+    [ "$_FAIL" -eq 1 ]
+}
+
+@test "Python 3.13 is accepted" {
+    has_cmd() { return 0; }
+    get_version() { echo "3.13.7"; }
+    INSTALL=false
+
+    check_python_313
+
+    [ "$_PASS" -eq 1 ]
+    [ "$_FAIL" -eq 0 ]
+}
+
+@test "missing Python installs and selects python3.13" {
+    installed_package=""
+    alternatives_args=""
+    has_cmd() { return 1; }
+    apt_install() { installed_package="$1"; return 0; }
+    sudo() { alternatives_args="$*"; return 0; }
+    INSTALL=true
+
+    check_python_313
+
+    [ "$installed_package" = "python3.13" ]
+    [ "$alternatives_args" = "update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 13" ]
+    [ "$_PASS" -eq 1 ]
+    [ "$_FAIL" -eq 1 ]
+}
+
 # ── python3-venv fallback (install.sh:259-264 rewrite) ────────────────────────
 @test "python3-venv: first attempt succeeds → 1 pass, 0 fail" {
     apt_install() { return 0; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
@@ -39,7 +89,7 @@ setup() {
 @test "python3-venv: first fails, fallback succeeds → 1 pass, 0 fail" {
     _n=0
     apt_install() { _n=$((_n+1)); [ "$_n" -eq 1 ] && return 1; return 0; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
@@ -49,7 +99,7 @@ setup() {
 
 @test "python3-venv: both fail → 0 pass, 1 fail" {
     apt_install() { return 1; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
@@ -122,7 +172,7 @@ setup() {
 #    The rewritten if-block must NOT exhibit that behaviour. ─────────────────
 @test "regression: success path always increments exactly one counter" {
     apt_install() { return 0; }
-    if apt_install python3.12-venv || apt_install python3-venv; then
+    if apt_install python3.13-venv || apt_install python3-venv; then
         check_pass "python3-venv installed"
     else
         check_fail "python3-venv — install failed"
