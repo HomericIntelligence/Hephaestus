@@ -7,6 +7,7 @@ perform GitHub API mutations (enforced by test_pipeline_architecture.py).
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import logging
@@ -118,7 +119,7 @@ _TRUSTED_GIT_CANDIDATES = (
     Path("/usr/bin/git"),
 )
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
-_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v5-dependency-manifest"
+_HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v6-shell-launchers"
 
 # The host verification handles code from an untrusted pull request.  Bound
 # the Git archive before extraction and bound every child output/write path.
@@ -242,8 +243,12 @@ def _rewrite_runtime_launchers(runtime: Path, source_runtime: Path) -> None:
     the mutable checkout, so those launchers must name the copied interpreter
     before the runtime is sealed.
     """
-    source_prefix = f"#!{source_runtime.resolve()}".encode()
-    target_prefix = f"#!{runtime.resolve()}".encode()
+    source_path = str(source_runtime.resolve()).encode()
+    target_path = str(runtime.resolve()).encode()
+    source_prefix = b"#!" + source_path
+    target_prefix = b"#!" + target_path
+    shell_source_prefix = b"'''exec' '" + source_path + b"/"
+    shell_target_prefix = b"'''exec' '" + target_path + b"/"
     for launcher in (runtime / "bin").iterdir():
         if launcher.is_symlink() or not launcher.is_file():
             continue
@@ -252,10 +257,25 @@ def _rewrite_runtime_launchers(runtime: Path, source_runtime: Path) -> None:
         except OSError:
             continue
         first_line, separator, remainder = content.partition(b"\n")
-        if not first_line.startswith(source_prefix):
+        if first_line.startswith(source_prefix):
+            launcher.write_bytes(
+                target_prefix + first_line[len(source_prefix) :] + separator + remainder
+            )
+            continue
+        if first_line != b"#!/bin/sh":
+            continue
+        trampoline, trampoline_separator, script = remainder.partition(b"\n")
+        if not (
+            trampoline.startswith(shell_source_prefix) and trampoline.endswith(b'\' "$0" "$@"')
+        ):
             continue
         launcher.write_bytes(
-            target_prefix + first_line[len(source_prefix) :] + separator + remainder
+            first_line
+            + separator
+            + shell_target_prefix
+            + trampoline[len(shell_source_prefix) :]
+            + trampoline_separator
+            + script
         )
 
 
@@ -264,8 +284,8 @@ def _sealed_runtime_marker(target: Path) -> Path:
     return target.with_name(f"{target.name}.sealed")
 
 
-def _is_sealed_runtime_cache(target: Path) -> bool:
-    """Return whether *target* was completely sealed by this verifier."""
+def _sealed_runtime_marker_matches(target: Path) -> bool:
+    """Return whether *target* has this verifier's structurally valid marker."""
     marker = _sealed_runtime_marker(target)
     try:
         return (
@@ -278,6 +298,41 @@ def _is_sealed_runtime_cache(target: Path) -> bool:
         )
     except OSError:
         return False
+
+
+def _runtime_manifest_files_exist(runtime: Path) -> bool:
+    """Return whether installed RECORD entries still exist inside *runtime*."""
+    try:
+        root = runtime.resolve()
+        if not (runtime / "pyvenv.cfg").is_file() or not (runtime / "bin" / "python").is_file():
+            return False
+        for record in runtime.rglob("*.dist-info/RECORD"):
+            site_packages = record.parent.parent
+            with record.open(encoding="utf-8", newline="") as manifest:
+                for row in csv.reader(manifest):
+                    if not row or not row[0]:
+                        continue
+                    candidate = (site_packages / row[0]).resolve()
+                    if not candidate.is_relative_to(root) or not candidate.is_file():
+                        return False
+    except (OSError, csv.Error):
+        return False
+    return True
+
+
+def _is_sealed_runtime_cache(target: Path) -> bool:
+    """Return whether *target* is marked, sealed, and manifest-complete."""
+    return _sealed_runtime_marker_matches(target) and _runtime_manifest_files_exist(target)
+
+
+def _remove_corrupted_sealed_runtime(target: Path) -> None:
+    """Remove a marked cache after making its sealed directories removable."""
+    for path in (target, *target.rglob("*")):
+        if path.is_symlink():
+            continue
+        path.chmod(path.stat().st_mode | (0o700 if path.is_dir() else 0o600))
+    shutil.rmtree(target)
+    _sealed_runtime_marker(target).unlink()
 
 
 def _verifier_owned_runtime_environment(checkout: Path) -> Path:
@@ -309,7 +364,10 @@ def _verifier_owned_runtime_environment(checkout: Path) -> Path:
             if _is_sealed_runtime_cache(target):
                 return target
             if target.exists() or target.is_symlink():
-                raise _HostVerificationBoundaryError("host_verification_runtime_cache_unsafe")
+                if _sealed_runtime_marker_matches(target):
+                    _remove_corrupted_sealed_runtime(target)
+                else:
+                    raise _HostVerificationBoundaryError("host_verification_runtime_cache_unsafe")
             staging = Path(tempfile.mkdtemp(prefix="runtime-", dir=cache_root))
             copied = staging / "environment"
             try:

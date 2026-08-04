@@ -994,9 +994,11 @@ class TestWorkerPoolSubmitComplete:
             (runtime / "bin").mkdir(parents=True)
             (runtime / "bin" / "python").write_text("host interpreter\n", encoding="utf-8")
             (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
-            dist_info = runtime / "lib" / "python3.13" / "site-packages" / "demo-1.0.dist-info"
+            site_packages = runtime / "lib" / "python3.13" / "site-packages"
+            dist_info = site_packages / "demo-1.0.dist-info"
             dist_info.mkdir(parents=True)
             (dist_info / "RECORD").write_text(record, encoding="utf-8")
+            (site_packages / "demo.py").write_text("value = 1\n", encoding="utf-8")
             return runtime
 
         first_runtime = make_runtime("runtime-first", "demo.py,sha256=first,1\n")
@@ -1017,6 +1019,61 @@ class TestWorkerPoolSubmitComplete:
         assert (
             second / "lib" / "python3.13" / "site-packages" / "demo-1.0.dist-info" / "RECORD"
         ).read_text(encoding="utf-8") == "demo.py,sha256=second,2\n"
+
+    def test_verifier_runtime_rebuilds_cache_missing_recorded_file(self, tmp_path: Path) -> None:
+        """A completion marker cannot mask a missing installed runtime file."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        runtime = tmp_path / "runtime"
+        site_packages = runtime / "lib" / "python3.13" / "site-packages"
+        dist_info = site_packages / "demo-1.0.dist-info"
+        (runtime / "bin").mkdir(parents=True)
+        dist_info.mkdir(parents=True)
+        (runtime / "bin" / "python").write_text("host interpreter\n", encoding="utf-8")
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        (site_packages / "demo.py").write_text("value = 1\n", encoding="utf-8")
+        (dist_info / "RECORD").write_text("demo.py,sha256=fixture,10\n", encoding="utf-8")
+        cache_temp = tmp_path / "cache-temp"
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+        ):
+            sealed = _verifier_owned_runtime_environment(checkout)
+            sealed_site_packages = sealed / "lib" / "python3.13" / "site-packages"
+            sealed_site_packages.chmod(sealed_site_packages.stat().st_mode | 0o200)
+            (sealed_site_packages / "demo.py").unlink()
+            rebuilt = _verifier_owned_runtime_environment(checkout)
+
+        assert rebuilt == sealed
+        assert (rebuilt / "lib" / "python3.13" / "site-packages" / "demo.py").read_text(
+            encoding="utf-8"
+        ) == "value = 1\n"
+
+    def test_verifier_runtime_reuses_intact_manifest_cache(self, tmp_path: Path) -> None:
+        """Integrity checks do not recopy an intact sealed environment."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        runtime = tmp_path / "runtime"
+        site_packages = runtime / "lib" / "python3.13" / "site-packages"
+        dist_info = site_packages / "demo-1.0.dist-info"
+        (runtime / "bin").mkdir(parents=True)
+        dist_info.mkdir(parents=True)
+        (runtime / "bin" / "python").write_text("host interpreter\n", encoding="utf-8")
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        (site_packages / "demo.py").write_text("value = 1\n", encoding="utf-8")
+        (dist_info / "RECORD").write_text("demo.py,sha256=fixture,10\n", encoding="utf-8")
+        cache_temp = tmp_path / "cache-temp"
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+        ):
+            sealed = _verifier_owned_runtime_environment(checkout)
+            with patch(f"{_WP}.shutil.copytree", side_effect=AssertionError("unexpected copy")):
+                reused = _verifier_owned_runtime_environment(checkout)
+
+        assert reused == sealed
 
     def test_verifier_runtime_dereferences_the_python_launcher(self, tmp_path: Path) -> None:
         """The sealed copy does not retain a launcher back into its source runtime."""
@@ -1048,6 +1105,34 @@ class TestWorkerPoolSubmitComplete:
             .read_text(encoding="utf-8")
             .startswith(f"#!{sealed.resolve()}/bin/python\n")
         )
+
+    def test_verifier_runtime_rewrites_uv_long_path_shell_launcher(self, tmp_path: Path) -> None:
+        """A uv shell trampoline executes only the sealed runtime interpreter."""
+        checkout = tmp_path / "checkout"
+        runtime = checkout / ("long-runtime-path-" + "x" * 120) / ".venv"
+        launcher = runtime / "bin" / "python"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("host interpreter\n", encoding="utf-8")
+        (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+        source_python = runtime.resolve() / "bin" / "python"
+        (runtime / "bin" / "mypy").write_text(
+            "#!/bin/sh\n"
+            f"'''exec' '{source_python}' \"$0\" \"$@\"\n"
+            "' '''\n"
+            "from mypy.__main__ import console_entry\n",
+            encoding="utf-8",
+        )
+        cache_temp = tmp_path / "cache-temp"
+
+        with (
+            patch(f"{_WP}.sys.prefix", str(runtime)),
+            patch(f"{_WP}.tempfile.gettempdir", return_value=str(cache_temp)),
+        ):
+            sealed = _verifier_owned_runtime_environment(checkout)
+
+        copied = (sealed / "bin" / "mypy").read_text(encoding="utf-8")
+        assert str(source_python) not in copied
+        assert f"'''exec' '{sealed.resolve() / 'bin' / 'python'}'" in copied
 
     def test_host_verification_environment_keeps_tool_output_in_scratch(
         self, tmp_path: Path
