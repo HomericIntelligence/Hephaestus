@@ -56,13 +56,12 @@ reuse across loop iterations *and* across main-bumps (#841): the artifact
 being worked on is the issue/PR, not the commit at which the loop started,
 so the session must persist as long as the issue does.
 
-Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is
-``str(uuid.uuid5(NAMESPACE_DNS, <human-readable>))``. UUIDv5 is
-deterministic, so no state file is needed — two callers on different machines,
-given the same tuple, will produce the same UUID. Different ``agent`` produces
-a different UUID, preserving the "planner and reviewer are independent
-sessions" property while still letting each agent resume itself across loop
-iterations.
+Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is a UUIDv5
+derived from that name plus a collision-resistant identity for the current Git
+checkout. The identity is shared by a repository root and its registered
+worktrees, but differs for unrelated clones. Different ``agent`` produces a
+different UUID, preserving the "planner and reviewer are independent sessions"
+property while still letting each agent resume itself across loop iterations.
 
 The UUID is artifact-stable, while transcript lookup is restricted to the
 current Git checkout's registered worktree family. This lets repo-root and
@@ -77,6 +76,7 @@ import os
 import re
 import subprocess
 import uuid
+from hashlib import sha256
 from pathlib import Path
 
 from hephaestus.constants import (
@@ -498,9 +498,49 @@ def session_name(repo: str, issue: int | str, agent: str, model: str | None = No
     return f"{base}_{model_token}" if model_token else base
 
 
-def session_uuid(repo: str, issue: int | str, agent: str, model: str | None = None) -> str:
-    """Return the deterministic UUIDv5 session ID for the (repo, issue, agent, model) key."""
+def _checkout_identity(cwd: Path) -> str:
+    """Return a collision-resistant identity shared by one Git worktree family."""
+    resolved_cwd = cwd.resolve()
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_cwd),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+        identity_path = Path(result.stdout.strip()).resolve()
+    except (OSError, subprocess.SubprocessError):
+        identity_path = resolved_cwd
+    return sha256(os.fsencode(identity_path)).hexdigest()
+
+
+def session_uuid(
+    repo: str,
+    issue: int | str,
+    agent: str,
+    model: str | None = None,
+    *,
+    cwd: Path | None = None,
+) -> str:
+    """Return the deterministic UUIDv5 session ID for one artifact and checkout.
+
+    When ``cwd`` is provided, unrelated checkouts get distinct session IDs even
+    if Claude's lossy cwd encoding maps their project directories to the same
+    path. A repository root and its linked worktrees share the Git common-dir
+    identity and therefore keep one resumable session lineage.
+    """
     name = session_name(repo, issue, agent, model)
+    if cwd is not None:
+        name = f"{name}@{_checkout_identity(cwd)}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 

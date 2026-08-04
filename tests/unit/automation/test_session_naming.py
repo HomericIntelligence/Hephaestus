@@ -7,6 +7,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -146,6 +147,23 @@ class TestSessionUUID:
         b = session_uuid("R", 1, AGENT_PLANNER, "claude-opus-4-8")
         assert a != b
 
+    def test_registered_worktree_family_gets_same_checkout_uuid(self, tmp_path: Path) -> None:
+        """Repo-root and linked-worktree callers share their common-dir identity."""
+        repo_root = tmp_path / "owner-a" / "Repo"
+        worktree = tmp_path / "worktrees" / "issue-2284"
+        common_dir = repo_root / ".git"
+        repo_root.mkdir(parents=True)
+        worktree.mkdir(parents=True)
+
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            return_value=MagicMock(stdout=f"{common_dir}\n"),
+        ):
+            root_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable", cwd=repo_root)
+            worktree_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "fable", cwd=worktree)
+
+        assert root_sid == worktree_sid
+
     def test_omitting_model_preserves_legacy_key(self) -> None:
         """Backward compat: no model reproduces the historical (repo, issue, agent) id."""
         from hephaestus.automation.session_naming import session_name
@@ -189,7 +207,7 @@ class TestSessionUUID:
         to the now-githash-free signatures — otherwise this very test
         would itself be flagged as "wrong arg name" on every PR scan.
         """
-        bad_kwargs = {"githash": "abc1234"}
+        bad_kwargs: dict[str, Any] = {"githash": "abc1234"}
         with pytest.raises(TypeError):
             session_uuid("R", 1, AGENT_PLANNER, **bad_kwargs)
         with pytest.raises(TypeError):
@@ -343,6 +361,41 @@ class TestSessionJsonlPath:
 
         assert resolved == session_jsonl_path(sid, local_worktree)
         assert resolved != foreign_transcript
+        assert not resolved.exists()
+
+    def test_lossy_path_pair_cannot_resume_unregistered_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dotted and dashed checkout paths cannot collide through Claude encoding."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        dotted = tmp_path / "owner.a" / "Repo"
+        dashed = tmp_path / "owner-a" / "Repo"
+        dotted.mkdir(parents=True)
+        dashed.mkdir(parents=True)
+
+        git_failure = subprocess.CalledProcessError(128, ["git"])
+        with patch(
+            "hephaestus.automation.agent_config.subprocess.run",
+            side_effect=git_failure,
+        ):
+            dotted_sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable", cwd=dotted)
+            dashed_sid = session_uuid("Repo", 2284, AGENT_PLAN_REVIEWER, "fable", cwd=dashed)
+
+        dotted_path = session_jsonl_path(dotted_sid, dotted)
+        dashed_path = session_jsonl_path(dashed_sid, dashed)
+        assert dotted_path.parent == dashed_path.parent
+        assert dotted_sid != dashed_sid
+
+        dashed_path.parent.mkdir(parents=True, exist_ok=True)
+        dashed_path.write_text("{}\n", encoding="utf-8")
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(dotted.resolve(),),
+        ):
+            resolved = resolve_session_jsonl_path(dotted_sid, dotted)
+
+        assert resolved == dotted_path
+        assert resolved != dashed_path
         assert not resolved.exists()
 
     def test_worktree_discovery_parses_nul_output_and_scrubs_git_environment(

@@ -27,7 +27,8 @@ def test_registered_worktree_resolves_repo_root_transcript(
     repo_root = tmp_path / "owner-a" / "Hephaestus"
     worktree = repo_root / "build" / ".worktrees" / "issue-2284"
     worktree.mkdir(parents=True)
-    sid = session_uuid("Hephaestus", 2284, "plan-reviewer", "fable")
+    monkeypatch.setattr(agent_config, "_checkout_identity", lambda _cwd: "checkout-family")
+    sid = session_uuid("Hephaestus", 2284, "plan-reviewer", "fable", cwd=repo_root)
 
     transcript = session_jsonl_path(sid, repo_root)
     transcript.parent.mkdir(parents=True, exist_ok=True)
@@ -48,9 +49,10 @@ def test_plan_reviewer_then_pipeline_worker_resumes_same_transcript(
     worktree = repo_root / "build" / ".worktrees" / "issue-2284"
     worktree.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(agent_config, "_checkout_identity", lambda _cwd: "checkout-family")
 
     model = "fable"
-    sid = session_uuid("Hephaestus", 2284, "plan-reviewer", model)
+    sid = session_uuid("Hephaestus", 2284, "plan-reviewer", model, cwd=repo_root)
     calls: list[list[str]] = []
 
     def fake_run_tracked(argv: list[str], **_kwargs: object) -> MagicMock:

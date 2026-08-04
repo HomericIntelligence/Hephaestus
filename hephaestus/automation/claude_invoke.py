@@ -13,7 +13,7 @@ What lives here:
   ``--resume`` targets a session that no longer exists locally.
 - :func:`invoke_claude_with_session` — the single entry point every
   automation phase must use. Picks ``--session-id`` (first call) vs
-  ``--resume`` (subsequent calls) based on whether the model-keyed JSONL
+  ``--resume`` (subsequent calls) based on whether the checkout-scoped JSONL
   transcript already exists. No recreate-on-failure cascade — a create/resume
   error propagates (#1168). On a model-specific usage cap it retries the same
   request once on :func:`agent_config.fallback_model` and pins the fallback
@@ -29,7 +29,6 @@ import os
 import re
 import signal
 import subprocess
-import uuid
 from pathlib import Path
 
 from hephaestus.automation import subprocess_registry
@@ -38,6 +37,7 @@ from hephaestus.automation.agent_config import (
     fallback_model,
     resolve_session_jsonl_path,
     session_name,
+    session_uuid,
 )
 from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
@@ -162,18 +162,19 @@ def invoke_claude_with_session(
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic per-(repo, issue, agent, model) session.
 
-    The session id is ``uuid5`` of ``(repo, issue, agent, model)``. The FIRST
-    call for a key uses ``--session-id`` to create the transcript; every later
-    call ``--resume``s it so cached context is reused instead of re-sent (#1166,
-    #1168). ``claude --resume`` does NOT auto-create — it errors "No conversation
-    found" for an unknown id — so create-on-first-use is required; the probe is
-    the model-keyed transcript file's existence. There is no expired/contention
-    recreate cascade (the old one mis-fired on 429s, re-sending full prompts 3×
-    and crossing models); a ``--session-id``/``--resume`` failure simply
-    propagates. Because ``--resume`` is locked to the creating model, the model
-    is part of the key: switching a per-agent model starts that model's own
-    create-once-then-resume lineage rather than colliding with another model's
-    transcript.
+    The session id is ``uuid5`` of ``(repo, issue, agent, model)`` plus the
+    collision-resistant Git checkout identity. The FIRST call for a key uses
+    ``--session-id`` to create the transcript; every later call ``--resume``s it
+    so cached context is reused instead of re-sent (#1166, #1168).
+    ``claude --resume`` does NOT auto-create — it errors "No conversation found"
+    for an unknown id — so create-on-first-use is required; the probe searches
+    only the current checkout's registered worktree family. There is no
+    expired/contention recreate cascade (the old one mis-fired on 429s,
+    re-sending full prompts 3× and crossing models); a
+    ``--session-id``/``--resume`` failure simply propagates. Because
+    ``--resume`` is locked to the creating model, the model is part of the key:
+    switching a per-agent model starts that model's own create-once-then-resume
+    lineage rather than colliding with another model's transcript.
 
     The session is scoped to the artifact (issue/PR), not a commit SHA, so the
     transcript persists across main-bumps for the issue's lifetime (#841).
@@ -220,8 +221,8 @@ def invoke_claude_with_session(
             recreate toggle.
 
     Returns:
-        ``(stdout, session_uuid)`` — the deterministic id derived from
-        ``(repo, issue, agent, model)`` — for the model actually used (the
+        ``(stdout, session_uuid)`` — the deterministic id derived from the
+        artifact key and checkout identity for the model actually used (the
         fallback's id when a cap forced a switch).
 
     Raises:
@@ -293,7 +294,7 @@ def _invoke_claude_once(
     docstring for the session-key semantics.
     """
     display_name = session_name(repo, issue, agent, model)
-    sid = str(uuid.uuid5(uuid.NAMESPACE_DNS, display_name))
+    sid = session_uuid(repo, issue, agent, model, cwd=cwd)
 
     # Create on FIRST use, resume after (#1168). ``claude --resume`` does NOT
     # auto-create — it errors "No conversation found" for an unknown id — so the
