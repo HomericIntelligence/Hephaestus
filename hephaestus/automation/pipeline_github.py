@@ -2036,7 +2036,13 @@ class PipelineGitHub:
         """
         try:
             body_result = self._gh(
-                ["pr", "view", str(pr_number), "--json", "body,headRefOid,baseRefName"]
+                [
+                    "pr",
+                    "view",
+                    str(pr_number),
+                    "--json",
+                    "title,body,headRefOid,baseRefName",
+                ]
             )
             body_data = json.loads(body_result.stdout or "{}")
             if not isinstance(body_data, dict):
@@ -2044,11 +2050,13 @@ class PipelineGitHub:
         except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
             logger.warning("PR #%s: review context read failed: %s", pr_number, exc)
             return None
+        title = body_data.get("title")
         body = body_data.get("body")
         head = body_data.get("headRefOid")
         base_branch = body_data.get("baseRefName")
         if (
-            not isinstance(body, str)
+            not isinstance(title, str)
+            or not isinstance(body, str)
             or not isinstance(head, str)
             or not head
             or not isinstance(base_branch, str)
@@ -2056,6 +2064,7 @@ class PipelineGitHub:
         ):
             return None
         return {
+            "pr_title": github_api.strip_null_bytes(title),
             "pr_description": github_api.strip_null_bytes(body),
             "pr_head_sha": head,
             "pr_base_branch": base_branch,

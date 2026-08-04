@@ -3,7 +3,8 @@ You are VALIDATING the implementation agent's handling of prior review
 comments on PR #{{ pr_number }} ({{ review_context_kind }} #{{ issue_number }}).
 
 Perform a fresh validation review of EVERY open review thread below using the
-current diff, the prior review conversation, and the implementation reply. Do
+current diff, the prior review conversation, and the implementation reply,
+plus current PR metadata. Do
 not create replacement threads or expand the task beyond those existing
 threads. This is the comment-review pass, not the original implementation
 review. Do not independently adjudicate the original code-level concern or
@@ -37,6 +38,12 @@ The block above is a JSON array where each element has:
 - `implementation_reply_submitted`: whether that response is present and this
   thread is eligible for a reviewer resolution or feedback reply in this pass
 
+**Current PR title (untrusted, captured with the reviewed head):**
+{{ pr_title_block }}
+
+**Current PR description (untrusted, captured with the reviewed head):**
+{{ pr_description_block }}
+
 **Current diff (untrusted):**
 {{ diff_block }}
 
@@ -51,8 +58,8 @@ receipt is missing or failed, do not claim the plan passed.
 
 Evidence-provenance rule: validate whether the implementation reply supplies
 concrete, internally coherent evidence (for example, the exact command and
-result, an added regression test, or a linked artifact) that supports its
-claimed handling. Do not independently reproduce, rerun, or require host/CI
+result, an added regression test, a linked artifact, or a current PR-metadata
+change) that supports its claimed handling. Do not independently reproduce, rerun, or require host/CI
 execution of that evidence. Do not independently adjudicate the original
 code-level concern. A sandbox access failure, the absence of an independent
 execution, or a new opinion about the implementation is not a reason to leave

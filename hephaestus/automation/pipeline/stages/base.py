@@ -196,7 +196,7 @@ class StageGitHub(Protocol):
         pass
 
     def pr_review_context(self, pr_number: int) -> dict[str, str] | None:
-        """Return PR metadata; the verified checkout later derives the review diff."""
+        """Return title/body/head metadata; checkout later derives the review diff."""
         ...
 
     def has_existing_plan(self, issue_number: int) -> bool:

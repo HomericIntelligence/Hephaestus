@@ -1399,11 +1399,24 @@ class PrReviewStage(Stage):
                 if is_full_commit_sha(reviewed_head)
                 else []
             )
+            pr_context = ctx.github.pr_review_context(item.pr)
         except Exception as error:
             logger.warning(
                 "pr_review:%s: could not fetch validation receipts (%s)",
                 item.issue,
                 type(error).__name__,
+            )
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        if (
+            pr_context is None
+            or pr_context.get("pr_head_sha") != reviewed_head
+            or not isinstance(pr_context.get("pr_title"), str)
+            or not isinstance(pr_context.get("pr_description"), str)
+        ):
+            logger.warning(
+                "pr_review:%s: fresh validation metadata did not match reviewed head",
+                item.issue,
             )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
@@ -1434,6 +1447,8 @@ class PrReviewStage(Stage):
                 "issue_number": item.issue,
                 "prior_comments_json": item.payload["prior_comments_json"],
                 "diff_text": item.payload.get("pr_diff", ""),
+                "pr_title": pr_context["pr_title"],
+                "pr_description": pr_context["pr_description"],
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
