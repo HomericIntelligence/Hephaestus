@@ -44,8 +44,8 @@ EXPECTED_SCOPES = {
     ("stages/implementation.py", "_implement_wait", "get_address_review_prompt"): ADDRESS,
     ("stages/implementation.py", "_implement_wait", "build_implementation_prompt"): WRITE,
     ("stages/implementation.py", "_testfix_wait", "build_test_fix_prompt"): WRITE,
-    ("stages/pr_review.py", "_submit_review_job", "get_pr_review_analysis_prompt"): PR_REVIEW,
-    ("stages/pr_review.py", "_validate_wait", "get_review_validation_prompt"): READ_ONLY,
+    ("stages/pr_review_jobs.py", "_submit_review_job", "get_pr_review_analysis_prompt"): PR_REVIEW,
+    ("stages/pr_review_jobs.py", "_validate_wait", "get_review_validation_prompt"): READ_ONLY,
     ("stages/merge_wait.py", "_request_learn", "build_drive_green_learn_prompt"): ADDRESS,
 }
 

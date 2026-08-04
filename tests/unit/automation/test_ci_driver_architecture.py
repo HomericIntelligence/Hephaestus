@@ -27,11 +27,11 @@ _BUDGETS = {
     "hephaestus.automation.drive_green_state.DriveGreenArmingCoordinator": ClassBudget(320, 7, 80),
     "hephaestus.automation.drive_green_state.LastCIFixStore": ClassBudget(140, 4, 60),
     "hephaestus.automation.pr_discovery.PRDiscovery": ClassBudget(560, 14, 80),
-    # 18th method: _affected_tests_pass, the pre-push CI-fix test gate (#2122) —
-    # a cohesive addition to the push-contract guard family this collaborator
-    # already owns; re-runs the failing pytest node IDs before force-pushing so
-    # the mesh never pushes a branch that fails the exact test it claims to fix.
-    "hephaestus.automation.ci_fix_orchestrator.CIFixOrchestrator": ClassBudget(1050, 18, 80),
+    # The façade is intentionally limited to construction and compatibility
+    # wiring. Session behavior and push safety live in the two collaborators.
+    "hephaestus.automation.ci_fix_orchestrator.CIFixOrchestrator": ClassBudget(320, 9, 60),
+    "hephaestus.automation.ci_fix_sessions.CIFixSessions": ClassBudget(420, 8, 80),
+    "hephaestus.automation.ci_fix_push_guard.CIFixPushGuard": ClassBudget(500, 9, 80),
 }
 
 
