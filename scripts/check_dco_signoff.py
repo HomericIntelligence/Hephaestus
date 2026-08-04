@@ -5,7 +5,7 @@ Enforces the Developer Certificate of Origin requirement documented in
 CONTRIBUTING.md ("Developer Certificate of Origin (DCO)"): every commit must
 include a Signed-off-by: Name <email> trailer (added by ``git commit -s``).
 This is distinct from, and additional to, the cryptographic ``-S`` signature
-that ``pr-policy`` Check 2 enforces.
+that the ``homeric-main-baseline`` ruleset enforces.
 
 Used by both the local ``commit-msg`` pre-commit hook (the message file path is
 passed as argv[0]) and the ``pr-policy`` CI job (full commit messages are piped
@@ -93,8 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         print(__doc__)
         return 0
     messages = _messages_from_args(args)
-    # An empty message set is not a violation; the signing + Closes checks
-    # cover the empty-commits anomaly. (Mirrors check_conventional_commit.py.)
+    # An empty message set is not a violation; the PR-body and DCO policy checks
+    # cover the malformed/empty-commit metadata path.
     failed = False
     for message in messages:
         err = validate_message(message)

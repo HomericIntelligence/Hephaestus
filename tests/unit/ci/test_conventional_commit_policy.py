@@ -30,7 +30,7 @@ def _pr_policy_step(name: str) -> dict[str, Any]:
 def test_pr_policy_validates_title_and_commit_subjects() -> None:
     """The required workflow validates both the squash title and branch commits."""
     fetch = str(_pr_policy_step("Fetch PR metadata")["run"])
-    check = _pr_policy_step("Check 3: PR title and commit subjects follow Conventional Commits")
+    check = _pr_policy_step("Check 2: PR title and commit subjects follow Conventional Commits")
     run = str(check["run"])
 
     assert "--json body,title" in fetch
@@ -41,7 +41,7 @@ def test_pr_policy_validates_title_and_commit_subjects() -> None:
     assert checkout["with"]["path"] == "policy-base"
     assert "policy-base/scripts/check_conventional_commit.py" in run
     dco_run = str(
-        _pr_policy_step("Check 4: every commit carries a DCO Signed-off-by trailer")["run"]
+        _pr_policy_step("Check 3: every commit carries a DCO Signed-off-by trailer")["run"]
     )
     assert "policy-base/scripts/check_dco_signoff.py" in dco_run
     assert "strict Conventional Commits form" in run

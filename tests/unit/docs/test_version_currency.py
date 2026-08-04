@@ -6,7 +6,7 @@ fails CI when the documented version is *older* than the canonical hatch-vcs
 version (latest vX.Y.Z git tag). See issue #1208.
 
 This test is designed to RUN in CI, not skip: the unit-test job checks out with
-``fetch-tags: true`` (see .github/workflows/test.yml). If tags are somehow
+the CI checkout fetches tags before running this suite. If tags are somehow
 absent, the test FAILS LOUD with remediation guidance rather than skipping --
 a guard that silently skips is not a guard.
 """

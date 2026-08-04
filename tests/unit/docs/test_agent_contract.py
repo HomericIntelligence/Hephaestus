@@ -34,7 +34,7 @@ REQUIRED_SECTIONS = {
     ),
     "## Working with GitHub": (
         "Closes #<issue-number>",
-        "git commit -S",
+        "git commit -s -S",
         "Signed-off-by",
         "PR titles MUST",
     ),
