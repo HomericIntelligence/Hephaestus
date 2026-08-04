@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
+import tarfile
+import threading
 from collections import deque
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -50,6 +56,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     _without_duplicate_live_findings,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind
+from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import STATE_SKIP
@@ -1300,6 +1307,271 @@ class TestPrReviewStageStep:
         assert changed_pytest_specs[0].changed_path == kept_path
         assert kept_path in changed_pytest_specs[0].argv
         assert deleted_path not in changed_pytest_specs[0].argv
+
+    def test_changed_conftest_verifies_containing_directory_once(self) -> None:
+        """A support-only conftest change must not be a no-tests pytest target."""
+        directory = "tests/unit/automation/pipeline/stages"
+        conftest_path = f"{directory}/conftest.py"
+        test_path = f"{directory}/test_stage_pr_review.py"
+        specs = stage_module._host_verification_specs(
+            f"diff --git a/{conftest_path} b/{conftest_path}\n"
+            f"--- a/{conftest_path}\n"
+            f"+++ b/{conftest_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+            f"diff --git a/{test_path} b/{test_path}\n"
+            f"--- a/{test_path}\n"
+            f"+++ b/{test_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+        )
+
+        changed_pytest_specs = tuple(
+            spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
+        )
+
+        assert len(changed_pytest_specs) == 1
+        assert changed_pytest_specs[0].changed_path == conftest_path
+        assert changed_pytest_specs[0].argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            directory,
+            "-q",
+            "--tb=short",
+        )
+
+    def test_nested_changed_conftests_keep_shallowest_directory_once(self) -> None:
+        """A parent conftest directory target already covers nested conftest changes."""
+        parent_directory = "tests/unit/automation"
+        child_directory = f"{parent_directory}/pipeline"
+        parent_conftest_path = f"{parent_directory}/conftest.py"
+        child_conftest_path = f"{child_directory}/conftest.py"
+        specs = stage_module._host_verification_specs(
+            f"diff --git a/{parent_conftest_path} b/{parent_conftest_path}\n"
+            f"--- a/{parent_conftest_path}\n"
+            f"+++ b/{parent_conftest_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+            f"diff --git a/{child_conftest_path} b/{child_conftest_path}\n"
+            f"--- a/{child_conftest_path}\n"
+            f"+++ b/{child_conftest_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+        )
+
+        changed_pytest_specs = tuple(
+            spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
+        )
+
+        assert len(changed_pytest_specs) == 1
+        assert changed_pytest_specs[0].changed_path == parent_conftest_path
+        assert changed_pytest_specs[0].argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            parent_directory,
+            "--ignore=tests/unit/automation/pipeline/test_worker_pool.py",
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_ancestor_conftest_directory_preserves_nonhermetic_exclusion(
+        self,
+    ) -> None:
+        """Directory targets must not re-collect host-excluded unit tests."""
+        directory = "tests/unit/automation"
+        conftest_path = f"{directory}/conftest.py"
+        ordinary_path = "tests/unit/automation/stages/test_plan_review.py"
+        specs = stage_module._host_verification_specs(
+            f"diff --git a/{conftest_path} b/{conftest_path}\n"
+            f"--- a/{conftest_path}\n"
+            f"+++ b/{conftest_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+            f"diff --git a/{ordinary_path} b/{ordinary_path}\n"
+            f"--- a/{ordinary_path}\n"
+            f"+++ b/{ordinary_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+        )
+
+        changed_pytest_specs = tuple(
+            spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
+        )
+
+        assert len(changed_pytest_specs) == 1
+        assert changed_pytest_specs[0].changed_path == conftest_path
+        assert changed_pytest_specs[0].argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            directory,
+            "--ignore=tests/unit/automation/pipeline/test_worker_pool.py",
+            "-q",
+            "--tb=short",
+        )
+
+    def test_changed_conftest_directory_host_verification_receipt_is_head_bound(
+        self, tmp_path: Path, completion_q: Any
+    ) -> None:
+        """The emitted conftest directory target runs through the immutable receipt path."""
+        directory = "tests/unit/host_conftest_receipt"
+        conftest_path = f"{directory}/conftest.py"
+        specs = stage_module._host_verification_specs(
+            f"diff --git a/{conftest_path} b/{conftest_path}\n"
+            f"--- a/{conftest_path}\n"
+            f"+++ b/{conftest_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+        )
+        spec = next(spec for spec in specs if spec.descr.startswith("review_changed_unit_test_"))
+        assert spec.argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            directory,
+            "-q",
+            "--tb=short",
+        )
+
+        source_fixture = tmp_path / "source-fixture"
+        test_directory = source_fixture / directory
+        test_directory.mkdir(parents=True)
+        (test_directory / "conftest.py").write_text(
+            "import pytest\n\n"
+            "@pytest.fixture\n"
+            "def conftest_marker() -> str:\n"
+            "    return 'from-conftest'\n",
+            encoding="utf-8",
+        )
+        (test_directory / "test_uses_conftest.py").write_text(
+            "def test_uses_directory_conftest(conftest_marker: str) -> None:\n"
+            "    assert conftest_marker == 'from-conftest'\n",
+            encoding="utf-8",
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            tar.add(source_fixture / "tests", arcname="tests")
+
+        expected_head = "b" * 40
+        checkout = tmp_path / "review-checkout"
+        checkout.mkdir()
+        runtime_environment = tmp_path / "runtime"
+        runtime_environment.mkdir()
+        checkout_checks: list[tuple[Path, str]] = []
+        module = "hephaestus.automation.pipeline.worker_pool"
+
+        def checkout_matches_immutable_head(checkout_path: Path, head_sha: str) -> None:
+            checkout_checks.append((checkout_path, head_sha))
+            return None
+
+        def quota_backed_scratch(root: Path) -> object:
+            scratch = root / "scratch"
+            scratch.mkdir()
+            return nullcontext(scratch)
+
+        def quota_backed_pi_smoke_logs(root: Path, source: Path) -> object:
+            del root
+            logs = source / "pi-smoke-logs"
+            logs.mkdir()
+            return nullcontext(logs)
+
+        def prepare_immutable_git_metadata(
+            _checkout: Path,
+            _expected_head: str,
+            _source: Path,
+            root: Path,
+            _git_executable: str,
+        ) -> Path:
+            metadata = root / "metadata.git"
+            metadata.mkdir()
+            return metadata
+
+        def host_verification_command(
+            *,
+            argv: tuple[str, ...],
+            source: Path,
+            scratch: Path,
+            runtime_environment: Path,
+            git_metadata: Path,
+            pi_smoke_logs: Path,
+        ) -> tuple[str, ...]:
+            del source, scratch, runtime_environment, git_metadata, pi_smoke_logs
+            assert argv == (sys.executable, *spec.argv[1:])
+            return (sys.executable, "-m", "pytest", *spec.argv[3:])
+
+        job = BuildTestJob(
+            repo="test/repo",
+            cwd=checkout,
+            argv=spec.argv,
+            timeout_s=60,
+            descr=spec.descr,
+            expected_head_sha=expected_head,
+            immutable_source=True,
+        )
+        shutdown = threading.Event()
+        pool = WorkerPool(
+            size=1,
+            shutdown=shutdown,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        try:
+            with (
+                patch(
+                    f"{module}._checkout_matches_immutable_head",
+                    side_effect=checkout_matches_immutable_head,
+                ),
+                patch(f"{module}._trusted_uv_executable", return_value=sys.executable),
+                patch(f"{module}._trusted_git_executable", return_value=sys.executable),
+                patch(
+                    f"{module}._verifier_owned_runtime_environment",
+                    return_value=runtime_environment,
+                ),
+                patch(
+                    f"{module}._bounded_git_archive",
+                    return_value=(archive.getvalue(), ""),
+                ),
+                patch(
+                    f"{module}._prepare_immutable_git_metadata",
+                    side_effect=prepare_immutable_git_metadata,
+                ),
+                patch(f"{module}._quota_backed_scratch", side_effect=quota_backed_scratch),
+                patch(
+                    f"{module}._quota_backed_pi_smoke_logs",
+                    side_effect=quota_backed_pi_smoke_logs,
+                ),
+                patch(
+                    f"{module}._host_verification_command",
+                    side_effect=host_verification_command,
+                ),
+            ):
+                result = pool._run_build_test(job)
+        finally:
+            pool.shutdown()
+
+        assert result.ok is True
+        assert result.value == {
+            "head_sha": expected_head,
+            "immutable_source": True,
+            "failure_kind": "none",
+        }
+        assert checkout_checks == [(checkout, expected_head), (checkout, expected_head)]
+        assert "passed" in result.stdout_tail
+        receipt = {
+            "argv": list(spec.argv),
+            "error": "",
+            "failure_kind": "none",
+            "head_sha": expected_head,
+            "immutable_source": True,
+            "ok": result.ok,
+            "stderr_tail": result.stderr_tail,
+            "stdout_tail": result.stdout_tail,
+        }
+        assert stage_module._host_verification_receipt_matches(receipt, spec, expected_head)
+        assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
