@@ -390,12 +390,20 @@ class TestSessionJsonlPath:
     def test_lossy_path_pair_cannot_resume_unregistered_checkout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Dotted and dashed checkout paths cannot collide through Claude encoding."""
+        """Dotted/dashed checkout paths are separated before transcript lookup."""
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         dotted = tmp_path / "owner.a" / "Repo"
         dashed = tmp_path / "owner-a" / "Repo"
         dotted.mkdir(parents=True)
         dashed.mkdir(parents=True)
+
+        legacy_sid = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                session_name("Repo", 2284, AGENT_PLAN_REVIEWER, "fable"),
+            )
+        )
+        assert session_jsonl_path(legacy_sid, dotted) == session_jsonl_path(legacy_sid, dashed)
 
         git_failure = subprocess.CalledProcessError(128, ["git"])
         with patch(
