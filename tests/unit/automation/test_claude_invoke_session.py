@@ -237,6 +237,29 @@ class TestArgvAssembly:
         assert argv[-2] == "--print"
         assert argv[-1] == "hi"
 
+    def test_empty_allowed_tools_is_forwarded_as_zero_tool_scope(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """An explicit empty scope reaches Claude instead of restoring CLI defaults."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+
+        invoke_claude_with_session(
+            repo="R",
+            issue=1,
+            agent=AGENT_PLANNER,
+            prompt="hi",
+            model="sonnet",
+            cwd=cwd,
+            allowed_tools="",
+            permission_mode="dontAsk",
+        )
+
+        argv = _argv(stub_run.call_args)
+        allowed_tools_index = argv.index("--allowedTools")
+        assert argv[allowed_tools_index + 1] == ""
+        assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+
     def test_input_via_stdin_drops_prompt_from_argv(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:

@@ -3,9 +3,24 @@
 
 import contextlib
 import json
+import os
 
 import pytest
 import yaml
+
+CONTRACT_OPT_IN_ENV = "HEPHAESTUS_CONTRACT_TESTS"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip contract-marked tests unless the opt-in environment is enabled."""
+    del config
+    if os.environ.get(CONTRACT_OPT_IN_ENV) == "1":
+        return
+
+    skip = pytest.mark.skip(reason=f"contract lane is opt-in; set {CONTRACT_OPT_IN_ENV}=1 to run")
+    for item in items:
+        if item.get_closest_marker("contract"):
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +50,8 @@ def _agents_authenticated_by_default(
     (last-writer-wins).
     """
     if request.module.__name__.endswith("agents.test_runtime"):
+        return
+    if request.node.get_closest_marker("contract"):
         return
     monkeypatch.setattr(
         "hephaestus.agents.runtime.is_agent_authenticated",
