@@ -180,6 +180,9 @@ _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = "_implementation_file_claims"
 #: WorkItem payload key holding consecutive file-overlap deferrals.
 _FILE_OVERLAP_DEFERRALS_KEY = "file_overlap_deferrals"
 
+#: Host-owned snapshot of the active claims that last blocked a queued item.
+_FILE_OVERLAP_BLOCKED_CLAIMS_KEY = "_file_overlap_blocked_claims"
+
 #: Deferral counts strictly above this value are logged as warnings.
 _FILE_OVERLAP_WARNING_THRESHOLD = 10
 
@@ -1771,6 +1774,7 @@ class Coordinator:
             if (claims := submission_claims.get(id(item))) is not None:
                 item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(claims)
             item.payload.pop(_FILE_OVERLAP_DEFERRALS_KEY, None)
+            item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
             self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
 
@@ -1892,16 +1896,26 @@ class Coordinator:
         for item, identity in candidates:
             if item.issue is None:  # defensive: candidate construction excludes this case
                 continue
+            blocked_claims = item.payload.get(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
+            if blocked_claims is not None and set(blocked_claims) == claimed:
+                # The same active reservation still blocks this item. Polling
+                # must remain quiet until that reservation changes.
+                continue
             repo = (self.config.org, item.repo)
             payload_claims = item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
             if payload_claims is None:
                 planned = _admission._fetch_planned_files(item.issue, repo=repo)
                 item_claims = {(repo, path) for path in planned} if planned else set()
+                # Freeze the plan on first admission attempt, including while
+                # blocked, so coordinator polling never repeats GitHub reads.
+                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
             else:
                 item_claims = set(payload_claims)
             if item_claims and (item_claims & claimed):
                 self._record_file_overlap_deferral(item, identity)
+                item.payload[_FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)
                 continue
+            item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
             claimed.update(item_claims)
             # Preserve an empty snapshot too: unknown plans fail open, but
             # must not be fetched again after being admitted.

@@ -2035,6 +2035,53 @@ class TestImplementationAdmission:
         assert run_repos == ["repo-a"]
         assert "file_overlap_deferrals" not in repo_a.payload
 
+    def test_queued_overlap_is_recorded_once_until_active_claims_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stable in-flight claim must not create a polling hot loop."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_issues: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_issues.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active_handle = _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION),
+            claimed_files={"shared.py"},
+        )
+        blocked = _issue_item(7, StageName.IMPLEMENTATION)
+        coordinator._push_item(blocked, StageName.IMPLEMENTATION, enter=True)
+        fetches = 0
+
+        def fetch_planned_files(_issue: int, repo: tuple[str, str]) -> set[str]:
+            nonlocal fetches
+            fetches += 1
+            return {"shared.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            fetch_planned_files,
+        )
+
+        coordinator._drain_implementation()
+        coordinator._drain_implementation()
+
+        assert fetches == 1
+        assert blocked.payload["file_overlap_deferrals"] == 1
+        assert run_issues == []
+
+        coordinator._handle_completion(active_handle, JobResult(ok=True))
+        run_issues.clear()
+        coordinator._drain_implementation()
+
+        assert fetches == 1
+        assert run_issues == [7]
+        assert "file_overlap_deferrals" not in blocked.payload
+
     def test_ambiguous_aged_overlap_beats_a_recurring_regular_contender(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2087,7 +2134,7 @@ class TestImplementationAdmission:
 
         assert run_order == ["repo-a#7"]
         assert "file_overlap_deferrals" not in ambiguous_a.payload
-        assert ambiguous_b.payload["file_overlap_deferrals"] == 2
+        assert ambiguous_b.payload["file_overlap_deferrals"] == 1
         assert recurring_regular.payload["file_overlap_deferrals"] == 1
         assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [
             ambiguous_b,
