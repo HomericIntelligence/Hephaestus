@@ -172,10 +172,15 @@ _IDLE_POLL_S = 1.0
 #: Number of fully stalled idle ticks before the coordinator force-runs work.
 _STALL_TICKS_BEFORE_FORCE = 3
 
-# Host-owned work-item payload key for the immutable plan-file snapshot that
-# admitted a queued implementation item. It is retained for the whole
-# implementation-stage lifetime and is never sourced from GitHub content.
+# Host-owned work-item payload key for the file reservation that admitted a
+# queued implementation item. The frozen plan starts the reservation; paths
+# from the verified checkout diff extend it through review and merge wait.
 _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = "_implementation_file_claims"
+
+_FILE_CLAIM_STAGES = frozenset(
+    {StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT}
+)
+_REALIZED_DIFF_CLAIM_STAGES = frozenset({StageName.PR_REVIEW, StageName.MERGE_WAIT})
 
 #: WorkItem payload key holding consecutive file-overlap deferrals.
 _FILE_OVERLAP_DEFERRALS_KEY = "file_overlap_deferrals"
@@ -1939,12 +1944,26 @@ class Coordinator:
         return duplicates
 
     def _active_implementation_file_claims(self) -> set[_admission.PlanFileClaim]:
-        """Return immutable plan claims held for active implementation work."""
+        """Return plan plus verified-diff claims held by active PR work."""
         claims: set[_admission.PlanFileClaim] = set()
         for item_claims in self._implementation_file_claims.values():
             claims.update(item_claims)
         for active_claims in self._inflight_implementation_claims.values():
             claims.update(active_claims)
+        for item in self.items:
+            if item.stage not in _REALIZED_DIFF_CLAIM_STAGES:
+                continue
+            item_claims = set(item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, ()))
+            changed_paths = item.payload.get("review_changed_paths")
+            if isinstance(changed_paths, list):
+                repo = (self.config.org, item.repo)
+                for changed_path in changed_paths:
+                    if isinstance(changed_path, str) and changed_path:
+                        item_claims.add((repo, changed_path))
+            if item_claims:
+                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+                self._implementation_file_claims[id(item)] = set(item_claims)
+                claims.update(item_claims)
         return claims
 
     def _capture_implementation_file_claims(self, item: WorkItem) -> set[_admission.PlanFileClaim]:
@@ -1976,8 +1995,8 @@ class Coordinator:
         return set(selected)
 
     def _clear_implementation_file_claims_on_exit(self, item: WorkItem, target: StageName) -> None:
-        """Drop a stage-scoped snapshot only after implementation really exits."""
-        if item.stage is StageName.IMPLEMENTATION and target is not StageName.IMPLEMENTATION:
+        """Drop reservations only after the active PR lifecycle really exits."""
+        if item.stage in _FILE_CLAIM_STAGES and target not in _FILE_CLAIM_STAGES:
             self._implementation_file_claims.pop(id(item), None)
             item.payload.pop(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, None)
 

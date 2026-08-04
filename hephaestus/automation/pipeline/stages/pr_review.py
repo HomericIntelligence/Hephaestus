@@ -420,6 +420,7 @@ def _clear_round_review_state(item: WorkItem) -> None:
         item.payload.pop(key, None)
     item.payload.pop("reviewed_pr_head_sha", None)
     item.payload.pop("pr_diff", None)
+    item.payload.pop("review_changed_paths", None)
 
 
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
@@ -1793,11 +1794,16 @@ class PrReviewStage(Stage):
         ready = bool(isinstance(value, dict) and value.get("ready"))
         review_diff = value.get("diff") if isinstance(value, dict) else None
         review_base = value.get("base") if isinstance(value, dict) else None
+        changed_paths = value.get("changed_paths") if isinstance(value, dict) else None
         if ready and not isinstance(review_diff, str):
             item.payload["review_checkout_error"] = "checkout job returned no bound diff"
             ready = False
         if ready:
             item.payload["pr_diff"] = review_diff
+            if isinstance(changed_paths, list) and all(
+                isinstance(path, str) and bool(path) for path in changed_paths
+            ):
+                item.payload["review_changed_paths"] = list(changed_paths)
             if is_full_commit_sha(review_base):
                 item.payload["reviewed_pr_base_sha"] = review_base
         item.payload["review_checkout_ready"] = ready

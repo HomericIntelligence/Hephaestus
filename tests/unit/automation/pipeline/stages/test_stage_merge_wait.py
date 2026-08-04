@@ -973,10 +973,10 @@ def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any)
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
 
 
-def test_readiness_wait_has_a_bounded_minute_scale_deadline_without_puts(
+def test_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
     make_ctx: Any, make_work_item: Any
 ) -> None:
-    """Ordinary CI waits do not consume conditional merge attempts indefinitely."""
+    """A normal CI restart fits while readiness waiting remains bounded."""
     github = _ConditionalGitHub(
         states=[_open_pr()],
         readiness={
@@ -997,7 +997,7 @@ def test_readiness_wait_has_a_bounded_minute_scale_deadline_without_puts(
         now_fn=lambda: now[0],
     )
 
-    for _ in range(18):
+    for _ in range(33):
         result = stage.step(item, ctx)
         assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
         assert github.merge_attempts == []
@@ -1007,8 +1007,8 @@ def test_readiness_wait_has_a_bounded_minute_scale_deadline_without_puts(
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
     assert github.merge_attempts == []
-    assert item.payload["merge_readiness_deadline_s"] == 1900.0
-    assert item.payload["merge_readiness_polls"] == 18
+    assert item.payload["merge_readiness_deadline_s"] == 2800.0
+    assert item.payload["merge_readiness_polls"] == 33
 
 
 @pytest.mark.parametrize("now", [1900.0, 1901.0])
@@ -1073,7 +1073,7 @@ def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["merge_readiness_head_sha"] == fresh_head
-    assert item.payload["merge_readiness_deadline_s"] == 1000.0
+    assert item.payload["merge_readiness_deadline_s"] == 1900.0
     assert item.payload["merge_readiness_polls"] == 1
     assert github.merge_attempts == []
 
@@ -1107,7 +1107,7 @@ def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["merge_readiness_proof_generation"] == 2
-    assert item.payload["merge_readiness_deadline_s"] == 1000.0
+    assert item.payload["merge_readiness_deadline_s"] == 1900.0
     assert item.payload["merge_readiness_polls"] == 1
     assert github.merge_attempts == []
 

@@ -766,7 +766,14 @@ class TestPrReviewStageStep:
         assert isinstance(barrier, JobRequest)
         stage.on_job_done(
             item,
-            JobResult(ok=True, value={"ready": True, "diff": "checkout diff for A"}),
+            JobResult(
+                ok=True,
+                value={
+                    "ready": True,
+                    "diff": "checkout diff for A",
+                    "changed_paths": ["old.py", "new.py"],
+                },
+            ),
             ctx,
         )
         item.state = barrier.on_done_state
@@ -775,6 +782,7 @@ class TestPrReviewStageStep:
         assert isinstance(review, JobRequest)
         assert isinstance(review.job, AgentJob)
         assert review.job.prompt_kwargs["pr_diff"] == "checkout diff for A"
+        assert item.payload["review_changed_paths"] == ["old.py", "new.py"]
 
     def test_no_issue_number_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """Step without an issue number finishes failed."""
