@@ -4,7 +4,7 @@ Scans Markdown files for incorrect tier label mappings, e.g., calling T2
 "Skills" when its canonical name is "Tooling", or T3 "Tooling" when it
 should be "Delegation".
 
-Canonical tier mapping (authoritative source: CLAUDE.md):
+Canonical tier mapping (authoritative source: AGENTS.md):
   T0 = Prompts
   T1 = Skills
   T2 = Tooling

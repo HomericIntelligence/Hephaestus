@@ -139,7 +139,7 @@ repos:
         entry: uv run python -m hephaestus.scripts_lib.check_cli_table_sync
         language: system
         pass_filenames: false
-        files: ^(README\.md|COMPATIBILITY\.md|CLAUDE\.md|pyproject\.toml|docs/.*\.md)$
+        files: ^(README\.md|COMPATIBILITY\.md|AGENTS\.md|CLAUDE\.md|pyproject\.toml|docs/.*\.md)$
 
   # Claude settings permission path check
   - repo: local

@@ -16,7 +16,6 @@ SCAN_PATHS = (
     "scripts",
     "skills",
     "AGENTS.md",
-    "CLAUDE.md",
     "README.md",
     "justfile",
 )
