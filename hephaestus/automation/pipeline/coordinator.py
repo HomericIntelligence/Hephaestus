@@ -1922,6 +1922,16 @@ class Coordinator:
                 item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
             else:
                 item_claims = set(payload_claims)
+            # A PR may return from review before a coordinator-wide claim
+            # refresh materializes its verified diff paths.  Its selected
+            # reservation must include those realized paths immediately so a
+            # later candidate in this same admission batch cannot overlap.
+            changed_paths = item.payload.get("review_changed_paths")
+            if isinstance(changed_paths, list):
+                for changed_path in changed_paths:
+                    if isinstance(changed_path, str) and changed_path:
+                        item_claims.add((repo, changed_path))
+                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
             if item_claims and (item_claims & claimed):
                 self._record_file_overlap_deferral(item, identity)
                 item.payload[_FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)

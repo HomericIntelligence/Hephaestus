@@ -1994,12 +1994,14 @@ class TestImplementationAdmission:
     ) -> None:
         """A returning PR keeps exclusive ownership without self-deadlocking."""
         coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
-        claim = (("org", "repo-a"), "shared.py")
+        plan_claim = (("org", "repo-a"), "planned.py")
+        realized_claim = (("org", "repo-a"), "shared.py")
         returning = _issue_item(21, StageName.IMPLEMENTATION)
-        returning.payload["_implementation_file_claims"] = {claim}
-        coordinator._implementation_file_claims[id(returning)] = {claim}
+        returning.payload["_implementation_file_claims"] = {plan_claim}
+        returning.payload["review_changed_paths"] = ["shared.py"]
+        coordinator._implementation_file_claims[id(returning)] = {plan_claim}
         overlapping = _issue_item(22, StageName.IMPLEMENTATION)
-        overlapping.payload["_implementation_file_claims"] = {claim}
+        overlapping.payload["_implementation_file_claims"] = {realized_claim}
         independent = _issue_item(23, StageName.IMPLEMENTATION)
         independent_claim = (("org", "repo-a"), "independent.py")
         independent.payload["_implementation_file_claims"] = {independent_claim}
@@ -2010,8 +2012,12 @@ class TestImplementationAdmission:
 
         assert dispatch == [returning, independent]
         assert snapshots == {
-            id(returning): {claim},
+            id(returning): {plan_claim, realized_claim},
             id(independent): {independent_claim},
+        }
+        assert returning.payload["_implementation_file_claims"] == {
+            plan_claim,
+            realized_claim,
         }
         assert overlapping.payload["file_overlap_deferrals"] == 1
 
