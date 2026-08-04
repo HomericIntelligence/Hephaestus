@@ -113,6 +113,22 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.event_log_path.parent == Path(DEFAULT_STATE_DIR)
 
 
+def test_build_pipeline_config_maps_explicit_gh_root(
+    dispatch: dict[str, MagicMock], tmp_path: Path
+) -> None:
+    """The CLI-only executable exception reaches the checkout worker config."""
+    gh_root = tmp_path / "gh-root"
+    executable = gh_root / "bin" / "gh"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+
+    loop_runner.main(["--gh-extra-path-root", str(gh_root)])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.gh_extra_path_root == gh_root
+
+
 def test_drive_green_all_maps_all_authors_and_bots(dispatch: dict[str, MagicMock]) -> None:
     """The legacy drive-green-all flag preserves its configuration mapping."""
     loop_runner.main(["--drive-green-all", "--dry-run"])

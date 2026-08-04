@@ -302,6 +302,9 @@ class PipelineConfig:
     planner_reasoning_effort: str = ""
     reviewer_reasoning_effort: str = ""
     implementer_reasoning_effort: str = ""
+    # Explicit CLI-provided root that may supply only ``bin/gh``.  No
+    # environment-derived executable locations are admitted.
+    gh_extra_path_root: Path | None = None
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
@@ -525,6 +528,7 @@ class Coordinator:
                 size=work_window,
                 shutdown=self.shutdown,
                 completion_q=self.completion_q,
+                gh_extra_path_root=config.gh_extra_path_root,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

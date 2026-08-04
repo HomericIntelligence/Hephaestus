@@ -71,6 +71,20 @@ def _executable_path(name: str, *, path: str | None = None) -> str:
     return str(Path(executable).resolve())
 
 
+def test_trusted_gh_executable_accepts_explicit_extra_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit root contributes only its contained ``bin/gh`` executable."""
+    gh_root = tmp_path / "custom-gh"
+    executable = gh_root / "bin" / "gh"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    monkeypatch.setattr(f"{_WP}._TRUSTED_GH_CANDIDATES", ())
+
+    assert _trusted_gh_executable(gh_root) == str(executable)
+
+
 @pytest.fixture
 def shutdown_event() -> threading.Event:
     """Fresh shutdown event for each test."""
@@ -1527,6 +1541,15 @@ class TestInterruptedPostCheck:
 
 class TestGitOps:
     """Tests for every GitJob op dispatch (helpers mocked)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_trusted_gh_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep checkout-sync tests independent of the host's gh install layout."""
+        def executable(_root: Path | None = None) -> str:
+            return "/usr/bin/gh"
+
+        monkeypatch.setattr(f"{_WP}._trusted_gh_executable", executable)
+        monkeypatch.setattr(f"{__name__}._trusted_gh_executable", executable)
 
     def test_create_worktree_dispatch(
         self,
@@ -3051,6 +3074,32 @@ class TestGitOps:
         assert (checkout / ".git" / ".hephaestus-git-metadata.lock").is_file()
         assert result.ok is True
         assert result.value == "a" * 40
+
+    def test_sync_checkout_missing_gh_explains_extra_root_flag(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A missing trusted executable gives the operator the supported escape hatch."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        with (
+            patch("hephaestus.automation.git_utils.run") as mock_run,
+            patch(f"{_WP}._trusted_gh_executable", return_value=None),
+        ):
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+            ]
+            result = pool._sync_checkout_locked(
+                checkout=checkout,
+                expected_repo="owner/name",
+                timeout_s=120,
+            )
+
+        assert result.error == (
+            "required GitHub executable is unavailable; pass "
+            "--gh-extra-path-root ROOT when ROOT/bin/gh is the intended installation"
+        )
 
     def test_sync_checkout_rechecks_clean_state_after_fetch_before_merge(
         self,

@@ -107,6 +107,27 @@ def test_parse_args_accepts_explicit_codex_agent() -> None:
     assert args.agent == "codex"
 
 
+def test_loop_help_documents_explicit_gh_root_override() -> None:
+    """The executable exception is an explicit, discoverable CLI authority."""
+    assert "--gh-extra-path-root" in loop_runner._build_parser().format_help()
+
+
+def test_parse_args_rejects_gh_root_that_escapes_through_a_symlink(tmp_path: Path) -> None:
+    """The explicit root cannot authorize an executable outside its boundary."""
+    gh_root = tmp_path / "gh-root"
+    gh_root.mkdir()
+    outside = tmp_path / "outside-gh"
+    outside.write_text("#!/bin/sh\n")
+    outside.chmod(0o755)
+    (gh_root / "bin").mkdir()
+    (gh_root / "bin" / "gh").symlink_to(outside)
+
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--gh-extra-path-root", str(gh_root)])
+
+    assert excinfo.value.code == 2
+
+
 def test_parse_args_accepts_no_advise() -> None:
     """The loop runner can disable advise across child phases."""
     args = loop_runner._parse_args(["--no-advise"])
