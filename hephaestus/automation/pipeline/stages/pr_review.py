@@ -1374,6 +1374,11 @@ class PrReviewStage(Stage):
                 StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
             )
         if not live_threads:
+            if item.payload.get(_COMMENT_VALIDATION_ONLY):
+                # A reply may resolve the last thread while the immutable
+                # host checks are running.  Keep the already-selected
+                # validation-only route instead of opening a second audit.
+                return Continue(next_state=VALIDATE_WAIT)
             return self._submit_review_job(item, ctx)
         snapshots = _validation_thread_snapshots(live_threads, receipts)
         remediation_threads = _normalize_remediation_threads(live_threads)
