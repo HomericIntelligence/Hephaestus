@@ -74,7 +74,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
         "check_python_version_consistency",
     ),
     "check_test_structure": (
-        "hephaestus.validation.test_structure",
+        "hephaestus.validation.test_layout",
         "check_test_structure",
     ),
     "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),
