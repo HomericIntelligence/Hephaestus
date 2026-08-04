@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import sys
+import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib
 
 _PYPROJECT = Path(__file__).resolve().parents[3] / "pyproject.toml"
 
