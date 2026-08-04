@@ -28,7 +28,7 @@ EXPECTED_SCOPES = {
     ("planning.py", "step", "build_plan_prompt"): READ_ONLY,
     ("plan_review.py", "step", "get_plan_loop_review_prompt"): READ_ONLY,
     ("plan_review.py", "step", "build_amend_prompt"): READ_ONLY,
-    ("plan_review.py", "step", "build_learn_prompt"): WRITE,
+    ("plan_review.py", "step", "build_learn_prompt"): ADDRESS,
     (
         "implementation.py",
         "_dirty_decision_wait",
@@ -44,7 +44,7 @@ EXPECTED_SCOPES = {
     ("implementation.py", "_testfix_wait", "build_test_fix_prompt"): WRITE,
     ("pr_review.py", "_submit_review_job", "get_pr_review_analysis_prompt"): PR_REVIEW,
     ("pr_review.py", "_validate_wait", "get_review_validation_prompt"): READ_ONLY,
-    ("merge_wait.py", "_request_learn", "build_drive_green_learn_prompt"): WRITE,
+    ("merge_wait.py", "_request_learn", "build_drive_green_learn_prompt"): ADDRESS,
 }
 
 
@@ -58,6 +58,7 @@ def _discover_agent_jobs() -> dict[tuple[str, str, str], str]:
     non-literal value that cannot be checked by this policy test.
     """
     discovered: dict[tuple[str, str, str], str] = {}
+    discovered_locations: dict[tuple[str, str, str], int] = {}
 
     for path in sorted(STAGES_DIR.glob("*.py")):
         tree = ast.parse(path.read_text())
@@ -100,7 +101,15 @@ def _discover_agent_jobs() -> dict[tuple[str, str, str], str]:
                         f"({builder_source}) allowed_tools must be a string literal"
                     )
                 key = (self.filename, function, builder_source)
+                if key in discovered:
+                    pytest.fail(
+                        f"{self.filename}:{node.lineno}: duplicate AgentJob policy key "
+                        f"{key}; previous occurrence at line {discovered_locations[key]}. "
+                        "Include a distinct prompt builder or extend the policy key before "
+                        "adding another constructor with the same identity."
+                    )
                 discovered[key] = scope.value
+                discovered_locations[key] = node.lineno
 
         _Visitor(path.name).visit(tree)
 

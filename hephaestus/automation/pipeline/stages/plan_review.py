@@ -500,7 +500,7 @@ class PlanReviewStage(Stage):
                 prompt_builder=build_learn_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=learn_claude_timeout(),
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_PLANNER,  # resume planner session (legacy parity)
                 prompt_kwargs={"context": item.payload.get("plan_text", "")},
                 descr="learn",
