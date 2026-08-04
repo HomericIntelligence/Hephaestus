@@ -107,7 +107,7 @@ def install_signal_handlers(shutdown_fn: Callable[[], None]) -> None:
 
 
 @contextlib.contextmanager
-def terminal_guard(shutdown_fn: Callable[[], None] | None = None) -> Generator[None, None, None]:
+def terminal_guard(shutdown_fn: Callable[[], None] | None = None) -> Generator[None]:
     """Install signal handlers and restore the terminal on exit.
 
     On enter: installs SIGINT/SIGTERM handlers with double-Ctrl+C escalation

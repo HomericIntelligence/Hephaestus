@@ -2,9 +2,7 @@
 """Tests for dataset downloading utilities."""
 
 import gzip
-import io
 import tarfile
-import warnings
 from http.client import HTTPMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -475,53 +473,14 @@ class TestSecurityHardening:
         assert _verify_or_remove(target, "novel.bin") is True
         assert target.exists()
 
-    def test_extract_tar_uses_data_filter_when_supported(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_extract_tar_uses_data_filter(self, tmp_path: Path) -> None:
         """Modern Python uses the standard-library safe extraction filter."""
         archive = MagicMock(spec=tarfile.TarFile)
-        monkeypatch.setattr(downloader, "_supports_tar_data_filter", lambda: True)
 
         downloader._extract_tar_safely(archive, tmp_path)
 
         archive.extractall.assert_called_once_with(tmp_path, filter="data")
         archive.getmembers.assert_not_called()
-
-    def test_extract_tar_supports_legacy_python(self, tmp_path: Path) -> None:
-        """Python 3.10-compatible extraction handles ordinary CIFAR members."""
-        archive_path = tmp_path / "archive.tar"
-        destination = tmp_path / "destination"
-        destination.mkdir()
-        with tarfile.open(archive_path, "w") as archive:
-            payload = b"portable extraction"
-            member = tarfile.TarInfo("dataset/data.txt")
-            member.size = len(payload)
-            archive.addfile(member, io.BytesIO(payload))
-
-        with tarfile.open(archive_path) as archive:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                with patch.object(downloader, "_supports_tar_data_filter", return_value=False):
-                    downloader._extract_tar_safely(archive, destination)
-
-        assert (destination / "dataset/data.txt").read_bytes() == b"portable extraction"
-
-    def test_extract_tar_rejects_traversal_on_legacy_python(self, tmp_path: Path) -> None:
-        """Legacy extraction rejects zip-slip paths before writing any member."""
-        archive_path = tmp_path / "archive.tar"
-        destination = tmp_path / "destination"
-        with tarfile.open(archive_path, "w") as archive:
-            payload = b"must not escape"
-            member = tarfile.TarInfo("../outside.txt")
-            member.size = len(payload)
-            archive.addfile(member, io.BytesIO(payload))
-
-        with tarfile.open(archive_path) as archive:
-            with patch.object(downloader, "_supports_tar_data_filter", return_value=False):
-                with pytest.raises(tarfile.TarError, match="unsafe archive member"):
-                    downloader._extract_tar_safely(archive, destination)
-
-        assert not (tmp_path / "outside.txt").exists()
 
     def test_fashion_mnist_url_is_https(self) -> None:
         """Fashion-MNIST downloader uses HTTPS, not plain HTTP."""

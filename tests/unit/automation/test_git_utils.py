@@ -41,7 +41,7 @@ from hephaestus.automation.git_utils import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_caches() -> Generator[None, None, None]:
+def _clear_caches() -> Generator[None]:
     """Clear repo caches before each test to avoid cross-test interference."""
     clear_repo_caches()
     yield

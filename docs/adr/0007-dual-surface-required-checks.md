@@ -11,7 +11,7 @@ ADR-0004 established `required-checks-gate` as an aggregate fan-in job so
 workflow membership cannot silently drift from the merge gate. The live
 repository configuration now applies two required-status-check surfaces to
 `main`: classic branch protection requires the aggregate gate and two Python
-3.12 test contexts, while the active repository ruleset requires nine direct
+3.13 test contexts, while the active repository ruleset requires nine direct
 workflow contexts. Treating the ruleset as the only enforcement surface would
 misdescribe the actual merge contract.
 
@@ -21,7 +21,7 @@ Preserve the aggregate gate and document the dual required-check contract:
 
 1. `required-checks-gate` remains a classic branch-protection required context
    and fans in every non-advisory gating job.
-2. The two Python 3.12 matrix contexts remain classic branch-protection
+2. The two Python 3.13 matrix contexts remain classic branch-protection
    required contexts.
 3. The active ruleset's nine direct contexts remain independently required.
 4. The policy runbook validates the exact classic and direct ruleset inventories

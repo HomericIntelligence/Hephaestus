@@ -16,7 +16,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -106,7 +106,7 @@ class AgentRunResult:
     session_id: str | None = None
 
 
-class AgentCapability(str, Enum):
+class AgentCapability(StrEnum):
     """Provider capability names used by the provider-neutral parity contract."""
 
     FILE_READ = "file-read"

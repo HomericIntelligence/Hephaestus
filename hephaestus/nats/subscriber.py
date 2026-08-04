@@ -462,7 +462,7 @@ class NATSSubscriberThread(threading.Thread):
                 for sub in subscriptions:
                     try:
                         msg = await sub.next_msg(timeout=0.5)
-                    except (asyncio.TimeoutError, TimeoutError):
+                    except TimeoutError:
                         # nats-py's next_msg raises nats.errors.TimeoutError (a
                         # subclass of the builtin TimeoutError) on its own timeout,
                         # but the underlying asyncio.wait_for can surface a bare

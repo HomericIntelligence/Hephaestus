@@ -15,7 +15,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -388,7 +388,7 @@ class ReadmeValidator:
         """
         report = ValidationReport(
             level="quick",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             total_blocks=len(blocks),
         )
 
@@ -443,7 +443,7 @@ class ReadmeValidator:
         """
         report = ValidationReport(
             level="comprehensive",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             total_blocks=len(blocks),
         )
 

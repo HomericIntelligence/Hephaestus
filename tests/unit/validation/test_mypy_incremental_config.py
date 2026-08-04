@@ -8,14 +8,10 @@ silently disable it.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib
 
 PYPROJECT = Path(__file__).resolve().parents[3] / "pyproject.toml"
 

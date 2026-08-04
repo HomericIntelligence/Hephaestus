@@ -20,34 +20,8 @@ from __future__ import annotations
 
 import re
 import sys
-import types
+import tomllib
 from pathlib import Path
-
-
-def _get_tomllib() -> types.ModuleType:
-    """Return the ``tomllib`` module, falling back to ``tomli`` on Python 3.10.
-
-    Raises:
-        RuntimeError: When neither ``tomllib`` nor ``tomli`` is importable.
-
-    """
-    # WHY justified: tomllib is stdlib only on Python 3.11+; on 3.10 we fall
-    # back to the `tomli` backport. [no-any-return] — the imported module object
-    # is typed Any; [no-redef] — `tomli as tomllib` rebinds the same name.
-    try:
-        import tomllib  # Python 3.11+
-
-        return tomllib  # type: ignore[no-any-return]
-    except ModuleNotFoundError:  # pragma: no cover — only on Python 3.10
-        try:
-            import tomli as tomllib  # type: ignore[no-redef, unused-ignore]
-
-            return tomllib  # type: ignore[no-any-return]
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "tomllib (stdlib, Python 3.11+) or tomli (pip install tomli) required."
-            ) from exc
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -71,7 +45,6 @@ _DOC_SCAN_GLOBS = ("README.md", "COMPATIBILITY.md", "CLAUDE.md", "docs/**/*.md")
 
 def _load_scripts(repo_root: Path | None = None) -> set[str]:
     """Return the set of command names from pyproject.toml [project.scripts]."""
-    tomllib = _get_tomllib()
     pyproject = (repo_root / "pyproject.toml") if repo_root is not None else PYPROJECT
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     scripts: dict[str, str] = data.get("project", {}).get("scripts", {})

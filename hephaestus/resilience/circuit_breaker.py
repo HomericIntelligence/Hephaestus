@@ -30,7 +30,7 @@ class CircuitBreakerState(enum.Enum):
     HALF_OPEN = "half_open"
 
 
-class CircuitBreakerOpenReason(str, enum.Enum):
+class CircuitBreakerOpenReason(enum.StrEnum):
     """Why a CircuitBreakerOpenError was raised.
 
     Lets callers pick a retry strategy without parsing the message:

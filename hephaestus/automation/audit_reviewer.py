@@ -16,7 +16,7 @@ import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ def _parse_coordinator_results(text: str) -> list[dict[str, Any]]:
 def write_audit_report(state_dir: Path, audits: list[dict[str, Any]]) -> Path:
     """Persist audit results to ``<state_dir>/audit-report-<ts>.json``."""
     state_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = state_dir / f"audit-report-{ts}.json"
     write_secure(path, json.dumps({"audits": audits, "generated_at": ts}, indent=2))
     return path

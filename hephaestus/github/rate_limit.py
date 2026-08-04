@@ -158,7 +158,7 @@ def parse_reset_epoch(time_str: str, tz: str) -> int:
     if tz not in ALLOWED_TIMEZONES:
         tz = "America/Los_Angeles"
 
-    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_utc = dt.datetime.now(dt.UTC)
     today = now_utc.astimezone(ZoneInfo(tz)).date()
 
     m = re.match(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$", time_str, re.IGNORECASE)
@@ -480,7 +480,7 @@ def _parse_reset_with_date(date_str: str, time_str: str, tz: str) -> int:
         if ampm == "am" and hour == _NOON_HOUR:
             hour = _MIDNIGHT_HOUR
 
-    now_local = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo(tz))
+    now_local = dt.datetime.now(dt.UTC).astimezone(ZoneInfo(tz))
     # Year disambiguation: if the parsed month/day is more than 6 months in the
     # past, assume next year (handles end-of-year wrap).
     year = now_local.year

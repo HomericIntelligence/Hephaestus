@@ -11,11 +11,11 @@ import math
 import re
 import threading
 from collections.abc import Mapping
-from typing import TypeAlias, overload
+from typing import overload
 
 _METRIC_NAME_RE = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*\Z")
 _LABEL_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-LabelValues: TypeAlias = tuple[tuple[str, str], ...]
+type LabelValues = tuple[tuple[str, str], ...]
 
 
 def _normalise_labels(labels: Mapping[str, object] | None) -> LabelValues:

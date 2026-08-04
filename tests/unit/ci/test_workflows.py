@@ -7,16 +7,12 @@ import os
 import re
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 has no stdlib tomllib
-    import tomli as tomllib
 
 from hephaestus.ci.workflows import (
     Violation,
@@ -245,7 +241,7 @@ class TestPerformanceWorkflow:
 
         assert uv_step["uses"].startswith("astral-sh/setup-uv@")
         assert uv_step["with"]["enable-cache"] == "true"
-        assert uv_step["with"]["python-version"] == "3.12"
+        assert uv_step["with"]["python-version"] == "3.13"
         assert install_step["run"] == "uv sync --all-groups --all-extras --locked"
         assert uv_index < install_index < collect_index < run_index
         assert collect_step["run"].startswith("uv run pytest tests/performance")

@@ -49,15 +49,12 @@ def load_pyproject_scripts(pyproject_path: Path) -> dict[str, str]:
     """Return the ``[project.scripts]`` mapping from *pyproject_path*.
 
     Raises:
-        RuntimeError: When neither ``tomllib`` (Python 3.11+) nor the
-            ``tomli`` backport is available.
+        RuntimeError: When ``tomllib`` is unavailable.
 
     """
     tomllib = import_tomllib()
     if tomllib is None:
-        raise RuntimeError(
-            "tomllib (Python 3.11+) or the 'tomli' backport is required to parse pyproject.toml"
-        )
+        raise RuntimeError("tomllib is required to parse pyproject.toml")
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     return dict(data.get("project", {}).get("scripts", {}))
 
