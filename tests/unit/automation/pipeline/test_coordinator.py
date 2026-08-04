@@ -92,6 +92,7 @@ def make_coordinator(
     monkeypatch: pytest.MonkeyPatch,
     *,
     repos: list[str] | None = None,
+    issues: list[int] | None = None,
     seed_entries: list[list[SeedEntry]] | None = None,
     loops: int = 1,
     max_workers: int = 1,
@@ -105,6 +106,7 @@ def make_coordinator(
     config = PipelineConfig(
         org="org",
         repos=repos if repos is not None else ["repo-a"],
+        issues=issues if issues is not None else [],
         loops=loops,
         max_workers=max_workers,
         parallel_repos=parallel_repos,
@@ -1082,7 +1084,9 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A relative configured worktree still verifies Git's absolute holder path."""
-        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, issues=[22, 23]
+        )
         monkeypatch.chdir(tmp_path)
         shared_branch = "shared-head"
         owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
@@ -1926,6 +1930,70 @@ class TestImplementationAdmission:
 
         assert len(pool.submitted) == 2
         assert fetches == [21]
+        assert id(item) not in coordinator._implementation_file_claims
+        assert "_implementation_file_claims" not in item.payload
+
+    def test_reviewed_pr_realized_diff_blocks_overlapping_direct_issue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A PR under review retains its plan and newly verified diff claims."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            issues=[22, 23],
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+        )
+        active = _issue_item(21, StageName.PR_REVIEW)
+        active.pr = 701
+        active.payload["_implementation_file_claims"] = {(("org", "repo-a"), "planned.py")}
+        active.payload["pr_diff"] = (
+            "diff --git a/AGENTS.md b/AGENTS.md\n--- a/AGENTS.md\n+++ b/AGENTS.md\n"
+        )
+        assert coordinator._push_item(active, StageName.PR_REVIEW, enter=True)
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        plans = {22: {"AGENTS.md"}, 23: {"independent.py"}}
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            lambda issue, **_kwargs: plans[issue],
+        )
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+        source = coordinator._direct_issue_source
+        assert source is not None
+        source.issues = deque([22, 23])
+
+        assert coordinator._drain_direct_issue_source() == 1
+        queued = coordinator.queues[StageName.IMPLEMENTATION].snapshot()
+        assert [item.issue for item in queued] == [23]
+        assert coordinator._active_implementation_file_claims() >= {
+            (("org", "repo-a"), "planned.py"),
+            (("org", "repo-a"), "AGENTS.md"),
+        }
+
+    def test_overlap_claims_survive_review_and_merge_wait_until_finished(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Implementation ownership ends only when the active PR lifecycle ends."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        claim = (("org", "repo-a"), "shared.py")
+        item.payload["_implementation_file_claims"] = {claim}
+        coordinator._implementation_file_claims[id(item)] = {claim}
+
+        coordinator._clear_implementation_file_claims_on_exit(item, StageName.PR_REVIEW)
+        assert coordinator._implementation_file_claims[id(item)] == {claim}
+        assert item.payload["_implementation_file_claims"] == {claim}
+
+        item.stage = StageName.PR_REVIEW
+        coordinator._clear_implementation_file_claims_on_exit(item, StageName.MERGE_WAIT)
+        assert coordinator._implementation_file_claims[id(item)] == {claim}
+
+        item.stage = StageName.MERGE_WAIT
+        coordinator._clear_implementation_file_claims_on_exit(item, StageName.FINISHED)
         assert id(item) not in coordinator._implementation_file_claims
         assert "_implementation_file_claims" not in item.payload
 
