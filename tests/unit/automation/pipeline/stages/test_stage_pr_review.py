@@ -1272,6 +1272,35 @@ class TestPrReviewStageStep:
         assert item.payload["review_audit"] == audit
         assert item.payload["host_verification_receipts"] == receipts
 
+    def test_deleted_unit_tests_do_not_schedule_changed_pytest_specs(self) -> None:
+        """Deleted tests have no new-side path for host pytest to execute."""
+        deleted_path = "tests/unit/automation/pipeline/stages/test_deleted.py"
+        kept_path = "tests/unit/automation/pipeline/stages/test_kept.py"
+        specs = stage_module._host_verification_specs(
+            f"diff --git a/{deleted_path} b/{deleted_path}\n"
+            "deleted file mode 100644\n"
+            f"--- a/{deleted_path}\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-def test_removed() -> None:\n"
+            "-    pass\n"
+            f"diff --git a/{kept_path} b/{kept_path}\n"
+            f"--- a/{kept_path}\n"
+            f"+++ b/{kept_path}\n"
+            "@@ -1 +1 @@\n"
+            "-def test_old() -> None: pass\n"
+            "+def test_new() -> None: pass\n"
+        )
+
+        changed_pytest_specs = tuple(
+            spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
+        )
+
+        assert len(changed_pytest_specs) == 1
+        assert changed_pytest_specs[0].changed_path == kept_path
+        assert kept_path in changed_pytest_specs[0].argv
+        assert deleted_path not in changed_pytest_specs[0].argv
+
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
