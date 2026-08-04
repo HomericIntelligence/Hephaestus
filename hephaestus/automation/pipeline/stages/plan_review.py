@@ -432,6 +432,8 @@ class PlanReviewStage(Stage):
                 prompt_builder=get_plan_loop_review_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=plan_reviewer_claude_timeout(),
+                sandbox="read-only",
+                allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLAN_REVIEWER,
                 # get_plan_loop_review_prompt takes a 0-based iteration index
                 # (full-sweep suffix on the final iteration). Issue title/body
@@ -471,6 +473,8 @@ class PlanReviewStage(Stage):
                 prompt_builder=build_amend_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                sandbox="read-only",
+                allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,
                 # build_amend_prompt composes get_plan_prompt with the
                 # reviewer feedback block in-worker (doc: "resume planner
@@ -498,6 +502,7 @@ class PlanReviewStage(Stage):
                 prompt_builder=build_learn_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=learn_claude_timeout(),
+                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_PLANNER,  # resume planner session (legacy parity)
                 prompt_kwargs={"context": item.payload.get("plan_text", "")},
                 descr="learn",

@@ -552,6 +552,7 @@ class MergeWaitStage(Stage):
             prompt_builder=build_drive_green_learn_prompt,
             cwd=_worktree_path(item, ctx),
             timeout_s=learn_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
             session_agent=AGENT_LEARNINGS,
             prompt_kwargs={"issue_number": item.issue, "pr_number": item.pr},
             descr="drive_green_learn",
