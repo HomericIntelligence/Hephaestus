@@ -308,6 +308,12 @@ _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
         "tox.ini",
     }
 )
+#: This suite exercises the host verifier's own disk-image and sandbox
+#: primitives. Running it inside that verifier would require nested mounts and
+#: produces runner failures rather than meaningful code evidence.
+_NONHERMETIC_HOST_UNIT_TEST_PATHS = frozenset(
+    {"tests/unit/automation/pipeline/test_worker_pool.py"}
+)
 #: Some Python regressions require additional bounded execution beyond the
 #: baseline review plan.  Their path trigger is derived only from a real Git
 #: diff header, never from reviewer or GitHub prose.
@@ -353,7 +359,9 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
             sorted(
                 path
                 for path in changed_paths
-                if path.startswith("tests/unit/") and path.endswith(".py")
+                if path.startswith("tests/unit/")
+                and path.endswith(".py")
+                and path not in _NONHERMETIC_HOST_UNIT_TEST_PATHS
             )
         )
     )

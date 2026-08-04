@@ -1158,6 +1158,8 @@ class TestPrReviewStageStep:
                 "pr_diff": (
                     "diff --git a/tests/unit/automation/pipeline/stages/test_stage_pr_review.py "
                     "b/tests/unit/automation/pipeline/stages/test_stage_pr_review.py\n"
+                    "diff --git a/tests/unit/automation/pipeline/test_worker_pool.py "
+                    "b/tests/unit/automation/pipeline/test_worker_pool.py\n"
                     "diff --git a/tests/performance/test_worker_pool_load.py "
                     "b/tests/performance/test_worker_pool_load.py\n"
                     "--- a/tests/performance/test_worker_pool_load.py\n"
