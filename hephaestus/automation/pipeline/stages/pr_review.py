@@ -502,6 +502,7 @@ _ROUND_PAYLOAD_KEYS = (
     "prior_comments_json",
     "validation_threads",
     "validation_receipt_fingerprints",
+    "validation_pr_metadata_fingerprint",
     "scope_retraction_paths",
     "reviewed_pr_base_sha",
     "host_verification_receipts",
@@ -804,6 +805,30 @@ def _validation_receipt_fingerprints(
         )
         fingerprints[thread_id] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return fingerprints
+
+
+def _validation_pr_metadata_fingerprint(
+    pr_context: dict[str, str] | None, reviewed_head: str
+) -> str | None:
+    """Bind a validator decision to the exact live title/body it reviewed."""
+    if (
+        pr_context is None
+        or pr_context.get("pr_head_sha") != reviewed_head
+        or not isinstance(pr_context.get("pr_title"), str)
+        or not isinstance(pr_context.get("pr_description"), str)
+    ):
+        return None
+    canonical = json.dumps(
+        {
+            "head_sha": reviewed_head,
+            "pr_description": pr_context["pr_description"],
+            "pr_title": pr_context["pr_title"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _reviewer_thread_decisions(  # noqa: C901
@@ -1408,18 +1433,17 @@ class PrReviewStage(Stage):
             )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        if (
-            pr_context is None
-            or pr_context.get("pr_head_sha") != reviewed_head
-            or not isinstance(pr_context.get("pr_title"), str)
-            or not isinstance(pr_context.get("pr_description"), str)
-        ):
+        metadata_fingerprint = _validation_pr_metadata_fingerprint(pr_context, reviewed_head)
+        if metadata_fingerprint is None:
             logger.warning(
                 "pr_review:%s: fresh validation metadata did not match reviewed head",
                 item.issue,
             )
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        validated_pr_context = cast(dict[str, str], pr_context)
+        pr_title = validated_pr_context["pr_title"]
+        pr_description = validated_pr_context["pr_description"]
         validation_threads = _validation_thread_snapshots(live_threads, receipts)
         receipt_fingerprints = _validation_receipt_fingerprints(receipts)
         if validation_threads is None or receipt_fingerprints is None:
@@ -1427,6 +1451,7 @@ class PrReviewStage(Stage):
             return Continue(next_state=EVAL)
         item.payload["validation_threads"] = validation_threads
         item.payload["validation_receipt_fingerprints"] = receipt_fingerprints
+        item.payload["validation_pr_metadata_fingerprint"] = metadata_fingerprint
         item.payload["prior_comments_json"] = json.dumps(
             validation_threads, ensure_ascii=False, sort_keys=True
         )
@@ -1447,8 +1472,8 @@ class PrReviewStage(Stage):
                 "issue_number": item.issue,
                 "prior_comments_json": item.payload["prior_comments_json"],
                 "diff_text": item.payload.get("pr_diff", ""),
-                "pr_title": pr_context["pr_title"],
-                "pr_description": pr_context["pr_description"],
+                "pr_title": pr_title,
+                "pr_description": pr_description,
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
@@ -2088,9 +2113,10 @@ class PrReviewStage(Stage):
                 if is_full_commit_sha(reviewed_head)
                 else []
             )
+            pr_context = ctx.github.pr_review_context(item.pr)
         except Exception as error:
             logger.warning(
-                "pr_review:%s: could not refresh reviewer validation receipts (%s)",
+                "pr_review:%s: could not refresh reviewer validation inputs (%s)",
                 item.issue,
                 type(error).__name__,
             )
@@ -2098,9 +2124,33 @@ class PrReviewStage(Stage):
             return Continue(next_state=EVAL)
         live_receipt_fingerprints = _validation_receipt_fingerprints(validation_receipts)
         validated_receipt_fingerprints = item.payload.get("validation_receipt_fingerprints")
+        live_metadata_fingerprint = _validation_pr_metadata_fingerprint(pr_context, reviewed_head)
+        validated_metadata_fingerprint = item.payload.get("validation_pr_metadata_fingerprint")
         if live_receipt_fingerprints is None:
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
+        metadata_guard_expected = validated_receipt_fingerprints is not None or (
+            "validation_pr_metadata_fingerprint" in item.payload
+        )
+        if metadata_guard_expected and (
+            live_metadata_fingerprint is None
+            or not isinstance(validated_metadata_fingerprint, str)
+            or validated_metadata_fingerprint != live_metadata_fingerprint
+        ):
+            # The validator reviewed a different PR title/body (or head) than
+            # the current live metadata.  Metadata-only remediations are
+            # reviewable evidence, so a same-head edit after validation must
+            # restart validation before any thread reconciliation can happen.
+            item.payload.pop("validation_result", None)
+            item.payload.pop("validation_threads", None)
+            item.payload.pop("validation_receipt_fingerprints", None)
+            item.payload.pop("validation_pr_metadata_fingerprint", None)
+            logger.info(
+                "pr_review:%s: PR metadata changed after validation; "
+                "revalidating before reconciliation",
+                item.issue,
+            )
+            return Continue(next_state=VALIDATE_WAIT)
         if validated_receipt_fingerprints is not None and (
             not isinstance(validated_receipt_fingerprints, dict)
             or validated_receipt_fingerprints != live_receipt_fingerprints
@@ -2111,6 +2161,7 @@ class PrReviewStage(Stage):
             item.payload.pop("validation_result", None)
             item.payload.pop("validation_threads", None)
             item.payload.pop("validation_receipt_fingerprints", None)
+            item.payload.pop("validation_pr_metadata_fingerprint", None)
             logger.info(
                 "pr_review:%s: implementation reply receipt changed after validation; "
                 "revalidating before reconciliation",
@@ -2156,6 +2207,7 @@ class PrReviewStage(Stage):
                 item.payload.pop("validation_result", None)
                 item.payload.pop("validation_threads", None)
                 item.payload.pop("validation_receipt_fingerprints", None)
+                item.payload.pop("validation_pr_metadata_fingerprint", None)
                 return Continue(next_state=REVIEW_WAIT)
             # A concurrent mutation can make one receipt ineligible after a
             # previous receipt was safely resolved or received feedback.  Do
