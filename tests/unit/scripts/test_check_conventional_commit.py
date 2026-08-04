@@ -1,12 +1,16 @@
 """Tests for scripts/check_conventional_commit.py."""
 
+import io
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 
 from check_conventional_commit import (
     _subjects_from_args,
+    main,
     validate_subject,
 )
 
@@ -55,6 +59,41 @@ class TestValidateSubject:
         assert validate_subject("Merge branch 'main'") is None
         assert validate_subject('Revert "feat: x"') is None
         assert validate_subject("fixup! fix: x") is None
+
+    def test_rejects_machinery_when_disabled(self) -> None:
+        for subject in (
+            "Merge branch 'main'",
+            'Revert "feat: x"',
+            "fixup! fix: x",
+            "squash! fix: x",
+        ):
+            assert validate_subject(subject, allow_machinery=False) is not None
+
+    def test_accepts_machinery_by_default(self) -> None:
+        assert validate_subject("Merge branch 'main'") is None
+
+
+class TestMain:
+    """Tests for command-line validation modes."""
+
+    @pytest.mark.parametrize(
+        "subject",
+        ["fix:description", "fix:\tdescription", "fix:"],
+    )
+    def test_strict_mode_rejects_nonconforming_description(
+        self,
+        subject: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(subject + "\n"))
+        assert main(["--strict", "-"]) == 1
+
+    def test_strict_mode_rejects_machinery_from_stdin(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys, "stdin", io.StringIO("Merge branch 'main'\n"))
+        assert main(["--strict", "-"]) == 1
 
 
 class TestSubjectsFromArgs:
