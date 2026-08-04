@@ -646,10 +646,7 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     deterministic.
     """
     expected = session_jsonl_path(uuid_str, cwd)
-    candidates = {expected}
-    candidates.update(
-        session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)
-    )
+    candidates = {session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)}
     existing = sorted(
         (candidate for candidate in candidates if candidate.is_file()),
         key=str,

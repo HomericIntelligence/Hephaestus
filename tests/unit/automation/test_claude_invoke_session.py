@@ -119,6 +119,45 @@ class TestCreateThenResume:
         assert "--session-id" not in argv
         assert "--name" not in argv
 
+    def test_lossy_path_collision_does_not_resume_unregistered_checkout(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """Dotted/dashed checkout path collisions stay isolated by checkout id."""
+        dotted = fake_home / "owner.a" / "Repo"
+        dashed = fake_home / "owner-a" / "Repo"
+        dotted.mkdir(parents=True)
+        dashed.mkdir(parents=True)
+
+        dotted_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "sonnet", cwd=dotted)
+        dashed_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "sonnet", cwd=dashed)
+        assert dotted_sid != dashed_sid
+
+        dotted_path = session_jsonl_path(dotted_sid, dotted)
+        dashed_path = session_jsonl_path(dashed_sid, dashed)
+        assert dotted_path.parent == dashed_path.parent
+        dashed_path.parent.mkdir(parents=True, exist_ok=True)
+        dashed_path.write_text("{}\n", encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(dotted.resolve(),),
+        ):
+            _, sid = invoke_claude_with_session(
+                repo="Repo",
+                issue=2284,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="sonnet",
+                cwd=dotted,
+            )
+
+        argv = _argv(stub_run.call_args)
+        assert sid == dotted_sid
+        assert "--session-id" in argv
+        assert dotted_sid in argv
+        assert "--resume" not in argv
+        assert dashed_sid not in argv
+
     def test_different_models_get_different_uuids(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:
