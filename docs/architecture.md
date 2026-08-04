@@ -1429,6 +1429,13 @@ pre-PR test gate. Its vetted default is `uv run pytest tests -q --tb=short`;
 programmatic callers can supply `PipelineConfig.pre_pr_test_argv` for a
 different vetted test command.
 
+For hosts that cannot install GitHub CLI in the system-owned locations, the
+automation loop accepts the explicit, CLI-only
+`--gh-extra-path-root ROOT` exception. It admits only `ROOT/bin/gh`; `ROOT`
+must be absolute, the executable must be executable, and its resolved path
+must remain below `ROOT`. The loop does not read an environment equivalent and
+does not discover this exception through `PATH`.
+
 Three Codex-only flags control per-role reasoning effort:
 `--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
 analogous `--reviewer-reasoning-effort` and `--implementer-reasoning-effort`

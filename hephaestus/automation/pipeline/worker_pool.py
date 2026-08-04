@@ -1126,9 +1126,17 @@ def _trusted_git_executable() -> str | None:
     return None
 
 
-def _trusted_gh_executable() -> str | None:
-    """Return a supported absolute ``gh`` binary without consulting ``PATH``."""
-    for candidate in _TRUSTED_GH_CANDIDATES:
+def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
+    """Return an allowed absolute ``gh`` binary without consulting ``PATH``.
+
+    ``extra_path_root`` is an explicit operator authority passed only through
+    the loop CLI.  It contributes exactly ``<root>/bin/gh`` and rejects a
+    candidate whose resolved path escapes that root.
+    """
+    candidates: tuple[Path, ...] = _TRUSTED_GH_CANDIDATES
+    if extra_path_root is not None:
+        candidates = (*candidates, extra_path_root / "bin" / "gh")
+    for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)
         except OSError:
@@ -1137,6 +1145,13 @@ def _trusted_gh_executable() -> str | None:
             continue
         if any(resolved.is_relative_to(root) for root in _TRUSTED_GH_ROOTS):
             return str(resolved)
+        if extra_path_root is not None:
+            try:
+                resolved_root = extra_path_root.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved.is_relative_to(resolved_root):
+                return str(resolved)
     return None
 
 
@@ -1313,6 +1328,7 @@ class WorkerPool:
         shutdown: threading.Event,
         completion_q: CompletionQueue,
         lock_dir: Path | None = None,
+        gh_extra_path_root: Path | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1325,6 +1341,8 @@ class WorkerPool:
             lock_dir: Optional override for the cross-process git lock
                 directory (tests inject a temp dir; defaults to the shared
                 automation state dir — see :func:`_repo_lock_path`).
+            gh_extra_path_root: Explicit CLI-provided root that may supply
+                only ``bin/gh`` for checkout synchronization.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1338,6 +1356,7 @@ class WorkerPool:
         self._repo_locks: dict[str, _RepoLockEntry] = {}
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
+        self._gh_extra_path_root = gh_extra_path_root
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
@@ -2079,9 +2098,15 @@ class WorkerPool:
         branch = branch_result.stdout.strip()
         if branch_result.returncode != 0 or not branch:
             return JobResult(ok=False, error=f"checkout is detached: {checkout}")
-        gh_command = _trusted_gh_executable()
+        gh_command = _trusted_gh_executable(self._gh_extra_path_root)
         if gh_command is None:
-            return JobResult(ok=False, error="required GitHub executable is unavailable")
+            return JobResult(
+                ok=False,
+                error=(
+                    "required GitHub executable is unavailable; pass "
+                    "--gh-extra-path-root ROOT when ROOT/bin/gh is the intended installation"
+                ),
+            )
         default_branch = git_utils.run(
             [gh_command, "api", f"repos/{expected_repo}", "--jq", ".default_branch"],
             cwd=checkout,

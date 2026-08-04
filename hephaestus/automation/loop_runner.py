@@ -114,6 +114,30 @@ def _parse_positive_int(value: str) -> int:
     return number
 
 
+def _parse_gh_extra_path_root(value: str) -> Path:
+    """Validate an explicit root whose only admitted executable is ``bin/gh``."""
+    root = Path(value).expanduser()
+    if not root.is_absolute():
+        raise argparse.ArgumentTypeError("--gh-extra-path-root must be an absolute path")
+    try:
+        resolved_root = root.resolve(strict=True)
+        executable = (resolved_root / "bin" / "gh").resolve(strict=True)
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(
+            "--gh-extra-path-root must contain an executable bin/gh"
+        ) from exc
+    if (
+        not resolved_root.is_dir()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+        or not executable.is_relative_to(resolved_root)
+    ):
+        raise argparse.ArgumentTypeError(
+            "--gh-extra-path-root must contain an executable bin/gh without symlink escapes"
+        )
+    return resolved_root
+
+
 def _parse_positive_int_list(value: str, label: str) -> list[int]:
     """Split a comma-separated list into positive integers."""
     numbers: list[int] = []
@@ -226,6 +250,9 @@ class LoopConfig:
     planner_reasoning_effort: str = ""
     reviewer_reasoning_effort: str = ""
     implementer_reasoning_effort: str = ""
+    # Explicit, CLI-only extension to the system ``gh`` installation roots.
+    # The parser admits only ``<root>/bin/gh`` and never consults an env var.
+    gh_extra_path_root: Path | None = None
     gh_global_rate: float = 10.0
     gh_global_burst: float = 30.0
     # Org is resolved at runtime from --org / --repos / cwd detection; no
@@ -344,6 +371,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--run-pre-pr-tests",
         action="store_true",
         help=("Run the implementation-stage pre-PR test gate before committing and creating PRs."),
+    )
+    p.add_argument(
+        "--gh-extra-path-root",
+        type=_parse_gh_extra_path_root,
+        default=None,
+        metavar="ROOT",
+        help=(
+            "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
+            "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
+        ),
     )
     p.add_argument(
         "--model",
@@ -703,6 +740,7 @@ def _build_pipeline_config(
         planner_reasoning_effort=cfg.planner_reasoning_effort,
         reviewer_reasoning_effort=cfg.reviewer_reasoning_effort,
         implementer_reasoning_effort=cfg.implementer_reasoning_effort,
+        gh_extra_path_root=cfg.gh_extra_path_root,
         no_advise=cfg.no_advise,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
@@ -873,6 +911,7 @@ def main(argv: list[str] | None = None) -> int:
         planner_reasoning_effort=args.planner_reasoning_effort,
         reviewer_reasoning_effort=args.reviewer_reasoning_effort,
         implementer_reasoning_effort=args.implementer_reasoning_effort,
+        gh_extra_path_root=args.gh_extra_path_root,
         gh_global_rate=args.gh_global_rate,
         gh_global_burst=args.gh_global_burst,
         org=org,
