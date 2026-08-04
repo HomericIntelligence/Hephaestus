@@ -2,6 +2,15 @@
 
 **Status:** Proposed
 
+**Owner:** The prompt subsystem owner defined by
+[CODEOWNERS](../../.github/CODEOWNERS).
+
+**Review trigger:** Any change to `PromptCatalog`, packaged template layout,
+override precedence, or prompt parity requirements.
+
+**Maintained sources:** [`PromptCatalog`](../../hephaestus/prompts/catalog.py)
+and the [packaged default templates](../../hephaestus/prompts/templates/default/).
+
 ## Goal
 
 Move every built-in, agent-facing Hephaestus prompt and reusable prompt

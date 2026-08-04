@@ -6,21 +6,21 @@ Hephaestus is the foundational utilities and tooling repository of the HomericIn
 
 ## Current Focus (Q3 2026)
 
-Remediation of the strict 2026-05-28 audit findings (`audit-finding` issues) continues, now alongside hardening of the queue-based automation pipeline delivered under Epic #1809 and the fail-closed auto-merge bootstrap (#2054/#2055). This ongoing work spans:
+Current focus is reconciled from
+[open epics](https://github.com/HomericIntelligence/Hephaestus/issues?q=is%3Aopen%20label%3Aepic)
+and
+[open audit findings](https://github.com/HomericIntelligence/Hephaestus/issues?q=is%3Aopen%20label%3Aaudit-finding)
+at the maintenance triggers below.
 
-1. **Audit Remediation** — Addressing the open `audit-finding` issues across the 15 audit dimensions. Focus areas include documentation currency, automation module test coverage, fixing f-string logging anti-patterns, and continued hardening of the 3-stage review-PR pipeline (collapsed from the prior 6-phase design in #677/#679).
-
-2. **Automation Pipeline Hardening** — Stabilizing the queue-based
-   plan → implement → review pipeline (Epic #1809): drive-green loop
-   behavior, linked-issue PR recovery, epic/skip-tag scoping, and restoring
-   the reviewed-head interlock and bounded SHA-conditional normal merge in
-   `merge_wait` for a confirmed-unarmed PR.
-
-3. **CLI Tool Coverage Expansion** — Expanding the CLI entry point test suite from 13 of 47 declared tools to full coverage, ensuring all command-line interfaces are properly validated.
-
-4. **Test Coverage Hardening** — Bringing 12 excluded automation modules into coverage measurement with mocked unit tests for core orchestration logic.
-
-5. **Security & Dependency Management** — Hard-blocking pip-audit failures in CI and resolving dependency consistency issues across pyproject.toml and pyproject.toml.
+1. **Audit Remediation** — Address documentation currency, testability,
+   security, and maintainability findings represented by open audit issues.
+2. **Automation Pipeline Hardening** — Improve queue convergence, recovery,
+   review gates, and merge-wait safety using the queue pipeline's source and
+   architecture contracts.
+3. **CLI Inventory Parity** — Keep declared console scripts documented and
+   tested from the `[project.scripts]` source of truth.
+4. **Coverage Hardening** — Reduce orchestration coverage omissions while
+   retaining unit coverage for pure helpers.
 
 ## Near-term (Next 1-2 Quarters)
 
@@ -48,9 +48,9 @@ Conservative, directional items:
 
 ## How We Plan
 
-Hephaestus uses an Epic-and-children issue pattern for project planning. Major initiatives are tracked as Epic issues (labeled `epic`), with breakdown into concrete child issues tagged by audit section and severity.
-
-**Exemplar:** Epic #310 (Strict audit 2026-04-28, now closed) contained 29 child issues spanning all 15 audit dimensions, with clear scoping and evidence-based requirements.
+Hephaestus uses an Epic-and-children issue pattern for project planning. Major
+initiatives are represented by open Epic issues, with concrete child issues
+carrying their own acceptance evidence.
 
 We also capture session learnings in Mnemosyne via the `/learn` skill, preserving team knowledge about patterns, anti-patterns, and decisions across the ecosystem.
 
@@ -77,4 +77,4 @@ that is the release maintainer; there is no separate roadmap committee.
 PR editing it directly). The roadmap is refreshed to reflect current focus
 areas as Epics are created or priorities shift.
 
-Last updated: 2026-07-18
+Last updated: 2026-07-20
