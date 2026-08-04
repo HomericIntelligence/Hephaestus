@@ -24,6 +24,9 @@ dist/
 *.egg
 *.pyc
 
+# Legacy Hypothesis cache location (tests route storage under build/)
+/.hypothesis/
+
 # Virtual environments
 .venv/
 venv/
