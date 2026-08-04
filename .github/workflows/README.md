@@ -8,6 +8,7 @@
 | auto-label-needs-plan.yml | Applies `state:needs-plan` to opened or reopened issues and exposes the reusable issue-label workflow. | workflow_call, issues opened/reopened |
 | auto-label-severity.yml | Reconciles `severity:*` labels from issue form content. | issues opened/edited |
 | auto-tag.yml | Manually computes and pushes the next signed release tag. | workflow_dispatch |
+| contract.yml | Opt-in authenticated GitHub and agent contract tests. | workflow_dispatch |
 | merge-queue-smoke.yml | Single fast `merge-queue-smoke` job for merge-queue entries (lockfile, workflow-schema, and symlink validation). | merge_group |
 | nightly-tests.yml | Runs the high-cost functional tests excluded from pull-request checks. | schedule, workflow_dispatch |
 | performance.yml | Runs bounded worker-pool capacity, latency, and sustained-concurrency tests and retains the JSON report. | schedule, workflow_dispatch |
