@@ -150,6 +150,7 @@ class FakeStageGitHub(FakeGitHub):
             pr_review_context
             if pr_review_context is not None
             else {
+                "pr_title": "A current PR title",
                 "pr_description": "Closes #1",
                 "pr_head_sha": "a" * 40,
                 "pr_base_branch": "main",

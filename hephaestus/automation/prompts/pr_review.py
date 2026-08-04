@@ -103,6 +103,8 @@ def get_review_validation_prompt(
     prior_comments_json: str,
     diff_text: str = "",
     host_verifications_json: str = "",
+    pr_title: str = "",
+    pr_description: str = "",
     review_context_kind: str = "issue",
 ) -> str:
     """Get the prompt that validates whether prior review comments were addressed.
@@ -126,6 +128,8 @@ def get_review_validation_prompt(
         diff_text: The current cumulative PR diff.
         host_verifications_json: Host-captured output from every fixed,
             repository-owned validation command bound to the reviewed head.
+        pr_title: Current GitHub PR title captured with the reviewed head.
+        pr_description: Current GitHub PR body captured with the reviewed head.
         review_context_kind: Human-readable numeric context kind for the
             prompt header (defaults to ``"issue"``).
 
@@ -145,6 +149,8 @@ def get_review_validation_prompt(
             "HOST_VERIFICATIONS",
             host_verifications_json or "[]",
         ),
+        pr_title_block=fenced.fence("PR_TITLE", pr_title),
+        pr_description_block=fenced.fence("PR_DESCRIPTION", pr_description),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )

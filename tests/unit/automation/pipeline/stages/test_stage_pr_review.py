@@ -996,6 +996,7 @@ class TestPrReviewStageStep:
         stage = PrReviewStage()
         ctx = make_ctx(config=SimpleNamespace(agent="codex"))
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
         item.session_ids["pr-reviewer"] = "review-session-id"
 
         result = stage.step(item, ctx)
@@ -1090,6 +1091,7 @@ class TestPrReviewStageStep:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         validation = stage.step(item, ctx)
         assert isinstance(validation, JobRequest)
@@ -1144,12 +1146,59 @@ class TestPrReviewStageStep:
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert result.on_done_state == "POST"
         assert result.job.descr == "validate"
+
+    def test_validate_wait_includes_fresh_head_bound_pr_metadata(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A PR-body-only remediation is visible to the reply validator."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_title": "docs(policy): remove stale claim",
+                "pr_description": "Current factual summary.\n\nCloses #1",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.prompt_kwargs["pr_title"] == "docs(policy): remove stale claim"
+        assert result.job.prompt_kwargs["pr_description"] == (
+            "Current factual summary.\n\nCloses #1"
+        )
+
+    def test_validate_wait_fails_closed_when_fresh_metadata_head_drifted(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Metadata from a different head cannot resolve reviewed-head threads."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_review_context={
+                "pr_title": "changed title",
+                "pr_description": "changed body",
+                "pr_head_sha": "b" * 40,
+                "pr_base_branch": "main",
+            }
+        )
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="EVAL")
+        assert item.payload["review_audit_failure"] is True
 
     def test_checkout_runs_registered_host_verification_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
@@ -2931,6 +2980,7 @@ class TestReviewThreadLifecycle:
         """The reviewer validates every open host-read thread, not only reply receipts."""
         stage = PrReviewStage()
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
         first_thread = self._thread("thread-1", 3, "fix this")
         inherited = self._thread("inherited", 8, "manual review")
 
@@ -3155,6 +3205,72 @@ class TestReviewThreadLifecycle:
 
         assert result == Continue(next_state="VALIDATE_WAIT")
         assert github.reconciliation_calls == []
+
+    def test_same_head_pr_metadata_mutation_restarts_validation_before_reconciliation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A validator decision for one title/body cannot act after metadata changes."""
+        thread = self._thread("thread-1", 3, "fix this")
+        thread["comments"].append(
+            {
+                "id": "implementation-reply",
+                "author": "hephaestus[bot]",
+                "body": "Updated the PR metadata only.",
+            }
+        )
+
+        class MetadataRaceGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(
+                    pr_review_context={
+                        "pr_title": "docs(policy): corrected",
+                        "pr_description": "Current factual summary.\n\nCloses #1",
+                        "pr_head_sha": "a" * 40,
+                        "pr_base_branch": "main",
+                    }
+                )
+                self.reconciliation_calls: list[dict[str, Any]] = []
+
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [dict(thread)]
+
+            def reconcile_reviewer_validated_threads(self, *args: Any, **kwargs: Any) -> Any:
+                self.reconciliation_calls.append(dict(kwargs))
+                return super().reconcile_reviewer_validated_threads(*args, **kwargs)
+
+        github = MetadataRaceGitHub()
+        ctx = make_ctx(github=github)
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
+        item.payload["reviewed_pr_head_sha"] = "a" * 40
+
+        validation = stage.step(item, ctx)
+        assert isinstance(validation, JobRequest)
+        original_fingerprint = item.payload["validation_pr_metadata_fingerprint"]
+
+        github._pr_review_context = {
+            "pr_title": "docs(policy): stale claim restored",
+            "pr_description": "Stale factual summary.\n\nCloses #1",
+            "pr_head_sha": "a" * 40,
+            "pr_base_branch": "main",
+        }
+        item.state = "POST"
+        item.payload.update(
+            {
+                "validation_result": {"resolved": ["thread-1"], "unaddressed": []},
+                "review_audit": _valid_audit(),
+                "review_threads": [],
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        assert github.reconciliation_calls == []
+        assert item.payload.get("validation_pr_metadata_fingerprint") is None
+        assert item.payload.get("validation_result") is None
+        assert original_fingerprint
 
     @pytest.mark.parametrize(
         ("pr_state", "validation_result", "authors"),

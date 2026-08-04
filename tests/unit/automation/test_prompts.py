@@ -1168,6 +1168,22 @@ class TestReviewValidationPrompt:
         assert "_HOST_VERIFICATIONS\n" in out
         assert "UNTRUSTED" in out
 
+    def test_includes_current_pr_metadata_as_fenced_untrusted_input(self) -> None:
+        """Metadata-only remediation is reviewable without trusting GitHub prose."""
+        out = prompts.get_review_validation_prompt(
+            pr_number=42,
+            issue_number=7,
+            prior_comments_json="[]",
+            pr_title="docs(policy): remove stale claim",
+            pr_description="Current factual summary.\n\nCloses #7",
+        )
+
+        assert "docs(policy): remove stale claim" in out
+        assert "Current factual summary." in out
+        assert "_PR_TITLE\n" in out
+        assert "_PR_DESCRIPTION\n" in out
+        assert "UNTRUSTED" in out
+
     def test_renders_with_brace_containing_body(self) -> None:
         out = prompts.get_review_validation_prompt(
             pr_number=1,
