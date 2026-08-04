@@ -36,7 +36,7 @@ from hephaestus.automation import subprocess_registry
 from hephaestus.automation.agent_config import (
     agent_default_timeout,
     fallback_model,
-    session_jsonl_path,
+    resolve_session_jsonl_path,
     session_name,
 )
 from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
@@ -299,11 +299,13 @@ def _invoke_claude_once(
     # auto-create — it errors "No conversation found" for an unknown id — so the
     # first call for a (repo, issue, agent, model) key must use ``--session-id``
     # to create the transcript; every later call ``--resume``s it to reuse cached
-    # context. The probe is the transcript file's existence, which is model-keyed
-    # because ``sid`` is. This is NOT the old recreate-on-failure cascade (that
-    # mis-fired on 429s, re-sending full prompts 3x and crossing models); a
-    # ``--resume``/``--session-id`` failure now simply propagates.
-    create = not session_jsonl_path(sid, cwd).exists()
+    # context. The first transcript is created under the caller's exact cwd;
+    # later probes search only registered worktrees of that same Git checkout.
+    # This is NOT the old recreate-on-failure cascade (that mis-fired on 429s,
+    # re-sending full prompts 3x and crossing models); a ``--resume``/``--session-id``
+    # failure now simply propagates.
+    transcript = resolve_session_jsonl_path(sid, cwd)
+    create = not transcript.is_file()
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
     cmd: list[str] = [
         "claude",

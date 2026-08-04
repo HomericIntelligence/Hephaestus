@@ -63,6 +63,11 @@ given the same tuple, will produce the same UUID. Different ``agent`` produces
 a different UUID, preserving the "planner and reviewer are independent
 sessions" property while still letting each agent resume itself across loop
 iterations.
+
+The UUID is artifact-stable, while transcript lookup is restricted to the
+current Git checkout's registered worktree family. This lets repo-root and
+worktree callers share a transcript without allowing same-slug repositories
+from unrelated checkouts to resume one another's sessions.
 """
 
 from __future__ import annotations
@@ -557,6 +562,61 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
 
 
+def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
+    """Return worktree roots registered to cwd's exact Git repository.
+
+    The explicit invocation path is authoritative. Ambient Git repository
+    environment variables are removed so an outer checkout cannot redirect
+    this discovery to a different repository.
+    """
+    resolved_cwd = cwd.resolve()
+    roots = {resolved_cwd}
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_cwd),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return (resolved_cwd,)
+
+    for field in result.stdout.split("\0"):
+        if field.startswith("worktree "):
+            roots.add(Path(field.removeprefix("worktree ")).resolve())
+    return tuple(sorted(roots, key=str))
+
+
+def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
+    """Resolve an existing transcript within cwd's registered worktree family.
+
+    The exact cwd path remains the create location when no transcript exists.
+    Existing transcripts are selected only from worktrees registered to the
+    same Git repository, with lexical ordering making historical duplicates
+    deterministic.
+    """
+    expected = session_jsonl_path(uuid_str, cwd)
+    candidates = {expected}
+    candidates.update(
+        session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)
+    )
+    existing = sorted(
+        (candidate for candidate in candidates if candidate.is_file()),
+        key=str,
+    )
+    return existing[0] if existing else expected
+
+
 __all__ = [
     # Session naming
     "AGENT_ADDRESS_REVIEW",
@@ -619,6 +679,7 @@ __all__ = [
     "planner_model",
     "pr_reviewer_claude_timeout",
     "read_timeout_env",
+    "resolve_session_jsonl_path",
     "reviewer_agent",
     "reviewer_model",
     "session_jsonl_path",
