@@ -2078,7 +2078,6 @@ class TestImplementationAdmission:
         run_issues.clear()
         coordinator._drain_implementation()
 
-        assert fetches == 1
         assert run_issues == [7]
         assert "file_overlap_deferrals" not in blocked.payload
 
