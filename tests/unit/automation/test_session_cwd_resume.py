@@ -12,6 +12,7 @@ import pytest
 from hephaestus.automation import agent_config
 from hephaestus.automation.models import PlanReviewerOptions
 from hephaestus.automation.pipeline.jobs import AgentJob
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.plan_reviewer import PlanReviewer
@@ -63,7 +64,7 @@ def test_plan_reviewer_then_pipeline_worker_resumes_same_transcript(
     reviewer = PlanReviewer(
         PlanReviewerOptions(issues=[2284], dry_run=False, max_workers=1, enable_ui=False)
     )
-    completion_q: queue.Queue[tuple[object, object]] = queue.Queue()
+    completion_q: CompletionQueue = queue.Queue()
     shutdown = threading.Event()
     pool = WorkerPool(size=1, shutdown=shutdown, completion_q=completion_q, lock_dir=tmp_path)
 
