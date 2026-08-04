@@ -65,6 +65,7 @@ class FakeStageGitHub(FakeGitHub):
         labels: list[str] | None = None,
         issue_title: str = "A task",
         issue_body: str = "",
+        issue_state: str = "OPEN",
         merged_pr: int | None = None,
         open_pr: int | None = None,
         pr_issue: int | None = None,
@@ -86,6 +87,7 @@ class FakeStageGitHub(FakeGitHub):
             labels: Seed labels applied to any issue on first read/mutation.
             issue_title: Canned issue title returned by gh_issue_json.
             issue_body: Canned issue body returned by gh_issue_json.
+            issue_state: Canned current GitHub issue state.
             merged_pr: Canned answer for find_merged_closing_pr.
             open_pr: Canned answer for find_pr_for_issue.
             pr_issue: Canned answer for find_issue_for_pr.
@@ -118,6 +120,7 @@ class FakeStageGitHub(FakeGitHub):
         self._seed_labels = list(labels or [])
         self._issue_title = issue_title
         self._issue_body = issue_body
+        self._issue_state = issue_state
         self._merged_pr = merged_pr
         self._open_pr = open_pr
         self._pr_issue = pr_issue
@@ -171,6 +174,7 @@ class FakeStageGitHub(FakeGitHub):
             "number": issue_number,
             "title": self._issue_title,
             "body": self._issue_body,
+            "state": self._issue_state,
             "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
         }
 
@@ -437,7 +441,7 @@ class FakeStageGitHub(FakeGitHub):
         replies: dict[str, str],
         batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
-        """Record commit-gated implementation replies for stage tests."""
+        """Record head-gated implementation replies for stage tests."""
         del expected_head_sha, batch_nonce
         by_id = {
             str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads

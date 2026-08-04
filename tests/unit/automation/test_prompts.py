@@ -1011,7 +1011,7 @@ class TestAddressReviewPrompt:
         """The final JSON-block contract the pipeline parses must be intact.
 
         The implementation agent must return one reply for every fixed thread.
-        The host posts that reply after verifying the pushed fix; the reviewer
+        The host posts that reply after verifying the current head; the reviewer
         then performs a fresh review before resolving or leaving feedback.
         """
         out = self._build()

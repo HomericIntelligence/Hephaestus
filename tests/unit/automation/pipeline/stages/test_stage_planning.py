@@ -130,8 +130,10 @@ class TestPlanningStageEnter:
         assert github.mutation_log == []
         assert any("state:skip AND state:plan-go" in record.message for record in caplog.records)
 
-    def test_merged_pr_closes_issue(self, make_ctx: Any, make_work_item: Any) -> None:
-        """A merged closing PR closes the issue as covered (gate A)."""
+    def test_historical_merged_pr_does_not_close_open_issue(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An open issue remains actionable despite a historic merged closing PR."""
         stage = PlanningStage()
         github = FakeStageGitHub(merged_pr=123)
         ctx = make_ctx(github=github)
@@ -139,9 +141,38 @@ class TestPlanningStageEnter:
 
         outcome = stage.on_enter(item, ctx)
 
+        assert outcome is None
+        assert github.mutation_log == [("gh_issue_add_labels", (3, (STATE_NEEDS_PLAN,)))]
+
+    def test_issue_closed_after_seeding_with_merged_pr_finishes_at_entry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Planning revalidates a close/merge race before creating duplicate work."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(issue_state="CLOSED", merged_pr=123)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=3)
+
+        outcome = stage.on_enter(item, ctx)
+
         assert outcome is not None
-        assert outcome.disposition == Disposition.SKIP
-        assert github.mutation_log == [("close_issue_as_covered", (3, 123))]
+        assert outcome.disposition == Disposition.FINISH_PASS
+        assert github.mutation_log == []
+
+    def test_malformed_issue_state_fails_closed_at_planning_entry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A malformed refresh cannot authorize planning writes."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(issue_state="UNKNOWN")
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=3)
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is not None
+        assert outcome.disposition == Disposition.FINISH_FAIL
+        assert github.mutation_log == []
 
     def test_open_pr_skips(self, make_ctx: Any, make_work_item: Any) -> None:
         """An open PR for the issue skips planning with zero writes (gate B)."""

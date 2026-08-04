@@ -11,7 +11,8 @@ Entry routing (the binding contract is the classification table in
 ``docs/architecture.md`` §7 "Seeding and restart reconstruction"):
 
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
-- PR merged → finished (pass, idempotent)
+- Closed issue + merged PR carrying an exact ``Closes #N`` line → finished
+  (pass, idempotent)
 - Open PR + PR-level ``state:implementation-go`` → merge_wait
 - Any other open PR → pr_review (including an issue-level implementation-GO)
 - No PR, at-or-past ``state:plan-go`` → implementation
@@ -43,6 +44,7 @@ from hephaestus.automation.github_api import (
     gh_pr_label_names,
     gh_pr_state,
 )
+from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -89,6 +91,7 @@ class IssueFacts:
             merged), None otherwise.
         pr_is_open: True iff PR exists and is open.
         pr_is_merged: True iff PR exists and is merged.
+        issue_is_closed: True iff GitHub currently reports the issue closed.
         pr_has_implementation_go: True iff the open PR carries
             ``state:implementation-go``.
         pr_has_implementation_no_go: True iff the open PR carries
@@ -111,6 +114,7 @@ class IssueFacts:
     pr_number: int | None
     pr_is_open: bool
     pr_is_merged: bool
+    issue_is_closed: bool = False
     pr_has_implementation_go: bool = False
     pr_has_implementation_no_go: bool = False
     body: str = ""
@@ -259,8 +263,10 @@ def classify_issue(facts: IssueFacts) -> Classification:
         LOG.warning("issue excluded: %s", reason)
         return None, reason
 
-    # Terminal state: merged PR
-    if facts.pr_is_merged:
+    # Completion requires the current issue state as well as a merged PR that
+    # carries the exact closing reference. A reopened issue may retain the
+    # historical PR relationship, but it is actionable again.
+    if facts.issue_is_closed and facts.pr_is_merged:
         return StageName.FINISHED, f"#{facts.number} PR merged (idempotent)"
 
     # Extract the active state label
@@ -353,6 +359,7 @@ def seed_issue(issue_number: int) -> IssueFacts:
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
+        issue_is_closed=issue_info.state == IssueState.CLOSED,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
     )
@@ -386,14 +393,28 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
 
     """
     issue_data = github.gh_issue_json(issue_number)
-    raw_labels = issue_data.get("labels", []) if isinstance(issue_data, dict) else []
-    labels = {
-        str(label.get("name", ""))
+    if not isinstance(issue_data, dict):
+        raise TypeError("issue snapshot must be a JSON object")
+    if issue_data.get("number") != issue_number:
+        raise ValueError("issue snapshot number does not match the requested issue")
+    state = issue_data.get("state")
+    if not isinstance(state, str) or state.upper() not in {
+        IssueState.OPEN.value,
+        IssueState.CLOSED.value,
+    }:
+        raise ValueError("issue snapshot state must be exactly OPEN or CLOSED")
+    raw_labels = issue_data.get("labels")
+    if not isinstance(raw_labels, list):
+        raise ValueError("issue snapshot labels must be a list")
+    if any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str)
         for label in raw_labels
-        if isinstance(label, dict) and label.get("name")
-    }
-    title = str(issue_data.get("title") or "") if isinstance(issue_data, dict) else ""
-    body = str(issue_data.get("body") or "") if isinstance(issue_data, dict) else ""
+    ):
+        raise ValueError("issue snapshot labels must contain string names")
+    labels = {label["name"] for label in raw_labels if label["name"]}
+    title = str(issue_data.get("title") or "")
+    body = str(issue_data.get("body") or "")
+    issue_is_closed = state.upper() == IssueState.CLOSED.value
     epic = is_epic(sorted(labels), title)
     pr_is_open = False
     pr_is_merged = False
@@ -419,6 +440,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_number=pr_number,
         pr_is_open=pr_is_open,
         pr_is_merged=pr_is_merged,
+        issue_is_closed=issue_is_closed,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
     )
@@ -470,7 +492,7 @@ def seed_from_cli(
     - ``repos`` → one :attr:`StageName.REPO` entry each (discovery seeds).
     - ``issues`` → :func:`seed_issue` + :func:`classify_issue` per issue.
     - ``prs`` → tri-state classification mirroring ``classify_issue``'s
-      open-PR routing: merged PR -> FINISHED (idempotent), closed PR ->
+      open-PR routing: merged direct PR -> FINISHED (idempotent), closed PR ->
       excluded, open PR with ``state:implementation-go`` -> MERGE_WAIT, open PR
       without it -> PR_REVIEW. A failed state/label fetch reads as
       "open, not yet reviewed" (-> pr_review), matching the existing

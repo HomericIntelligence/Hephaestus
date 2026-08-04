@@ -722,7 +722,7 @@ class TestFindMergedClosingPr:
 
         def _side_effect(args: list[str], **kw: Any) -> MagicMock:
             captured["args"] = args
-            return _make_gh_result([{"number": 1358, "body": "Summary.\n\nCloses #1357\n"}])
+            return _make_gh_result([{"number": 1358, "body": "Summary.\r\n\r\nCloses #1357\r\n"}])
 
         with patch(
             "hephaestus.automation._review_utils._gh_call",
@@ -763,6 +763,23 @@ class TestFindMergedClosingPr:
 
         assert result is None
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Closes #12, #18\n",
+            "Closes #12-extra\n",
+            "Closes #12: reason\n",
+            "Closes #12 trailing\n",
+        ],
+    )
+    def test_rejects_trailing_text_after_target_issue(self, body: str) -> None:
+        """The target number must occupy the complete policy line."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([{"number": 5000, "body": body}]),
+        ):
+            assert find_merged_closing_pr(12) is None
+
     def test_returns_none_when_no_merged_pr(self) -> None:
         """No merged PR found → None."""
         with patch(
@@ -792,13 +809,13 @@ class TestFindMergedClosingPr:
 class TestFindMergedPrForIssue:
     """Tests for find_merged_pr_for_issue — the tri-state fetch's merged lookup."""
 
-    def test_finds_via_merged_branch_name(self) -> None:
-        """Strategy 1: ``{issue}-auto-impl`` head lookup with ``--state merged``."""
+    def test_finds_via_exact_merged_closing_line(self) -> None:
+        """Only an exact closing line can associate merged work to an issue."""
         captured: dict[str, list[str]] = {}
 
         def _side_effect(args: list[str], **kw: Any) -> MagicMock:
             captured["args"] = args
-            return _make_gh_result([{"number": 43}])
+            return _make_gh_result([{"number": 43, "body": "Closes #7\n"}])
 
         with patch(
             "hephaestus.automation._review_utils._gh_call",
@@ -807,16 +824,14 @@ class TestFindMergedPrForIssue:
             result = find_merged_pr_for_issue(7)
 
         assert result == 43
-        assert "--head" in captured["args"]
-        assert "7-auto-impl" in captured["args"]
+        assert "--search" in captured["args"]
+        assert "--head" not in captured["args"]
         assert "merged" in captured["args"]
 
-    def test_falls_back_to_merged_body_search(self) -> None:
-        """Branch miss → falls through to find_merged_closing_pr's body search."""
+    def test_uses_exact_merged_body_search(self) -> None:
+        """The sole merged lookup delegates to exact body search."""
 
         def _side_effect(args: list[str], **kw: Any) -> MagicMock:
-            if "--head" in args:
-                return _make_gh_result([])
             return _make_gh_result([{"number": 44, "body": "Fix.\n\nCloses #7\n"}])
 
         with patch(
@@ -826,6 +841,18 @@ class TestFindMergedPrForIssue:
             result = find_merged_pr_for_issue(7)
 
         assert result == 44
+
+    @pytest.mark.parametrize(
+        "body",
+        ["Closes #7, #8\n", "Closes #7: reason\n", "Closes #7 trailing\n"],
+    )
+    def test_rejects_trailing_text_after_target_issue(self, body: str) -> None:
+        """Merged lookup follows the same whole-line PR policy contract."""
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result([{"number": 44, "body": body}]),
+        ):
+            assert find_merged_pr_for_issue(7) is None
 
     def test_returns_none_when_no_merged_pr(self) -> None:
         """Neither strategy finds a merged PR → None (closed PRs stay invisible)."""
@@ -837,14 +864,12 @@ class TestFindMergedPrForIssue:
 
         assert result is None
 
-    def test_branch_lookup_failure_still_tries_body_search(self) -> None:
-        """A branch-strategy gh failure is swallowed; body search still runs."""
+    def test_exact_body_search_does_not_probe_branch_name(self) -> None:
+        """Branch names cannot turn a merged PR into completion evidence."""
         calls: list[list[str]] = []
 
         def _side_effect(args: list[str], **kw: Any) -> MagicMock:
             calls.append(args)
-            if "--head" in args:
-                raise RuntimeError("gh boom")
             return _make_gh_result([{"number": 45, "body": "Closes #7\n"}])
 
         with patch(
@@ -854,7 +879,8 @@ class TestFindMergedPrForIssue:
             result = find_merged_pr_for_issue(7)
 
         assert result == 45
-        assert len(calls) == 2
+        assert len(calls) == 1
+        assert "--head" not in calls[0]
 
 
 # ---------------------------------------------------------------------------

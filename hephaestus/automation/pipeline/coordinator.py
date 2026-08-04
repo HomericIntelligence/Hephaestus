@@ -180,6 +180,9 @@ _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = "_implementation_file_claims"
 #: WorkItem payload key holding consecutive file-overlap deferrals.
 _FILE_OVERLAP_DEFERRALS_KEY = "file_overlap_deferrals"
 
+#: Host-owned snapshot of the active claims that last blocked a queued item.
+_FILE_OVERLAP_BLOCKED_CLAIMS_KEY = "_file_overlap_blocked_claims"
+
 #: Deferral counts strictly above this value are logged as warnings.
 _FILE_OVERLAP_WARNING_THRESHOLD = 10
 
@@ -408,9 +411,10 @@ class _DirectIssueSource:
     """
 
     repo: str
-    issues: Iterator[int]
+    issues: deque[int]
     base_sha: str
     run_nonce: str
+    overlap_blocked_claims: frozenset[_admission.PlanFileClaim] | None = None
 
 
 @dataclass
@@ -1770,6 +1774,7 @@ class Coordinator:
             if (claims := submission_claims.get(id(item))) is not None:
                 item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(claims)
             item.payload.pop(_FILE_OVERLAP_DEFERRALS_KEY, None)
+            item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
             self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
 
@@ -1891,12 +1896,26 @@ class Coordinator:
         for item, identity in candidates:
             if item.issue is None:  # defensive: candidate construction excludes this case
                 continue
+            blocked_claims = item.payload.get(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
+            if blocked_claims is not None and set(blocked_claims) == claimed:
+                # The same active reservation still blocks this item. Polling
+                # must remain quiet until that reservation changes.
+                continue
             repo = (self.config.org, item.repo)
-            planned = _admission._fetch_planned_files(item.issue, repo=repo)
-            item_claims = {(repo, path) for path in planned} if planned else set()
+            payload_claims = item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
+            if payload_claims is None:
+                planned = _admission._fetch_planned_files(item.issue, repo=repo)
+                item_claims = {(repo, path) for path in planned} if planned else set()
+                # Freeze the plan on first admission attempt, including while
+                # blocked, so coordinator polling never repeats GitHub reads.
+                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+            else:
+                item_claims = set(payload_claims)
             if item_claims and (item_claims & claimed):
                 self._record_file_overlap_deferral(item, identity)
+                item.payload[_FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)
                 continue
+            item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
             claimed.update(item_claims)
             # Preserve an empty snapshot too: unknown plans fail open, but
             # must not be fetched again after being admitted.
@@ -2659,7 +2678,7 @@ class Coordinator:
         open_issues = _admission._filter_open_issues(repo, self.config.issues)
         self._direct_issue_source = _DirectIssueSource(
             repo=repo,
-            issues=iter(open_issues),
+            issues=deque(open_issues),
             base_sha=base_sha,
             run_nonce=uuid.uuid4().hex,
         )
@@ -2680,54 +2699,86 @@ class Coordinator:
             self.queues[stage].can_offer() for stage in _DIRECT_ISSUE_ENTRY_STAGES
         )
 
+    def _prepare_direct_issue_item(
+        self,
+        source: _DirectIssueSource,
+        issue: int,
+        active_claims: frozenset[_admission.PlanFileClaim],
+        *,
+        overlap_enabled: bool,
+    ) -> tuple[WorkItem | None, bool]:
+        """Classify one source issue and snapshot its overlap reservation."""
+        entry = self._seed_direct_issue_entry(source.repo, issue)
+        if entry.stage is None:
+            if entry.skip_tag_obligation is not None:
+                self.github.skip_epics({entry.skip_tag_obligation.issue: []})
+            logger.info("seed excluded: %s", entry.reason)
+            return None, False
+
+        item = self._entry_to_item(entry, source.repo)
+        if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
+            repo = (self.config.org, item.repo)
+            planned = _admission._fetch_planned_files(issue, repo=repo)
+            item_claims = {(repo, path) for path in planned} if planned else set()
+            if item_claims and item_claims.intersection(active_claims):
+                return None, True
+            item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+
+        if is_full_commit_sha(source.base_sha):
+            item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
+            if item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
+                item.branch = f"{item.issue}-auto-impl-direct-{source.run_nonce}"
+                item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = source.run_nonce
+        if item.stage not in (StageName.REPO, StageName.FINISHED):
+            self._pass_work_count += 1
+        if item.stage is StageName.FINISHED and item.result is None:
+            item.result = ItemResult(
+                passed=entry.passed,
+                reason=entry.reason,
+                final_stage=StageName.FINISHED,
+            )
+        return item, False
+
     def _drain_direct_issue_source(self) -> int:
         """Pull explicit issues directly into queues without a seed spill buffer.
 
         An issue is classified only after its eventual destination is
-        guaranteed to have capacity.  The loop fills immediately available
-        capacity, then leaves the remaining caller-owned iterator live until
-        normal queue draining creates another safe admission point.
+        guaranteed to have capacity. With parallel overlap serialization, a
+        bounded deque lets one full source pass rotate conflicting issues and
+        admit the first independent candidate. A fully blocked pass is cached
+        against the immutable active-claim set, preventing hot-loop GitHub
+        plan fetches until implementation ownership changes.
         """
         source = self._direct_issue_source
         if source is None:
             return 0
 
+        active_claims = frozenset(self._active_implementation_file_claims())
+        overlap_enabled = self._overlap_serialization_enabled()
+        if overlap_enabled and source.overlap_blocked_claims == active_claims:
+            return 0
+        source.overlap_blocked_claims = None
+
         pushed = 0
-        while self._direct_issue_queues_can_accept():
-            try:
-                issue = next(source.issues)
-            except StopIteration:
-                self._direct_issue_source = None
-                break
+        scanned = 0
+        scan_limit = len(source.issues)
+        blocked_by_overlap = False
+        while self._direct_issue_queues_can_accept() and source.issues and scanned < scan_limit:
+            issue = source.issues.popleft()
+            scanned += 1
 
-            entry = self._seed_direct_issue_entry(source.repo, issue)
-            if entry.stage is None:
-                # Epic tagging is the one sanctioned seeding write.  Complete
-                # it before honoring the source exclusion, exactly as the
-                # ordinary seed path does.
-                if entry.skip_tag_obligation is not None:
-                    self.github.skip_epics({entry.skip_tag_obligation.issue: []})
-                logger.info("seed excluded: %s", entry.reason)
+            item, overlaps = self._prepare_direct_issue_item(
+                source,
+                issue,
+                active_claims,
+                overlap_enabled=overlap_enabled,
+            )
+            if overlaps:
+                source.issues.append(issue)
+                blocked_by_overlap = True
                 continue
-
-            item = self._entry_to_item(entry, source.repo)
-            if is_full_commit_sha(source.base_sha):
-                item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
-                if item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
-                    # A fresh direct issue is tied to one immutable checkout
-                    # snapshot.  Its branch and writer-worktree identity must
-                    # be unique per cursor so a preserved predecessor cannot
-                    # stall a restart before implementation reaches an agent.
-                    item.branch = f"{item.issue}-auto-impl-direct-{source.run_nonce}"
-                    item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = source.run_nonce
-            if item.stage not in (StageName.REPO, StageName.FINISHED):
-                self._pass_work_count += 1
-            if item.stage is StageName.FINISHED and item.result is None:
-                item.result = ItemResult(
-                    passed=entry.passed,
-                    reason=entry.reason,
-                    final_stage=StageName.FINISHED,
-                )
+            if item is None:
+                continue
             # ``_direct_issue_queues_can_accept`` covers every possible
             # classifier result and the coordinator-wide permit budget. This
             # source owns the coordinator thread, so a failed lifecycle push
@@ -2735,6 +2786,19 @@ class Coordinator:
             # saturation or a completion/shutdown fault.
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
+                # Let the implementation drain establish ownership before a
+                # later source item is considered, otherwise two overlapping
+                # plans can be queued in the same bootstrap tick.
+                if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
+                    break
+        if not source.issues:
+            self._direct_issue_source = None
+        elif pushed == 0 and blocked_by_overlap and scanned == scan_limit:
+            source.overlap_blocked_claims = active_claims
+            logger.info(
+                "direct issue source blocked by active file claims; candidates=%d",
+                scan_limit,
+            )
         return pushed
 
     def _drain_direct_pr_source(self) -> int:

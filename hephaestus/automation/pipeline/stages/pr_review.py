@@ -40,7 +40,8 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   exclusively for implementation-state labels. Every open review thread—regardless of
   author—is implementation work. The implementation agent investigates and
   fixes each thread, then returns a concise reply. The host posts that reply
-  only after the fix commit is pushed and never resolves the thread. The
+  against the verified current head and never resolves the thread. A reply
+  without a corresponding commit carries an explicit warning. The
   reviewer then performs a fresh comment validation of the current change,
   prior review, implementation reply, and every open thread. The reviewer is
   the sole actor that can resolve a valid
@@ -67,8 +68,9 @@ state machine (docs/architecture.md §5.5 "pr_review" is the binding contract):
   not recreate, replace, or suppress existing threads; it only gives the
   reviewer the authority to reconcile current implementation replies.
 - The implementation stage owns rebase, commit/push, and reply handoff. It
-  posts the `[Response]` reply only after a real writer-branch commit reaches
-  GitHub; the review stage does not commit, push, or rebase.
+  binds every `[Response]` reply to the verified current head and marks a
+  no-commit reply for thorough reviewer analysis; the review stage does not
+  commit, push, or rebase.
 - Recovery for interrupted pre-migration items is read-only and fail-closed:
   it may preserve an already-pushed reply handoff or take a fresh detached
   snapshot, but it cannot dispatch a writer agent or publish a branch from
@@ -551,8 +553,9 @@ def _normalize_remediation_threads(
     The reviewer audit contains proposed findings, not durable GitHub thread
     identities. Address jobs must instead consume the live post/read-back
     snapshot so every open thread—regardless of author—is investigated.  The
-    implementation agent replies after a real fix commit; the reviewer later
-    performs a fresh review and resolves or returns the exact thread.
+    implementation agent replies against the verified current head; the
+    reviewer later performs a fresh review and resolves or returns the exact
+    thread. No-commit replies are explicitly marked for thorough analysis.
     """
     normalized: list[dict[str, Any]] = []
     for thread in threads:

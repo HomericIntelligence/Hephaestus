@@ -7,6 +7,7 @@ from typing import Any
 from ._review_utils import parse_json_block
 
 _ADDRESS_PARSE_DEFAULT: dict[str, Any] = {"addressed": [], "replies": {}}
+MAX_ADDRESS_REPLY_CHARS = 4_000
 
 
 def _parse_addressed_block(text: str) -> dict[str, Any]:
@@ -53,7 +54,7 @@ def parse_addressed_replies(
     normalized: dict[str, str] = {}
     for thread_id in known_ids:
         reply = replies.get(thread_id)
-        if not isinstance(reply, str) or not 0 < len(reply.strip()) <= 4_000:
+        if not isinstance(reply, str) or not 0 < len(reply.strip()) <= MAX_ADDRESS_REPLY_CHARS:
             return None
         normalized[thread_id] = reply.strip()
     return normalized
