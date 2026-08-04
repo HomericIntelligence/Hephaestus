@@ -1982,6 +1982,43 @@ class WorkerPool:
         publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
+        cwd = Path(str(kwargs.get("cwd") or ""))
+        if publish_rebased_head:
+            if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
+                return JobResult(ok=False, error="writer rebase publish arguments invalid")
+            remote = str(kwargs.get("remote", "origin"))
+            base_branch = str(kwargs.get("base_branch", "main"))
+            base_ref = f"{remote}/{base_branch}"
+            git_utils.run(
+                ["git", "fetch", remote, base_branch],
+                cwd=cwd,
+                timeout=job.timeout_s,
+            )
+            ancestry = git_utils.run(
+                ["git", "merge-base", "--is-ancestor", base_ref, "HEAD"],
+                cwd=cwd,
+                check=False,
+                timeout=job.timeout_s,
+            )
+            if ancestry.returncode == 0:
+                source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
+                if isinstance(source_sha, JobResult):
+                    return source_sha
+                if source_sha != expected_remote_sha:
+                    return JobResult(
+                        ok=False,
+                        error="current writer head does not match expected remote head",
+                    )
+                return JobResult(
+                    ok=True,
+                    value={
+                        "rebased": False,
+                        "published": False,
+                        "head_sha": source_sha,
+                    },
+                )
+            if ancestry.returncode != 1:
+                return JobResult(ok=False, error="cannot determine writer base ancestry")
         result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
         if not result:
             if not publish_rebased_head:
@@ -1997,9 +2034,6 @@ class WorkerPool:
             )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
-        cwd = Path(str(kwargs.get("cwd") or ""))
-        if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
-            return JobResult(ok=False, error="writer rebase publish arguments invalid")
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha

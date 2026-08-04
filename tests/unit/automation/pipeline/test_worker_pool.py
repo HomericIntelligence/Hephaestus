@@ -2436,16 +2436,70 @@ class TestGitOps:
                 "expected_remote_sha": "a" * 40,
             },
         )
-        with patch(
-            "hephaestus.automation.git_utils.rebase_worktree_onto",
-            return_value=False,
+        with (
+            patch(
+                "hephaestus.automation.git_utils.rebase_worktree_onto",
+                return_value=False,
+            ),
+            patch(f"{_WP}.git_utils.run") as run,
         ):
+            run.side_effect = [
+                MagicMock(returncode=0),
+                MagicMock(returncode=1),
+            ]
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
         assert result.value == {"rebased": False}
         assert result.error == "mechanical rebase hit conflicts; aborted"
+
+    def test_writer_rebase_keeps_exact_head_when_current_base_is_already_ancestor(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Review preparation must not rewrite or publish an already-current PR."""
+        head = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": head,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.run") as run,
+            patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0),
+                MagicMock(returncode=0),
+                MagicMock(returncode=0, stdout=f"{head}\n"),
+            ]
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "rebased": False,
+            "published": False,
+            "head_sha": head,
+        }
+        assert [call.args[0] for call in run.call_args_list[:2]] == [
+            ["git", "fetch", "origin", "main"],
+            ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+        ]
+        rebase.assert_not_called()
+        push.assert_not_called()
 
     def test_direct_rebase_dispatch_rejects_the_retired_publish_mode(
         self,
