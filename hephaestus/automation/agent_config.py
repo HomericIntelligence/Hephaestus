@@ -56,13 +56,17 @@ reuse across loop iterations *and* across main-bumps (#841): the artifact
 being worked on is the issue/PR, not the commit at which the loop started,
 so the session must persist as long as the issue does.
 
-Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is
-``str(uuid.uuid5(NAMESPACE_DNS, <human-readable>))``. UUIDv5 is
-deterministic, so no state file is needed — two callers on different machines,
-given the same tuple, will produce the same UUID. Different ``agent`` produces
-a different UUID, preserving the "planner and reviewer are independent
-sessions" property while still letting each agent resume itself across loop
-iterations.
+Human-readable name: ``<repo>_<issue>_<agent>``; the session ID is a UUIDv5
+derived from that name plus a collision-resistant identity for the current Git
+checkout. The identity is shared by a repository root and its registered
+worktrees, but differs for unrelated clones. Different ``agent`` produces a
+different UUID, preserving the "planner and reviewer are independent sessions"
+property while still letting each agent resume itself across loop iterations.
+
+The UUID is artifact-stable, while transcript lookup is restricted to the
+current Git checkout's registered worktree family. This lets repo-root and
+worktree callers share a transcript without allowing same-slug repositories
+from unrelated checkouts to resume one another's sessions.
 """
 
 from __future__ import annotations
@@ -72,6 +76,7 @@ import os
 import re
 import subprocess
 import uuid
+from hashlib import sha256
 from pathlib import Path
 
 from hephaestus.constants import (
@@ -493,9 +498,54 @@ def session_name(repo: str, issue: int | str, agent: str, model: str | None = No
     return f"{base}_{model_token}" if model_token else base
 
 
-def session_uuid(repo: str, issue: int | str, agent: str, model: str | None = None) -> str:
-    """Return the deterministic UUIDv5 session ID for the (repo, issue, agent, model) key."""
+def _checkout_identity(cwd: Path) -> str:
+    """Return a collision-resistant identity shared by one Git worktree family."""
+    resolved_cwd = cwd.resolve()
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_cwd),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+        identity_path = Path(result.stdout.strip()).resolve()
+    except (OSError, subprocess.SubprocessError):
+        identity_path = resolved_cwd
+    return sha256(os.fsencode(identity_path)).hexdigest()
+
+
+def session_uuid(
+    repo: str,
+    issue: int | str,
+    agent: str,
+    model: str | None = None,
+    *,
+    cwd: Path | None = None,
+) -> str:
+    """Return the deterministic UUIDv5 session ID for one artifact and checkout.
+
+    Unrelated checkouts get distinct session IDs even if Claude's lossy cwd
+    encoding maps their project directories to the same transcript directory.
+    The checkout identity is folded into the UUID filename itself before
+    transcript lookup, so a pre-existing transcript from another checkout
+    cannot satisfy :func:`resolve_session_jsonl_path` for this checkout. A
+    repository root and its linked worktrees share the Git common-dir identity
+    and therefore keep one resumable session lineage. When callers omit
+    ``cwd``, the process working directory supplies the checkout identity;
+    session IDs are never unscoped by accident.
+    """
     name = session_name(repo, issue, agent, model)
+    checkout_cwd = cwd if cwd is not None else Path.cwd()
+    name = f"{name}@{_checkout_identity(checkout_cwd)}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name))
 
 
@@ -552,9 +602,70 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     returns False even though the JSONL is on disk, the caller goes down
     the ``--session-id`` create path, and the CLI rejects with ``Session ID
     <uuid> is already in use``. (#822)
+
+    That directory encoding is lossy (for example, ``owner.a`` and
+    ``owner-a`` collide), so checkout isolation is provided by the
+    collision-resistant checkout identity folded into ``uuid_str`` by
+    :func:`session_uuid`. The UUID filename, not the encoded parent directory,
+    is therefore the isolation boundary.
     """
     encoded = str(cwd.resolve()).replace("/", "-").replace(".", "-")
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
+
+
+def _registered_worktree_roots(cwd: Path) -> tuple[Path, ...]:
+    """Return worktree roots registered to cwd's exact Git repository.
+
+    The explicit invocation path is authoritative. Ambient Git repository
+    environment variables are removed so an outer checkout cannot redirect
+    this discovery to a different repository.
+    """
+    resolved_cwd = cwd.resolve()
+    roots = {resolved_cwd}
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(resolved_cwd),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            check=True,
+            capture_output=True,
+            env=_repo_scoped_git_env(),
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return (resolved_cwd,)
+
+    for field in result.stdout.split("\0"):
+        if field.startswith("worktree "):
+            roots.add(Path(field.removeprefix("worktree ")).resolve())
+    return tuple(sorted(roots, key=str))
+
+
+def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
+    """Resolve an existing transcript within cwd's registered worktree family.
+
+    The exact cwd path remains the create location when no transcript exists.
+    Existing transcripts are selected only from worktrees registered to the
+    same Git repository, with lexical ordering making historical duplicates
+    deterministic.
+    """
+    # ``uuid_str`` is checkout-scoped by session_uuid. This matters before any
+    # registered-worktree lookup: Claude's lossy cwd encoding can make the
+    # expected parent directory belong to more than one unrelated checkout.
+    expected = session_jsonl_path(uuid_str, cwd)
+    candidates = {session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)}
+    existing = sorted(
+        (candidate for candidate in candidates if candidate.is_file()),
+        key=str,
+    )
+    return existing[0] if existing else expected
 
 
 __all__ = [
@@ -619,6 +730,7 @@ __all__ = [
     "planner_model",
     "pr_reviewer_claude_timeout",
     "read_timeout_env",
+    "resolve_session_jsonl_path",
     "reviewer_agent",
     "reviewer_model",
     "session_jsonl_path",

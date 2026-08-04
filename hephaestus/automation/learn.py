@@ -402,7 +402,7 @@ def compact_session(
         a non-zero exit code (e.g. /compact skill not registered).
 
     """
-    sid = session_uuid(repo, issue, agent, model)
+    sid = session_uuid(repo, issue, agent, model, cwd=cwd)
     timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
         result = subprocess.run(

@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Generator
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -49,6 +50,10 @@ def stub_run() -> Generator[MagicMock]:
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect $HOME so session_jsonl_path resolves under tmp_path."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "hephaestus.automation.agent_config._checkout_identity",
+        lambda cwd: sha256(str(cwd.resolve()).encode()).hexdigest(),
+    )
     return tmp_path
 
 
@@ -89,14 +94,14 @@ class TestCreateThenResume:
         assert sid in argv
         assert out == "ok"
         # The session id includes the model (#1166).
-        assert sid == session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        assert sid == session_uuid("R", 1, AGENT_PLANNER, "sonnet", cwd=cwd)
 
     def test_subsequent_call_resumes_existing_transcript(
         self, stub_run: MagicMock, fake_home: Path
     ) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet", cwd=cwd)
         _make_existing_jsonl(fake_home, cwd, sid)
 
         invoke_claude_with_session(
@@ -113,6 +118,45 @@ class TestCreateThenResume:
         assert sid in argv
         assert "--session-id" not in argv
         assert "--name" not in argv
+
+    def test_lossy_path_collision_does_not_resume_unregistered_checkout(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """Dotted/dashed checkout path collisions stay isolated by checkout id."""
+        dotted = fake_home / "owner.a" / "Repo"
+        dashed = fake_home / "owner-a" / "Repo"
+        dotted.mkdir(parents=True)
+        dashed.mkdir(parents=True)
+
+        dotted_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "sonnet", cwd=dotted)
+        dashed_sid = session_uuid("Repo", 2284, AGENT_PLANNER, "sonnet", cwd=dashed)
+        assert dotted_sid != dashed_sid
+
+        dotted_path = session_jsonl_path(dotted_sid, dotted)
+        dashed_path = session_jsonl_path(dashed_sid, dashed)
+        assert dotted_path.parent == dashed_path.parent
+        dashed_path.parent.mkdir(parents=True, exist_ok=True)
+        dashed_path.write_text("{}\n", encoding="utf-8")
+
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(dotted.resolve(),),
+        ):
+            _, sid = invoke_claude_with_session(
+                repo="Repo",
+                issue=2284,
+                agent=AGENT_PLANNER,
+                prompt="hi",
+                model="sonnet",
+                cwd=dotted,
+            )
+
+        argv = _argv(stub_run.call_args)
+        assert sid == dotted_sid
+        assert "--session-id" in argv
+        assert dotted_sid in argv
+        assert "--resume" not in argv
+        assert dashed_sid not in argv
 
     def test_different_models_get_different_uuids(
         self, stub_run: MagicMock, fake_home: Path
@@ -131,8 +175,8 @@ class TestCreateThenResume:
             repo="R", issue=1, agent=AGENT_PLANNER, prompt="hi", model="opus", cwd=cwd
         )
         assert sid_sonnet != sid_opus
-        assert sid_sonnet == session_uuid("R", 1, AGENT_PLANNER, "sonnet")
-        assert sid_opus == session_uuid("R", 1, AGENT_PLANNER, "opus")
+        assert sid_sonnet == session_uuid("R", 1, AGENT_PLANNER, "sonnet", cwd=cwd)
+        assert sid_opus == session_uuid("R", 1, AGENT_PLANNER, "opus", cwd=cwd)
 
     def test_different_agents_get_different_uuids(
         self, stub_run: MagicMock, fake_home: Path
@@ -340,7 +384,7 @@ class TestEndToEndSessionResume:
     def test_create_then_resume_same_uuid_distinct_prompts(self, fake_home: Path) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
-        expected_sid = session_uuid("Scylla", 1944, AGENT_PLANNER, "sonnet")
+        expected_sid = session_uuid("Scylla", 1944, AGENT_PLANNER, "sonnet", cwd=cwd)
 
         # First call writes the transcript so the second call's probe finds it.
         def _side_effect(*args: Any, **kwargs: Any) -> MagicMock:
@@ -383,16 +427,17 @@ class TestEndToEndSessionResume:
         assert second_argv[-1] == "iter 1"
 
     def test_session_id_is_githash_invariant(self, fake_home: Path) -> None:
-        """The session UUID depends only on (repo, issue, agent, model) — #841/#1166.
+        """The session UUID omits the trunk SHA — #841/#1166.
 
         Regression for #841: the prior behavior fed ``current_trunk_githash``
         into the session-naming tuple, so every main-bump forked a new session
-        family. The loop is PR/issue-scoped: the same (repo, issue, agent, model)
-        key must always resume the same transcript regardless of the trunk SHA.
+        family. The loop is PR/issue-scoped within one checkout: the same
+        (repo, issue, agent, model) key must always resume the same transcript
+        regardless of the trunk SHA.
         """
         cwd = fake_home / "work"
         cwd.mkdir()
-        expected_sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet")
+        expected_sid = session_uuid("R", 1, AGENT_PLANNER, "sonnet", cwd=cwd)
         # Existing transcript → resume path.
         _make_existing_jsonl(fake_home, cwd, expected_sid)
 
@@ -662,7 +707,7 @@ class TestModelCapFallback:
                 model="claude-fable-5",
                 cwd=cwd,
             )
-        assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48)
+        assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48, cwd=cwd)
 
     def test_heph_fallback_model_env_override(
         self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
