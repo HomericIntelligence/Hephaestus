@@ -1301,6 +1301,39 @@ class TestPrReviewStageStep:
         assert kept_path in changed_pytest_specs[0].argv
         assert deleted_path not in changed_pytest_specs[0].argv
 
+    def test_changed_conftest_verifies_containing_directory_once(self) -> None:
+        """A support-only conftest change must not be a no-tests pytest target."""
+        directory = "tests/unit/automation/pipeline/stages"
+        conftest_path = f"{directory}/conftest.py"
+        test_path = f"{directory}/test_stage_pr_review.py"
+        specs = stage_module._host_verification_specs(
+            f"diff --git a/{conftest_path} b/{conftest_path}\n"
+            f"--- a/{conftest_path}\n"
+            f"+++ b/{conftest_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+            f"diff --git a/{test_path} b/{test_path}\n"
+            f"--- a/{test_path}\n"
+            f"+++ b/{test_path}\n"
+            "@@ -1 +1 @@\n-old = True\n+new = True\n"
+        )
+
+        changed_pytest_specs = tuple(
+            spec for spec in specs if spec.descr.startswith("review_changed_unit_test_")
+        )
+
+        assert len(changed_pytest_specs) == 1
+        assert changed_pytest_specs[0].changed_path == conftest_path
+        assert changed_pytest_specs[0].argv == (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            directory,
+            "-q",
+            "--tb=short",
+        )
+
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
