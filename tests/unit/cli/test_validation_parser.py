@@ -18,7 +18,7 @@ ISSUE_1418_FILES = [
     Path("hephaestus/validation/complexity.py"),
     Path("hephaestus/validation/audit.py"),
     Path("hephaestus/validation/stale_scripts.py"),
-    Path("hephaestus/validation/test_structure.py"),
+    Path("hephaestus/validation/test_layout.py"),
     Path("hephaestus/validation/mypy_per_file.py"),
     Path("hephaestus/validation/cli_tier_docs.py"),
     Path("hephaestus/validation/coverage.py"),

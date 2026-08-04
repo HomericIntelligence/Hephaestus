@@ -1,8 +1,9 @@
-"""Tests for hephaestus.validation.test_structure."""
+"""Tests for hephaestus.validation.test_layout."""
 
 from pathlib import Path
 
-from hephaestus.validation.test_structure import (
+from hephaestus.validation import test_layout, test_structure as legacy_test_structure
+from hephaestus.validation.test_layout import (
     SANCTIONED_EXTRA_TEST_DIRS,
     _detect_src_package,
     _get_subpackages,
@@ -16,6 +17,24 @@ from hephaestus.validation.test_structure import (
     check_test_structure,
     main,
 )
+
+
+def test_legacy_test_structure_imports_match_canonical_module() -> None:
+    """The old module path preserves its supported public imports."""
+    public_names = (
+        "SANCTIONED_EXTRA_TEST_DIRS",
+        "check_no_ghost_packages",
+        "check_no_loose_test_files",
+        "check_no_phantom_test_dirs",
+        "check_no_stray_tests_root_files",
+        "check_no_unsanctioned_test_dirs",
+        "check_scripts_coverage",
+        "check_test_directory_mirrors",
+        "check_test_structure",
+        "main",
+    )
+    for name in public_names:
+        assert getattr(legacy_test_structure, name) is getattr(test_layout, name)
 
 
 def _make_package(root: Path, name: str) -> Path:
