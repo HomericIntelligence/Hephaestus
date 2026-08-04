@@ -513,8 +513,10 @@ the `auto-merge-policy` check is advisory.
 2. Commit your changes **signed** (`git commit -S -m "feat(scope): add amazing feature"`),
    using [conventional commit](https://www.conventionalcommits.org/) messages.
 3. Push the branch (`git push -u origin 123-amazing-feature`).
-4. Open a pull request whose body contains the literal line `Closes #123`
-   (capital `C`, no colon, on its own line — `Fixes`/`Resolves` are **not** accepted).
+4. Open a pull request titled `type(scope): concise description` whose body
+   contains the literal line `Closes #123` (capital `C`, no colon, on its own
+   line — `Fixes`/`Resolves` are **not** accepted). The title becomes the
+   squash-merge subject on `main`.
 5. Do not enable auto-merge manually. The automation loop's review, label, and
    `merge_wait` preserves the head-bound approval boundary with a
    SHA-conditional normal merge and never mutates native auto-merge.

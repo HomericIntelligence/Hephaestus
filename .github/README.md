@@ -43,7 +43,9 @@ Builds and publishes the package to PyPI on version tag push (`v*`).
 
 The consolidated required-status-check gate that runs on every pull request to
 `main` (and on push to `main`). It aggregates lint, `uv-lock-check`,
-shellcheck, the `pr-policy` gate (enforces `Closes #N` and signed commits),
+shellcheck, the `pr-policy` gate (enforces `Closes #N`, commit signatures and
+DCO trailers, the Conventional Commit PR title used for squash history, and
+every branch commit subject),
 unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. It also runs the
 advisory `auto-merge-policy` job. It is intentionally **not** a required

@@ -28,6 +28,7 @@ DIRECT_REQUIRED_JOBS = {
 PULL_REQUEST_TYPES = [
     "opened",
     "synchronize",
+    "edited",
     "reopened",
     "ready_for_review",
 ]
@@ -98,7 +99,7 @@ def test_merge_queue_smoke_is_the_only_merge_group_workflow() -> None:
 
 
 def test_required_workflows_preserve_pull_request_and_push_behavior() -> None:
-    """Queue readiness must be additive to the existing PR and main-push events."""
+    """PR title edits must rerun validation without changing main-push behavior."""
     required_events = _events(_load_workflow("_required.yml"))
     test_events = _events(_load_workflow("test.yml"))
 

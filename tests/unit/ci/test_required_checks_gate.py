@@ -115,7 +115,13 @@ class TestRequiredChecksGate:
     ) -> None:
         """Non-code events must not emit skipped heavy-job contexts for a code head."""
         trigger = workflow[True]["pull_request"]
-        assert trigger["types"] == ["opened", "synchronize", "reopened", "ready_for_review"]
+        assert trigger["types"] == [
+            "opened",
+            "synchronize",
+            "edited",
+            "reopened",
+            "ready_for_review",
+        ]
 
     def test_gate_assertion_fires_on_unwired_job(self) -> None:
         """Negative-path: the invariant check must flag a job absent from needs:.
