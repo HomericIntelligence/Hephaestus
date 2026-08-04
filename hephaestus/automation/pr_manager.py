@@ -442,7 +442,7 @@ def _fallback_pr_message(issue_number: int, issue_title: str, agent: str) -> _Pr
         title=f"feat: {issue_title}",
         summary=f"Implements #{issue_number}",
         changes=f"- Automated implementation via {_agent_display_name(agent)}",
-        testing="- Automated tests included",
+        testing="- Test commands were not recorded by automation.",
     )
 
 

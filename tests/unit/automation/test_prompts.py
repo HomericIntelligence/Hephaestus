@@ -79,6 +79,12 @@ class TestImplementationPrompt:
         assert "gh pr list --head" not in out
         assert "DO NOT open a second PR" not in out
 
+    def test_implementation_prompt_requires_test_command_receipts(self) -> None:
+        """Implementers must return the commands and outcomes for PR evidence (#2599)."""
+        out = prompts.get_implementation_prompt(issue_number=42)
+        assert "exact test commands" in out
+        assert "their outcomes" in out
+
 
 class TestPRReviewAnalysisPrompt:
     """Tests for the policy-aware PR review analysis prompt."""

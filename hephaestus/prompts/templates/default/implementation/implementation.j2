@@ -55,6 +55,9 @@ Implement GitHub issue #{{ issue_number }}.
 - Write unit tests for new functionality
 - Ensure existing tests still pass
 - Use pytest fixtures and parametrize where appropriate
+- In your final summary, list every test or verification command you actually
+  ran and its outcome. Do not claim a command ran when it did not. The
+  orchestrator records its own host-run test receipt in the PR's Testing section.
 
 **Code Quality:**
 - Type hint all function signatures
@@ -82,7 +85,8 @@ agent turn returns.
   makes every commit unverifiable (`no_user`) and fails the signed-commit gate.
   Express agent attribution only via the orchestrator's `Co-Authored-By:` trailer.
 - Leave the final implementation changes in the working tree.
-- When you finish, summarize what changed and what tests you ran.
+- When you finish, summarize what changed and provide the exact test commands
+  you ran with their outcomes; this is the evidence that belongs in the PR.
 
 After you return, the orchestrator will:
 1. Create a cryptographically signed and DCO-signed commit with `git commit -S -s`.

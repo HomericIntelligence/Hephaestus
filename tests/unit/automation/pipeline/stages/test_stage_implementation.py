@@ -1559,6 +1559,20 @@ class TestTestsAndFix:
         assert "tests_failed" not in item.payload
         assert "test_output" not in item.payload
 
+    def test_green_tests_record_command_receipt_for_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A passing host test run leaves its exact command and outcome for the PR."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        ctx.config.run_pre_pr_tests = True
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        stage.step(item, ctx)
+        stage.on_job_done(item, JobResult(ok=True, value=0), ctx)
+
+        assert item.payload["test_receipt"] == "`uv run pytest tests -q --tb=short` — passed"
+
     def test_testfix_requests_resume_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """TESTFIX_WAIT submits the composed test-failure resume job."""
         stage = ImplementationStage()
@@ -2288,7 +2302,7 @@ class TestCommitPushAndPrCreate:
         assert [name for name, _ in github.mutation_log] == ["gh_pr_create"]
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
-        assert "uv run pytest tests -q --tb=short" in github.prs[1001]["body"]
+        assert "Not run by the automation pipeline" in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "chore: Add the widget"
 
     @pytest.mark.parametrize(
@@ -2316,6 +2330,22 @@ class TestCommitPushAndPrCreate:
         ImplementationStage().step(item, ctx)
 
         assert github.prs[1001]["title"] == expected_title
+
+    def test_pr_create_includes_passing_host_test_receipt(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """PR testing metadata identifies the command the host actually ran."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, state="PR_CREATE")
+        item.branch = "9-auto-impl"
+        item.payload["test_receipt"] = "`uv run pytest tests/unit/example.py -q` — passed"
+
+        stage.step(item, ctx)
+
+        assert item.pr == 1001
+        assert "`uv run pytest tests/unit/example.py -q` — passed" in github.prs[1001]["body"]
 
     def test_pr_create_does_not_call_the_removed_auto_merge_mutator(
         self, make_ctx: Any, make_work_item: Any
