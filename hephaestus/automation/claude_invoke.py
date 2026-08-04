@@ -208,7 +208,8 @@ def invoke_claude_with_session(
             budget is assumed (#1415).
         system_prompt_file: Optional ``--system-prompt`` file.
         allowed_tools: Optional ``--allowedTools`` value (e.g.
-            ``"Read,Glob,Grep"``).
+            ``"Read,Glob,Grep"``). Pass an empty string to explicitly disable
+            all tools; only ``None`` omits the CLI flag.
         permission_mode: Optional ``--permission-mode`` value.
         extra_args: Any additional flags.
         output_format: ``--output-format`` (``"text"``, ``"json"``, or
@@ -314,7 +315,7 @@ def _invoke_claude_once(
     ]
     if system_prompt_file is not None and system_prompt_file.exists():
         cmd += ["--system-prompt", str(system_prompt_file)]
-    if allowed_tools:
+    if allowed_tools is not None:
         cmd += ["--allowedTools", allowed_tools]
     if permission_mode:
         cmd += ["--permission-mode", permission_mode]
