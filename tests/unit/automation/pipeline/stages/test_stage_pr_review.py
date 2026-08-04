@@ -1328,6 +1328,124 @@ class TestPrReviewStageStep:
         assert item.payload["review_audit"] == audit
         assert item.payload["host_verification_receipts"] == receipts
 
+    def test_comment_validation_carries_fresh_host_verification_receipts(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Reply validation receives exact-head host evidence without a broad review."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(1, 0)])
+        github._thread_replies["live-thread-1001-0"] = [
+            {
+                "id": "implementation-reply-live-thread-1001-0",
+                "author": "hephaestus[bot]",
+                "body": "[Response] The regression passes on this head.",
+            }
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "reviewer_comment_validation_only": True,
+                "pr_diff": (
+                    "diff --git a/tests/unit/validation/test_test_layout.py "
+                    "b/tests/unit/validation/test_test_layout.py\n"
+                    "--- a/tests/unit/validation/test_test_layout.py\n"
+                    "+++ b/tests/unit/validation/test_test_layout.py\n"
+                ),
+            }
+        )
+
+        result = stage.step(item, ctx)
+        while isinstance(result, JobRequest) and isinstance(result.job, BuildTestJob):
+            receipt = {
+                "head_sha": "a" * 40,
+                "argv": list(result.job.argv),
+                "immutable_source": True,
+                "failure_kind": "none",
+                "ok": True,
+                "stdout_tail": "65 passed in 0.5s",
+                "stderr_tail": "",
+            }
+            stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+            item.state = result.on_done_state
+            result = stage.step(item, ctx)
+
+        receipts = item.payload["host_verification_receipts"]
+        assert receipts
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        item.state = result.next_state
+        validation = stage.step(item, ctx)
+
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        assert validation.job.descr == "validate"
+        assert json.loads(validation.job.prompt_kwargs["host_verifications_json"]) == receipts
+        assert 1001 not in github.reviews
+
+    def test_comment_validation_stays_validation_only_if_threads_resolve_during_host_checks(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A last-thread resolution during host checks must not start a broad audit."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(
+            pr_head_branch="1-auto-impl-direct-" + "b" * 32,
+            by_severity=[(1, 0, 0), (1, 0, 0), (0, 0, 0)],
+        )
+        github._thread_replies["live-thread-1001-0"] = [
+            {
+                "id": "implementation-reply-live-thread-1001-0",
+                "author": "hephaestus[bot]",
+                "body": "[Response] The regression passes on this head.",
+            }
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+
+        assert stage.on_enter(item, ctx) is None
+        assert item.payload["reviewer_comment_validation_only"] is True
+
+        item.state = REVIEW_CHECKOUT_WAIT
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/unit/validation/test_test_layout.py "
+                    "b/tests/unit/validation/test_test_layout.py\n"
+                    "--- a/tests/unit/validation/test_test_layout.py\n"
+                    "+++ b/tests/unit/validation/test_test_layout.py\n"
+                ),
+            }
+        )
+
+        result = stage.step(item, ctx)
+        while isinstance(result, JobRequest) and isinstance(result.job, BuildTestJob):
+            receipt = {
+                "head_sha": "a" * 40,
+                "argv": list(result.job.argv),
+                "immutable_source": True,
+                "failure_kind": "none",
+                "ok": True,
+                "stdout_tail": "65 passed in 0.5s",
+                "stderr_tail": "",
+            }
+            stage.on_job_done(item, JobResult(ok=True, value=receipt), ctx)
+            item.state = result.on_done_state
+            result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="VALIDATE_WAIT")
+        item.state = result.next_state
+        validation = stage.step(item, ctx)
+
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        assert validation.job.descr == "validate"
+        assert 1001 not in github.reviews
+
     def test_deleted_unit_tests_do_not_schedule_changed_pytest_specs(self) -> None:
         """Deleted tests have no new-side path for host pytest to execute."""
         deleted_path = "tests/unit/automation/pipeline/stages/test_deleted.py"
