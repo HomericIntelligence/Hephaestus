@@ -81,6 +81,15 @@ _REVIEW_PARSE_FAILED = {
 }
 
 
+def has_exact_closing_line(body: str, issue_number: int) -> bool:
+    """Return whether ``body`` contains the canonical ``Closes #N`` policy line.
+
+    The optional carriage return admits CRLF bodies while rejecting grouped and
+    suffixed issue references that GitHub's text search can otherwise return.
+    """
+    return re.search(rf"^Closes #{issue_number}\r?$", body, re.MULTILINE) is not None
+
+
 @overload
 def load_state_file[StateModelT: BaseModel](
     state_dir: Path,
@@ -796,10 +805,9 @@ def find_pr_for_issue(
         # line boundaries (re.MULTILINE) so ``Closes #1234`` cannot match a
         # query for #12, and grouped ``Closes #12, #18`` cannot match either
         # — only PRs that follow ``pr-policy``'s exact-line format match.
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
         for candidate in pr_data:
             body = candidate.get("body") or ""
-            if closes_pattern.search(body):
+            if has_exact_closing_line(body, issue_number):
                 pr_number = int(candidate["number"])
                 logger.info("Found PR #%d for issue #%d via body search", pr_number, issue_number)
                 return pr_number
@@ -849,10 +857,9 @@ def find_merged_closing_pr(issue_number: int) -> int | None:
             check=False,
         )
         pr_data = json.loads(result.stdout or "[]")
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
         for candidate in pr_data:
             body = candidate.get("body") or ""
-            if closes_pattern.search(body):
+            if has_exact_closing_line(body, issue_number):
                 pr_number = int(candidate["number"])
                 logger.info(
                     "Found merged PR #%d closing issue #%d via body search",
@@ -869,15 +876,9 @@ def find_merged_closing_pr(issue_number: int) -> int | None:
 def find_merged_pr_for_issue(issue_number: int) -> int | None:
     """Find the MERGED PR for a single issue (tri-state fetch layer, epic #1809).
 
-    Mirrors :func:`find_pr_for_issue`'s strategies with ``--state merged``:
-
-    1. Branch name lookup (``{issue}-auto-impl``, merged PRs).
-    2. Exact ``Closes #N`` body search via :func:`find_merged_closing_pr`.
-
-    Used by pipeline seeding so the "PR merged → finished" classification row
-    is reachable: when the open-PR lookup misses, this lookup distinguishes
-    merged work (finished, idempotent) from closed/abandoned PRs (invisible —
-    normalized to "no PR") and from genuinely PR-less issues.
+    Only an exact ``Closes #N`` body line establishes the relationship. A
+    branch name is not completion evidence: branches may be reused and a
+    merged PR without the required closing line must not terminalize an issue.
 
     Args:
         issue_number: GitHub issue number.
@@ -886,33 +887,6 @@ def find_merged_pr_for_issue(issue_number: int) -> int | None:
         The merged PR number if found, ``None`` otherwise.
 
     """
-    branch_name = issue_auto_impl_branch_name(issue_number)
-    try:
-        result = _gh_call(
-            [
-                "pr",
-                "list",
-                "--head",
-                branch_name,
-                "--state",
-                "merged",
-                "--json",
-                "number",
-                "--limit",
-                "1",
-            ],
-            check=False,
-        )
-        pr_data = json.loads(result.stdout or "[]")
-        if pr_data:
-            pr_number = int(pr_data[0]["number"])
-            logger.info(
-                "Found merged PR #%d for issue #%d via branch name", pr_number, issue_number
-            )
-            return pr_number
-    except Exception as e:
-        logger.debug("Merged branch-name lookup failed for issue #%d: %s", issue_number, e)
-
     return find_merged_closing_pr(issue_number)
 
 

@@ -28,8 +28,12 @@ prose or a stale PR snapshot.
    describing the change. It never resolves a thread. A complete response set
    enters reviewer comment validation directly; it does not trigger another
    broad review batch before that validation.
-2. The host posts an implementation reply only after a real fix commit is
-   pushed. Before and after each reply it requires a complete thread snapshot
+2. The host posts an implementation reply after a real fix commit is pushed,
+   or after a successful no-commit remediation response with the explicit
+   suffix ``[auto-msg] reply has no corresponding commit, review thoroughly``.
+   The latter is evidence for the reviewer, never proof that the concern is
+   resolved: the reviewer must analyze the response and current code. Before
+   and after each reply the host requires a complete thread snapshot
    and an open, unarmed PR at the exact expected head. A later pass may recover
    a candidate reply from the final, viewer-owned thread comment on GitHub only
    when its marker recomputes for that exact thread and head; fresh GitHub
@@ -72,5 +76,8 @@ prose or a stale PR snapshot.
   implementation loop; only the host may replay its exact saved reply batch.
   It retries only the thread IDs with ambiguous host outcomes; a changed thread
   is deliberately rereviewed rather than retried.
+- A no-commit response is not rejected based on its source. Its warning is
+  length-bounded with deterministic truncation when needed, and the independent
+  reviewer retains sole responsibility for accepting or rejecting it.
 - The queue can apply implementation approval only after the fresh open-thread
   read is empty; review prose and CI remain non-authoritative for that label.

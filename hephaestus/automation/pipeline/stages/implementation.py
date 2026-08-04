@@ -68,6 +68,7 @@ from collections.abc import Callable
 from typing import cast
 
 from hephaestus.automation.address_review_core import (
+    MAX_ADDRESS_REPLY_CHARS,
     _parse_addressed_block,
     parse_addressed_replies,
 )
@@ -206,6 +207,43 @@ PRE_PR_TEST_TIMEOUT_S = 1800
 #: Vetted pre-PR test command (BuildTestJob argv must never carry
 #: issue-derived strings).
 PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
+
+NO_COMMIT_REPLY_WARNING = "[auto-msg] reply has no corresponding commit, review thoroughly"
+_TRUNCATED_REPLY_WARNING = "[auto-msg] reply truncated to fit review limit"
+
+
+def _append_no_commit_reply_warning(reply: str) -> str:
+    """Append the reviewer warning while preserving the reply-size contract."""
+    suffix = f"\n\n{NO_COMMIT_REPLY_WARNING}"
+    if len(reply) + len(suffix) <= MAX_ADDRESS_REPLY_CHARS:
+        return f"{reply}{suffix}"
+    bounded_suffix = f"\n\n{_TRUNCATED_REPLY_WARNING}{suffix}"
+    content_budget = MAX_ADDRESS_REPLY_CHARS - len(bounded_suffix)
+    return f"{reply[:content_budget].rstrip()}{bounded_suffix}"
+
+
+def _remediation_reply_head(
+    receipt: dict[str, object], snapshots: list[object]
+) -> tuple[str | None, bool]:
+    """Return the pushed or unchanged snapshotted head for a reply handoff."""
+    pushed = receipt.get("pushed") is True
+    receipt_head = receipt.get("head_sha")
+    if is_full_commit_sha(receipt_head):
+        return receipt_head, pushed
+    if pushed:
+        return None, True
+
+    snapshot_heads: set[str] = set()
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        pr_state = snapshot.get("pr_state")
+        snapshot_head = pr_state.get("headRefOid") if isinstance(pr_state, dict) else None
+        if not is_full_commit_sha(snapshot_head):
+            snapshot_head = snapshot.get("review_commit_sha")
+        if is_full_commit_sha(snapshot_head):
+            snapshot_heads.add(snapshot_head)
+    return (snapshot_heads.pop() if len(snapshot_heads) == 1 else None), False
 
 
 def build_implementation_prompt(
@@ -634,13 +672,21 @@ class ImplementationStage(Stage):
                         "implementation_reply_handoff_journal_read",
                     )
                 if recovered_handoff is not None:
-                    item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = recovered_handoff
-                    item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                    current_head, _pushed = _remediation_reply_head({}, snapshots)
+                    if recovered_handoff.get("head_sha") == current_head:
+                        item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = recovered_handoff
+                        item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+                        logger.info(
+                            "implementation:%d: recovered exact GitHub-journaled review "
+                            "reply handoff",
+                            issue,
+                        )
+                        return Continue(next_state=PR_CREATE)
                     logger.info(
-                        "implementation:%d: recovered exact GitHub-journaled review reply handoff",
+                        "implementation:%d: ignoring stale GitHub-journaled review reply "
+                        "handoff for a previous head",
                         issue,
                     )
-                    return Continue(next_state=PR_CREATE)
             job = AgentJob(
                 repo=item.repo,
                 issue=issue,
@@ -854,7 +900,9 @@ class ImplementationStage(Stage):
     def _on_commit_push_done(item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Record commit+push success, no-commit skip, or git failure."""
         if result.ok:
-            if not bool(result.value):
+            receipt = result.value if isinstance(result.value, dict) else {}
+            pushed = receipt.get("pushed") is True if receipt else bool(result.value)
+            if not pushed:
                 item.payload["no_commits"] = True
                 # The worker's no-commit path conditionally released the
                 # remote branch.  Keep the exact receipt so Finished can
@@ -886,7 +934,7 @@ class ImplementationStage(Stage):
     def _post_remediation_replies_after_push(
         item: WorkItem, result: JobResult, ctx: StageContext
     ) -> None:
-        """Prepare one commit-gated reply handoff after the writer runs.
+        """Prepare one head-gated reply handoff after the writer runs.
 
         GitHub can briefly expose the previous PR head immediately after a
         successful push.  The PR_CREATE state owns the bounded host-only
@@ -894,17 +942,20 @@ class ImplementationStage(Stage):
         without another implementation turn or commit. Before that retry can
         begin, this method records the exact batch in GitHub's immutable
         journal, allowing an interrupted loop to recover the original writer
-        response without a fresh no-op implementation claim.
+        response. A successful no-commit remediation is posted against the
+        unchanged reviewed head with an explicit warning so the reviewer—not
+        the implementation stage—decides whether the reply is sufficient.
         """
         if not item.payload.get("implementation_remediation"):
             return
         receipt = result.value if isinstance(result.value, dict) else {}
-        head_sha = receipt.get("head_sha")
         snapshots = item.payload.get("remediation_thread_snapshots")
         if not isinstance(snapshots, list):
             item.payload["remediation_reply_error"] = True
             return
-        if not receipt.get("pushed") or not is_full_commit_sha(head_sha):
+
+        head_sha, pushed = _remediation_reply_head(receipt, snapshots)
+        if not is_full_commit_sha(head_sha):
             item.payload["remediation_reply_error"] = True
             return
         replies = parse_addressed_replies(
@@ -914,6 +965,12 @@ class ImplementationStage(Stage):
         if replies is None or item.pr is None:
             item.payload["remediation_reply_error"] = True
             return
+        if not pushed:
+            replies = {
+                thread_id: _append_no_commit_reply_warning(reply)
+                for thread_id, reply in replies.items()
+            }
+            item.payload.pop("no_commits", None)
         handoff = implementation_reply_handoff(
             head_sha,
             snapshots,

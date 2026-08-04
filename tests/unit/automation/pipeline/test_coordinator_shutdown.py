@@ -328,6 +328,7 @@ def _classify_from_fake(
     *,
     open_pr: int | None = None,
     merged_pr: int | None = None,
+    issue_is_closed: bool = False,
     is_epic: bool = False,
 ) -> Any:
     """Re-run the seeding classifier against the FakeGitHub label journal."""
@@ -339,6 +340,7 @@ def _classify_from_fake(
         pr_number=open_pr if open_pr is not None else merged_pr,
         pr_is_open=open_pr is not None,
         pr_is_merged=merged_pr is not None,
+        issue_is_closed=issue_is_closed,
     )
     stage, _reason = classify_issue(facts)
     return stage
@@ -352,17 +354,18 @@ class TestCrashMatrixJournal:
     """Truncate after each durable mutation -> re-seed -> same-or-earlier stage."""
 
     @pytest.mark.parametrize(
-        ("case", "labels", "open_pr", "merged_pr", "is_epic", "expected"),
+        ("case", "labels", "open_pr", "merged_pr", "issue_is_closed", "is_epic", "expected"),
         [
-            ("no label", [], None, None, False, StageName.PLANNING),
-            ("needs-plan label", [STATE_NEEDS_PLAN], None, None, False, StageName.PLANNING),
-            ("plan-no-go label", [STATE_PLAN_NO_GO], None, None, False, StageName.PLANNING),
-            ("plan-go label", [STATE_PLAN_GO], None, None, False, StageName.IMPLEMENTATION),
+            ("no label", [], None, None, False, False, StageName.PLANNING),
+            ("needs-plan label", [STATE_NEEDS_PLAN], None, None, False, False, StageName.PLANNING),
+            ("plan-no-go label", [STATE_PLAN_NO_GO], None, None, False, False, StageName.PLANNING),
+            ("plan-go label", [STATE_PLAN_GO], None, None, False, False, StageName.IMPLEMENTATION),
             (
                 "open PR without implementation-go",
                 [STATE_IMPLEMENTATION_NO_GO],
                 77,
                 None,
+                False,
                 False,
                 StageName.PR_REVIEW,
             ),
@@ -372,11 +375,12 @@ class TestCrashMatrixJournal:
                 78,
                 None,
                 False,
+                False,
                 StageName.PR_REVIEW,
             ),
-            ("merged PR", [], None, 79, False, StageName.FINISHED),
-            ("state:skip", [STATE_SKIP], None, None, False, None),
-            ("untagged epic", [], None, None, True, None),
+            ("closed issue with merged PR", [], None, 79, True, False, StageName.FINISHED),
+            ("state:skip", [STATE_SKIP], None, None, False, False, None),
+            ("untagged epic", [], None, None, False, True, None),
         ],
     )
     def test_reconstruction_table_covers_every_github_journal_row(
@@ -385,6 +389,7 @@ class TestCrashMatrixJournal:
         labels: list[str],
         open_pr: int | None,
         merged_pr: int | None,
+        issue_is_closed: bool,
         is_epic: bool,
         expected: StageName | None,
     ) -> None:
@@ -399,6 +404,7 @@ class TestCrashMatrixJournal:
             issue,
             open_pr=open_pr,
             merged_pr=merged_pr,
+            issue_is_closed=issue_is_closed,
             is_epic=is_epic,
         )
 

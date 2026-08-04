@@ -1,10 +1,10 @@
-"""Durable, commit-gated implementation reply handoffs.
+"""Durable, head-gated implementation reply handoffs.
 
 The implementation and PR-review stages can each hold a validated response
-batch after the writer pushes a fix.  This module is the single owner of the
-replay contract: preserve the exact thread snapshots and response prose, wait
-briefly for GitHub to expose the pushed head, then retry only that batch.  A
-head or conversation that actually changed is never replayed.
+batch after the writer runs. This module is the single owner of the replay
+contract: preserve the exact thread snapshots and response prose, bind them to
+the pushed or unchanged reviewed head, then retry only that batch. A head or
+conversation that actually changed is never replayed.
 """
 
 from __future__ import annotations

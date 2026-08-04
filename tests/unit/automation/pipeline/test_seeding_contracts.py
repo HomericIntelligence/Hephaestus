@@ -7,7 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from hephaestus.automation.pipeline.seeding import seed_issue_from_github
+from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.seeding import classify_issue, seed_issue_from_github
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 
 
@@ -20,6 +21,7 @@ class TestSeedIssueFromGitHubContract:
             "number": 104,
             "title": "A task",
             "body": "",
+            "state": "OPEN",
             "labels": [{"name": STATE_PLAN_GO}],
         }
         github.find_pr_for_issue.return_value = None
@@ -48,6 +50,24 @@ class TestSeedIssueFromGitHubContract:
         with pytest.raises(RuntimeError, match="issue fetch down"):
             seed_issue_from_github(104, github)
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {},
+            {"number": 104, "state": None, "labels": []},
+            {"number": 104, "state": "UNKNOWN", "labels": []},
+            {"number": 999, "state": "OPEN", "labels": []},
+        ],
+    )
+    def test_malformed_issue_snapshot_fails_closed(self, payload: object) -> None:
+        """Missing or contradictory live issue facts never become actionable."""
+        github = self._github()
+        github.gh_issue_json.return_value = payload
+
+        with pytest.raises((TypeError, ValueError), match="issue snapshot"):
+            seed_issue_from_github(104, github)
+
     def test_open_pr_lookup_failure_raises(self) -> None:
         """Open-PR probe failures propagate, never falling back to no-PR facts."""
         github = self._github()
@@ -63,3 +83,14 @@ class TestSeedIssueFromGitHubContract:
 
         with pytest.raises(RuntimeError, match="merged probe down"):
             seed_issue_from_github(104, github)
+
+    def test_open_issue_with_merged_closing_pr_remains_actionable(self) -> None:
+        """A reopened issue is not terminal merely because a closing PR merged."""
+        github = self._github()
+        github.gh_issue_json.return_value["state"] = "OPEN"
+        github.find_merged_pr_for_issue.return_value = 105
+
+        facts = seed_issue_from_github(104, github)
+
+        assert facts.pr_is_merged is True
+        assert classify_issue(facts)[0] is StageName.IMPLEMENTATION

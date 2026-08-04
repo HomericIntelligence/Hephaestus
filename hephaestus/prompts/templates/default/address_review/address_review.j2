@@ -108,12 +108,13 @@ Rules for the JSON block:
 - `addressed`: array containing EVERY supplied `thread_id` exactly once, after
   fixing each corresponding concern in code.
 - `replies`: a one-line explanation for EVERY supplied id, keyed by that exact
-  id. The coordinator posts these only after it proves a real fix commit reached
-  the PR head; it never resolves a thread in this implementation step.
+  id. The coordinator binds these to the verified PR head. If no corresponding
+  commit exists, it appends an automatic warning for the reviewer. The coordinator
+  never resolves a thread in this implementation step.
 - Do not omit an unaddressable or difficult thread. Investigate and fix it; a
   partial result is rejected and no reply is posted.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
 - Do not attempt to resolve a GitHub thread. Return the required reply text in
-  the JSON instead; the coordinator posts it after the pushed fix is verified.
+  the JSON instead; the coordinator posts it after the current head is verified.
   The reviewer performs a fresh review of the fix and reply, resolves verified threads,
   and explains what remains wrong on threads it leaves open.

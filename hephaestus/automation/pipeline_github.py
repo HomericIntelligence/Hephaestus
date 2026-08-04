@@ -37,6 +37,7 @@ from hephaestus.automation._review_utils import (
     find_merged_closing_pr,
     find_merged_pr_for_issue,
     get_pr_head_branch,
+    has_exact_closing_line,
 )
 from hephaestus.automation.arming_state import (
     ArmingStateStore,
@@ -480,7 +481,6 @@ class PipelineGitHub:
         candidates = json.loads(stdout)
         if not isinstance(candidates, list) or len(candidates) >= 1000:
             raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
-        closes_pattern = re.compile(rf"^Closes #{issue_number}\b", re.MULTILINE)
         matching_pr: int | None = None
         for candidate in candidates:
             if not isinstance(candidate, dict):
@@ -489,7 +489,7 @@ class PipelineGitHub:
             number = candidate.get("number")
             if not isinstance(body, str) or not isinstance(number, int) or number <= 0:
                 raise RuntimeError(f"could not verify existing PR state for issue #{issue_number}")
-            if closes_pattern.search(body):
+            if has_exact_closing_line(body, issue_number):
                 if state.lower() == "open":
                     head_branch = self._verified_open_pr_head_branch(number, issue_number)
                     open_prs = self._open_prs_for_branch(head_branch)
@@ -504,12 +504,6 @@ class PipelineGitHub:
     def _find_pr_for_issue(self, issue_number: int, *, state: str) -> int | None:
         if state.lower() == "open":
             selected_pr = self._find_open_pr_for_branch(issue_auto_impl_branch_name(issue_number))
-            if selected_pr is not None:
-                return selected_pr
-        else:
-            selected_pr = self._find_pr_on_branch(
-                issue_auto_impl_branch_name(issue_number), state, issue_number
-            )
             if selected_pr is not None:
                 return selected_pr
         return self._find_closing_pr(issue_number, state)
@@ -1561,7 +1555,7 @@ class PipelineGitHub:
         replies: dict[str, str],
         batch_nonce: str,
     ) -> ImplementationThreadReplyResult:
-        """Post implementation-agent replies after a real fix commit reached GitHub.
+        """Post implementation-agent replies against a verified current PR head.
 
         Every target must be an ID from the complete host-provided thread
         snapshot. The method never resolves threads: the next reviewer pass
