@@ -1937,6 +1937,11 @@ class Coordinator:
                 item.payload[_FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)
                 continue
             item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
+            # Keep the host-owned reservation in sync with the selected
+            # snapshot.  A returning PR already has its planned claims in
+            # this map; without updating it here, its verified review paths
+            # would disappear when the implementation job captures claims.
+            self._implementation_file_claims[id(item)] = set(item_claims)
             selected_claims.update(item_claims)
             # Preserve an empty snapshot too: unknown plans fail open, but
             # must not be fetched again after being admitted.

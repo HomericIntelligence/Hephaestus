@@ -1996,10 +1996,13 @@ class TestImplementationAdmission:
         coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
         plan_claim = (("org", "repo-a"), "planned.py")
         realized_claim = (("org", "repo-a"), "shared.py")
-        returning = _issue_item(21, StageName.IMPLEMENTATION)
+        returning = _issue_item(21, StageName.PR_REVIEW)
+        assert coordinator._push_item(returning, StageName.PR_REVIEW, enter=True)
         returning.payload["_implementation_file_claims"] = {plan_claim}
         returning.payload["review_changed_paths"] = ["shared.py"]
         coordinator._implementation_file_claims[id(returning)] = {plan_claim}
+        coordinator._route(returning, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+        assert returning.stage is StageName.IMPLEMENTATION
         overlapping = _issue_item(22, StageName.IMPLEMENTATION)
         overlapping.payload["_implementation_file_claims"] = {realized_claim}
         independent = _issue_item(23, StageName.IMPLEMENTATION)
@@ -2019,7 +2022,19 @@ class TestImplementationAdmission:
             plan_claim,
             realized_claim,
         }
-        assert overlapping.payload["file_overlap_deferrals"] == 1
+        assert coordinator._implementation_file_claims[id(returning)] == {
+            plan_claim,
+            realized_claim,
+        }
+        assert coordinator._capture_implementation_file_claims(returning) == {
+            plan_claim,
+            realized_claim,
+        }
+        later_dispatch, _ = coordinator._select_file_overlap_implementation_items(
+            [(overlapping, "#22")]
+        )
+        assert later_dispatch == []
+        assert overlapping.payload["file_overlap_deferrals"] == 2
 
     def test_remediation_candidate_still_honors_same_claim_owned_by_peer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
