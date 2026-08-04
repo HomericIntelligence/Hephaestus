@@ -602,6 +602,12 @@ def session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     returns False even though the JSONL is on disk, the caller goes down
     the ``--session-id`` create path, and the CLI rejects with ``Session ID
     <uuid> is already in use``. (#822)
+
+    That directory encoding is lossy (for example, ``owner.a`` and
+    ``owner-a`` collide), so checkout isolation is provided by the
+    collision-resistant checkout identity folded into ``uuid_str`` by
+    :func:`session_uuid`. The UUID filename, not the encoded parent directory,
+    is therefore the isolation boundary.
     """
     encoded = str(cwd.resolve()).replace("/", "-").replace(".", "-")
     return Path.home() / ".claude" / "projects" / encoded / f"{uuid_str}.jsonl"
@@ -650,6 +656,9 @@ def resolve_session_jsonl_path(uuid_str: str, cwd: Path) -> Path:
     same Git repository, with lexical ordering making historical duplicates
     deterministic.
     """
+    # ``uuid_str`` is checkout-scoped by session_uuid. This matters before any
+    # registered-worktree lookup: Claude's lossy cwd encoding can make the
+    # expected parent directory belong to more than one unrelated checkout.
     expected = session_jsonl_path(uuid_str, cwd)
     candidates = {session_jsonl_path(uuid_str, root) for root in _registered_worktree_roots(cwd)}
     existing = sorted(

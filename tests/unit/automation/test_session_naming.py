@@ -390,11 +390,12 @@ class TestSessionJsonlPath:
     def test_lossy_path_pair_cannot_resume_unregistered_checkout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Dotted/dashed checkout paths are separated before transcript lookup."""
+        """Dotted/dashed checkouts isolate sessions but registered worktrees resume."""
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         dotted = tmp_path / "owner.a" / "Repo"
+        dotted_worktree = dotted / "build" / ".worktrees" / "issue-2284"
         dashed = tmp_path / "owner-a" / "Repo"
-        dotted.mkdir(parents=True)
+        dotted_worktree.mkdir(parents=True)
         dashed.mkdir(parents=True)
 
         legacy_sid = str(
@@ -416,6 +417,7 @@ class TestSessionJsonlPath:
         dotted_path = session_jsonl_path(dotted_sid, dotted)
         dashed_path = session_jsonl_path(dashed_sid, dashed)
         assert dotted_path.parent == dashed_path.parent
+        assert dotted_path != dashed_path
         assert dotted_sid != dashed_sid
 
         dashed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -429,6 +431,14 @@ class TestSessionJsonlPath:
         assert resolved == dotted_path
         assert resolved != dashed_path
         assert not resolved.exists()
+
+        dotted_path.parent.mkdir(parents=True, exist_ok=True)
+        dotted_path.write_text("{}\n", encoding="utf-8")
+        with patch(
+            "hephaestus.automation.agent_config._registered_worktree_roots",
+            return_value=(dotted.resolve(), dotted_worktree.resolve()),
+        ):
+            assert resolve_session_jsonl_path(dotted_sid, dotted_worktree) == dotted_path
 
     def test_worktree_discovery_parses_nul_output_and_scrubs_git_environment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
