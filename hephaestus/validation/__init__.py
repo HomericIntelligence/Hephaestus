@@ -52,7 +52,7 @@ from hephaestus.validation.readme_commands import (
 )
 from hephaestus.validation.stale_scripts import check_stale_scripts, find_stale_scripts
 from hephaestus.validation.structure import StructureValidator
-from hephaestus.validation.test_structure import (
+from hephaestus.validation.test_layout import (
     check_no_loose_test_files,
     check_scripts_coverage,
     check_test_directory_mirrors,

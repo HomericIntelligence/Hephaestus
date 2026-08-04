@@ -18,7 +18,7 @@ VALIDATION_MODULES = {
     "python_version.py": 1,
     "schema.py": 1,
     "stale_scripts.py": 1,
-    "test_structure.py": 1,
+    "test_layout.py": 1,
     "tier_labels.py": 1,
     "type_aliases.py": 1,
 }
