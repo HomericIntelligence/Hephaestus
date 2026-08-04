@@ -599,6 +599,7 @@ class TestCreatePR:
         assert kwargs["base"] == "main"
         assert "Closes #5" in kwargs["body"]
         assert "Automated implementation via Codex" in kwargs["body"]
+        assert "Test commands were not recorded by automation" in kwargs["body"]
         assert "Claude Code" not in kwargs["body"]
 
     def test_uses_message_agent_for_pr_title_and_body(self) -> None:
