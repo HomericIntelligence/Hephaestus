@@ -844,7 +844,11 @@ def _host_validation_failure_kind(
         if (
             tool == "ruff"
             and returncode == 1
-            and re.search(r"(?m)^(Found |Would reformat )", transcript)
+            and re.search(
+                r"(?m)^(?:Found |Would reformat |unformatted: |"
+                r"[1-9]\d* files? would be reformatted$)",
+                transcript,
+            )
         ):
             return "validation"
         if (

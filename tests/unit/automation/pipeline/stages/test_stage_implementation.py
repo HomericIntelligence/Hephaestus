@@ -2292,7 +2292,11 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=9, state="PR_CREATE")
         item.branch = "9-auto-impl"
         item.payload["issue_title"] = "Add the widget"
-        item.payload["implement_summary"] = "Added the widget."
+        item.payload["implement_summary"] = (
+            "Added the widget.\n\n"
+            "Full suite: 7,000 passed. Changes remain uncommitted at "
+            "/private/tmp/issue-9."
+        )
 
         result = stage.step(item, ctx)
 
@@ -2303,6 +2307,9 @@ class TestCommitPushAndPrCreate:
         # The PR body is a get_pr_description body carrying the closing line.
         assert "Closes #9" in github.prs[1001]["body"]
         assert "Not run by the automation pipeline" in github.prs[1001]["body"]
+        assert "7,000 passed" not in github.prs[1001]["body"]
+        assert "remain uncommitted" not in github.prs[1001]["body"]
+        assert "/private/tmp" not in github.prs[1001]["body"]
         assert github.prs[1001]["title"] == "chore: Add the widget"
 
     @pytest.mark.parametrize(

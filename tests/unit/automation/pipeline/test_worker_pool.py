@@ -662,6 +662,15 @@ class TestWorkerPoolSubmitComplete:
         )
         assert (
             _host_validation_failure_kind(
+                ("uv", "run", "ruff", "format", "--check", "hephaestus/"),
+                1,
+                "unformatted: File would be reformatted\n3 files would be reformatted\n",
+                "",
+            )
+            == "validation"
+        )
+        assert (
+            _host_validation_failure_kind(
                 ("uv", "run", "ruff", "check", "hephaestus/"),
                 2,
                 "",
