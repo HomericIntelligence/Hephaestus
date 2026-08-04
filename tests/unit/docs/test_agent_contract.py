@@ -1,5 +1,6 @@
 """Regression contract for the canonical repository agent guidance."""
 
+import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -59,6 +60,7 @@ ALLOWED_CLAUDE_REFERENCE_LINES = {
 
 EXCLUDED_PARTS = {
     ".git",
+    ".hypothesis",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
@@ -77,6 +79,12 @@ def _section(text: str, heading: str) -> str:
 def test_claude_md_is_exact_pointer() -> None:
     """The legacy entry point must contain only the compatibility pointer."""
     assert (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8") == EXPECTED_POINTER
+
+
+def test_hypothesis_cache_is_not_repository_source() -> None:
+    """Property-test caches stay under build and outside policy scans."""
+    assert ".hypothesis" in EXCLUDED_PARTS
+    assert Path(os.environ["HYPOTHESIS_STORAGE_DIRECTORY"]) == (REPO_ROOT / "build" / ".hypothesis")
 
 
 def test_source_sections_and_directives_are_preserved() -> None:

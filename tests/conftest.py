@@ -4,6 +4,14 @@
 import contextlib
 import json
 import os
+from pathlib import Path
+
+# Repository policy requires generated files to live under build/. Hypothesis
+# consults this environment variable lazily when it first opens its storage,
+# so set the suite-wide location before importing test modules.
+os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(
+    Path(__file__).resolve().parents[1] / "build" / ".hypothesis"
+)
 
 import pytest
 import yaml
