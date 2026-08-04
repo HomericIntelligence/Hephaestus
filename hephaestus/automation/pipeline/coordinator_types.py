@@ -239,7 +239,7 @@ _DIRECT_ISSUE_ENTRY_STAGES: frozenset[StageName] = frozenset(
     }
 )
 
-type StageStepResult = Continue | JobRequest | StageOutcome
+StageStepResult = Continue | JobRequest | StageOutcome
 
 
 def _budget_lookup(name: str) -> int:

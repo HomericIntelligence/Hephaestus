@@ -25,7 +25,8 @@ if TYPE_CHECKING:
             pre_agent_sha: str,
             session_id: str | None,
             max_retries: int = 2,
-        ) -> bool: ...
+        ) -> bool:
+            pass
 
         def push_ci_fix(
             self,
@@ -38,7 +39,8 @@ if TYPE_CHECKING:
             session_id: str | None,
             pr_base_branch: str = "main",
             ci_logs: str = "",
-        ) -> bool: ...
+        ) -> bool:
+            pass
 
 else:
 

@@ -85,33 +85,44 @@ if TYPE_CHECKING:
         _agent_job_time_s: float
 
         @property
-        def live_work_count(self) -> int: ...
+        def live_work_count(self) -> int:
+            pass
 
-        def _ctx_for_repo(self, repo: str) -> StageContext: ...
+        def _ctx_for_repo(self, repo: str) -> StageContext:
+            pass
 
-        def _record_event(self, event: str, *fields: Any) -> None: ...
+        def _record_event(self, event: str, *fields: Any) -> None:
+            pass
 
-        def _try_acquire_work_permit(self, item: WorkItem) -> bool: ...
+        def _try_acquire_work_permit(self, item: WorkItem) -> bool:
+            pass
 
-        def _release_work_permit(self, item: WorkItem) -> None: ...
+        def _release_work_permit(self, item: WorkItem) -> None:
+            pass
 
-        def _record_terminal_result(self, item: WorkItem) -> None: ...
+        def _record_terminal_result(self, item: WorkItem) -> None:
+            pass
 
-        def _claim_item(self, stage_name: StageName, *, index: int = 0) -> WorkItem | None: ...
+        def _claim_item(self, stage_name: StageName, *, index: int = 0) -> WorkItem | None:
+            pass
 
-        def _release_source_lease(self, item: WorkItem) -> bool: ...
+        def _release_source_lease(self, item: WorkItem) -> bool:
+            pass
 
-        def _run_item(self, item: WorkItem) -> None: ...
+        def _run_item(self, item: WorkItem) -> None:
+            pass
 
-        def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None: ...
+        def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
+            pass
 
-        def _externalize_repo_issue_source(
-            self, item: WorkItem, source: RepoIssueSource
-        ) -> bool: ...
+        def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
+            pass
 
-        def _drain_repo_issue_sources(self) -> None: ...
+        def _drain_repo_issue_sources(self) -> None:
+            pass
 
-        def _seed_products(self, item: WorkItem) -> None: ...
+        def _seed_products(self, item: WorkItem) -> None:
+            pass
 
         def _push_item(
             self,
@@ -120,42 +131,57 @@ if TYPE_CHECKING:
             enter: bool,
             *,
             defer_if_full: bool = False,
-        ) -> bool: ...
+        ) -> bool:
+            pass
 
         @staticmethod
-        def _item_key(item: WorkItem) -> str: ...
+        def _item_key(item: WorkItem) -> str:
+            pass
 
-        def _seed_pass(self) -> int: ...
+        def _seed_pass(self) -> int:
+            pass
 
-        def _drain_repo_entry_source(self) -> int: ...
+        def _drain_repo_entry_source(self) -> int:
+            pass
 
-        def _begin_direct_issue_source(self, repo: str, base_sha: str) -> None: ...
+        def _begin_direct_issue_source(self, repo: str, base_sha: str) -> None:
+            pass
 
-        def _begin_direct_pr_source(self, repo: str, base_sha: str) -> None: ...
+        def _begin_direct_pr_source(self, repo: str, base_sha: str) -> None:
+            pass
 
-        def _drain_direct_issue_source(self) -> int: ...
+        def _drain_direct_issue_source(self) -> int:
+            pass
 
-        def _drain_direct_pr_source(self) -> int: ...
+        def _drain_direct_pr_source(self) -> int:
+            pass
 
-        def _reseed_if_converged(self) -> bool: ...
+        def _reseed_if_converged(self) -> bool:
+            pass
 
-        def _drain_implementation(self) -> None: ...
+        def _drain_implementation(self) -> None:
+            pass
 
-        def _overlap_serialization_enabled(self) -> bool: ...
+        def _overlap_serialization_enabled(self) -> bool:
+            pass
 
         def _active_implementation_file_claims(
             self, *, exclude_item: WorkItem | None = None
-        ) -> set[_admission.PlanFileClaim]: ...
+        ) -> set[_admission.PlanFileClaim]:
+            pass
 
         def _capture_implementation_file_claims(
             self, item: WorkItem
-        ) -> set[_admission.PlanFileClaim]: ...
+        ) -> set[_admission.PlanFileClaim]:
+            pass
 
         def _clear_implementation_file_claims_on_exit(
             self, item: WorkItem, target: StageName
-        ) -> None: ...
+        ) -> None:
+            pass
 
-        def _admit(self, item: WorkItem) -> bool: ...
+        def _admit(self, item: WorkItem) -> bool:
+            pass
 
 else:
 
