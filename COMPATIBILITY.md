@@ -17,9 +17,10 @@ follows the deprecation policy below.
 
 ## Stability Tiers
 
-Hephaestus ships 20 documented subpackages with different maturity levels. Only the
-**stable** subpackages below are covered by the [deprecation policy](#deprecation-policy);
-**provisional** subpackages may change without notice, even across minor versions.
+Hephaestus documents subpackages with different maturity levels. Only the
+**stable** subpackages below are covered by the
+[deprecation policy](#deprecation-policy); **provisional** subpackages may
+change without notice, even across minor versions.
 
 ### Stable
 

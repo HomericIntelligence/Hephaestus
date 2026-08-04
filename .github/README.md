@@ -16,7 +16,8 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 
 **Jobs:**
 
-- **Unit tests**: pytest with coverage (≥80%)
+- **Unit tests**: pytest with the coverage floor defined by
+  [`pyproject.toml [tool.coverage.report]`](../pyproject.toml)
 - **Integration tests**: import smoke tests + wheel build/install
 - **Structure check**: enforces test mirrors source layout
 

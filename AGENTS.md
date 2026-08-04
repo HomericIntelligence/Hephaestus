@@ -34,7 +34,7 @@ common abstractions used throughout the HomericIntelligence suite.
 
 ```text
 Hephaestus/
-├── hephaestus/                 # Python source code (21 documented subpackages)
+├── hephaestus/                 # Python source packages
 │   ├── agents/                 # Agent frontmatter + loader + runtime
 │   ├── automation/             # Queue-based issue planning / implementation / PR review pipeline
 │   ├── benchmarks/             # Benchmark comparison utilities
@@ -72,8 +72,8 @@ lowercase_snake_case.
 
 ## Library vs product layer
 
-`hephaestus/automation/` is a **product layer** (26.1k LoC, 53.9% of the
-codebase) co-located with the utility library. It is gated behind the
+`hephaestus/automation/` is an opt-in product layer co-located with the utility
+library. It is gated behind the
 `HomericIntelligence-Hephaestus[automation]` optional extra. The base
 `import hephaestus` surface MUST NOT pull `curses`, `fcntl`, `pydantic`,
 or any `hephaestus.automation.*` module. Enforced by
