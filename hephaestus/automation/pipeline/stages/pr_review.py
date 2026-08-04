@@ -368,6 +368,26 @@ def _changed_new_side_paths(pr_diff: str) -> frozenset[str]:
     return frozenset(paths)
 
 
+def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:
+    """Return the changed-unit pytest command while preserving host exclusions."""
+    ignore_args = tuple(
+        f"--ignore={path}"
+        for path in sorted(_NONHERMETIC_HOST_UNIT_TEST_PATHS)
+        if path.startswith(f"{target}/")
+    )
+    return (
+        "uv",
+        "run",
+        "pytest",
+        "-o",
+        "addopts=",
+        target,
+        *ignore_args,
+        "-q",
+        "--tb=short",
+    )
+
+
 def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ...]:
     """Return the complete fixed host plan activated by the verified diff."""
     if not isinstance(pr_diff, str):
@@ -378,21 +398,46 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
     ):
         return ()
     changed_new_side_paths = _changed_new_side_paths(pr_diff)
+    changed_unit_paths = tuple(
+        sorted(
+            path
+            for path in changed_new_side_paths
+            if path.startswith("tests/unit/")
+            and path.endswith(".py")
+            and path not in _NONHERMETIC_HOST_UNIT_TEST_PATHS
+        )
+    )
+    changed_conftest_paths = tuple(
+        (path.rsplit("/", 1)[0], path)
+        for path in changed_unit_paths
+        if path.rsplit("/", 1)[-1] == "conftest.py"
+    )
+    changed_conftest_directories = {
+        directory: path
+        for directory, path in changed_conftest_paths
+        if not any(
+            directory.startswith(f"{other_directory}/")
+            for other_directory, _ in changed_conftest_paths
+        )
+    }
+    changed_unit_targets = (
+        *((path, directory) for directory, path in sorted(changed_conftest_directories.items())),
+        *(
+            (path, path)
+            for path in changed_unit_paths
+            if path.rsplit("/", 1)[-1] != "conftest.py"
+            and not any(
+                path.startswith(f"{directory}/") for directory in changed_conftest_directories
+            )
+        ),
+    )
     changed_unit_tests = tuple(
         _HostVerificationSpec(
-            changed_path=path,
-            argv=("uv", "run", "pytest", "-o", "addopts=", path, "-q", "--tb=short"),
+            changed_path=changed_path,
+            argv=_changed_unit_pytest_argv(target),
             descr=f"review_changed_unit_test_{index}",
         )
-        for index, path in enumerate(
-            sorted(
-                path
-                for path in changed_new_side_paths
-                if path.startswith("tests/unit/")
-                and path.endswith(".py")
-                and path not in _NONHERMETIC_HOST_UNIT_TEST_PATHS
-            )
-        )
+        for index, (changed_path, target) in enumerate(changed_unit_targets)
     )
     return (
         *_PYTHON_HOST_VERIFICATION_SPECS,
