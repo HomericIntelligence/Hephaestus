@@ -2449,7 +2449,35 @@ class WorkerPool:
         ).stdout
         if not isinstance(diff, str):
             return JobResult(ok=False, error="review checkout diff unavailable")
-        return JobResult(ok=True, value={"ready": True, "head": head, "base": base, "diff": diff})
+        # Disable rename detection so a rename is represented by both its
+        # deleted source and added destination.  The NUL-delimited manifest
+        # preserves paths containing whitespace or newlines without parsing
+        # the human-oriented ``diff --git`` header.
+        changed_paths_output = git_utils.run(
+            [
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{base}...{head}",
+            ],
+            cwd=worktree,
+            timeout=job.timeout_s,
+        ).stdout
+        if not isinstance(changed_paths_output, str):
+            return JobResult(ok=False, error="review checkout path manifest unavailable")
+        changed_paths = [path for path in changed_paths_output.split("\0") if path]
+        return JobResult(
+            ok=True,
+            value={
+                "ready": True,
+                "head": head,
+                "base": base,
+                "diff": diff,
+                "changed_paths": changed_paths,
+            },
+        )
 
     def _git_remove_worktree(self, job: GitJob) -> JobResult:
         """Remove a worktree by known path, or fall back to manager state."""
