@@ -1994,6 +1994,7 @@ class TestGitOps:
                     MagicMock(stdout=""),
                     MagicMock(stdout="b" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for A"),
+                    MagicMock(stdout="old.py\0new.py\0"),
                 ],
             ) as mock_run,
         ):
@@ -2006,6 +2007,7 @@ class TestGitOps:
             "head": "a" * 40,
             "base": "b" * 40,
             "diff": "checkout diff for A",
+            "changed_paths": ["old.py", "new.py"],
         }
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
         assert mock_run.call_args_list[3].args[0] == [
@@ -2013,6 +2015,14 @@ class TestGitOps:
             "diff",
             "--no-ext-diff",
             "--binary",
+            f"{'b' * 40}...{'a' * 40}",
+        ]
+        assert mock_run.call_args_list[4].args[0] == [
+            "git",
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
             f"{'b' * 40}...{'a' * 40}",
         ]
 

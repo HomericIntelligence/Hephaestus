@@ -1954,14 +1954,11 @@ class Coordinator:
             if item.stage not in _REALIZED_DIFF_CLAIM_STAGES:
                 continue
             item_claims = set(item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, ()))
-            pr_diff = item.payload.get("pr_diff")
-            if isinstance(pr_diff, str):
+            changed_paths = item.payload.get("review_changed_paths")
+            if isinstance(changed_paths, list):
                 repo = (self.config.org, item.repo)
-                for line in pr_diff.splitlines():
-                    if not line.startswith("diff --git a/"):
-                        continue
-                    _prefix, separator, changed_path = line.partition(" b/")
-                    if separator and changed_path:
+                for changed_path in changed_paths:
+                    if isinstance(changed_path, str) and changed_path:
                         item_claims.add((repo, changed_path))
             if item_claims:
                 item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)

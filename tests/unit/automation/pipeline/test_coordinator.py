@@ -1947,9 +1947,7 @@ class TestImplementationAdmission:
         active = _issue_item(21, StageName.PR_REVIEW)
         active.pr = 701
         active.payload["_implementation_file_claims"] = {(("org", "repo-a"), "planned.py")}
-        active.payload["pr_diff"] = (
-            "diff --git a/AGENTS.md b/AGENTS.md\n--- a/AGENTS.md\n+++ b/AGENTS.md\n"
-        )
+        active.payload["review_changed_paths"] = ["AGENTS.md"]
         assert coordinator._push_item(active, StageName.PR_REVIEW, enter=True)
 
         monkeypatch.setattr(
@@ -1972,6 +1970,23 @@ class TestImplementationAdmission:
         assert coordinator._active_implementation_file_claims() >= {
             (("org", "repo-a"), "planned.py"),
             (("org", "repo-a"), "AGENTS.md"),
+        }
+
+    def test_reviewed_pr_rename_claims_source_and_destination(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A verified rename prevents work against either side of the move."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        active = _issue_item(21, StageName.PR_REVIEW)
+        active.pr = 701
+        active.payload["review_changed_paths"] = ["old.py", "new.py"]
+        assert coordinator._push_item(active, StageName.PR_REVIEW, enter=True)
+
+        claims = coordinator._active_implementation_file_claims()
+
+        assert claims >= {
+            (("org", "repo-a"), "old.py"),
+            (("org", "repo-a"), "new.py"),
         }
 
     def test_overlap_claims_survive_review_and_merge_wait_until_finished(
