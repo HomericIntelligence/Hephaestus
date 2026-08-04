@@ -1249,11 +1249,6 @@ class PrReviewStage(Stage):
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
-        if item.payload.get(_COMMENT_VALIDATION_ONLY):
-            # The original audit already left these threads.  At this point
-            # the reviewer only validates the implementation's current-head
-            # replies, so do not create a second broad review batch.
-            return Continue(next_state=VALIDATE_WAIT)
         verifications = _host_verification_specs(item.payload.get("pr_diff"))
         if verifications:
             logger.info(
@@ -1379,6 +1374,11 @@ class PrReviewStage(Stage):
                 StageOutcome(Disposition.FINISH_FAIL, "review_thread_receipts_unavailable"),
             )
         if not live_threads:
+            if item.payload.get(_COMMENT_VALIDATION_ONLY):
+                # A reply may resolve the last thread while the immutable
+                # host checks are running.  Keep the already-selected
+                # validation-only route instead of opening a second audit.
+                return Continue(next_state=VALIDATE_WAIT)
             return self._submit_review_job(item, ctx)
         snapshots = _validation_thread_snapshots(live_threads, receipts)
         remediation_threads = _normalize_remediation_threads(live_threads)
