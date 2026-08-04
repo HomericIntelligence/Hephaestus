@@ -36,6 +36,7 @@ SECURITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 PERFORMANCE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "performance.yml"
 NIGHTLY_TESTS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml"
+CONTRACT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "contract.yml"
 PERFORMANCE_DOC = REPO_ROOT / "docs" / "performance-testing.md"
 SETUP_PI_ACTION = REPO_ROOT / ".github" / "actions" / "setup-pi-cli" / "action.yml"
 
@@ -314,6 +315,37 @@ class TestNightlyTestsWorkflow:
         """Commands that override pytest defaults retain the nightly exclusion."""
         for workflow_path in (REQUIRED_WORKFLOW, TEST_WORKFLOW):
             assert '-m "not nightly"' in workflow_path.read_text(encoding="utf-8")
+
+
+class TestContractWorkflow:
+    """Contracts for the opt-in external integration lane."""
+
+    def _load(self) -> dict[str, Any]:
+        workflow: dict[str, Any] = yaml.load(
+            CONTRACT_WORKFLOW.read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        return workflow
+
+    def test_lane_is_manual_only(self) -> None:
+        """The contract lane must never run on pushes or pull requests."""
+        workflow = self._load()
+        assert set(workflow["on"]) == {"workflow_dispatch"}
+
+    def test_github_job_is_opted_in_and_tokened(self) -> None:
+        """The GitHub job enables the lane and passes the workflow token."""
+        workflow = self._load()
+        steps = workflow["jobs"]["github-contract"]["steps"]
+        pytest_step = next(
+            step for step in steps if "tests/integration/contract" in str(step.get("run", ""))
+        )
+        assert pytest_step["env"]["HEPHAESTUS_CONTRACT_TESTS"] == "1"
+        assert pytest_step["env"]["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105
+
+    def test_permissions_are_read_only(self) -> None:
+        """The workflow token may only read repository contents and issues."""
+        workflow = self._load()
+        assert workflow["permissions"]["contents"] == "read"
 
 
 class TestIsCheckoutStep:
