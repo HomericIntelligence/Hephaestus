@@ -11,11 +11,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO_ROOT / "hephaestus"
 README = REPO_ROOT / "README.md"
+COMPATIBILITY_POINTER = "CLAUDE" + ".md"
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
 
 NAVIGATION_HEADING = "## Repository navigation"
 NAVIGATION_EXCLUSIONS = {
     "README.md": "The navigation index lives in README.md, so a self-link adds no value.",
+    COMPATIBILITY_POINTER: "The compatibility pointer is not an authoritative policy document.",
 }
 TABLE_TARGET_RE = re.compile(r"^\|\s*\[[^\]]+\]\(([^)]+)\)\s*\|", re.MULTILINE)
 TREE_MARKER_RE = re.compile(r"^\s*(?:├──|└──|(?:\|--|`--|\+--)\s+\S)")
@@ -105,8 +107,8 @@ def _assert_targets_resolve_within_repository(
 
 
 def test_navigation_exclusion_policy_is_explicit() -> None:
-    """README itself is the only tracked root entry excluded from navigation."""
-    assert set(NAVIGATION_EXCLUSIONS) == {"README.md"}
+    """README and the non-authoritative compatibility pointer are excluded."""
+    assert set(NAVIGATION_EXCLUSIONS) == {"README.md", COMPATIBILITY_POINTER}
     assert all(reason.strip() for reason in NAVIGATION_EXCLUSIONS.values())
 
 
