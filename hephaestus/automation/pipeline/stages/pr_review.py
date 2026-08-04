@@ -1467,6 +1467,7 @@ class PrReviewStage(Stage):
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
             prompt_kwargs={
                 "pr_number": item.pr,
                 "issue_number": item.issue,
