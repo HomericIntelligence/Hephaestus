@@ -1895,12 +1895,18 @@ class Coordinator:
         candidates: list[tuple[WorkItem, str]],
     ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
         """Apply one repo-scoped overlap safety rule to every candidate class."""
-        claimed = self._active_implementation_file_claims()
         dispatch: list[WorkItem] = []
         snapshots: dict[int, set[_admission.PlanFileClaim]] = {}
+        selected_claims: set[_admission.PlanFileClaim] = set()
         for item, identity in candidates:
             if item.issue is None:  # defensive: candidate construction excludes this case
                 continue
+            # A reviewed PR returning for remediation still owns its claims so
+            # it can block every *other* issue.  It must not block itself.
+            # Recompute per candidate rather than subtracting from an aggregate:
+            # another active item may independently own the same path.
+            claimed = self._active_implementation_file_claims(exclude_item=item)
+            claimed.update(selected_claims)
             blocked_claims = item.payload.get(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
             if blocked_claims is not None and set(blocked_claims) == claimed:
                 # The same active reservation still blocks this item. Polling
@@ -1921,7 +1927,7 @@ class Coordinator:
                 item.payload[_FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)
                 continue
             item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
-            claimed.update(item_claims)
+            selected_claims.update(item_claims)
             # Preserve an empty snapshot too: unknown plans fail open, but
             # must not be fetched again after being admitted.
             snapshots[id(item)] = set(item_claims)
@@ -1943,14 +1949,21 @@ class Coordinator:
                 seen.add(key)
         return duplicates
 
-    def _active_implementation_file_claims(self) -> set[_admission.PlanFileClaim]:
-        """Return plan plus verified-diff claims held by active PR work."""
+    def _active_implementation_file_claims(
+        self, *, exclude_item: WorkItem | None = None
+    ) -> set[_admission.PlanFileClaim]:
+        """Return active claims, optionally excluding one candidate's ownership."""
         claims: set[_admission.PlanFileClaim] = set()
-        for item_claims in self._implementation_file_claims.values():
+        excluded_id = id(exclude_item) if exclude_item is not None else None
+        for item_id, item_claims in self._implementation_file_claims.items():
+            if item_id == excluded_id:
+                continue
             claims.update(item_claims)
         for active_claims in self._inflight_implementation_claims.values():
             claims.update(active_claims)
         for item in self.items:
+            if item is exclude_item:
+                continue
             if item.stage not in _REALIZED_DIFF_CLAIM_STAGES:
                 continue
             item_claims = set(item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, ()))
