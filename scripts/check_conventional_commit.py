@@ -111,8 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     strict = "--strict" in args
     args = [arg for arg in args if arg != "--strict"]
     subjects = _subjects_from_args(args)
-    # An empty subject set (no commits / empty stdin) is not a violation;
-    # the pr-policy signing + Closes checks cover the empty-commits anomaly.
+    # An empty subject set is not a violation; the PR-body and DCO policy checks
+    # still cover the malformed/empty-commit metadata path.
     failed = False
     for subject in subjects:
         err = validate_subject(subject, allow_machinery=not strict)

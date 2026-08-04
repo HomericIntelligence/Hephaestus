@@ -270,8 +270,9 @@ class TestResignEmailKeyGuard:
     """Regression tests for #1025: re-sign email must match the GPG signing key.
 
     A commit re-signed with an email that is not on the configured signing key
-    signs locally but GitHub reports verified=false/reason=no_user, so pr-policy
-    rejects the PR at merge. get_resign_email() must catch this and fail fast.
+    signs locally but GitHub reports verified=false/reason=no_user, so the
+    required-signatures ruleset rejects the PR at merge. get_resign_email() must
+    catch this and fail fast.
     """
 
     def _stub_signing_key(self, monkeypatch, *, signingkey: str, uids: list[str]) -> None:
@@ -304,7 +305,7 @@ class TestResignEmailKeyGuard:
         assert fleet_sync.get_resign_email() == "Dev@Example.com"
 
     def test_email_not_on_key_raises(self, monkeypatch) -> None:
-        """A mismatch fails fast with an actionable pr-policy message."""
+        """A mismatch fails fast with an actionable ruleset message."""
         from hephaestus.github import fleet_sync
 
         monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)

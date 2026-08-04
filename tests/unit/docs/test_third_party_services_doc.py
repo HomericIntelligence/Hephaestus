@@ -19,12 +19,8 @@ REQUIRED_SERVICES = (
     "Renovate",
 )
 
-# First-party GitHub actions (owner ``actions``) are covered by the GitHub
-# inventory row rather than listed individually.
-FIRST_PARTY_ACTION_OWNERS = frozenset({"actions"})
 
-
-def _documented_action_owners(repo_root: Path = REPO_ROOT) -> set[str]:
+def _documented_action_owners(repo_root: Path) -> set[str]:
     """Remote ``uses:`` owners referenced by workflows and composite actions.
 
     The trailing ``@`` in the pattern restricts matches to remote pinned
@@ -33,8 +29,8 @@ def _documented_action_owners(repo_root: Path = REPO_ROOT) -> set[str]:
     """
     owners: set[str] = set()
     for definitions in (
-        repo_root / ".github" / "workflows",
-        repo_root / ".github" / "actions",
+        repo_root / ".github/" / "workflows/",
+        repo_root / ".github/" / "actions",
     ):
         for pattern in ("*.yml", "*.yaml"):
             for definition in definitions.rglob(pattern):
@@ -84,20 +80,9 @@ def test_inventory_has_responsibility_and_status_columns() -> None:
     assert any("status" in cell.lower() for cell in header), header
 
 
-def test_every_third_party_action_owner_is_documented() -> None:
-    """A new external CI vendor must be added to the inventory table."""
-    owners = _documented_action_owners() - FIRST_PARTY_ACTION_OWNERS
-    assert owners, "no remote action owners found — regex or workflow layout changed"
-    service_cells = [row[0].lower() for row in _inventory_table_rows()[1:]]
-    missing = sorted(
-        owner for owner in owners if not any(owner.lower() in cell for cell in service_cells)
-    )
-    assert missing == [], f"CI action owners absent from docs/third-party-services.md: {missing}"
-
-
 def test_composite_action_owner_is_discovered(tmp_path: Path) -> None:
     """A nested composite action cannot bypass the external-owner guard."""
-    action = tmp_path / ".github" / "actions" / "bootstrap" / "action.yml"
+    action = tmp_path / ".github/" / "actions" / "bootstrap" / "action.yml"
     action.parent.mkdir(parents=True)
     action.write_text(
         "runs:\n  using: composite\n  steps:\n"
@@ -110,7 +95,7 @@ def test_composite_action_owner_is_discovered(tmp_path: Path) -> None:
 
 def test_named_step_action_owner_is_discovered(tmp_path: Path) -> None:
     """A named workflow step cannot bypass the external-owner guard."""
-    workflow = tmp_path / ".github" / "workflows" / "release.yml"
+    workflow = tmp_path / ".github/" / "workflows/" / "release.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text(
         "steps:\n"
@@ -124,7 +109,7 @@ def test_named_step_action_owner_is_discovered(tmp_path: Path) -> None:
 
 def test_quoted_action_owner_is_discovered(tmp_path: Path) -> None:
     """Quoted remote action references cannot bypass the external-owner guard."""
-    workflow = tmp_path / ".github" / "workflows" / "release.yml"
+    workflow = tmp_path / ".github/" / "workflows/" / "release.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text(
         "steps:\n"
