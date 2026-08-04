@@ -1858,7 +1858,11 @@ class WorkerPool:
                     value=False,
                     error="mechanical rebase hit conflicts; aborted",
                 )
-            return JobResult(ok=False, value={"rebased": False}, error="rebase conflicted")
+            return JobResult(
+                ok=False,
+                value={"rebased": False},
+                error="mechanical rebase hit conflicts; aborted",
+            )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
         cwd = Path(str(kwargs.get("cwd") or ""))

@@ -2249,6 +2249,36 @@ class TestGitOps:
         assert result.value is rebase_clean
         assert result.error == expected_error
 
+    def test_writer_publish_rebase_conflict_returns_actionable_reason(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The active writer publish path preserves the conflict explanation."""
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with patch(
+            "hephaestus.automation.git_utils.rebase_worktree_onto",
+            return_value=False,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {"rebased": False}
+        assert result.error == "mechanical rebase hit conflicts; aborted"
+
     def test_direct_rebase_dispatch_rejects_the_retired_publish_mode(
         self,
         pool: WorkerPool,
