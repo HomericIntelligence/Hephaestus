@@ -1,4 +1,4 @@
-"""Regression tests for externalized skill/plugin topology (#2134, #2504)."""
+"""Regression tests for externalized skill/plugin topology (#2134, #2255)."""
 
 import json
 import re
