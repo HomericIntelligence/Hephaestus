@@ -1,4 +1,4 @@
-"""Regression tests for externalized skill/plugin topology (#2134, #2504)."""
+"""Regression tests for externalized skill/plugin topology (#2134, #2255)."""
 
 import json
 import re
@@ -18,6 +18,10 @@ LEGACY_PLUGIN_PATHS = (
     REPO_ROOT / "skills",
     REPO_ROOT / "plugins" / "hephaestus",
     REPO_ROOT / ".codex-plugin",
+)
+RETIRED_PLUGIN_SCANNER_INPUTS = (
+    REPO_ROOT / ".github" / "workflows" / "hol-plugin-scanner.yml",
+    REPO_ROOT / ".plugin-scanner.toml",
 )
 REQUIRED_ROOT_METADATA = (
     REPO_ROOT / "README.md",
@@ -49,6 +53,13 @@ def test_repository_has_no_local_plugin_distribution() -> None:
     present = _present_path_names(LEGACY_PLUGIN_PATHS, REPO_ROOT)
 
     assert present == [], "repository-local plugin content must not reappear: " + ", ".join(present)
+
+
+def test_repository_has_no_retired_plugin_scanner_inputs() -> None:
+    """The retired scanner must not inspect the externalized plugin surface."""
+    present = _present_path_names(RETIRED_PLUGIN_SCANNER_INPUTS, REPO_ROOT)
+
+    assert present == [], "retired plugin scanner inputs must not reappear: " + ", ".join(present)
 
 
 def test_dangling_legacy_plugin_symlink_remains_present(tmp_path: Path) -> None:
