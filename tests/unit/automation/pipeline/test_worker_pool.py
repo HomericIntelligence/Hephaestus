@@ -2212,14 +2212,21 @@ class TestGitOps:
         assert result.value == {"local_branch_deleted": True}
         release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
 
-    @pytest.mark.parametrize("rebase_clean", [True, False])
-    def test_rebase_dispatch_propagates_bool(
+    @pytest.mark.parametrize(
+        ("rebase_clean", "expected_error"),
+        [
+            (True, None),
+            (False, "mechanical rebase hit conflicts; aborted"),
+        ],
+    )
+    def test_rebase_dispatch_propagates_result(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         rebase_clean: bool,
+        expected_error: str | None,
     ) -> None:
-        """Rebase forwards to rebase_worktree_onto; its bool is ok AND value."""
+        """Rebase propagates its status and explains an aborted conflict."""
         job = GitJob(
             repo="test/repo",
             op="rebase",
@@ -2240,6 +2247,37 @@ class TestGitOps:
         )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
+        assert result.error == expected_error
+
+    def test_writer_publish_rebase_conflict_returns_actionable_reason(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """The active writer publish path preserves the conflict explanation."""
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        with patch(
+            "hephaestus.automation.git_utils.rebase_worktree_onto",
+            return_value=False,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value == {"rebased": False}
+        assert result.error == "mechanical rebase hit conflicts; aborted"
 
     def test_direct_rebase_dispatch_rejects_the_retired_publish_mode(
         self,
