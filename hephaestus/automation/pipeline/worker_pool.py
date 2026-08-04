@@ -1853,8 +1853,16 @@ class WorkerPool:
         result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
         if not result:
             if not publish_rebased_head:
-                return JobResult(ok=False, value=False)
-            return JobResult(ok=False, value={"rebased": False}, error="rebase conflicted")
+                return JobResult(
+                    ok=False,
+                    value=False,
+                    error="mechanical rebase hit conflicts; aborted",
+                )
+            return JobResult(
+                ok=False,
+                value={"rebased": False},
+                error="mechanical rebase hit conflicts; aborted",
+            )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
         cwd = Path(str(kwargs.get("cwd") or ""))

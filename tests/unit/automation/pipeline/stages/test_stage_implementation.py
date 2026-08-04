@@ -574,6 +574,30 @@ class TestGate:
         stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
         assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
+    def test_rebase_conflict_warning_preserves_actionable_reason(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The implementation warning explains that the rebase was aborted."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        result = JobResult(
+            ok=False,
+            value={"rebased": False},
+            error="mechanical rebase hit conflicts; aborted",
+        )
+
+        with caplog.at_level("WARNING", logger=implementation_module.__name__):
+            stage.on_job_done(item, result, ctx)
+
+        assert item.payload["rebase_error"] is True
+        assert caplog.messages == [
+            "implementation:1: writer rebase failed: mechanical rebase hit conflicts; aborted"
+        ]
+
 
 class TestImplementationStateSkipGate:
     """GATE checks state:skip before either the existing-PR or plan-go path (#1835)."""
