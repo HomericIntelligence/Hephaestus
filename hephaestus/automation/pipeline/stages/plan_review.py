@@ -432,6 +432,7 @@ class PlanReviewStage(Stage):
                 prompt_builder=get_plan_loop_review_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=plan_reviewer_claude_timeout(),
+                sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLAN_REVIEWER,
                 # get_plan_loop_review_prompt takes a 0-based iteration index
@@ -472,6 +473,7 @@ class PlanReviewStage(Stage):
                 prompt_builder=build_amend_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,
                 # build_amend_prompt composes get_plan_prompt with the

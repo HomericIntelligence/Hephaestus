@@ -551,7 +551,25 @@ class TestPlanningStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "PLAN_WAIT"
         assert result.job.descr == "advise"
+        assert result.job.sandbox == "read-only"
         assert result.job.prompt_kwargs["issue_number"] == 3
+
+    def test_codex_advise_job_is_provider_neutral_read_only(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Codex advise turns must receive a runtime read-only sandbox."""
+        stage = PlanningStage()
+        ctx = make_ctx()
+        ctx.config.agent = "codex"
+        item = make_work_item(issue=3, state="ADVISE_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.agent == "codex"
+        assert result.job.sandbox == "read-only"
+        assert result.job.allowed_tools == "Read,Glob,Grep"
 
     def test_plan_wait_requests_plan_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """PLAN_WAIT submits the plan job (planner session) and lands in VERIFY."""
@@ -568,6 +586,7 @@ class TestPlanningStageStep:
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.on_done_state == "VERIFY"
         assert result.job.descr == "plan"
+        assert result.job.sandbox == "read-only"
         assert result.job.prompt_builder is build_plan_prompt
         # Advise findings travel via prompt_kwargs (builders run in-worker;
         # AgentJob is frozen, so no closures over payload).
