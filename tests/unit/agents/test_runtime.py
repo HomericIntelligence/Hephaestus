@@ -2132,8 +2132,10 @@ def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
     assert captured["kwargs"]["env"]["CLAUDECODE"] == ""
 
 
-def test_run_claude_text_read_only_omits_write_permissions(tmp_path: Path) -> None:
-    """Read-only stages should not grant Claude write-capable tool permissions."""
+def test_run_claude_text_read_only_uses_explicit_non_mutating_policy(
+    tmp_path: Path,
+) -> None:
+    """Read-only Claude execution must receive a fixed, explicit policy."""
     captured_cmd: list[str] = []
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -2148,8 +2150,46 @@ def test_run_claude_text_read_only_omits_write_permissions(tmp_path: Path) -> No
             sandbox="read-only",
         )
 
-    assert "--permission-mode" not in captured_cmd
-    assert "--allowedTools" not in captured_cmd
+    assert captured_cmd == [
+        "claude",
+        "--print",
+        "--output-format",
+        "text",
+        "--bare",
+        "--permission-mode",
+        "dontAsk",
+        "--tools",
+        "Read,Glob,Grep",
+        "--allowedTools",
+        "Read,Glob,Grep",
+        "--strict-mcp-config",
+    ]
+
+
+def test_run_claude_text_read_only_cannot_be_broadened_by_caller_tools(
+    tmp_path: Path,
+) -> None:
+    """Caller grants cannot expose write, edit, or shell tools in read-only mode."""
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured_cmd.extend(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        agent_runtime.run_claude_text(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="read-only",
+            allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
+        )
+
+    tools = set(captured_cmd[captured_cmd.index("--tools") + 1].split(","))
+    allowed = set(captured_cmd[captured_cmd.index("--allowedTools") + 1].split(","))
+    assert tools == {"Read", "Glob", "Grep"}
+    assert allowed == tools
+    assert tools.isdisjoint({"Write", "Edit", "Bash"})
 
 
 def test_resolve_agent_prefers_claude_when_both_are_authenticated() -> None:

@@ -234,14 +234,11 @@ def test_main_rejects_danger_full_access_sandbox_with_claude_agent(
     assert "--sandbox=danger-full-access" in capsys.readouterr().err
 
 
-def test_main_allows_read_only_sandbox_with_claude_agent(
+def test_main_allows_enforced_read_only_policy_with_claude_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--sandbox=read-only IS honored by run_claude_text and must NOT be rejected.
-
-    Regression guard for the over-restriction caught in plan review of issue #773.
-    """
+    """Claude accepts the explicitly enforced read-only tool policy."""
 
     def fake_run_claude_text(*a: object, **kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
@@ -265,6 +262,32 @@ def test_main_allows_read_only_sandbox_with_claude_agent(
         "read-only",
     ]
     assert agent_stage.main(argv) == 0
+
+
+def test_run_agent_propagates_claude_read_only_policy_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported enforcement flags must fail the stage without fallback."""
+
+    def fake_run_claude_text(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["sandbox"] == "read-only"
+        return subprocess.CompletedProcess(
+            ["claude"],
+            2,
+            stdout="error: unsupported read-only policy flag",
+            stderr="",
+        )
+
+    monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda agent: "claude")
+    args = _args(tmp_path, agent="claude")
+    args.sandbox = "read-only"
+
+    assert agent_stage.run_agent(args) == 2
 
 
 def test_main_allows_default_flags_with_claude_agent(
