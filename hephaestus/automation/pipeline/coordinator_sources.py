@@ -913,13 +913,20 @@ class SourceCoordinator(_CoordinatorHost):
         )
 
     def _reseed_if_converged(self) -> bool:
-        """Re-seed after full drain; False = stop (loops or zero-work exit).
+        """Re-seed repository discovery after full drain; False = stop.
 
         Mirrors the legacy zero-work early-exit (loop_runner
         ``_CONVERGENCE_PHASES``): when the just-finished pass produced zero
         actionable (non-repo, non-finished) work, the run converged — exit
         even if ``--loops`` remain.
+
+        Explicit ``--issues`` or ``--prs`` selections are a finite operator
+        scope, not a discovery source. Their stage queues own all retries and
+        fail-backs, so a completed pass must never recreate their cursors.
         """
+        if self.config.issues or self.config.prs:
+            logger.info("explicit issue/PR selection drained; skipping discovery re-seed")
+            return False
         if self._loops_run >= self.config.loops:
             logger.info("loop budget exhausted (%d/%d)", self._loops_run, self.config.loops)
             return False

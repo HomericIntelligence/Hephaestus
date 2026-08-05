@@ -116,10 +116,10 @@ def test_direct_issue_seeds_are_source_pulled_and_lossless_at_capacity_one(
     assert max(observed_occupancies) <= 1
 
 
-def test_direct_issue_source_restarts_for_each_configured_loop(
+def test_direct_issue_source_does_not_reseed_after_explicit_scope_drains(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bounded cursor is recreated, rather than exhausted, on re-seeding."""
+    """Explicit ``--issues`` drain once even when the loop budget remains."""
     events: list[tuple[str, int]] = []
 
     def classify_direct_issue(issue: int, github: Any) -> IssueFacts:
@@ -161,11 +161,42 @@ def test_direct_issue_source_restarts_for_each_configured_loop(
     assert events == [
         ("classify", 101),
         ("complete", 101),
-        ("classify", 101),
-        ("complete", 101),
     ]
-    assert coordinator._loops_run == 2
-    assert len(coordinator.ledger) == 2
+    assert coordinator._loops_run == 1
+    assert len(coordinator.ledger) == 1
+
+
+@pytest.mark.parametrize("issues, prs", [([101], []), ([], [701])])
+def test_reseed_is_disabled_for_any_explicit_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    issues: list[int],
+    prs: list[int],
+) -> None:
+    """An explicit issue or PR selection never starts a discovery pass."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=issues,
+            prs=prs,
+            loops=2,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    coordinator._loops_run = 1
+    coordinator._pass_work_count = 1
+
+    def unexpected_reseed() -> int:
+        raise AssertionError("explicit selections must not be re-seeded")
+
+    monkeypatch.setattr(coordinator, "_seed_pass", unexpected_reseed)
+
+    assert coordinator._reseed_if_converged() is False
+    assert coordinator._loops_run == 1
 
 
 def test_direct_pr_seeds_are_source_pulled_and_lossless_at_capacity_one(
