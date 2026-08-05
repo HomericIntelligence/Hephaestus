@@ -479,6 +479,31 @@ def test_run_codex_session_rejects_nested_sandbox_tool_failure_with_no_edits(
                 "type": "item.completed",
                 "item": {
                     "id": "item_1",
+                    "type": "error",
+                    "message": "Skill descriptions failed to load: invalid context budget",
+                },
+            },
+            "Skill descriptions failed to load: invalid context budget",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "error",
+                    "message": (
+                        "Skill descriptions were shortened to fit the invalid% skills context "
+                        "budget."
+                    ),
+                },
+            },
+            "Skill descriptions were shortened to fit the invalid% skills context budget",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
                     "type": "file_change",
                     "status": "failed",
                     "changes": [],
@@ -725,6 +750,65 @@ def test_run_codex_session_allows_app_server_stream_lag_after_successful_edits(
         )
 
     assert result.stdout == "Implemented and verified the fix."
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        (
+            "Skill descriptions were shortened to fit the 2% skills context budget. "
+            "Codex can still see every skill, but some descriptions are shorter. "
+            "Disable unused skills or plugins to leave more room for the rest."
+        ),
+        (
+            "Skill descriptions were shortened to fit the 7.5% skills context budget. "
+            "Some descriptions use compact summaries."
+        ),
+    ],
+)
+def test_run_codex_session_allows_skills_budget_notice_after_successful_turn(
+    tmp_path: Path,
+    notice: str,
+) -> None:
+    """Skills-budget percentage and guidance changes do not discard final output."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "codex-session"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "error",
+                            "message": notice,
+                        },
+                    }
+                ),
+                json.dumps({"type": "turn.completed", "usage": {}}),
+            ]
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message='{"grade":"A","summary":"Reviewed.","comments":[]}',
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "review",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="read-only",
+        )
+
+    assert result.stdout == '{"grade":"A","summary":"Reviewed.","comments":[]}'
 
 
 def test_codex_approval_args_uses_config_override_for_current_cli() -> None:

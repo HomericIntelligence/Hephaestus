@@ -993,6 +993,8 @@ _CODEX_NESTED_SANDBOX_DIAGNOSTIC = (
 _CODEX_FAILED_TOOL_STATUSES = frozenset({"failed", "declined"})
 _CODEX_APP_SERVER_STREAM_LAG_PREFIX = "in-process app-server event stream lagged; dropped "
 _CODEX_APP_SERVER_STREAM_LAG_SUFFIX = " events"
+_CODEX_SKILLS_BUDGET_PREFIX = "Skill descriptions were shortened to fit the "
+_CODEX_SKILLS_BUDGET_MARKER = "% skills context budget."
 
 
 def _codex_json_objects(text: str) -> Iterable[dict[str, Any]]:
@@ -1035,6 +1037,21 @@ def _is_codex_app_server_stream_lag(message: str) -> bool:
     return dropped_count.isascii() and dropped_count.isdigit()
 
 
+def _is_codex_nonfatal_error_item(message: str) -> bool:
+    """Return whether Codex encodes a known informational notice as an error item."""
+    if _is_codex_app_server_stream_lag(message):
+        return True
+    if not message.startswith(_CODEX_SKILLS_BUDGET_PREFIX):
+        return False
+    percentage, marker, _guidance = message[len(_CODEX_SKILLS_BUDGET_PREFIX) :].partition(
+        _CODEX_SKILLS_BUDGET_MARKER
+    )
+    percentage_parts = percentage.split(".", maxsplit=1)
+    return bool(
+        marker and all(part and part.isascii() and part.isdigit() for part in percentage_parts)
+    )
+
+
 def _codex_structured_failure(event: dict[str, Any]) -> str | None:
     """Return a failure description for a fatal Codex JSONL event."""
     event_type = event.get("type")
@@ -1061,7 +1078,7 @@ def _codex_structured_failure(event: dict[str, Any]) -> str | None:
         return None
     if item_type == "error":
         message = _codex_error_message(item)
-        if message is not None and _is_codex_app_server_stream_lag(message):
+        if message is not None and _is_codex_nonfatal_error_item(message):
             return None
         return message or "Codex error item"
     if status in _CODEX_FAILED_TOOL_STATUSES:
