@@ -6,7 +6,6 @@ import json
 import time
 from collections import deque
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -1714,8 +1713,7 @@ class TestWorktreeAndAdvise:
     def test_advise_disabled_skips_to_implement(self, make_ctx: Any, make_work_item: Any) -> None:
         """Advise disabled continues straight to IMPLEMENT_WAIT."""
         stage = ImplementationStage()
-        ctx = make_ctx()
-        ctx.config.enable_advise = False
+        ctx = make_ctx(config_overrides={"no_advise": True})
         item = make_work_item(issue=1, state="ADVISE_WAIT")
 
         result = stage.step(item, ctx)
@@ -1856,7 +1854,7 @@ class TestImplementBudget:
     ) -> None:
         """A retried direct implementation keeps its prior working context."""
         stage = ImplementationStage()
-        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, state="IMPLEMENT_WAIT")
         item.session_ids["implementer"] = "implement-session-id"
 
@@ -2093,8 +2091,7 @@ class TestTestsAndFix:
     def test_tests_enabled_request_build_test_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """run_pre_pr_tests=True submits the vetted pytest BuildTestJob."""
         stage = ImplementationStage()
-        ctx = make_ctx()
-        ctx.config.run_pre_pr_tests = True
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
         item = make_work_item(issue=1, state="TEST_WAIT")
         item.payload["tests_failed"] = True  # stale prior round result
 
@@ -2111,9 +2108,12 @@ class TestTestsAndFix:
     def test_tests_enabled_use_configured_argv(self, make_ctx: Any, make_work_item: Any) -> None:
         """The pre-PR test command comes from config when overridden."""
         stage = ImplementationStage()
-        ctx = make_ctx()
-        ctx.config.run_pre_pr_tests = True
-        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        ctx = make_ctx(
+            config_overrides={
+                "run_pre_pr_tests": True,
+                "pre_pr_test_argv": ("pytest", "tests/custom", "-q"),
+            }
+        )
         item = make_work_item(issue=1, state="TEST_WAIT")
 
         result = stage.step(item, ctx)
@@ -2157,8 +2157,7 @@ class TestTestsAndFix:
     ) -> None:
         """A passing host test run leaves its exact command and outcome for the PR."""
         stage = ImplementationStage()
-        ctx = make_ctx()
-        ctx.config.run_pre_pr_tests = True
+        ctx = make_ctx(config_overrides={"run_pre_pr_tests": True})
         item = make_work_item(issue=1, state="TEST_WAIT")
 
         stage.step(item, ctx)
@@ -2232,7 +2231,7 @@ class TestTestsAndFix:
     ) -> None:
         """A test repair continues the implementation conversation."""
         stage = ImplementationStage()
-        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, state="TESTFIX_WAIT")
         item.session_ids["implementer"] = "implement-session-id"
 
@@ -2908,11 +2907,11 @@ class TestCommitPushAndPrCreate:
         """Commit-message generation inherits the CLI-selected Codex tier and effort."""
         stage = ImplementationStage()
         ctx = make_ctx(
-            config=SimpleNamespace(
-                agent="codex",
-                implementer_model="sol",
-                implementer_reasoning_effort="medium",
-            )
+            config_overrides={
+                "agent": "codex",
+                "implementer_model": "sol",
+                "implementer_reasoning_effort": "medium",
+            }
         )
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
@@ -3274,8 +3273,10 @@ class TestFullWalks:
         """
         stage = ImplementationStage()
         github = FakeStageGitHub(labels=["state:plan-go"])
-        ctx = make_ctx(github=github)
-        ctx.config.run_pre_pr_tests = True
+        ctx = make_ctx(
+            github=github,
+            config_overrides={"run_pre_pr_tests": True},
+        )
         item = make_work_item(issue=5, state="ENTER")
         item.payload["issue_title"] = "Add the widget"
 
@@ -3308,9 +3309,10 @@ class TestFullWalks:
         """A red test run earns exactly one test_fix attempt, then converges."""
         stage = ImplementationStage()
         github = FakeStageGitHub(labels=["state:plan-go"])
-        ctx = make_ctx(github=github)
-        ctx.config.enable_advise = False
-        ctx.config.run_pre_pr_tests = True
+        ctx = make_ctx(
+            github=github,
+            config_overrides={"no_advise": True, "run_pre_pr_tests": True},
+        )
         item = make_work_item(issue=6, state="ENTER")
 
         pool = FakeWorkerPool()
@@ -3347,8 +3349,7 @@ class TestFullWalks:
         """
         stage = ImplementationStage()
         github = FakeStageGitHub(labels=["state:plan-go"])
-        ctx = make_ctx(github=github)
-        ctx.config.enable_advise = False
+        ctx = make_ctx(github=github, config_overrides={"no_advise": True})
         item = make_work_item(issue=8, state="ENTER")
 
         for expected_attempts in (1, 2):

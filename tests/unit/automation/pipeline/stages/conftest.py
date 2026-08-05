@@ -11,12 +11,14 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER, MergeAuthorization
+from hephaestus.automation.pipeline.coordinator import PipelineConfig
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -27,7 +29,6 @@ from hephaestus.automation.pipeline.stages import (
     StageGitHub,
 )
 from hephaestus.automation.pipeline.stages.base import BranchWorktreeOwnerStatus
-from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
@@ -756,20 +757,6 @@ def _budget_fn(name: str) -> int:
     return 1
 
 
-class _Config:
-    """PlannerOptions-like config stub for stage tests."""
-
-    def __init__(self, *, dry_run: bool = False) -> None:
-        self.enable_advise = True
-        self.enable_learn = True
-        self.enable_follow_up = True
-        self.run_pre_pr_tests = False
-        self.force = False
-        self.agent = "claude"
-        self.dry_run = dry_run
-        self.pre_pr_test_argv = PRE_PR_TEST_ARGV
-
-
 class _Paths:
     """Path accessor stub for stage tests."""
 
@@ -783,7 +770,8 @@ def make_ctx() -> Callable[..., StageContext]:
 
     def _make_ctx(
         *,
-        config: Any = None,
+        config: PipelineConfig | None = None,
+        config_overrides: dict[str, Any] | None = None,
         org: str = "test-org",
         dry_run: bool = False,
         github: FakeStageGitHub | None = None,
@@ -797,14 +785,25 @@ def make_ctx() -> Callable[..., StageContext]:
             Callable[[WorkItem, str, str], BranchWorktreeOwnerStatus] | None
         ) = None,
     ) -> StageContext:
+        if config is not None and config_overrides:
+            raise ValueError("pass config or config_overrides, not both")
+
         ticks = [0]
 
         def default_now_fn() -> float:
             ticks[0] += 1
             return 1000.0 + ticks[0]
 
+        resolved_config = config or PipelineConfig(
+            org=org,
+            repos=["test-repo"],
+            dry_run=dry_run,
+        )
+        if config_overrides:
+            resolved_config = replace(resolved_config, **config_overrides)
+
         return StageContext(
-            config=config if config is not None else _Config(dry_run=dry_run),
+            config=resolved_config,
             org=org,
             dry_run=dry_run,
             github=github if github is not None else FakeStageGitHub(),

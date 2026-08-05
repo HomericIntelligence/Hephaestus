@@ -173,7 +173,7 @@ class Coordinator(
             name: StageQueue(
                 config.learning_queue_capacity if name is StageName.LEARNING else work_window
             )
-            for name in StageName
+            for name in PIPELINE_ORDER
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
@@ -283,27 +283,6 @@ class Coordinator(
         self._fatal = False
         self._pool_shut_down = False
         self._seen_item_ids: set[int] = set()
-        self._stage_config = _StageRunConfig(
-            enable_advise=not config.no_advise,
-            enable_learn=config.enable_learn,
-            agent=config.agent,
-            model=config.model,
-            planner_model=config.planner_model,
-            reviewer_model=config.reviewer_model,
-            implementer_model=config.implementer_model,
-            planner_reasoning_effort=config.planner_reasoning_effort,
-            reviewer_reasoning_effort=config.reviewer_reasoning_effort,
-            implementer_reasoning_effort=config.implementer_reasoning_effort,
-            dry_run=config.dry_run,
-            nitpick=config.nitpick,
-            drive_green_all=config.drive_green_all,
-            include_bot_prs=config.include_bot_prs,
-            include_all_authors=config.include_all_authors,
-            pre_pr_test_argv=config.pre_pr_test_argv,
-            run_pre_pr_tests=config.run_pre_pr_tests,
-            issue_limit=config.issue_limit,
-            reset_plan_review_sessions=set(config.reset_plan_review_sessions),
-        )
         # A context contains a GitHub accessor and path configuration but no
         # mutable item state.  At most C items can be live, so an LRU of C is
         # enough for concurrent work and prevents all-org discovery from

@@ -399,13 +399,7 @@ class PrReviewJobs(_PrReviewHost):
                 "host_verifications_json": json.dumps(
                     item.payload.get("host_verification_receipts", []), sort_keys=True
                 ),
-                "include_nitpicks": bool(
-                    getattr(
-                        ctx.config,
-                        "nitpick",
-                        getattr(ctx.config, "include_nitpicks", False),
-                    )
-                ),
+                "include_nitpicks": ctx.config.nitpick,
                 "review_context_kind": _review_context_kind(item),
             },
             parse=_parse_review_response,  # structural audit parsed in-worker

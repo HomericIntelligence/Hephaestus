@@ -584,10 +584,14 @@ class TestCrashMatrixJournal:
         assert entry is expected, case
 
     def _ctx(self, gh: FakeStageGitHub) -> StageContext:
-        from tests.unit.automation.pipeline.stages.conftest import _budget_fn, _Config, _Paths
+        from tests.unit.automation.pipeline.stages.conftest import _budget_fn, _Paths
 
         return StageContext(
-            config=_Config(),
+            config=PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                enable_learn=False,
+            ),
             org="org",
             dry_run=False,
             github=gh,
@@ -599,7 +603,6 @@ class TestCrashMatrixJournal:
         """Drive plan_review's real GO path until it writes state:plan-go."""
         stage = PlanReviewStage()
         ctx = self._ctx(gh)
-        ctx.config.enable_learn = False
         item = WorkItem(
             repo="repo-a",
             kind=ItemKind.ISSUE,

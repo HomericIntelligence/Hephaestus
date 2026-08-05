@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -3692,7 +3692,7 @@ class TestPipelineScopeWiring:
         # Scope starts at IMPLEMENTATION; PLANNING is pre-scope.
         scope = PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW}))
         config = self._scoped_config(tmp_path, issues=[1], force=True)
-        object.__setattr__(config, "scope", scope)
+        config = replace(config, scope=scope)
         coordinator = Coordinator(
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
         )
@@ -3734,14 +3734,18 @@ class TestConfigWiring:
 
         assert ctx.budget("merge") == 3
 
-    def test_drive_green_filters_flow_to_stage_config(self, tmp_path: Path) -> None:
-        """Discovery flags survive the coordinator's stage-config copy."""
+    def test_pipeline_config_is_stage_context_authority(self, tmp_path: Path) -> None:
+        """Every stage receives the exact authoritative PipelineConfig object."""
         config = PipelineConfig(
             org="org",
             repos=["repo-a"],
             projects_dir=tmp_path,
+            no_advise=True,
+            enable_learn=False,
+            nitpick=True,
             include_bot_prs=False,
             include_all_authors=True,
+            reset_plan_review_sessions=frozenset({42}),
         )
         coordinator = Coordinator(
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
@@ -3749,5 +3753,13 @@ class TestConfigWiring:
 
         ctx = coordinator._ctx_for_repo("repo-a")
 
+        assert ctx.config is config
+        assert ctx.config.enable_advise is False
+        assert ctx.config.enable_learn is False
+        assert ctx.config.nitpick is True
         assert ctx.config.include_bot_prs is False
         assert ctx.config.include_all_authors is True
+        reset_issues = cast(set[int], ctx.config.reset_plan_review_sessions)
+        assert reset_issues == {42}
+        reset_issues.discard(42)
+        assert not reset_issues

@@ -31,7 +31,6 @@ if TYPE_CHECKING:
         _DirectPrSource,
         _PendingHandoff,
         _RepoEntrySource,
-        _StageRunConfig,
     )
 
     class _CoordinatorHost(Protocol):
@@ -71,7 +70,6 @@ if TYPE_CHECKING:
         _seen_item_ids: set[int]
         _routes: dict[StageName, Route]
         _terminal_summary: TerminalSummary
-        _stage_config: _StageRunConfig
         _ctx_cache: OrderedDict[str, StageContext]
         _ctx_cache_capacity: int
         _learning_claim_registry: Any

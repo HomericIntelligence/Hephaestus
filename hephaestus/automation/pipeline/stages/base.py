@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
@@ -69,6 +69,9 @@ from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobRes
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
+
+if TYPE_CHECKING:
+    from ..coordinator_types import PipelineConfig
 
 __all__ = [
     "GIT_JOB_TIMEOUT_S",
@@ -550,7 +553,7 @@ class StageContext:
     enforced by ``tests/unit/automation/pipeline/test_pipeline_architecture``.
     """
 
-    config: Any  # PlannerOptions-like (enable_advise, enable_learn, force, agent, dry_run)
+    config: PipelineConfig
     org: str
     dry_run: bool
     github: StageGitHub  # coordinator-owned GitHub accessor (label/comment/PR writes+reads)
@@ -592,7 +595,7 @@ class StageContext:
 
 def agent_provider(ctx: StageContext) -> str:
     """Return the selected agent backend provider for an agent job."""
-    return str(getattr(ctx.config, "agent", "") or DEFAULT_AGENT)
+    return ctx.config.agent or DEFAULT_AGENT
 
 
 def stage_model(

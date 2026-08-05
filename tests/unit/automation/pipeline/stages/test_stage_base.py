@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hephaestus.automation.pipeline import ROUTES
+from hephaestus.automation.pipeline.coordinator import PipelineConfig
 from hephaestus.automation.pipeline.routing import Disposition, StageOutcome
 from hephaestus.automation.pipeline.stages import (
     PlanningStage,
@@ -34,7 +34,7 @@ class TestStageContext:
 
     def _bare_ctx(self, **overrides: Any) -> StageContext:
         defaults: dict[str, Any] = {
-            "config": object(),
+            "config": PipelineConfig(org="test-org", repos=["test-repo"]),
             "org": "test-org",
             "dry_run": False,
             "github": object(),
@@ -114,7 +114,12 @@ class TestAgentProvider:
 
     def _ctx(self, agent: str | None = None) -> StageContext:
         """Build a minimal stage context for provider selection tests."""
-        return TestStageContext()._bare_ctx(config=SimpleNamespace(agent=agent))
+        config = PipelineConfig(
+            org="test-org",
+            repos=["test-repo"],
+            agent=agent or "",
+        )
+        return TestStageContext()._bare_ctx(config=config)
 
     def test_defaults_to_shared_default_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Blank config values use the shared backend default, not a literal."""
