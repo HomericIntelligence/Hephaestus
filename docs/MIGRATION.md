@@ -1,14 +1,14 @@
 # Migration Guide
 
-> **Release status:** The latest released version is **0.10.0** (tag-driven
+> **Release status:** The latest released version is **0.10.1** (tag-driven
 > via hatch-vcs). **1.0 has not been released yet** — the section below is
 > forthcoming 1.0 migration guidance. The package remains on the 0.x release
 > line until a signed `v1.0.0` tag is published.
 
-## Current main (unreleased; post-v0.10.0)
+## Current main (unreleased; post-v0.10.1)
 
-The 15-minute operational readiness wait described below is new on current main
-and is not part of the released 0.10.0 behavior.
+The 15-minute operational readiness wait described below is part of the released
+0.10.1 behavior.
 
 Before a request, `merge_wait` may wait up to 15 minutes for operational GitHub
 readiness without spending a merge attempt; readiness is not authorization, and the
