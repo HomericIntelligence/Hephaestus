@@ -20,9 +20,15 @@ from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
     PipelineConfig,
 )
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    MergeWaitCycleCompleted,
+    RunMergeWaitCycleRequest,
+)
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stages.base import ConditionalMergeResult
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -221,6 +227,15 @@ class TestRetryDelayConsumption:
         github = NotReadyGitHub()
         coordinator.github = github
         coordinator._ctx_cache.clear()
+        pool = coordinator.pool
+        assert isinstance(pool, FakeWorkerPool)
+
+        class Runner:
+            def run(self, job: GitHubJob) -> MergeWaitCycleCompleted:
+                assert isinstance(job.request, RunMergeWaitCycleRequest)
+                return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
+
+        pool.github_job_runner = Runner()
         coordinator.config.budget_overrides["merge"] = 2
         item = WorkItem(
             repo="repo-a",
@@ -240,12 +255,14 @@ class TestRetryDelayConsumption:
         )
 
         coordinator._run_item(item)
+        coordinator._drain_completions()
 
         assert github.puts == 0
         assert len(coordinator.timers) == 1
         clock.now += 2.0
         coordinator._wake_timers()
         coordinator._drain_queues()
+        coordinator._drain_completions()
 
         assert github.puts == 0
         assert item.result is not None
@@ -292,6 +309,15 @@ class TestRetryDelayConsumption:
         github = AmbiguousGitHub()
         coordinator.github = github
         coordinator._ctx_cache.clear()
+        pool = coordinator.pool
+        assert isinstance(pool, FakeWorkerPool)
+
+        class Runner:
+            def run(self, job: GitHubJob) -> MergeWaitCycleCompleted:
+                assert isinstance(job.request, RunMergeWaitCycleRequest)
+                return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
+
+        pool.github_job_runner = Runner()
         coordinator.config.budget_overrides["merge"] = 2
         item = WorkItem(
             repo="repo-a",
@@ -304,6 +330,7 @@ class TestRetryDelayConsumption:
         )
 
         coordinator._run_item(item)
+        coordinator._drain_completions()
 
         assert github.puts == 1
         assert item.attempts["merge"] == 1
@@ -311,6 +338,7 @@ class TestRetryDelayConsumption:
         clock.now += 2.0
         coordinator._wake_timers()
         coordinator._drain_queues()
+        coordinator._drain_completions()
 
         assert github.puts == 2
         assert item.attempts["merge"] == 2

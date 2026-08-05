@@ -1,12 +1,11 @@
-"""Architecture invariant: worker code performs zero GitHub API mutations.
+"""Architecture invariants for coordinator and closed GitHub worker access.
 
 Models tests/unit/automation/test_ci_driver_architecture.py. Enforces via AST
 walk that pipeline/* modules never import or call github_api mutator functions,
 with an explicit allowlist for documented interim offenders awaiting refactor.
-Worker-side modules (worker_pool.py, jobs.py) are held to a stricter bar: they
-may not import ``hephaestus.automation.github_api`` or
-``hephaestus.automation.pr_manager`` AT ALL, in any form — this also catches
-non-obvious mutators such as ``skip_epics``, ``gh_call``, and ``run``.
+The generic worker modules remain implementation-neutral. GitHub worker I/O is
+admitted only through frozen closed requests and the sole production runner,
+which constructs a fresh repository-scoped accessor for every job.
 
 Caveat: this is a static, import/attribute-level guard. Subprocess-level ``gh``
 calls (e.g. building a ``["gh", ...]`` argv and running it directly) are OUT OF
@@ -19,10 +18,26 @@ PipelineGitHub mapping tests.
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
+from dataclasses import fields, is_dataclass
 from pathlib import Path
+from typing import Any, get_args, get_origin, get_type_hints
 
 import hephaestus
 import hephaestus.automation.github_api as github_api
+from hephaestus.automation.pipeline.github_jobs import (
+    AppendReplyJournalRequest,
+    DeliverReplyHandoffRequest,
+    GitHubJob,
+    MergeWaitCycleCompleted,
+    PrReviewReconciled,
+    ReconcilePrReviewRequest,
+    RecoverReplyJournalRequest,
+    ReplyHandoffAttempted,
+    ReplyJournalAppended,
+    ReplyJournalRecovered,
+    RunMergeWaitCycleRequest,
+)
 
 _PIPELINE = Path(hephaestus.__file__).parent / "automation" / "pipeline"
 _AUTOMATION = _PIPELINE.parent
@@ -104,11 +119,11 @@ def _forbidden_module_imports(path: Path) -> set[str]:
     return hits
 
 
-def test_no_worker_module_imports_github_mutators() -> None:
+def test_pipeline_modules_do_not_import_github_api_mutators_directly() -> None:
     """Ensure pipeline modules (recursively) do not import/call github_api mutators.
 
-    Workers execute on thread pool with no coordinator access; all GitHub
-    state changes must go through the coordinator to maintain consistency.
+    Stage code uses the neutral StageGitHub contract; worker GitHub operations
+    live in the repository-scoped production dispatcher outside this package.
     Subprocess-level ``gh`` invocations are out of scope for this AST guard.
     """
     violations = []
@@ -119,7 +134,7 @@ def test_no_worker_module_imports_github_mutators() -> None:
         if offenders:
             violations.append(f"{py.name}: {sorted(offenders)}")
 
-    assert not violations, "worker code must not call github_api mutators:\n" + "\n".join(
+    assert not violations, "pipeline code must not call github_api mutators:\n" + "\n".join(
         violations
     )
 
@@ -142,6 +157,70 @@ def test_worker_side_modules_never_import_github_api_or_pr_manager() -> None:
     assert not violations, (
         "worker-side modules must not import github_api/pr_manager:\n" + "\n".join(violations)
     )
+
+
+def test_github_worker_boundary_is_closed_frozen_and_non_callable() -> None:
+    """Requests cannot smuggle coordinator state, callables, or mutable kwargs."""
+    request_types = (
+        RecoverReplyJournalRequest,
+        AppendReplyJournalRequest,
+        DeliverReplyHandoffRequest,
+        ReconcilePrReviewRequest,
+        RunMergeWaitCycleRequest,
+    )
+    receipt_types = (
+        ReplyJournalRecovered,
+        ReplyJournalAppended,
+        ReplyHandoffAttempted,
+        PrReviewReconciled,
+        MergeWaitCycleCompleted,
+    )
+    assert {field.name for field in fields(GitHubJob)} == {
+        "repo",
+        "repo_root",
+        "request",
+        "descr",
+    }
+    assert vars(GitHubJob)["__dataclass_params__"].frozen
+    forbidden_origins = {list, dict, set, Callable}
+    for request_type in request_types:
+        assert is_dataclass(request_type)
+        assert vars(request_type)["__dataclass_params__"].frozen
+        for annotation in get_type_hints(request_type).values():
+            candidates = (annotation, *get_args(annotation))
+            assert Any not in candidates
+            assert not any(get_origin(candidate) in forbidden_origins for candidate in candidates)
+            assert not any(
+                getattr(candidate, "__name__", "") in {"WorkItem", "StageContext", "Queue"}
+                for candidate in candidates
+            )
+    for receipt_type in receipt_types:
+        assert is_dataclass(receipt_type)
+        assert vars(receipt_type)["__dataclass_params__"].frozen
+
+
+def test_worker_pool_does_not_import_the_github_implementation() -> None:
+    """The generic dispatcher depends only on the typed runner protocol."""
+    tree = ast.parse((_PIPELINE / "worker_pool.py").read_text(encoding="utf-8"))
+    imported = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert not any(
+        module.endswith("pipeline_github") or module.endswith("pipeline_github_jobs")
+        for module in imported
+    )
+
+
+def test_worker_runner_is_the_only_worker_module_constructing_pipeline_github() -> None:
+    """Every closed job gets its accessor at the sole production gateway."""
+    runner = _AUTOMATION / "pipeline_github_jobs.py"
+    tree = ast.parse(runner.read_text(encoding="utf-8"), filename=str(runner))
+    constructors = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "PipelineGitHub"
+    ]
+    assert len(constructors) == 1
 
 
 def test_mutator_set_is_non_empty() -> None:

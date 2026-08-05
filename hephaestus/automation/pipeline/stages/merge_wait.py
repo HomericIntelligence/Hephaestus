@@ -26,6 +26,7 @@ The implemented mini-state graph is:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
@@ -33,6 +34,11 @@ from hephaestus.automation.learn import build_learn_prompt
 from hephaestus.automation.session_naming import AGENT_LEARNINGS
 from hephaestus.prompts import PromptCatalog
 
+from ..github_jobs import (
+    GitHubJob,
+    MergeWaitCycleCompleted,
+    RunMergeWaitCycleRequest,
+)
 from .base import (
     AgentJob,
     Continue,
@@ -55,6 +61,7 @@ logger = logging.getLogger(__name__)
 
 ENTER = "ENTER"
 MERGE = "MERGE"
+MERGE_APPLY = "MERGE_APPLY"
 LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
@@ -66,6 +73,9 @@ _READINESS_WAIT_INITIAL_S = 5.0
 _READINESS_WAIT_TIMEOUT_S = 30 * 60.0
 _READINESS_WAIT_DELAY_CAP_S = 60.0
 _DECLINED_READINESS_FINGERPRINT = "merge_readiness_declined_fingerprint"
+_PENDING_GITHUB_REQUEST = "_pending_github_request"
+_MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
+_MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
 
 
 def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
@@ -98,6 +108,8 @@ class MergeWaitStage(Stage):
             return Continue(next_state=MERGE)
         if item.state == MERGE:
             return self._merge(item, ctx)
+        if item.state == MERGE_APPLY:
+            return self._merge_apply(item, ctx)
         if item.state == LEARN_WAIT:
             return self._request_learn(item, ctx)
         if item.state == MW_FINISH:
@@ -108,51 +120,90 @@ class MergeWaitStage(Stage):
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
 
     def _merge(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Read final admission facts, then make at most one conditional request."""
-        admitted = self._admit(item, ctx)
-        if not isinstance(admitted, tuple):
-            return admitted
-        if item.attempts["merge"] >= ctx.budget("merge"):
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-        pr_state, reviewed_head = admitted
+        """Freeze one exact proof and dispatch the complete GitHub cycle."""
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        base_branch = pr_state.get("baseRefName")
-        if not isinstance(base_branch, str) or not base_branch:
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-        # A readiness wait only observes ordinary CI/mergeability state; it
-        # must not postpone admission failures.  Recheck both live
-        # conversation facts on every timer wake before parking again so an
-        # unresolved thread or weakened protection fails closed promptly.
-        safety_admission = self._admit_conversation_safety(
-            item.pr,
-            base_branch,
-            ctx,
-        )
-        if safety_admission is not None:
-            return safety_admission
-        readiness_wait = self._wait_for_readiness(item, ctx)
-        if readiness_wait is not None:
-            return readiness_wait
-
-        # Read the admission facts again after the non-authorizing readiness
-        # wait. The final conditional request must be bound to current label,
-        # head, and auto-merge facts rather than to the earlier polling read.
-        admitted = self._admit(item, ctx)
-        if not isinstance(admitted, tuple):
-            return admitted
-        pr_state, reviewed_head = admitted
-        base_branch = pr_state.get("baseRefName")
-        if not isinstance(base_branch, str) or not base_branch:
-            return StageOutcome(Disposition.FINISH_FAIL, "pr_state_unverified")
-        safety_admission = self._admit_conversation_safety(item.pr, base_branch, ctx)
-        if safety_admission is not None:
-            return safety_admission
         if item.attempts["merge"] >= ctx.budget("merge"):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
-        item.attempts["merge"] += 1
-        result = ctx.github.merge_pr_if_head(item.pr, reviewed_head)
-        return self._reconcile_merge_request(item, ctx, result)
+        reviewed_head = item.payload.get("reviewed_pr_head_sha")
+        if not isinstance(reviewed_head, str) or not reviewed_head:
+            return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
+        deadline = self._matching_readiness_deadline_outcome(item, ctx)
+        if deadline is not None:
+            return deadline
+        proof_generation = item.payload.get("reviewed_pr_proof_generation", 0)
+        declined = item.payload.get(_DECLINED_READINESS_FINGERPRINT)
+        if (
+            isinstance(proof_generation, bool)
+            or not isinstance(proof_generation, int)
+            or proof_generation < 0
+            or (
+                declined is not None
+                and (
+                    not isinstance(declined, (list, tuple))
+                    or not all(isinstance(part, str) for part in declined)
+                )
+            )
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
+        try:
+            request = RunMergeWaitCycleRequest(
+                pr_number=item.pr,
+                reviewed_head_sha=reviewed_head,
+                proof_generation=proof_generation,
+                declined_readiness_fingerprint=(tuple(declined) if declined is not None else None),
+            )
+        except ValueError:
+            return StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
+        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        if pending is None:
+            item.payload[_PENDING_GITHUB_REQUEST] = request
+        elif pending != request:
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_receipt_invalid")
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)).resolve(),
+                request=request,
+                descr="merge_wait_admission_cycle",
+            ),
+            on_done_state=MERGE_APPLY,
+        )
+
+    def _merge_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Apply one correlated immutable merge-cycle receipt locally."""
+        error = item.payload.pop(_MERGE_CYCLE_RECEIPT_ERROR, None)
+        if error is not None:
+            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_failed")
+        receipt = item.payload.pop(_MERGE_CYCLE_RECEIPT, None)
+        if not isinstance(receipt, MergeWaitCycleCompleted) or receipt.request != item.payload.get(
+            _PENDING_GITHUB_REQUEST
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "merge_cycle_receipt_invalid")
+        item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        if receipt.attempted:
+            item.attempts["merge"] += 1
+        if receipt.readiness_fingerprint is not None:
+            item.payload[_DECLINED_READINESS_FINGERPRINT] = list(receipt.readiness_fingerprint)
+        outcome = receipt.outcome
+        if outcome == "merged":
+            return self._route_merged(item, ctx)
+        if outcome == "closed":
+            return StageOutcome(Disposition.FINISH_FAIL, "closed")
+        if outcome == "auto_merge_already_armed":
+            return StageOutcome(Disposition.BLOCKED, outcome)
+        if outcome in {"not_implementation_go", "reviewed_head_drift"}:
+            return StageOutcome(Disposition.FAIL_BACK, outcome)
+        if outcome == "readiness_wait":
+            if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
+                return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
+            item.state = MERGE
+            return self._park_for_readiness(item, ctx)
+        if outcome in {"merge_not_ready", "merge_request_transport_error"} and receipt.retryable:
+            item.state = MERGE
+            return self._retry(item, ctx)
+        return StageOutcome(Disposition.FINISH_FAIL, outcome)
 
     def _reconcile_merge_request(
         self, item: WorkItem, ctx: StageContext, result: Any
@@ -561,6 +612,18 @@ class MergeWaitStage(Stage):
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Persist the post-merge learning result without changing merge outcome."""
+        if item.state == MERGE:
+            if not result.ok:
+                item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = result.error or "merge cycle failed"
+                return
+            receipt = result.value
+            if not isinstance(
+                receipt, MergeWaitCycleCompleted
+            ) or receipt.request != item.payload.get(_PENDING_GITHUB_REQUEST):
+                item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = "invalid"
+                return
+            item.payload[_MERGE_CYCLE_RECEIPT] = receipt
+            return
         if item.state != LEARN_WAIT or item.issue is None:
             return
         try:

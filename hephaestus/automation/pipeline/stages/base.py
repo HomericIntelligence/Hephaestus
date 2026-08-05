@@ -65,6 +65,7 @@ from hephaestus.automation.state_labels import (
 )
 
 from ..events import StageEvent
+from ..github_jobs import GitHubJob
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
 from ..work_item import ItemKind, WorkItem
@@ -77,6 +78,7 @@ __all__ = [
     "ConditionalMergeResult",
     "Continue",
     "Disposition",
+    "GitHubJob",
     "GitJob",
     "ImplementationThreadReplyResult",
     "ItemKind",
@@ -161,7 +163,11 @@ class ReviewerThreadReconciliationResult:
 
 @runtime_checkable
 class StageGitHub(Protocol):
-    """Coordinator-owned GitHub accessor injected as ``StageContext.github``.
+    """Single-owner GitHub accessor.
+
+    ``StageContext.github`` is coordinator-thread-only and must never cross a
+    worker boundary. ``GitHubJob`` workers create a fresh structurally
+    conforming accessor per job and serialize same-repository operations.
 
     The single seam through which stages read GitHub facts and request
     durable mutations. Dry-run is honored INSIDE the accessor implementation
@@ -502,14 +508,14 @@ class JobRequest:
     """Request a job be submitted to the worker pool.
 
     Attributes:
-        job: The frozen job spec to submit (agent, build/test, git, or session
-            compaction — the same union :class:`~..jobs.JobHandle` carries).
+        job: The frozen job spec to submit (agent, build/test, git, GitHub, or
+            session compaction — the same union :class:`~..jobs.JobHandle` carries).
         on_done_state: The state the coordinator moves the item to after the
             job completes and ``on_job_done`` has run.
 
     """
 
-    job: AgentJob | BuildTestJob | GitJob | CompactJob
+    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob
     on_done_state: str
 
 

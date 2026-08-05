@@ -27,7 +27,11 @@ class PrReviewGate(_PrReviewHost):
             )
             return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_incomplete")
 
-        handoff_status = self._retry_pending_implementation_reply_handoff(item, ctx)
+        if payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF) and not (
+            payload.get(_REPLY_HANDOFF_RECEIPT) or payload.get(_REPLY_HANDOFF_RECEIPT_ERROR)
+        ):
+            return Continue(next_state=RECOVERY_REPLY_WAIT)
+        handoff_status = self._consume_reply_handoff_receipt(item)
         if handoff_status == "visibility_wait":
             return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")
         if handoff_status == "invalid":

@@ -16,6 +16,8 @@ from typing import Any
 
 from hephaestus.automation.pipeline.routing import StageName
 
+from .github_jobs import GitHubJob
+
 GIT_OPS: frozenset[str] = frozenset(
     {
         "clone",
@@ -167,5 +169,5 @@ class JobHandle:
     never break hashing.
     """
 
-    job: AgentJob | BuildTestJob | GitJob | CompactJob
+    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob
     on_done_state: str | StageName

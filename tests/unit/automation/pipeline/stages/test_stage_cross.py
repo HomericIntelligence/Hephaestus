@@ -67,7 +67,7 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
                 )
                 item.state = result.on_done_state
                 continue
-            pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
+            pool.submit(result.job, result.on_done_state)
             _handle, job_result = pool.completion_q.get_nowait()
             stage.on_job_done(item, job_result, ctx)
             item.state = result.on_done_state

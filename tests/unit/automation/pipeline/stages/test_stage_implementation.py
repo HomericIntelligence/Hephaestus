@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,23 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.automation.pipeline.github_jobs import (
+    AppendReplyJournalRequest,
+    DeliverReplyHandoffRequest,
+    FrozenJson,
+    GitHubJob,
+    RecoverReplyJournalRequest,
+    ReplyHandoffAttempted,
+    ReplyJournalAppended,
+    ReplyJournalRecovered,
+)
 from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
+from hephaestus.automation.pipeline.reply_handoff import (
+    attempt_reply_handoff,
+    implementation_reply_handoff,
+    implementation_reply_handoff_journal_entry,
+    journaled_implementation_reply_handoff,
+)
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import (
     Continue,
@@ -50,7 +67,7 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             item.state = result.next_state
             continue
         if isinstance(result, JobRequest):
-            pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
+            pool.submit(result.job, result.on_done_state)
             _handle, job_result = pool.completion_q.get_nowait()
             assert not job_result.interrupted  # on_job_done contract precondition
             stage.on_job_done(item, job_result, ctx)
@@ -58,6 +75,55 @@ def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int
             continue
         return result
     raise AssertionError("stage driver did not terminate")
+
+
+def _drive_github_jobs(
+    stage: ImplementationStage,
+    item: Any,
+    ctx: Any,
+    *,
+    max_steps: int = 10,
+) -> Any:
+    """Execute typed GitHub jobs only after a stage has dispatched them."""
+    for _ in range(max_steps):
+        result = stage.step(item, ctx)
+        if isinstance(result, Continue):
+            item.state = result.next_state
+            continue
+        if not isinstance(result, JobRequest) or not isinstance(result.job, GitHubJob):
+            return result
+        request = result.job.request
+        try:
+            if isinstance(request, RecoverReplyJournalRequest):
+                threads = request.threads.thaw()
+                assert isinstance(threads, list)
+                handoff = journaled_implementation_reply_handoff(
+                    ctx.github.issue_comments(request.issue_number),
+                    pr_number=request.pr_number,
+                    threads=threads,
+                )
+                receipt: object = ReplyJournalRecovered(
+                    request=request,
+                    handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
+                )
+            elif isinstance(request, AppendReplyJournalRequest):
+                ctx.github.append_issue_comment(
+                    request.issue_number,
+                    request.marker,
+                    request.body,
+                )
+                receipt = ReplyJournalAppended(request=request)
+            elif isinstance(request, DeliverReplyHandoffRequest):
+                receipt = attempt_reply_handoff(request, ctx.github)
+                assert isinstance(receipt, ReplyHandoffAttempted)
+            else:  # pragma: no cover - the implementation stage has exactly three operations
+                raise AssertionError(f"unexpected request: {request!r}")
+            job_result = JobResult(ok=True, value=receipt)
+        except Exception as error:
+            job_result = JobResult(ok=False, error=f"{type(error).__name__}: {error}")
+        stage.on_job_done(item, job_result, ctx)
+        item.state = result.on_done_state
+    raise AssertionError("typed GitHub stage driver did not terminate")
 
 
 class TestComposedPromptBuilders:
@@ -1668,7 +1734,7 @@ class TestCommitPushAndPrCreate:
         )
 
         item.state = "PR_CREATE"
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
 
@@ -1752,7 +1818,7 @@ class TestCommitPushAndPrCreate:
         )
 
         item.state = "PR_CREATE"
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
@@ -1814,7 +1880,7 @@ class TestCommitPushAndPrCreate:
         )
 
         item.state = "PR_CREATE"
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
         )
         assert item.payload["retry_delay_s"] == 1.0
@@ -1822,7 +1888,7 @@ class TestCommitPushAndPrCreate:
             name == "post_implementation_thread_replies" for name, _ in github.mutation_log
         )
 
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert ("post_implementation_thread_replies", (1001, ("thread-1",))) in github.mutation_log
@@ -1883,7 +1949,7 @@ class TestCommitPushAndPrCreate:
         )
         item.state = "PR_CREATE"
 
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.RETRY, "implementation_reply_handoff_retry"
         )
         assert "pending_implementation_reply_handoff" in item.payload
@@ -1891,7 +1957,7 @@ class TestCommitPushAndPrCreate:
             name == "post_implementation_thread_replies" for name, _ in github.mutation_log
         )
 
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert (
@@ -1973,13 +2039,13 @@ class TestCommitPushAndPrCreate:
         )
         item.state = "PR_CREATE"
 
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.RETRY, "implementation_reply_handoff_visibility_wait"
         )
         assert item.payload["retry_delay_s"] == 1.0
         assert "pending_implementation_reply_handoff_retries" not in item.payload
 
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert (
@@ -2047,6 +2113,11 @@ class TestCommitPushAndPrCreate:
             JobResult(ok=True, value={"pushed": True, "head_sha": "b" * 40}),
             ctx,
         )
+        publisher.state = "PR_CREATE"
+        assert _drive_github_jobs(stage, publisher, ctx) == StageOutcome(
+            Disposition.RETRY,
+            "implementation_reply_handoff_retry",
+        )
 
         resumed = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
         # The normal restarted read sees the writer's new head and may see a
@@ -2073,15 +2144,7 @@ class TestCommitPushAndPrCreate:
             }
         )
 
-        assert stage.step(resumed, ctx) == Continue(next_state="PR_CREATE")
-        assert "pending_implementation_reply_handoff" in resumed.payload
-        assert "remediation_output" not in resumed.payload
-
-        resumed.state = "PR_CREATE"
-        assert stage.step(resumed, ctx) == StageOutcome(
-            Disposition.RETRY, "implementation_reply_handoff_retry"
-        )
-        assert stage.step(resumed, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, resumed, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert (
@@ -2108,7 +2171,7 @@ class TestCommitPushAndPrCreate:
             }
         )
 
-        stale_result = stage.step(stale, ctx)
+        stale_result = _drive_github_jobs(stage, stale, ctx)
 
         assert isinstance(stale_result, JobRequest)
         assert stale_result.job.descr == "address_review"
@@ -2166,13 +2229,17 @@ class TestCommitPushAndPrCreate:
             ctx,
         )
 
-        assert github.journal_calls == 1
+        assert github.journal_calls == 0
         assert "pending_implementation_reply_handoff" in item.payload
         assert "pending_implementation_reply_handoff_journal" in item.payload
         assert item.attempts.get("implement", 0) == 0
 
         item.state = "PR_CREATE"
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
+            Disposition.RETRY, "implementation_reply_handoff_journal_retry"
+        )
+        assert github.journal_calls == 1
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert github.journal_calls == 2
@@ -2228,7 +2295,7 @@ class TestCommitPushAndPrCreate:
         assert "pending_implementation_reply_handoff" in item.payload
 
         item.state = "PR_CREATE"
-        assert stage.step(item, ctx) == StageOutcome(
+        assert _drive_github_jobs(stage, item, ctx) == StageOutcome(
             Disposition.ADVANCE, "PR #1001 ready for review"
         )
         assert github._thread_replies["thread-1"][-1]["body"] == (
@@ -2738,3 +2805,73 @@ class TestFullWalks:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert outcome.note == "implement_exhausted"
         assert github.mutation_log == []  # exhaustion here owns no labels
+
+    def test_reply_journal_append_dispatches_without_inline_github_calls(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The coordinator step only freezes and dispatches the journal append."""
+
+        class InlineGitHubForbidden:
+            def append_issue_comment(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("GitHub append ran inline")
+
+            def gh_pr_state(self, *_args: object, **_kwargs: object) -> object:
+                raise AssertionError("GitHub state read ran inline")
+
+            def post_implementation_thread_replies(
+                self, *_args: object, **_kwargs: object
+            ) -> object:
+                raise AssertionError("GitHub reply mutation ran inline")
+
+        threads = [
+            {
+                "id": "thread-1",
+                "comments": [{"id": "comment-1", "body": "fix it"}],
+            }
+        ]
+        handoff = implementation_reply_handoff(
+            "a" * 40,
+            threads,
+            {"thread-1": "[Response] fixed"},
+            "b" * 32,
+        )
+        assert handoff is not None
+        journal = implementation_reply_handoff_journal_entry(7, handoff)
+        assert journal is not None
+        marker, body = journal
+        item = make_work_item(issue=3, pr=7, state="REPLY_JOURNAL_APPEND_WAIT")
+        item.payload.update(
+            {
+                "pending_implementation_reply_handoff": handoff,
+                "pending_implementation_reply_handoff_journal": {
+                    "marker": marker,
+                    "body": body,
+                },
+            }
+        )
+        stage = ImplementationStage()
+        ctx = make_ctx(github=InlineGitHubForbidden())
+
+        started = time.monotonic()
+        result = stage.step(item, ctx)
+        elapsed = time.monotonic() - started
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitHubJob)
+        assert result.job.request == AppendReplyJournalRequest(
+            issue_number=3,
+            marker=marker,
+            body=body,
+        )
+        assert elapsed < 0.25
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=ReplyJournalAppended(request=result.job.request)),
+            ctx,
+        )
+        assert "pending_implementation_reply_handoff_journal" not in item.payload
+        assert item.payload["pending_implementation_reply_handoff"] == handoff
+
+        item.state = result.on_done_state
+        assert stage.step(item, ctx) == Continue(next_state="REPLY_HANDOFF_WAIT")
