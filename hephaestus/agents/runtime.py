@@ -990,10 +990,9 @@ _CODEX_NESTED_SANDBOX_DIAGNOSTIC = (
     "automation loop outside the enclosing API sandbox; the child sandbox "
     "permissions were not broadened."
 )
-_CODEX_FATAL_TOOL_ITEM_TYPES = frozenset(
-    {"error", "file_change", "mcp_tool_call", "collab_tool_call"}
-)
 _CODEX_FAILED_TOOL_STATUSES = frozenset({"failed", "declined"})
+_CODEX_APP_SERVER_STREAM_LAG_PREFIX = "in-process app-server event stream lagged; dropped "
+_CODEX_APP_SERVER_STREAM_LAG_SUFFIX = " events"
 
 
 def _codex_json_objects(text: str) -> Iterable[dict[str, Any]]:
@@ -1023,6 +1022,19 @@ def _codex_error_message(value: object) -> str | None:
     return None
 
 
+def _is_codex_app_server_stream_lag(message: str) -> bool:
+    """Return whether *message* is Codex's nonfatal app-server lag notice."""
+    if not (
+        message.startswith(_CODEX_APP_SERVER_STREAM_LAG_PREFIX)
+        and message.endswith(_CODEX_APP_SERVER_STREAM_LAG_SUFFIX)
+    ):
+        return False
+    dropped_count = message[
+        len(_CODEX_APP_SERVER_STREAM_LAG_PREFIX) : -len(_CODEX_APP_SERVER_STREAM_LAG_SUFFIX)
+    ]
+    return dropped_count.isascii() and dropped_count.isdigit()
+
+
 def _codex_structured_failure(event: dict[str, Any]) -> str | None:
     """Return a failure description for a fatal Codex JSONL event."""
     event_type = event.get("type")
@@ -1048,9 +1060,13 @@ def _codex_structured_failure(event: dict[str, Any]) -> str | None:
             return output.strip()
         return None
     if item_type == "error":
-        return _codex_error_message(item) or "Codex error item"
-    if item_type in _CODEX_FATAL_TOOL_ITEM_TYPES and status in _CODEX_FAILED_TOOL_STATUSES:
-        return _codex_error_message(item) or f"{item_type} status={status}"
+        message = _codex_error_message(item)
+        if message is not None and _is_codex_app_server_stream_lag(message):
+            return None
+        return message or "Codex error item"
+    if status in _CODEX_FAILED_TOOL_STATUSES:
+        item_label = item_type if isinstance(item_type, str) else "item"
+        return _codex_error_message(item) or f"{item_label} status={status}"
     return None
 
 

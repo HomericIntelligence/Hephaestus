@@ -509,6 +509,17 @@ def test_run_codex_session_rejects_nested_sandbox_tool_failure_with_no_edits(
             },
             "collab_tool_call status=failed",
         ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "web_search_call",
+                    "status": "failed",
+                },
+            },
+            "web_search_call status=failed",
+        ),
     ],
 )
 def test_run_codex_session_rejects_structured_fatal_events(
@@ -657,6 +668,63 @@ def test_run_codex_session_allows_recovered_command_failure(tmp_path: Path) -> N
         )
 
     assert result.stdout == "Implemented the fix after correcting the test."
+
+
+def test_run_codex_session_allows_app_server_stream_lag_after_successful_edits(
+    tmp_path: Path,
+) -> None:
+    """A nonfatal app-server lag notice does not override turn completion."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "codex-session"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "file_change",
+                            "status": "completed",
+                            "changes": [{"path": "fixed.py", "kind": "update"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_2",
+                            "type": "error",
+                            "message": (
+                                "in-process app-server event stream lagged; dropped 17 events"
+                            ),
+                        },
+                    }
+                ),
+                json.dumps({"type": "turn.completed", "usage": {}}),
+            ]
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="Implemented and verified the fix.",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert result.stdout == "Implemented and verified the fix."
 
 
 def test_codex_approval_args_uses_config_override_for_current_cli() -> None:
