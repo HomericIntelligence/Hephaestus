@@ -105,3 +105,45 @@ clean-all: clean
     find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} +
     find . -type d -name '*.egg-info' -not -path './.venv/*' -exec rm -rf {} +
     find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -not -path './.venv/*' -delete
+
+# === Containerized CI (podman by default) ===
+
+# Build the CI container image (podman first, docker fallback)
+ci-build:
+    podman build -f ci/Containerfile -t hephaestus-ci:local . || docker build -f ci/Containerfile -t hephaestus-ci:local .
+
+# Run CI lint (pre-commit + doc links) in container
+ci-lint:
+    ./scripts/run_ci_local.sh lint
+
+# Run CI unit tests in container
+ci-unit:
+    ./scripts/run_ci_local.sh unit
+
+# Run CI integration tests in container
+ci-integration:
+    ./scripts/run_ci_local.sh integration
+
+# Run CI installed-CLI tests in container
+ci-cli:
+    ./scripts/run_ci_local.sh cli
+
+# Run CI package build in container
+ci-build-package:
+    ./scripts/run_ci_local.sh build
+
+# Run CI security scans (audit, sast, workflow-scan) in container
+ci-security:
+    ./scripts/run_ci_local.sh audit
+    ./scripts/run_ci_local.sh sast
+    ./scripts/run_ci_local.sh workflow-scan
+
+# Run CI schema/version/license checks in container
+ci-consistency:
+    ./scripts/run_ci_local.sh schema
+    ./scripts/run_ci_local.sh version
+    ./scripts/run_ci_local.sh license
+
+# Run all CI checks in container
+ci-all:
+    ./scripts/run_ci_local.sh all

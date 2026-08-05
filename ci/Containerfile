@@ -1,0 +1,169 @@
+# Containerfile for hephaestus-ci — CI image for shared HomericIntelligence tooling.
+#
+# This image provides:
+# - Python 3.13 environment (matches requires-python >=3.13,<3.14)
+# - uv with the locked project environment (all groups + extras) pre-installed
+# - pre-commit hook environments baked in (largest speedup)
+# - Non-root user 'ci' for rootless Podman compatibility
+#
+# Toolchain: uv (Odysseus ADR-017). Pattern mirrors Scylla ci/Containerfile.
+#
+# Build (OCI-compliant — works with both podman and docker):
+#   podman build -f ci/Containerfile -t hephaestus-ci:local .
+#   docker build -f ci/Containerfile -t hephaestus-ci:local .
+#
+# Run:
+#   podman run --rm -v .:/workspace:Z hephaestus-ci:local uv run pytest tests/unit
+#   podman run --rm -v .:/workspace:Z hephaestus-ci:local uv run pre-commit run --all-files
+
+# ============================================================================
+# Stage 0: uv binary — installed from a pinned GitHub release so the checksum
+# is reproducible and the build resolves identically under both podman/buildah
+# and docker (no cross-registry COPY of a third-party image). The ghcr.io
+# astral-sh/uv image's version-tag scheme does not track uv CLI versions
+# (0.11.21 does not exist there), so we pin the release tarball instead.
+# ============================================================================
+FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS uv
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://github.com/astral-sh/uv/releases/download/0.12.1/uv-x86_64-unknown-linux-gnu.tar.gz -o /tmp/uv.tar.gz \
+    && echo "90b2f223fb69d19db49e117da601f64978593417988530aa733d456141b4bcbb  /tmp/uv.tar.gz" | sha256sum --check \
+    && tar xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 \
+    && rm /tmp/uv.tar.gz
+
+# ============================================================================
+# Stage: node — pinned Node 22 runtime for the Pi coding-agent CLI used by the
+# pi_smoke tests (native CI installs it via the setup-pi-cli action).
+# ============================================================================
+FROM node:22-bookworm-slim AS node
+
+# Pre-install the Pi CLI here so the runtime stage can copy the whole /usr/local
+# prefix in one consistent tree (copying node/npm/npx individually breaks npm's
+# internal relative requires).
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2 && \
+    pi --version
+
+# ============================================================================
+# Stage 1: Builder — install uv and the locked project environment
+# ============================================================================
+FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Build the project virtualenv in a fixed, copyable location.
+    UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv \
+    # Bytecode-compile on install for faster cold starts.
+    UV_COMPILE_BYTECODE=1 \
+    # Copy (not hardlink) from the cache so the venv is self-contained for the
+    # runtime-stage COPY --from=builder.
+    UV_LINK_MODE=copy \
+    PATH="/opt/hephaestus-venv/bin:$PATH"
+
+# Install build dependencies + git (required by pre-commit hooks)
+# apt-get upgrade picks up any security patches released after the base image was pinned
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    gcc \
+    g++ \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (pinned release — keep the version and sha256 in sync with
+# astral-sh/setup-uv in .github/workflows/*.yml when bumping).
+COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+
+# Layer 1: Dependency files + the package source the hatchling build needs.
+# The package tree is copied so `uv sync` can install the project itself,
+# mirroring `uv sync --all-groups --all-extras --locked` in CI. Layer stays
+# cached when only the lock/config files change; uv's own cache absorbs the
+# dependency downloads, so source-only edits rebuild this layer quickly.
+WORKDIR /opt/hephaestus-build
+COPY uv.lock pyproject.toml .pre-commit-config.yaml README.md ./
+COPY hephaestus/ hephaestus/
+
+# Layer 2: Install the locked dependency set (all groups + extras) plus the
+# project itself into the venv, exactly as CI does.
+# hatch-vcs derives the package version from git tags, so init a synthetic
+# repo with a base tag first; pre-commit install-hooks also needs a git repo.
+# The synthetic .git is removed at the end of this stage.
+RUN git init . && \
+    git -c user.email=ci@localhost -c user.name=ci commit --allow-empty --quiet -m base && \
+    git tag 0.0.0 && \
+    uv sync --all-groups --all-extras --locked
+
+# Layer 3: Install pre-commit hook environments.
+# Baking this in means 'pre-commit run --all-files' starts immediately,
+# without downloading hook repos or creating virtualenvs at CI time.
+RUN uv run pre-commit install-hooks && \
+    rm -rf .git
+
+# ============================================================================
+# Stage 2: Runtime — minimal image without build tools
+# ============================================================================
+FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91
+
+LABEL org.opencontainers.image.title="hephaestus-ci"
+LABEL org.opencontainers.image.description="CI container for Hephaestus — validation, testing, security scans"
+LABEL org.opencontainers.image.vendor="Hephaestus"
+LABEL org.opencontainers.image.source="https://github.com/HomericIntelligence/Hephaestus"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv \
+    UV_LINK_MODE=copy \
+    PATH="/opt/hephaestus-venv/bin:$PATH"
+
+# Runtime-only system packages (no build tools)
+# apt-get upgrade picks up any security patches released after the base image was pinned
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    jq \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh) — pinned release; native runners ship it preinstalled and the
+# automation pipeline's _trusted_gh_executable() requires it.
+RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.deb -o /tmp/gh.deb \
+    && echo "7c7fa3bb890db0934baf65910d97b8c0fa437b2e590f7f7daf6bdf82c5c486d7  /tmp/gh.deb" | sha256sum --check \
+    && apt-get install -y /tmp/gh.deb \
+    && rm -f /tmp/gh.deb
+
+# Node 22 + npm + the Pi coding-agent CLI (same pin as setup-pi-cli), copied
+# as one consistent /usr/local tree from the node stage.
+COPY --from=node /usr/local/ /usr/local/
+
+# Copy the uv binaries and the pre-installed project virtualenv from builder.
+COPY --from=uv /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+COPY --from=builder /opt/hephaestus-venv /opt/hephaestus-venv
+
+# Copy pre-commit hook cache from builder (baked-in hook envs)
+COPY --from=builder /root/.cache/pre-commit /root/.cache/pre-commit
+
+# Create non-root user for rootless Podman compatibility
+# UID 1000 is the default first user on most Linux systems, matching typical
+# developer UIDs for smooth volume mount permissions without --userns=keep-id
+RUN groupadd -r ci && useradd -r -g ci -u 1000 -m -s /bin/bash ci
+
+# Copy pre-commit cache to ci user's home (pre-commit uses $HOME/.cache)
+RUN cp -r /root/.cache/pre-commit /home/ci/.cache/ 2>/dev/null || true && \
+    chown -R ci:ci /home/ci/.cache
+
+# Make the baked venv writable by the ci user: when the repo is bind-mounted at
+# /workspace, uv detects the project path changed and re-points the editable
+# install at the mounted source, so scripts and tests exercise the working tree.
+RUN chown -R ci:ci /opt/hephaestus-venv
+
+# Working directory is the mounted repo root at runtime
+WORKDIR /workspace
+
+# No ENTRYPOINT — commands are provided externally by CI or run_ci_local.sh
+# Example: podman run --rm -v .:/workspace:Z hephaestus-ci:local uv run pytest
+
+USER ci

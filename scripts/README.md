@@ -43,6 +43,11 @@ through installed `hephaestus-*` console scripts.
 - **`shell/lib/install_helpers.sh`** — Sourceable helper library (colors,
   counters, check helpers) shared by the installer scripts.
 
+### Local CI
+
+- **`run_ci_local.sh`** — Run the CI checks or a named subset in the local
+  Podman/Docker image built with `just ci-build`.
+
 ### Disaster recovery
 
 - **`backup_state.py`** — Backup, restore, and verify tier-3 operational

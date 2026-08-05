@@ -157,10 +157,16 @@ jobs:
       # job (issue #1173) so that the WHOLE hook suite is a required status
       # check — previously pre-commit was advisory, which let an unformatted
       # file land on main via #959 and break pre-commit for every later PR.
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
+
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Cache pre-commit environments
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
@@ -180,13 +186,15 @@ jobs:
           restore-keys: |
             mypy-${{ runner.os }}-
 
-      - name: Run pre-commit (all hooks)
+      - name: Run pre-commit (all hooks, in container)
         run: |
-          uv sync --all-groups --all-extras --locked
-          uv run pre-commit run --all-files --show-diff-on-failure
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local uv run pre-commit run --all-files --show-diff-on-failure
 
-      - name: Validate documentation links
-        run: uv run hephaestus-validate-links docs --repo-root .
+      - name: Validate documentation links (in container)
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run hephaestus-validate-links docs --repo-root .
 
       - name: Upload pre-commit diff
         if: failure()
@@ -209,12 +217,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
-      - name: Check uv.lock is in sync with pyproject.toml
-        run: uv lock --check
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
+
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Check uv.lock is in sync with pyproject.toml (in container)
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv lock --check
 
   justfile-check:
     name: justfile-check
@@ -501,25 +517,37 @@ jobs:
       - name: Install Pi CLI
         uses: ./.github/actions/setup-pi-cli
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Install locked project environment
-        run: uv sync --all-groups --all-extras --locked
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run unit tests
+
+      - name: Run unit tests (in container)
         run: |
-          uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not nightly" \
-            --cov=hephaestus --cov-report=term-missing --cov-report=xml
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local bash -c '
+            uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not nightly" \
+              --cov=hephaestus --cov-report=term-missing --cov-report=xml
+          '
 
-      - name: Check unit test structure
+      - name: Check unit test structure (in container)
         # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
-        run: uv run hephaestus-check-test-structure
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run hephaestus-check-test-structure
 
-      - name: Check per-module coverage floors
-        run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
+      - name: Check per-module coverage floors (in container)
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run hephaestus-check-coverage
+          --coverage-file coverage.xml --config coverage.toml
 
   integration-tests:
     name: integration-tests
@@ -538,20 +566,28 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Install locked project environment
-        run: uv sync --all-groups --all-extras --locked
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run integration tests
-        # uv sync installed every [project.scripts] binary into .venv/bin, so
-        # the CLI entry-point checks must never skip here (#2173).
+
+      - name: Run integration tests (in container)
+        # The baked image installs every [project.scripts] binary into the venv,
+        # so the CLI entry-point checks must never skip here (#2173).
         env:
           HEPHAESTUS_REQUIRE_CLI: "1"
-        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          -e HEPHAESTUS_REQUIRE_CLI
+          hephaestus-ci:local uv run pytest tests/integration
+          --override-ini="addopts=" -v --strict-markers -m "not nightly"
 
   installed-cli-tests:
     # Installed-artifact lane (#2173): build the wheel, install it into a
@@ -577,30 +613,45 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Build wheel
-        run: uv build --wheel
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Install wheel into fresh venv
+      - name: Build wheel (in container)
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv build --wheel
+
+      - name: Install wheel into fresh venv (in container)
         # [automation] extra: most console scripts live under
         # hephaestus.automation.*. pytest runs the suite; pyyaml is
         # imported by tests/conftest.py.
         run: |
-          uv venv build/cli-venv
-          WHEEL=(dist/*.whl)
-          uv pip install --python build/cli-venv/bin/python "${WHEEL[0]}[automation]" pytest pyyaml
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local bash -c '
+            uv venv build/cli-venv
+            WHEEL=(dist/*.whl)
+            uv pip install --python build/cli-venv/bin/python "${WHEEL[0]}[automation]" pytest pyyaml
+          '
 
-      - name: Run CLI entry-point tests against installed binaries
+      - name: Run CLI entry-point tests against installed binaries (in container)
         env:
           HEPHAESTUS_REQUIRE_CLI: "1"
         run: |
-          export PATH="$PWD/build/cli-venv/bin:$PATH"
-          build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py \
-            --override-ini="addopts=" -v --strict-markers
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            -e HEPHAESTUS_REQUIRE_CLI \
+            hephaestus-ci:local bash -c '
+            export PATH="$PWD/build/cli-venv/bin:$PATH"
+            build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py \
+              --override-ini="addopts=" -v --strict-markers
+          '
 
   shell-tests:
     name: shell-tests
@@ -648,23 +699,32 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Install locked build environment
-        run: uv sync --all-groups --all-extras --locked
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Build wheel and sdist
-        run: uv run python -m build --no-isolation
 
-      - name: Smoke-test installed wheel
+      - name: Build wheel and sdist (in container)
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run python -m build --no-isolation
+
+      - name: Smoke-test installed wheel (in container)
         run: |
-          uv venv /tmp/hephaestus-wheel-smoke
-          uv pip install --python /tmp/hephaestus-wheel-smoke/bin/python dist/homericintelligence_hephaestus-*.whl --force-reinstall
-          /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
-          /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local bash -c '
+            uv venv /tmp/hephaestus-wheel-smoke
+            uv pip install --python /tmp/hephaestus-wheel-smoke/bin/python dist/homericintelligence_hephaestus-*.whl --force-reinstall
+            /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print(\'Package version:\', hephaestus.__version__)"
+            /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print(\'OK\')"
+          '
 
   security-dependency-scan:
     name: security/dependency-scan
@@ -678,17 +738,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Install locked dependency audit environment
-        run: uv sync --all-groups --all-extras --locked
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run pip-audit
+
+      - name: Run pip-audit (in container)
         id: pip-audit
-        run: uv run pip-audit
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run pip-audit
 
       - name: Post pip-audit summary
         if: always()
@@ -750,14 +816,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Run bandit (SAST)
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+
+      - name: Run bandit (SAST, in container)
         id: bandit
-        run: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run bandit -c pyproject.toml -r hephaestus scripts
+          --severity-level medium
 
       - name: Post bandit summary
         if: always()
@@ -788,10 +863,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
+
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Run zizmor (workflow SAST)
         id: zizmor
@@ -799,7 +880,10 @@ jobs:
         # Online audits (e.g. known-vulnerable-actions) run weekly in
         # security.yml. Keep these flags identical to the zizmor pre-commit
         # hook (drift-guarded by tests/unit/ci/test_zizmor_config.py).
-        run: uv run zizmor --no-online-audits --min-severity medium .github/workflows/
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv run zizmor --no-online-audits --min-severity medium
+          .github/workflows/
 
       - name: Post zizmor summary
         if: always()
@@ -833,12 +917,18 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Validate GitHub workflow schemas
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+
+      - name: Validate GitHub workflow schemas (in container)
         run: |
           set -euo pipefail
           # Use check-jsonschema's bundled `vendor.github-workflows` schema so
@@ -849,9 +939,12 @@ jobs:
             echo "No workflow files to validate"
             exit 0
           fi
-          uvx check-jsonschema \
-            --builtin-schema vendor.github-workflows \
-            "${wf_files[@]}"
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local bash -c '
+            uvx check-jsonschema \
+              --builtin-schema vendor.github-workflows \
+              "${wf_files[@]}"
+          '
 
   deps-version-sync:
     name: deps/version-sync
@@ -871,21 +964,25 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
 
-      - name: Install locked project environment
-        run: uv sync --all-groups --all-extras --locked
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Check version single-source-of-truth
+
+      - name: Check version single-source-of-truth (in container)
         run: |
           set -euo pipefail
 
           # Diagnostics (informational only).
-          PKG_VERSION=$(uv run python -c "import hephaestus; print(hephaestus.__version__)")
-          echo "Installed __version__: $PKG_VERSION"
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local uv run python -c "import hephaestus; print('Installed __version__:', hephaestus.__version__)"
 
           # ENFORCEMENT: the tested checker asserts there is no
           # static [project].version, that version is in [project].dynamic,
@@ -897,10 +994,13 @@ jobs:
           # the module form is immune to sys.path[0]/CWD-dependent __file__
           # resolution, so the checker's get_repo_root() anchors to the
           # installed package and reads the checked-out pyproject.toml.
-          uv run python -m hephaestus.scripts_lib.check_version_single_source
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
+            hephaestus-ci:local uv run python -m hephaestus.scripts_lib.check_version_single_source
 
-      - name: Check uv.lock is in sync with pyproject.toml
-        run: uv lock --check
+      - name: Check uv.lock is in sync with pyproject.toml (in container)
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          hephaestus-ci:local uv lock --check
 
   license-scan:
     name: license-scan
@@ -915,21 +1015,28 @@ jobs:
           persist-credentials: false
           fetch-depth: 0  # hatch-vcs needs full history to compute the version
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Cache podman container storage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          enable-cache: true
+          path: ~/.local/share/containers/storage
+          key: podman-hephaestus-${{ runner.os }}-${{ hashFiles('uv.lock', '.pre-commit-config.yaml') }}
+          restore-keys: |
+            podman-hephaestus-${{ runner.os }}-
+
+      - name: Build CI image (podman)
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
       # Install the package + all runtime extras. ``[all]`` is required so
       # distributed_requirements() can read every runtime extra's Requires-Dist.
-      - name: Install locked project environment
-        run: uv sync --all-groups --all-extras --locked
 
-      - name: Run license scan
+      - name: Run license scan (in container)
         id: license-scan
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: uv run python scripts/check_license_compatibility.py
+        run: >
+          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
+          -e GITHUB_EVENT_NAME
+          hephaestus-ci:local uv run python scripts/check_license_compatibility.py
 
       - name: Post license-scan summary
         if: always()
