@@ -304,8 +304,15 @@ class TestArgvAssembly:
         assert argv[allowed_tools_index + 1] == ""
         assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
 
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            pytest.param("the-prompt", id="ordinary"),
+            pytest.param("sensitive-large-prompt:" + ("x" * 200_000), id="large"),
+        ],
+    )
     def test_input_via_stdin_drops_prompt_from_argv(
-        self, stub_run: MagicMock, fake_home: Path
+        self, stub_run: MagicMock, fake_home: Path, prompt: str
     ) -> None:
         cwd = fake_home / "work"
         cwd.mkdir()
@@ -313,17 +320,17 @@ class TestArgvAssembly:
             repo="R",
             issue=1,
             agent=AGENT_PLANNER,
-            prompt="the-prompt",
+            prompt=prompt,
             model="sonnet",
             cwd=cwd,
             input_via_stdin=True,
         )
         argv = _argv(stub_run.call_args)
-        assert "the-prompt" not in argv
+        assert all(prompt not in argument for argument in argv)
         assert argv[-1] == "--print"
-        # stdin kwarg carries the prompt
         kwargs = stub_run.call_args.kwargs
-        assert kwargs["stdin_text"] == "the-prompt"
+        assert kwargs["stdin_text"] == prompt
+        assert kwargs["use_devnull_stdin"] is False
 
     def test_claudecode_env_cleared(
         self, stub_run: MagicMock, fake_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -426,6 +433,48 @@ class TestEndToEndSessionResume:
         assert first_argv[-1] == "iter 0"
         assert second_argv[-1] == "iter 1"
 
+    def test_stdin_create_then_resume_same_uuid_distinct_prompts(self, fake_home: Path) -> None:
+        """Stdin prompts preserve the create/resume session transition."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        expected_sid = session_uuid("Scylla", 1944, AGENT_PLANNER, "sonnet", cwd=cwd)
+
+        def _side_effect(*args: Any, **kwargs: Any) -> MagicMock:
+            _make_existing_jsonl(fake_home, cwd, expected_sid)
+            return MagicMock(stdout="ok", stderr="", returncode=0)
+
+        with patch(
+            "hephaestus.automation.claude_invoke._run_tracked", side_effect=_side_effect
+        ) as m:
+            _, sid1 = invoke_claude_with_session(
+                repo="Scylla",
+                issue=1944,
+                agent=AGENT_PLANNER,
+                prompt="iter 0",
+                model="sonnet",
+                cwd=cwd,
+                input_via_stdin=True,
+            )
+            _, sid2 = invoke_claude_with_session(
+                repo="Scylla",
+                issue=1944,
+                agent=AGENT_PLANNER,
+                prompt="iter 1",
+                model="sonnet",
+                cwd=cwd,
+                input_via_stdin=True,
+            )
+
+        assert sid1 == sid2 == expected_sid
+        first_argv = _argv(m.call_args_list[0])
+        second_argv = _argv(m.call_args_list[1])
+        assert "--session-id" in first_argv
+        assert "--resume" in second_argv
+        assert m.call_args_list[0].kwargs["stdin_text"] == "iter 0"
+        assert m.call_args_list[1].kwargs["stdin_text"] == "iter 1"
+        assert all("iter 0" not in argument for argument in first_argv)
+        assert all("iter 1" not in argument for argument in second_argv)
+
     def test_session_id_is_githash_invariant(self, fake_home: Path) -> None:
         """The session UUID omits the trunk SHA — #841/#1166.
 
@@ -521,6 +570,38 @@ class TestModelCapFallback:
         assert first_argv[-1] == second_argv[-1] == "hi"
         assert any(
             "claude-fable-5" in r.getMessage() and OPUS_48 in r.getMessage() for r in caplog.records
+        )
+
+    def test_stdin_prompt_is_preserved_across_model_cap_fallback(self, fake_home: Path) -> None:
+        """A stdin request is retried with the same prompt and no argv leak."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        prompt = "sensitive fallback prompt"
+        ok = MagicMock(stdout="fallback-ok", stderr="", returncode=0)
+        with patch(
+            "hephaestus.automation.claude_invoke._run_tracked",
+            side_effect=[_cap_error(), ok],
+        ) as tracked:
+            out, sid = invoke_claude_with_session(
+                repo="R",
+                issue=1,
+                agent=AGENT_PLANNER,
+                prompt=prompt,
+                model="claude-fable-5",
+                cwd=cwd,
+                input_via_stdin=True,
+            )
+
+        assert out == "fallback-ok"
+        assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48, cwd=cwd)
+        assert [attempt.kwargs["stdin_text"] for attempt in tracked.call_args_list] == [
+            prompt,
+            prompt,
+        ]
+        assert all(
+            prompt not in argument
+            for attempt in tracked.call_args_list
+            for argument in _argv(attempt)
         )
 
     def test_error_envelope_falls_back_once(self, fake_home: Path) -> None:
