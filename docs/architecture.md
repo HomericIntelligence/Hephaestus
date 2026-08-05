@@ -257,11 +257,11 @@ tick does, in order:
  [`_reseed_if_converged`](../hephaestus/automation/pipeline/coordinator.py)).
  Otherwise wait on the completion/signal latch and drain the bounded
  completion queue.
-A defensive step watchdog ([`_STEP_WATCHDOG_S = 15.0`](../hephaestus/automation/pipeline/coordinator.py))
-warns when any `stage.step()` call exceeds ~15 s. 5 s proved too tight in
+A defensive step watchdog ([`_STEP_WATCHDOG_S = 60.0`](../hephaestus/automation/pipeline/coordinator.py))
+warns when any `stage.step()` call exceeds ~60 s. 15 s proved too tight in
 practice: routine repo-stage steps (clone + label reads over the network)
 breached it on nearly every multi-repo run, burying real stalls in noise
-(#2247).
+(#2648).
 
 ### Library → product layer boundary
 
