@@ -27,6 +27,11 @@ from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
     PipelineConfig,
 )
+from hephaestus.automation.pipeline.github_jobs import (
+    AppendReplyJournalRequest,
+    GitHubJob,
+    ReplyJournalAppended,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -87,6 +92,15 @@ class StubStage:
         self.calls.append(("job_done", result.ok))
 
 
+def _github_append_job(tmp_path: Path) -> tuple[GitHubJob, AppendReplyJournalRequest]:
+    """Build one valid typed GitHub job for coordinator completion tests."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+    return GitHubJob("repo-a", tmp_path.resolve(), request, "append"), request
+
+
 def make_coordinator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -131,6 +145,69 @@ def _issue_item(
     issue: int = 1, stage: StageName = StageName.PLANNING, repo: str = "repo-a"
 ) -> WorkItem:
     return WorkItem(repo=repo, kind=ItemKind.ISSUE, issue=issue, stage=stage, state="ENTER")
+
+
+def test_github_receipt_applies_before_on_done_state_and_routing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coordinator calls receipt application while the submitting state is intact."""
+    coordinator, _pool, _github = make_coordinator(tmp_path, monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    class ReceiptStage(StubStage):
+        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+            del result, ctx
+            calls.append(("on_job_done", item.state))
+
+        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+            del ctx
+            calls.append(("step", item.state))
+            return StageOutcome(Disposition.FINISH_FAIL, "receipt_applied")
+
+    coordinator.stages[StageName.PR_REVIEW] = ReceiptStage()
+    item = _issue_item(3, StageName.PR_REVIEW)
+    item.state = "POST"
+    job, request = _github_append_job(tmp_path)
+    handle = JobHandle(job=job, on_done_state="POST_APPLY")
+    coordinator.in_flight[handle] = item
+    coordinator.inflight_per_repo[item.repo] = 1
+
+    coordinator._handle_completion(
+        handle,
+        JobResult(ok=True, value=ReplyJournalAppended(request=request)),
+    )
+
+    assert calls == [("on_job_done", "POST"), ("step", "POST_APPLY")]
+
+
+def test_interrupted_github_job_never_applies_a_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted operation remains resumable in its submitting state."""
+    coordinator, _pool, _github = make_coordinator(tmp_path, monkeypatch)
+    stage = StubStage()
+    coordinator.stages[StageName.PR_REVIEW] = stage
+    item = _issue_item(3, StageName.PR_REVIEW)
+    item.state = "POST"
+    job, _request = _github_append_job(tmp_path)
+    handle = JobHandle(job=job, on_done_state="POST_APPLY")
+    coordinator.in_flight[handle] = item
+    coordinator.inflight_per_repo[item.repo] = 1
+
+    coordinator._handle_completion(
+        handle,
+        JobResult(ok=False, interrupted=True, error="shutdown"),
+    )
+
+    assert not any(name == "job_done" for name, _value in stage.calls)
+    assert item.state == "POST"
+    assert item.result == ItemResult(
+        passed=False,
+        reason="resumable at pr_review",
+        final_stage=StageName.PR_REVIEW,
+    )
 
 
 class TestQuiescence:

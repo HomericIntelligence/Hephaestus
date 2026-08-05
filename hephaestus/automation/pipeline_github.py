@@ -232,7 +232,12 @@ class PipelineGitHub(
     PipelineGitHubReviews,
     PipelineGitHubMutations,
 ):
-    """Stable coordinator façade over transport, queries, reviews, and mutations."""
+    """Stable GitHub façade with explicit single-owner semantics.
+
+    Coordinator contexts may cache an instance on the coordinator thread.
+    Worker jobs construct a separate instance for each request; sharing an
+    instance between threads is unsupported.
+    """
 
     def mark_pr_implementation_go(self, pr_number: int) -> None:
         """Apply and read back exclusive ``state:implementation-go``."""

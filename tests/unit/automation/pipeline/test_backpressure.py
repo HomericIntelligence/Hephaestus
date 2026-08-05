@@ -26,12 +26,14 @@ class _RecordingWorkerPool:
         completion_q: Any,
         lock_dir: Path | None = None,
         gh_extra_path_root: Path | None = None,
+        github_job_runner: Any = None,
     ) -> None:
         del lock_dir
         self.size = size
         self.shutdown_event = shutdown
         self.completion_q = completion_q
         self.gh_extra_path_root = gh_extra_path_root
+        self.github_job_runner = github_job_runner
 
 
 def _config(
@@ -69,6 +71,7 @@ def test_coordinator_uses_one_capacity_for_all_queues_and_worker_pool(
     assert coordinator.pool.size == capacity
     assert coordinator.pool.completion_q is coordinator.completion_q
     assert coordinator.pool.gh_extra_path_root is None
+    assert coordinator.pool.github_job_runner is not None
 
 
 def test_coordinator_passes_extra_gh_root_to_worker_pool(

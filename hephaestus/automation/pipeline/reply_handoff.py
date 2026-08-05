@@ -18,6 +18,11 @@ from hashlib import sha256
 from typing import Any, Literal
 
 from hephaestus.automation.address_review_core import parse_addressed_replies
+from hephaestus.automation.pipeline.github_jobs import (
+    DeliverReplyHandoffRequest,
+    FrozenJson,
+    ReplyHandoffAttempted,
+)
 from hephaestus.automation.review_journal import IssueComment
 
 IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
@@ -458,4 +463,35 @@ def retry_pending_implementation_reply_handoff(
         batch_nonce=batch_nonce,
         issue_number=issue_number,
         logger=logger,
+    )
+
+
+def attempt_reply_handoff(
+    request: DeliverReplyHandoffRequest,
+    github: Any,
+) -> ReplyHandoffAttempted:
+    """Attempt a handoff against detached state and return an immutable receipt."""
+    payload: dict[str, Any] = {
+        PENDING_IMPLEMENTATION_REPLY_HANDOFF: request.handoff.thaw(),
+        PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES: request.visibility_retries,
+    }
+    status = retry_pending_implementation_reply_handoff(
+        payload,
+        pr_number=request.pr_number,
+        issue_number=request.issue_number,
+        github=github,
+        logger=logging.getLogger(__name__),
+    )
+    if status == "none":
+        status = "invalid"
+    remaining = payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF)
+    retry_delay = payload.get("retry_delay_s")
+    return ReplyHandoffAttempted(
+        request=request,
+        status=status,
+        remaining_handoff=(FrozenJson.snapshot(remaining) if remaining is not None else None),
+        visibility_retries=int(
+            payload.get(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, 0)
+        ),
+        retry_delay_s=(float(retry_delay) if isinstance(retry_delay, (int, float)) else None),
     )

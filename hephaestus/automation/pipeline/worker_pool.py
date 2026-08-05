@@ -1,8 +1,8 @@
-"""Worker pool: the only place agent, build/test, git, and session work runs.
+"""Worker pool: the only place agent, build/test, git, GitHub, and session work runs.
 
 The coordinator submits frozen jobs and drains ``(handle, result)`` tuples from
 the completion queue. Workers never touch WorkItems or stage queues and never
-perform GitHub API mutations (enforced by test_pipeline_architecture.py).
+touch coordinator state. Closed GitHub jobs use a separately injected runner.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_a
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -1329,6 +1330,7 @@ class WorkerPool:
         completion_q: CompletionQueue,
         lock_dir: Path | None = None,
         gh_extra_path_root: Path | None = None,
+        github_job_runner: GitHubJobRunner | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1343,6 +1345,7 @@ class WorkerPool:
                 automation state dir — see :func:`_repo_lock_path`).
             gh_extra_path_root: Explicit CLI-provided root that may supply
                 only ``bin/gh`` for checkout synchronization.
+            github_job_runner: Closed worker-side GitHub operation runner.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1357,10 +1360,11 @@ class WorkerPool:
         self._repo_locks_guard = threading.Lock()
         self._lock_dir = lock_dir
         self._gh_extra_path_root = gh_extra_path_root
+        self._github_job_runner = github_job_runner
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
-        """Acquire a per-repo git lock and evict its cache entry when idle."""
+        """Serialize in-process worker operations for one repository."""
         with self._repo_locks_guard:
             entry = self._repo_locks.get(repo)
             if entry is None:
@@ -1397,7 +1401,7 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -1508,7 +1512,7 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
         claim_key: str = "",
         claim_stage: str = "",
     ) -> JobResult:
@@ -1548,6 +1552,8 @@ class WorkerPool:
                     result = self._run_build_test(job)
                 elif isinstance(job, GitJob):
                     result = self._run_git(job)
+                elif isinstance(job, GitHubJob):
+                    result = self._run_github(job)
                 elif isinstance(job, CompactJob):
                     result = self._run_compact(job)
                 else:
@@ -1587,6 +1593,14 @@ class WorkerPool:
             stderr_tail=result.stderr_tail[-_TAIL:] if result.stderr_tail else "",
             worker_id=worker_id,
         )
+
+    def _run_github(self, job: GitHubJob) -> JobResult:
+        """Execute one closed GitHub operation exactly once per submission."""
+        if self._github_job_runner is None:
+            raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
+        with self._repo_lock(job.repo):
+            receipt = self._github_job_runner.run(job)
+        return JobResult(ok=True, value=receipt)
 
     def _run_agent(self, job: AgentJob) -> JobResult:
         """Run an agent job (Claude or other runtime).

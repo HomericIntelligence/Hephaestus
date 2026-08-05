@@ -1119,7 +1119,7 @@ class TestPlanningFlowWithFakePool:
                 item.state = result.next_state
                 continue
             if isinstance(result, JobRequest):
-                pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
+                pool.submit(result.job, result.on_done_state)
                 _handle, job_result = pool.completion_q.get_nowait()
                 assert not job_result.interrupted
                 stage.on_job_done(item, job_result, ctx)

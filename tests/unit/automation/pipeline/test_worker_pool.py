@@ -23,6 +23,11 @@ import pytest
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.github_jobs import (
+    AppendReplyJournalRequest,
+    GitHubJob,
+    ReplyJournalAppended,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -135,6 +140,193 @@ def test_shutdown_can_reap_without_marking_interrupted(
     pool.shutdown(mark_interrupted=False)
 
     assert not shutdown_event.is_set()
+
+
+def test_github_job_dispatches_once_through_injected_typed_runner(
+    shutdown_event: threading.Event,
+    completion_q: CompletionQueue,
+    tmp_path: Path,
+) -> None:
+    """GitHub jobs have one typed dispatch and no generic worker replay."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(
+        issue_number=3,
+        marker=marker,
+        body=f'{marker}\n<!-- {{"format":1}} -->',
+    )
+    job = GitHubJob(
+        repo="example",
+        repo_root=tmp_path.resolve(),
+        request=request,
+        descr="append journal",
+    )
+    calls: list[GitHubJob] = []
+
+    class Runner:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+            calls.append(submitted)
+            return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
+
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+        github_job_runner=Runner(),
+    )
+    try:
+        result = pool._run(job)
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.ok
+    assert result.value == ReplyJournalAppended(request=request)
+    assert calls == [job]
+
+
+def test_same_repo_github_jobs_are_serialized(
+    shutdown_event: threading.Event,
+    completion_q: CompletionQueue,
+    tmp_path: Path,
+) -> None:
+    """The explicit StageGitHub contract permits one in-flight job per repo."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+
+    class Runner:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+            nonlocal active, max_active
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+                entered = first_entered if not first_entered.is_set() else second_entered
+                entered.set()
+            if entered is first_entered:
+                assert release_first.wait(timeout=2)
+            with guard:
+                active -= 1
+            return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
+
+    pool = WorkerPool(
+        size=2,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+        github_job_runner=Runner(),
+    )
+    jobs = [
+        GitHubJob("same-repo", tmp_path.resolve(), request, f"append-{index}") for index in range(2)
+    ]
+    try:
+        for job in jobs:
+            pool.submit(job, "done")
+        assert first_entered.wait(timeout=2)
+        assert not second_entered.wait(timeout=0.05)
+        release_first.set()
+        assert second_entered.wait(timeout=2)
+        completion_q.get(timeout=2)
+        completion_q.get(timeout=2)
+    finally:
+        release_first.set()
+        pool.shutdown(mark_interrupted=False)
+
+    assert max_active == 1
+
+
+def test_different_repo_github_jobs_may_run_concurrently(
+    shutdown_event: threading.Event,
+    completion_q: CompletionQueue,
+    tmp_path: Path,
+) -> None:
+    """Independent repositories do not share the worker-operation lock."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+    both_entered = threading.Event()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+
+    class Runner:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+            nonlocal active, max_active
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+                if active == 2:
+                    both_entered.set()
+            assert release.wait(timeout=2)
+            with guard:
+                active -= 1
+            return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
+
+    pool = WorkerPool(
+        size=2,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+        github_job_runner=Runner(),
+    )
+    try:
+        pool.submit(GitHubJob("repo-a", tmp_path.resolve(), request, "append-a"), "done")
+        pool.submit(GitHubJob("repo-b", tmp_path.resolve(), request, "append-b"), "done")
+        assert both_entered.wait(timeout=2)
+        release.set()
+        completion_q.get(timeout=2)
+        completion_q.get(timeout=2)
+    finally:
+        release.set()
+        pool.shutdown(mark_interrupted=False)
+
+    assert max_active == 2
+
+
+def test_failing_github_job_is_not_replayed_by_worker_pool(
+    shutdown_event: threading.Event,
+    completion_q: CompletionQueue,
+    tmp_path: Path,
+) -> None:
+    """Mutation ambiguity remains stage-owned and receives one failed result."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+    calls = 0
+
+    class Runner:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+            nonlocal calls
+            del submitted
+            calls += 1
+            raise OSError("ambiguous transport")
+
+    pool = WorkerPool(
+        size=1,
+        shutdown=shutdown_event,
+        completion_q=completion_q,
+        lock_dir=tmp_path / "locks",
+        github_job_runner=Runner(),
+    )
+    try:
+        result = pool._run(GitHubJob("repo", tmp_path.resolve(), request, "append"))
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert not result.ok
+    assert "ambiguous transport" in (result.error or "")
+    assert calls == 1
 
 
 class TestWorkerPoolSubmitComplete:

@@ -67,12 +67,17 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
+            from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
             pool = WorkerPool(
                 size=work_window,
                 shutdown=self.shutdown,
                 completion_q=self.completion_q,
                 gh_extra_path_root=config.gh_extra_path_root,
+                github_job_runner=PipelineGitHubJobRunner(
+                    org=config.org,
+                    dry_run=config.dry_run,
+                ),
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

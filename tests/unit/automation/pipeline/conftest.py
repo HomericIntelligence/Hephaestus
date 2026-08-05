@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
     BuildTestJob,
@@ -50,6 +51,8 @@ class FakeWorkerPool:
         shutdown: threading.Event | None = None,
         completion_q: CompletionQueue | None = None,
         lock_dir: Path | None = None,
+        gh_extra_path_root: Path | None = None,
+        github_job_runner: GitHubJobRunner | None = None,
     ) -> None:
         """Initialize the fake pool.
 
@@ -58,6 +61,8 @@ class FakeWorkerPool:
             shutdown: Accepted for signature parity with WorkerPool; unused.
             completion_q: Queue to drain results to (created if omitted).
             lock_dir: Accepted for signature parity with WorkerPool; unused.
+            gh_extra_path_root: Accepted for signature parity; unused.
+            github_job_runner: Scriptable executor for closed GitHub jobs.
 
         """
         self.size = size
@@ -69,6 +74,7 @@ class FakeWorkerPool:
         self.submitted_claims: list[tuple[str, str]] = []
         self.shutdown_calls = 0
         self._scripted: deque[JobResult | Exception] = deque()
+        self.github_job_runner = github_job_runner
 
     def script(self, *outcomes: JobResult | Exception) -> None:
         """FIFO-enqueue scripted outcomes for subsequent :meth:`submit` calls."""
@@ -84,8 +90,8 @@ class FakeWorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | CompactJob,
-        on_done_state: StageName,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        on_done_state: str | StageName,
         *,
         claim_key: str = "",
         claim_stage: str = "",
@@ -105,9 +111,17 @@ class FakeWorkerPool:
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
         self.submitted_claims.append((claim_key, claim_stage))
-        outcome: JobResult | Exception = (
-            self._scripted.popleft() if self._scripted else self._default_result(job)
-        )
+        if self._scripted:
+            outcome: JobResult | Exception = self._scripted.popleft()
+        elif isinstance(job, GitHubJob):
+            if self.github_job_runner is None:
+                raise AssertionError("GitHubJob requires a scripted runner")
+            try:
+                outcome = JobResult(ok=True, value=self.github_job_runner.run(job))
+            except Exception as error:
+                outcome = error
+        else:
+            outcome = self._default_result(job)
         if isinstance(outcome, Exception):
             outcome = JobResult(
                 ok=False,
@@ -117,7 +131,9 @@ class FakeWorkerPool:
         return handle
 
     @staticmethod
-    def _default_result(job: AgentJob | BuildTestJob | GitJob | CompactJob) -> JobResult:
+    def _default_result(
+        job: AgentJob | BuildTestJob | GitJob | CompactJob,
+    ) -> JobResult:
         """Synthesize a per-job-type ok result when nothing is scripted."""
         if isinstance(job, AgentJob):
             return JobResult(ok=True, value="fake agent output")
