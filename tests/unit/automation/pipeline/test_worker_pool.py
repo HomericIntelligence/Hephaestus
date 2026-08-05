@@ -20,6 +20,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from hephaestus.agents.runtime import AgentExecutionError
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -1498,6 +1499,27 @@ class TestAgentErrorHandling:
         assert result.error == "rc=2"
         assert "partial stdout" in result.stdout_tail
         assert "nonretryable failure detail" in result.stderr_tail
+
+    def test_codex_event_failure_is_explicit_agent_error(self, pool: WorkerPool) -> None:
+        """Structured Codex failures cross the worker boundary as agent errors."""
+        job = _agent_job(agent="codex")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(
+                f"{_WP}.run_agent_session",
+                side_effect=AgentExecutionError(
+                    "codex_nested_sandbox_unsupported: run the outer loop "
+                    "outside the enclosing API sandbox"
+                ),
+            ),
+        ):
+            result = pool._run_agent(job)
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.startswith("agent_error: codex_nested_sandbox_unsupported")
+        assert "outside the enclosing API sandbox" in result.error
 
     def test_generic_exception_converted_to_error_result(
         self,

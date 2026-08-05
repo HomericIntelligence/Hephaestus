@@ -404,6 +404,261 @@ def test_run_codex_session_timeout_without_last_message_still_raises(tmp_path: P
             )
 
 
+def test_run_codex_session_rejects_nested_sandbox_tool_failure_with_no_edits(
+    tmp_path: Path,
+) -> None:
+    """A failed nested-worktree sandbox must not look like a no-edit success."""
+    worktree = tmp_path / "repo" / "build" / ".worktrees" / "issue-2634"
+    git_common_dir = tmp_path / "repo" / ".git"
+    worktree.mkdir(parents=True)
+    git_common_dir.mkdir(parents=True)
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        captured_cmd.extend(cmd)
+        stdout = "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"codex-session"}',
+                (
+                    '{"type":"item.completed","item":{"id":"item_1",'
+                    '"type":"command_execution","status":"failed","exit_code":-1,'
+                    '"aggregated_output":"sandbox_apply: Operation not permitted"}}'
+                ),
+                '{"type":"turn.completed","usage":{}}',
+            ]
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="No edits were made.",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch(
+            "hephaestus.agents.runtime._codex_extra_writable_dirs",
+            return_value=[git_common_dir],
+        ),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(
+            agent_runtime.AgentExecutionError,
+            match="codex_nested_sandbox_unsupported",
+        ),
+    ):
+        agent_runtime.run_codex_session(
+            "implement",
+            cwd=worktree,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert captured_cmd[captured_cmd.index("--cd") + 1] == str(worktree)
+    assert captured_cmd[captured_cmd.index("--sandbox") + 1] == "workspace-write"
+    assert captured_cmd[captured_cmd.index("--add-dir") + 1] == str(git_common_dir)
+    assert "danger-full-access" not in captured_cmd
+
+
+@pytest.mark.parametrize(
+    ("event", "expected_detail"),
+    [
+        ({"type": "error", "message": "provider unavailable"}, "provider unavailable"),
+        (
+            {"type": "turn.failed", "error": {"message": "turn failed"}},
+            "turn failed",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {"id": "item_1", "type": "error", "message": "tool item failed"},
+            },
+            "tool item failed",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "file_change",
+                    "status": "failed",
+                    "changes": [],
+                },
+            },
+            "file_change status=failed",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "mcp_tool_call",
+                    "status": "failed",
+                    "error": {"message": "MCP unavailable"},
+                },
+            },
+            "MCP unavailable",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "collab_tool_call",
+                    "status": "failed",
+                },
+            },
+            "collab_tool_call status=failed",
+        ),
+    ],
+)
+def test_run_codex_session_rejects_structured_fatal_events(
+    tmp_path: Path,
+    event: dict[str, Any],
+    expected_detail: str,
+) -> None:
+    """Terminal provider and non-shell tool events are explicit failures."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=json.dumps(event),
+            final_message="No edits were made.",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(
+            agent_runtime.AgentExecutionError,
+            match=f"codex_tool_or_provider_failure: {expected_detail}",
+        ),
+    ):
+        agent_runtime.run_codex_session(
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+
+def test_run_codex_session_rejects_nonzero_nested_sandbox_failure(tmp_path: Path) -> None:
+    """A nonzero Codex process should retain the actionable sandbox diagnosis."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout="",
+            proc_stderr="sandbox_apply: Operation not permitted",
+            final_message="No edits were made.",
+            returncode=1,
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(
+            agent_runtime.AgentExecutionError,
+            match="codex_nested_sandbox_unsupported",
+        ),
+    ):
+        agent_runtime.run_codex_session(
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+
+def test_run_codex_session_rejects_failure_before_timeout_recovered_no_edits(
+    tmp_path: Path,
+) -> None:
+    """A recovered final message cannot override an earlier fatal tool event."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "status": "failed",
+                    "aggregated_output": "sandbox_apply: Operation not permitted",
+                },
+            }
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="No edits were made.",
+            hang=True,
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch.dict("os.environ", {"HEPH_CODEX_FINAL_MESSAGE_GRACE": "0"}),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(
+            agent_runtime.AgentExecutionError,
+            match="codex_nested_sandbox_unsupported",
+        ),
+    ):
+        agent_runtime.run_codex_session(
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+
+def test_run_codex_session_allows_recovered_command_failure(tmp_path: Path) -> None:
+    """A task command may fail before the agent successfully completes its work."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "item_1",
+                            "type": "command_execution",
+                            "status": "failed",
+                            "exit_code": 1,
+                            "aggregated_output": "one test failed",
+                        },
+                    }
+                ),
+                json.dumps({"type": "turn.completed", "usage": {}}),
+            ]
+        )
+        return _FakeCodexPopen(
+            cmd,
+            proc_stdout=stdout,
+            final_message="Implemented the fix after correcting the test.",
+            **kwargs,
+        )
+
+    with (
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        result = agent_runtime.run_codex_session(
+            "implement",
+            cwd=tmp_path,
+            timeout=30,
+            sandbox="workspace-write",
+        )
+
+    assert result.stdout == "Implemented the fix after correcting the test."
+
+
 def test_codex_approval_args_uses_config_override_for_current_cli() -> None:
     """Current Codex exposes approval policy through -c config overrides."""
     help_text = """

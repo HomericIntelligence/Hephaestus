@@ -106,6 +106,10 @@ class AgentRunResult:
     session_id: str | None = None
 
 
+class AgentExecutionError(RuntimeError):
+    """An agent CLI reported a fatal provider, sandbox, or tool failure."""
+
+
 class AgentCapability(StrEnum):
     """Provider capability names used by the provider-neutral parity contract."""
 
@@ -979,10 +983,21 @@ def _codex_base_cmd(
     return cmd
 
 
-def _parse_codex_json_events(text: str) -> tuple[str | None, str]:
-    """Extract session id and final text from Codex JSONL output."""
-    session_id: str | None = None
-    messages: list[str] = []
+_CODEX_NESTED_SANDBOX_MARKER = "sandbox_apply: Operation not permitted"
+_CODEX_NESTED_SANDBOX_DIAGNOSTIC = (
+    "codex_nested_sandbox_unsupported: Codex could not initialize its child "
+    "sandbox (sandbox_apply: Operation not permitted). Run the outer Hephaestus "
+    "automation loop outside the enclosing API sandbox; the child sandbox "
+    "permissions were not broadened."
+)
+_CODEX_FATAL_TOOL_ITEM_TYPES = frozenset(
+    {"error", "file_change", "mcp_tool_call", "collab_tool_call"}
+)
+_CODEX_FAILED_TOOL_STATUSES = frozenset({"failed", "declined"})
+
+
+def _codex_json_objects(text: str) -> Iterable[dict[str, Any]]:
+    """Yield JSON objects from Codex JSONL while ignoring non-object lines."""
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -990,8 +1005,76 @@ def _parse_codex_json_events(text: str) -> tuple[str | None, str]:
             event: Any = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(event, dict):
+        if isinstance(event, dict):
+            yield event
+
+
+def _codex_error_message(value: object) -> str | None:
+    """Extract a short message from a structured Codex failure payload."""
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if not isinstance(value, dict):
+        return None
+    for key in ("message", "error", "detail", "reason"):
+        nested_message = _codex_error_message(value.get(key))
+        if nested_message is not None:
+            return nested_message
+    return None
+
+
+def _codex_structured_failure(event: dict[str, Any]) -> str | None:
+    """Return a failure description for a fatal Codex JSONL event."""
+    event_type = event.get("type")
+    if event_type == "error":
+        return _codex_error_message(event) or "unrecoverable Codex error"
+    if event_type == "turn.failed":
+        return _codex_error_message(event.get("error")) or "Codex turn failed"
+    if event_type != "item.completed":
+        return None
+
+    item = event.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    status = item.get("status")
+    if item_type == "command_execution":
+        output = item.get("aggregated_output")
+        if (
+            status in _CODEX_FAILED_TOOL_STATUSES
+            and isinstance(output, str)
+            and _CODEX_NESTED_SANDBOX_MARKER.casefold() in output.casefold()
+        ):
+            return output.strip()
+        return None
+    if item_type == "error":
+        return _codex_error_message(item) or "Codex error item"
+    if item_type in _CODEX_FATAL_TOOL_ITEM_TYPES and status in _CODEX_FAILED_TOOL_STATUSES:
+        return _codex_error_message(item) or f"{item_type} status={status}"
+    return None
+
+
+def _codex_failure_diagnostic(stdout: str, stderr: str) -> str | None:
+    """Return a bounded fatal Codex diagnostic from structured failure channels."""
+    marker = _CODEX_NESTED_SANDBOX_MARKER.casefold()
+    if marker in stderr.casefold():
+        return _CODEX_NESTED_SANDBOX_DIAGNOSTIC
+
+    for event in _codex_json_objects(stdout):
+        failure = _codex_structured_failure(event)
+        if failure is None:
             continue
+        if marker in failure.casefold():
+            return _CODEX_NESTED_SANDBOX_DIAGNOSTIC
+        return f"codex_tool_or_provider_failure: {failure[:300]}"
+    return None
+
+
+def _parse_codex_json_events(text: str) -> tuple[str | None, str]:
+    """Extract session id and final text from Codex JSONL output."""
+    session_id: str | None = None
+    messages: list[str] = []
+    for event in _codex_json_objects(text):
         if event.get("type") == "session_meta":
             payload = event.get("payload")
             if isinstance(payload, dict) and isinstance(payload.get("id"), str):
@@ -1150,10 +1233,21 @@ def _run_codex_command(
                 output_path=Path(output_file.name),
                 process_tracker=process_tracker,
             )
+        except subprocess.CalledProcessError as exc:
+            diagnostic = _codex_failure_diagnostic(
+                _coerce_timeout_output(exc.stdout),
+                _coerce_timeout_output(exc.stderr),
+            )
+            if diagnostic is not None:
+                raise AgentExecutionError(diagnostic) from exc
+            raise
         except subprocess.TimeoutExpired as e:
             last_message = Path(output_file.name).read_text(encoding="utf-8").strip()
             stdout_text = _coerce_timeout_output(e.stdout)
             stderr_text = _coerce_timeout_output(e.stderr)
+            diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
+            if diagnostic is not None:
+                raise AgentExecutionError(diagnostic) from e
             if not last_message:
                 raise
             session_id, _ = _parse_codex_json_events(stdout_text)
@@ -1164,6 +1258,9 @@ def _run_codex_command(
             )
         last_message = Path(output_file.name).read_text(encoding="utf-8")
 
+    diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
+    if diagnostic is not None:
+        raise AgentExecutionError(diagnostic)
     session_id, event_message = _parse_codex_json_events(stdout_text)
     stdout = (last_message or event_message or stdout_text or "").strip()
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
