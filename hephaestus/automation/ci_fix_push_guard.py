@@ -126,8 +126,6 @@ push_current_branch_with_lease_on_divergence = _LegacyCallable(
 )
 rebase_worktree_onto = _LegacyCallable("rebase_worktree_onto")
 sync_worktree_to_remote_branch = _LegacyCallable("sync_worktree_to_remote_branch")
-_gh_call = _LegacyCallable("_gh_call")
-_invoke_agent_session = _LegacyCallable("_invoke_agent_session")
 _retry_no_commit_once = _LegacyCallable("_retry_no_commit_once")
 _attempt_mechanical_rebase = _LegacyCallable("_attempt_mechanical_rebase")
 

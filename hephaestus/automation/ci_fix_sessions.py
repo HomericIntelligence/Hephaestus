@@ -36,9 +36,6 @@ logger = logging.getLogger(__name__)
 # logs before force-pushing so the mesh can never push a branch that still fails
 # the exact test it claims to fix (root cause of PR #2056's stranding).
 _FAILED_TEST_LINE_RE = re.compile(r"(?:^|\s)(?:FAILED|ERROR)\s+(tests/[\w./-]+\.py(?:::[\w./-]+)*)")
-# pytest exit code 5 = "no tests ran": the failing test may have been deleted by
-# the fix/rebase itself (exactly the #2056 remedy) — not a gate failure.
-_PYTEST_NO_TESTS_RAN = 5
 
 
 def extract_failing_pytest_node_ids(ci_logs: str) -> list[str]:
@@ -94,7 +91,6 @@ push_current_branch_with_lease_on_divergence = _LegacyCallable(
 )
 rebase_worktree_onto = _LegacyCallable("rebase_worktree_onto")
 sync_worktree_to_remote_branch = _LegacyCallable("sync_worktree_to_remote_branch")
-_gh_call = _LegacyCallable("_gh_call")
 _invoke_agent_session = _LegacyCallable("_invoke_agent_session")
 _retry_no_commit_once = _LegacyCallable("_retry_no_commit_once")
 _attempt_mechanical_rebase = _LegacyCallable("_attempt_mechanical_rebase")
