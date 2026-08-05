@@ -124,10 +124,6 @@ ensure_branch_commit_metadata = _LegacyCallable("ensure_branch_commit_metadata")
 push_current_branch_with_lease_on_divergence = _LegacyCallable(
     "push_current_branch_with_lease_on_divergence"
 )
-rebase_worktree_onto = _LegacyCallable("rebase_worktree_onto")
-sync_worktree_to_remote_branch = _LegacyCallable("sync_worktree_to_remote_branch")
-_retry_no_commit_once = _LegacyCallable("_retry_no_commit_once")
-_attempt_mechanical_rebase = _LegacyCallable("_attempt_mechanical_rebase")
 
 
 class CIFixPushGuard(_CIFixHost):
