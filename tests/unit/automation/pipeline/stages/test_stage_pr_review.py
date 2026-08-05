@@ -1406,6 +1406,19 @@ class TestPrReviewStageStep:
                 ),
             ),
             (
+                "review_worker_pool_agent_execution_error",
+                (
+                    "uv",
+                    "run",
+                    "pytest",
+                    "-o",
+                    "addopts=",
+                    "tests/unit/automation/pipeline/test_worker_pool.py::TestAgentErrorHandling::test_codex_event_failure_is_explicit_agent_error",
+                    "-q",
+                    "--tb=short",
+                ),
+            ),
+            (
                 "review_stalled_consumer_verification",
                 (
                     "uv",

@@ -1513,6 +1513,41 @@ class TestImplementBudget:
         assert result.disposition == Disposition.RETRY
         assert result.note == "agent_error"
 
+    def test_agent_tool_failure_with_no_diff_never_enters_no_commit_cleanup(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A failed tool session cannot reach commit, skip, or branch cleanup."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=2634, state="IMPLEMENT_WAIT")
+        reservation = {"branch": "2634-auto-impl", "base_sha": "a" * 40}
+        item.payload["_direct_scope_reservation"] = reservation
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=(
+                    "agent_error: codex_nested_sandbox_unsupported: "
+                    "run the outer loop outside the enclosing API sandbox"
+                ),
+                stdout_tail="No edits were made; no diff exists.",
+            ),
+            ctx,
+        )
+        item.state = "TEST_WAIT"
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(Disposition.RETRY, "agent_error")
+        assert item.payload["_direct_scope_reservation"] == reservation
+        assert "no_commits" not in item.payload
+        assert "_direct_scope_local_branch_cleanup" not in item.payload
+        assert github.mutation_log == []
+
     def test_implement_budget_exhaustion_finishes_failed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

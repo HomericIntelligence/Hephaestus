@@ -31,7 +31,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeGuard, cast
 
-from hephaestus.agents.runtime import resolve_agent, resume_agent_session, run_agent_session
+from hephaestus.agents.runtime import (
+    AgentExecutionError,
+    resolve_agent,
+    resume_agent_session,
+    run_agent_session,
+)
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -133,6 +138,20 @@ _HOST_VERIFICATION_CPU_MAX_S = 240
 _HOST_VERIFICATION_PROCESS_HEADROOM = 64
 _HOST_VERIFICATION_POLL_S = 0.05
 _HOST_VERIFICATION_SETUP_TIMEOUT_S = 30
+
+
+def _agent_exception_result(exc: Exception) -> JobResult:
+    """Map provider-declared and unexpected agent exceptions to job results."""
+    if isinstance(exc, AgentExecutionError):
+        return JobResult(
+            ok=False,
+            error=f"agent_error: {exc!s}"[:_ERR_MAX],
+        )
+    logger.exception("Agent job raised, returning error result")
+    return JobResult(
+        ok=False,
+        error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
+    )
 
 
 class _HostVerificationBoundaryError(RuntimeError):
@@ -1717,11 +1736,7 @@ class WorkerPool:
                 stderr_tail=(exc.stderr or "")[-_TAIL:],
             )
         except Exception as exc:
-            logger.exception("Agent job raised, returning error result")
-            return JobResult(
-                ok=False,
-                error=f"{type(exc).__name__}: {exc!s}"[:_ERR_MAX],
-            )
+            return _agent_exception_result(exc)
 
     @staticmethod
     def _run_compact(job: CompactJob) -> JobResult:
