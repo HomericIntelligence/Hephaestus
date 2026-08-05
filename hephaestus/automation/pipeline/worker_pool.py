@@ -1670,6 +1670,7 @@ class WorkerPool:
                         output_format=job.output_format,
                         allowed_tools=scope.allowed_tools,
                         permission_mode=scope.permission_mode,
+                        input_via_stdin=True,
                     )
                     return stdout, None
                 if job.resume_session_id:
