@@ -87,7 +87,7 @@ class VersionManager:
         version_files: list[Path] | None = None,
         init_files: list[Path] | None = None,
         pyproject_file: Path | _UnsetType | None = _UNSET,
-    ):
+    ) -> None:
         """Initialize the version manager.
 
         Args:

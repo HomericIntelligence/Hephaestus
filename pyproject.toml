@@ -191,7 +191,7 @@ target-version = "py313"
 exclude = ["hephaestus/_version.py"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "RUF"]
+select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "ANN204", "RUF"]
 ignore = [
     "D100",   # Missing docstring in public module
     "D104",   # Missing docstring in public package

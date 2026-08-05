@@ -250,7 +250,7 @@ class IssueImplementer:
     - State persistence for resume capability
     """
 
-    def __init__(self, options: ImplementerOptions):
+    def __init__(self, options: ImplementerOptions) -> None:
         """Initialize issue implementer.
 
         Args:
