@@ -38,7 +38,7 @@ except ModuleNotFoundError:  # Windows: stdlib `curses` is not bundled with CPyt
 class LogBuffer:
     """Thread-safe circular log buffer."""
 
-    def __init__(self, maxlen: int = 1000):
+    def __init__(self, maxlen: int = 1000) -> None:
         """Initialize log buffer.
 
         Args:
@@ -128,7 +128,7 @@ class CursesUI:
         self,
         status_tracker: StatusTracker,
         log_manager: ThreadLogManager,
-    ):
+    ) -> None:
         """Initialize curses UI.
 
         Args:

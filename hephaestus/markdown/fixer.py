@@ -31,7 +31,7 @@ class FixerOptions:
 class MarkdownFixer:
     """Fixes common markdown linting issues."""
 
-    def __init__(self, options: FixerOptions | None = None):
+    def __init__(self, options: FixerOptions | None = None) -> None:
         """Initialize the markdown fixer.
 
         Args:

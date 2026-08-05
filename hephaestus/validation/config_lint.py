@@ -21,7 +21,7 @@ class ConfigLinter:
         deprecated_keys: dict[str, str] | None = None,
         required_keys: dict[str, list[str]] | None = None,
         perf_thresholds: dict[str, tuple[float, float]] | None = None,
-    ):
+    ) -> None:
         """Initialize the linter.
 
         Args:
