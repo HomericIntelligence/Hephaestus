@@ -466,6 +466,36 @@ class TestWorkerPoolSubmitComplete:
         assert result.ok is True
         assert "Test output" in str(result.value)
 
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            pytest.param("ordinary prompt", id="ordinary"),
+            pytest.param("sensitive-large-prompt:" + ("x" * 200_000), id="large"),
+        ],
+    )
+    def test_claude_agent_job_requires_stdin_transport(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        prompt: str,
+    ) -> None:
+        """Pipeline Claude jobs forward prompts through stdin transport."""
+        job = _agent_job(prompt_builder=lambda: prompt)
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                return_value=("Test output", "session-id"),
+            ) as invoke,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert invoke.call_args.kwargs["prompt"] == prompt
+        assert invoke.call_args.kwargs["input_via_stdin"] is True
+
     def test_compact_job_is_best_effort_and_returns_its_result(
         self,
         pool: WorkerPool,

@@ -20,28 +20,20 @@ class TestCompactSession:
             lambda _cwd: "test-checkout",
         )
 
-    def test_compact_session_issues_resume_and_print(self, tmp_path: Path) -> None:
-        """Verify compact_session invokes claude with --resume and --print /compact."""
+    def test_compact_session_sends_command_via_stdin(self, tmp_path: Path) -> None:
+        """Verify /compact is sent via stdin rather than process arguments."""
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            result = compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
 
-            # Verify the subprocess was called
-            assert mock_run.call_count == 1
-            call_args = mock_run.call_args
-
-            # Verify the command structure
-            cmd = call_args[0][0]
-            assert "claude" in cmd
-            assert "--resume" in cmd
-            assert "--print" in cmd
-            assert "/compact" in cmd
-
-            # Verify the order: --resume <uuid> comes before --print /compact
-            resume_idx = cmd.index("--resume")
-            print_idx = cmd.index("--print")
-            assert resume_idx < print_idx
+        assert result is True
+        cmd = mock_run.call_args.args[0]
+        assert "--resume" in cmd
+        assert cmd[-1] == "--print"
+        assert all("/compact" not in argument for argument in cmd)
+        assert mock_run.call_args.kwargs["input"] == "/compact"
+        assert mock_run.call_args.kwargs["text"] is True
 
     def test_compact_session_uses_deterministic_uuid(self, tmp_path: Path) -> None:
         """Verify compact_session uses the deterministic session_uuid."""
