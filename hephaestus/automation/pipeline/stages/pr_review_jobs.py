@@ -12,14 +12,15 @@ from ..github_jobs import (
 )
 from .pr_review_threads import *
 from .pr_review_threads import (
-    _PENDING_GITHUB_REQUEST,
-    _PR_REVIEW_RECEIPT,
-    _PR_REVIEW_RECEIPT_ERROR,
     _REPLY_HANDOFF_RECEIPT,
     _REPLY_HANDOFF_RECEIPT_ERROR,
     POST_APPLY,
     _finding_key,
 )
+
+_PENDING_GITHUB_REQUEST = "_pending_github_request"
+_PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
+_PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 
 
 class PrReviewJobs(_PrReviewHost):

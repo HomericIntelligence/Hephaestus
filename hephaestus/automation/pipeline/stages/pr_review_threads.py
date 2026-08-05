@@ -248,9 +248,6 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     CLEANUP_REVIEW_WORKTREE_WAIT: "_cleanup_review_worktree_wait",
 }
 
-_PENDING_GITHUB_REQUEST = "_pending_github_request"
-_PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
-_PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 _REPLY_HANDOFF_RECEIPT = "_reply_handoff_receipt"
 _REPLY_HANDOFF_RECEIPT_ERROR = "_reply_handoff_receipt_error"
 

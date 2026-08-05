@@ -145,7 +145,7 @@ def test_merge_cycle_dispatches_without_inline_github_calls(
                 "gh_pr_merge_readiness",
                 "merge_pr_if_head",
             }:
-                raise AssertionError(f"GitHub call ran inline: {name}")
+                raise AttributeError(f"GitHub call ran inline: {name}")
             return super().__getattribute__(name)
 
     item = _reviewed_item(make_work_item)

@@ -70,6 +70,7 @@ class PipelineGitHubJobRunner:
                 return self._run_merge_wait_cycle(job.request, github)
             case unknown:
                 return assert_never(unknown)
+        raise AssertionError("unreachable closed GitHub request dispatch")
 
     @staticmethod
     def _reconcile_pr_review(  # noqa: C901

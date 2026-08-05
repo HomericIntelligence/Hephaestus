@@ -342,4 +342,4 @@ class GitHubJobRunner(Protocol):
 
     def run(self, job: GitHubJob) -> GitHubReceipt:
         """Execute one closed GitHub request and return its immutable receipt."""
-        ...
+        raise NotImplementedError
