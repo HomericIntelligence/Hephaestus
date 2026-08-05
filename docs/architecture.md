@@ -170,7 +170,7 @@ The main thread (coordinator) OWNS:
 - the timer heap ([`self.timers`](../hephaestus/automation/pipeline/coordinator.py))
 - the in-flight registry ([`self.in_flight`](../hephaestus/automation/pipeline/coordinator.py))
 - all routing and disposition semantics ([`_route`](../hephaestus/automation/pipeline/coordinator.py))
-- every GitHub API mutation, through
+- coordinator-local GitHub reads and mutations, through
  [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py)
  (label writes, comment upserts, and PR creation; the queue does not mutate
  auto-merge)
@@ -178,7 +178,15 @@ It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
 The single worker pool ([`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py))
 executes everything else: agent invocations (Claude or Codex), build/test
-subprocesses and git/network operations. Every Claude agent invocation
+subprocesses, git operations, and the closed worker-owned GitHub operations.
+`StageContext.github` remains coordinator-thread-owned and never crosses this
+boundary. Each [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py)
+contains one frozen request from a closed five-operation algebra; the production
+runner creates a fresh [`PipelineGitHub`](../hephaestus/automation/pipeline_github.py)
+accessor per job. Same-repository GitHub jobs serialize under `_repo_lock`, while
+different repositories may execute concurrently. No arbitrary callable, mutable
+kwargs, `WorkItem`, stage callback, or shared service response crosses the worker
+boundary. Every Claude agent invocation
 routed through the worker pool binds to an explicit least-privilege
 `--allowedTools` scope. An explicit [`AgentJob.allowed_tools`](../hephaestus/automation/pipeline/jobs.py)
 grant wins (the `pr_review` job uses it for the reviewer skill); absent that,
@@ -279,10 +287,14 @@ comment presence, PR existence) fast-forward through already-completed
 work. Interrupts therefore leave items RESUMABLE, never FAILED — a restart's
 seeding classifies them back into the same entry queue and `on_enter`
 restarts from the same state.
-Implementation: each stage method performs its durable op via a single
-[`ctx.github`](../hephaestus/automation/pipeline/stages/base.py) accessor call
-on the coordinator-owned [`StageGitHub`](../hephaestus/automation/pipeline/stages/base.py)
-protocol, then returns `StageOutcome(…)`. The coordinator's
+Implementation: coordinator-local writes use the single-owner
+[`ctx.github`](../hephaestus/automation/pipeline/stages/base.py) accessor. Reply
+journal recovery/append and delivery, PR-review reconciliation, and merge-wait
+admission/conditional merge instead submit a closed `GitHubJob`. Its receipt
+embeds the exact immutable request and is accepted only when it equals the
+item's pending request. The coordinator invokes `on_job_done()` while the item
+is still in its submitting state, so the receipt is applied before installing
+the next mini-state or routing to another queue. The coordinator's
 [`_route`](../hephaestus/automation/pipeline/coordinator.py) applies the
 disposition to the queue.
 
@@ -1295,9 +1307,10 @@ and require operator handling.
 
 [`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py) is the
 single executor. It receives frozen specs and returns bounded
-[`JobResult`](../hephaestus/automation/pipeline/jobs.py) tuples. Workers
-never touch WorkItems or stage queues and never perform GitHub API
-mutations.
+[`JobResult`](../hephaestus/automation/pipeline/jobs.py) tuples. Workers never
+touch `WorkItem`s or stage queues. GitHub I/O is allowed only through the
+closed typed runner; generic worker code does not import the GitHub
+implementation.
 
 ### Job kinds
 
@@ -1324,6 +1337,14 @@ mutations.
  expected snapshot SHA, and PR number. The worker rejects a dirty checkout,
  synchronizes the branch, requires `git rev-parse HEAD` to equal that SHA, and
  checks cleanliness again ([`_git_verify_pr_review_checkout`](../hephaestus/automation/pipeline/worker_pool.py)).
+- [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py) — one of five
+ frozen typed requests: recover or append the version-one reply journal,
+ deliver an exact reply handoff, reconcile one exact-head PR review, or run one
+ complete merge-wait cycle. Nested service data uses canonical JSON snapshots;
+ each receipt contains its request and fresh decodes, so stage and worker never
+ share mutable GitHub responses. These jobs and their wait-state names are
+ process-local. The durable reply marker and `"format": 1` body are unchanged,
+ preserving restart, downgrade, and rollback recovery.
 - [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
  the retry lifecycle.
@@ -1358,8 +1379,9 @@ and selects exit code 130.
 
 ### Per-repo lock layering
 
-[`_run_git`](../hephaestus/automation/pipeline/worker_pool.py) wraps every
-git operation in two locks:
+[`_run_git`](../hephaestus/automation/pipeline/worker_pool.py) wraps every git
+operation in two locks. `_run_github` uses the same outer repository lock but
+does not take the Git metadata file lock:
 
 1. **Outer**: in-process `threading.Lock` per repo ([`_repo_lock`](../hephaestus/automation/pipeline/worker_pool.py))
  — single-thread per process serializes at most one thread per
@@ -1369,8 +1391,11 @@ git operation in two locks:
  `<repo_root>/<DEFAULT_STATE_DIR>/locks/git-<repo>.lock`
  ([`_repo_lock_path`](../hephaestus/automation/pipeline/worker_pool.py))
  with a bounded wait using interruptible polling.
-Both locks are held for the entire operation because worktrees share
-`.git`.
+Both git locks are held for the entire git operation because worktrees share
+`.git`. A GitHub job holds only the outer lock for its entire fresh-client
+operation, enforcing the `StageGitHub` concurrency contract without implying
+cross-process GitHub serialization; exact live-state guards remain authoritative
+across processes.
 
 `sync_checkout` additionally takes the status-safe Git-metadata lock resolved
 by [`WorktreeManager.git_metadata_lock_path`](../hephaestus/automation/worktree_manager.py).

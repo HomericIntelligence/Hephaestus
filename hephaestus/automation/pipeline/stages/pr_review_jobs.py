@@ -1,6 +1,25 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+from pathlib import Path
+
+from ..github_jobs import (
+    DeliverReplyHandoffRequest,
+    FrozenJson,
+    GitHubJob,
+    PrReviewReconciled,
+    ReconcilePrReviewRequest,
+    ReplyHandoffAttempted,
+)
 from .pr_review_threads import *
+from .pr_review_threads import (
+    _PENDING_GITHUB_REQUEST,
+    _PR_REVIEW_RECEIPT,
+    _PR_REVIEW_RECEIPT_ERROR,
+    _REPLY_HANDOFF_RECEIPT,
+    _REPLY_HANDOFF_RECEIPT_ERROR,
+    POST_APPLY,
+    _finding_key,
+)
 
 
 class PrReviewJobs(_PrReviewHost):
@@ -768,6 +787,12 @@ class PrReviewJobs(_PrReviewHost):
             ctx: Stage context.
 
         """
+        if item.state == POST:
+            self._on_reconciliation_done(item, result)
+            return
+        if item.state == RECOVERY_REPLY_WAIT:
+            self._on_reply_handoff_done(item, result)
+            return
         if self._consume_review_worktree_cleanup_result(item, result):
             return
         if self._consume_direct_worktree_result(item, result):
@@ -827,91 +852,6 @@ class PrReviewJobs(_PrReviewHost):
                         # code commit has already changed the review head.
                         item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
                         item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-                    batch_nonce = handoff["batch_nonce"] if handoff is not None else ""
-                    try:
-                        # The worker returns the local commit it actually
-                        # published.  A later arbitrary remote push must not
-                        # acquire this implementation reply by being read as
-                        # the current head.
-                        state = ctx.github.gh_pr_state(item.pr)
-                        if not _pr_is_current_open_head(state, published_head):
-                            raise RuntimeError("published implementation head no longer current")
-                        reply_result = ctx.github.post_implementation_thread_replies(
-                            item.pr,
-                            expected_head_sha=published_head,
-                            threads=thread_snapshots,
-                            replies=replies,
-                            batch_nonce=batch_nonce,
-                        )
-                    except Exception as error:
-                        logger.warning(
-                            "pr_review:%s: could not post implementation replies (%s)",
-                            item.issue,
-                            type(error).__name__,
-                        )
-                    else:
-                        replied = set(getattr(reply_result, "replied_thread_ids", ()))
-                        blocked = set(getattr(reply_result, "blocked_thread_ids", ()))
-                        receipts = list(getattr(reply_result, "receipts", ()))
-                        retryable = bool(getattr(reply_result, "retryable", False))
-                        expected_ids = set(replies)
-                        remaining_ids = expected_ids - replied
-                        result_retryable_ids = set(
-                            getattr(reply_result, "retryable_thread_ids", ())
-                        )
-                        retryable_ids = (
-                            result_retryable_ids
-                            if result_retryable_ids and result_retryable_ids.issubset(remaining_ids)
-                            else remaining_ids
-                            if retryable and not result_retryable_ids
-                            else set()
-                        )
-                        if replied != set(replies) or len(receipts) != len(replied):
-                            logger.warning(
-                                "pr_review:%s: some implementation replies could not be verified",
-                                item.issue,
-                            )
-                            if retryable_ids and handoff is not None:
-                                item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = (
-                                    _implementation_reply_handoff(
-                                        published_head,
-                                        [
-                                            snapshot
-                                            for snapshot in thread_snapshots
-                                            if str(snapshot.get("id") or "") in retryable_ids
-                                        ],
-                                        {
-                                            thread_id: reply
-                                            for thread_id, reply in replies.items()
-                                            if thread_id in retryable_ids
-                                        },
-                                        batch_nonce,
-                                    )
-                                )
-                            elif retryable_ids:
-                                logger.info(
-                                    "pr_review:%s: retaining an exact reply handoff after an "
-                                    "ambiguous host failure",
-                                    item.issue,
-                                )
-                            else:
-                                # A verified mismatch means the conversation changed.  Replaying
-                                # a stale snapshot can never repair it and eventually wedges the
-                                # work item; the fresh reviewer cycle will obtain new facts.
-                                item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
-                                item.payload.pop(
-                                    _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None
-                                )
-                        else:
-                            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
-                            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-                        if blocked:
-                            logger.info(
-                                "pr_review:%s: %d changed thread(s) remain open for a new "
-                                "implementation pass",
-                                item.issue,
-                                len(blocked),
-                            )
                 # The old audit and checkout receipt describe the pre-push
                 # head. Discard the entire round before EVAL can bind the new
                 # head to any implementation-state transition.
@@ -1114,225 +1054,92 @@ class PrReviewJobs(_PrReviewHost):
         elif item.state == ADDRESS_WAIT:
             item.payload["address_error"] = True
 
-    def _post(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
-        """Reconcile reviewer decisions, publish new findings, and queue remediation.
-
-        Reviewer validation can only resolve or return current implementation
-        reply receipts. Fresh audit findings are deduplicated against live
-        threads, then every remaining open thread enters implementation
-        remediation regardless of its author.
-        """
-        if item.pr is None:  # guarded by step(); kept for restart safety
-            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
-        validation_only = bool(item.payload.get(_COMMENT_VALIDATION_ONLY))
-        audit = item.payload.get("review_audit")
-        if not validation_only and (not isinstance(audit, ReviewAudit) or not audit.valid):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        raw_threads = (
-            [] if validation_only else [dict(t) for t in item.payload.get("review_threads") or []]
-        )
-        # Validation controls only the reviewer-owned reconciliation of
-        # implementation replies. Fresh audit findings are independently
-        # deduplicated against live threads below; a validator must never
-        # recreate, replace, or suppress an open review conversation.
-        threads = raw_threads
-        item.payload["raw_review_threads"] = raw_threads
-
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        try:
-            live_for_reconciliation = ctx.github.list_unresolved_review_threads(item.pr)
-            validation_receipts = (
-                ctx.github.reviewer_validation_receipts(
-                    item.pr,
-                    reviewed_head_sha=reviewed_head,
-                    threads=live_for_reconciliation,
-                )
-                if is_full_commit_sha(reviewed_head)
-                else []
+    @staticmethod
+    def _on_reconciliation_done(item: WorkItem, result: JobResult) -> None:
+        """Store only an exact request-bearing reconciliation receipt."""
+        if not result.ok:
+            retries = item.payload.get("pr_review_reconciliation_retries", 0)
+            if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+                item.payload[_PR_REVIEW_RECEIPT_ERROR] = "invalid"
+                return
+            retries += 1
+            item.payload["pr_review_reconciliation_retries"] = retries
+            item.payload[_PR_REVIEW_RECEIPT_ERROR] = (
+                "retry" if retries <= REVIEW_ERROR_RETRY_CAP else "failed"
             )
-            pr_context = ctx.github.pr_review_context(item.pr)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: could not refresh reviewer validation inputs (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        live_receipt_fingerprints = _validation_receipt_fingerprints(validation_receipts)
-        validated_receipt_fingerprints = item.payload.get("validation_receipt_fingerprints")
-        live_metadata_fingerprint = _validation_pr_metadata_fingerprint(pr_context, reviewed_head)
-        validated_metadata_fingerprint = item.payload.get("validation_pr_metadata_fingerprint")
-        if live_receipt_fingerprints is None:
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        metadata_guard_expected = validated_receipt_fingerprints is not None or (
-            "validation_pr_metadata_fingerprint" in item.payload
-        )
-        if metadata_guard_expected and (
-            live_metadata_fingerprint is None
-            or not isinstance(validated_metadata_fingerprint, str)
-            or validated_metadata_fingerprint != live_metadata_fingerprint
+            return
+        receipt = result.value
+        if not isinstance(receipt, PrReviewReconciled) or receipt.request != item.payload.get(
+            _PENDING_GITHUB_REQUEST
         ):
-            # The validator reviewed a different PR title/body (or head) than
-            # the current live metadata. Metadata-only remediations are
-            # reviewable evidence, so a same-head edit after validation must
-            # restart validation before any thread reconciliation can happen.
+            item.payload[_PR_REVIEW_RECEIPT_ERROR] = "invalid"
+            return
+        item.payload[_PR_REVIEW_RECEIPT] = receipt
+
+    def _post_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Apply a correlated immutable reconciliation receipt locally."""
+        del ctx
+        error = item.payload.pop(_PR_REVIEW_RECEIPT_ERROR, None)
+        if error == "retry":
+            item.state = POST
+            return StageOutcome(Disposition.RETRY, "pr_review_reconciliation_retry")
+        if error in {"failed", "invalid"}:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        receipt = item.payload.pop(_PR_REVIEW_RECEIPT, None)
+        if not isinstance(receipt, PrReviewReconciled) or receipt.request != item.payload.get(
+            _PENDING_GITHUB_REQUEST
+        ):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        item.payload.pop("pr_review_reconciliation_retries", None)
+        if receipt.action == "revalidate":
             item.payload.pop("validation_result", None)
             item.payload.pop("validation_threads", None)
             item.payload.pop("validation_receipt_fingerprints", None)
             item.payload.pop("validation_pr_metadata_fingerprint", None)
-            logger.info(
-                "pr_review:%s: PR metadata changed after validation; "
-                "revalidating before reconciliation",
-                item.issue,
-            )
             return Continue(next_state=VALIDATE_WAIT)
-        if validated_receipt_fingerprints is not None and (
-            not isinstance(validated_receipt_fingerprints, dict)
-            or validated_receipt_fingerprints != live_receipt_fingerprints
-        ):
-            # The validation agent reviewed a different immutable receipt than
-            # the one currently open on GitHub.  Its decision must not act on
-            # a replacement reply, even if the durable thread ID is unchanged.
+        if receipt.action == "fresh_review":
             item.payload.pop("validation_result", None)
             item.payload.pop("validation_threads", None)
             item.payload.pop("validation_receipt_fingerprints", None)
             item.payload.pop("validation_pr_metadata_fingerprint", None)
-            logger.info(
-                "pr_review:%s: implementation reply receipt changed after validation; "
-                "revalidating before reconciliation",
-                item.issue,
-            )
-            return Continue(next_state=VALIDATE_WAIT)
-        if validation_receipts:
-            decisions = _reviewer_thread_decisions(
-                validation_receipts, item.payload.get("validation_result")
-            )
-            if decisions is None:
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-            resolved_ids, feedback = decisions
-            try:
-                reconciliation = ctx.github.reconcile_reviewer_validated_threads(
-                    item.pr,
-                    reviewed_head_sha=reviewed_head,
-                    receipts=validation_receipts,
-                    resolved_thread_ids=resolved_ids,
-                    feedback=feedback,
-                )
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%s: reviewer thread reconciliation failed (%s)",
-                    item.issue,
-                    type(error).__name__,
-                )
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-            expected_ids = {_durable_thread_id(receipt) for receipt in validation_receipts}
-            completed_ids = set(reconciliation.resolved_thread_ids) | set(
-                reconciliation.feedback_thread_ids
-            )
-            if None in expected_ids or not completed_ids.issubset(expected_ids):
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-            if reconciliation.blocked_thread_ids:
-                # Resolution status was not proven for at least one exact
-                # receipt.  The adapter deliberately does not issue an
-                # unresolve compensation mutation; discard this validator's
-                # decisions and obtain a new audit/check-out proof instead.
-                item.payload.pop("validation_result", None)
-                item.payload.pop("validation_threads", None)
-                item.payload.pop("validation_receipt_fingerprints", None)
-                item.payload.pop("validation_pr_metadata_fingerprint", None)
-                return Continue(next_state=REVIEW_WAIT)
-            # A concurrent mutation can make one receipt ineligible after a
-            # previous receipt was safely resolved or received feedback.  Do
-            # not retain that stale, partially consumed receipt set: doing so
-            # wedges the next validation pass because the completed thread is
-            # no longer open.  Drop all receipts and rebuild remediation from
-            # the fresh complete live snapshot below.  The adapter's snapshot
-            # checks prevent duplicate mutations for the blocked IDs.
-            if completed_ids != expected_ids:
-                logger.info(
-                    "pr_review:%s: reviewer reconciliation was partial; refreshing live threads",
-                    item.issue,
-                )
-        try:
-            live_before_post = ctx.github.list_unresolved_review_threads(item.pr)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: review finding dedupe read failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
+            return Continue(next_state=REVIEW_WAIT)
+        if receipt.action == "audit_failure":
             item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        live_by_id = {
-            thread_id: thread
-            for thread in live_before_post
-            if (thread_id := _durable_thread_id(thread)) is not None
+
+        posted = receipt.posted_receipts.thaw()
+        unresolved = receipt.unresolved_threads.thaw()
+        remediation = receipt.remediation_threads.thaw()
+        if (
+            not isinstance(posted, list)
+            or not isinstance(unresolved, list)
+            or not isinstance(remediation, list)
+        ):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        raw_findings = receipt.request.findings.thaw()
+        if not isinstance(raw_findings, list) or not all(
+            isinstance(value, dict) for value in raw_findings
+        ):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        posted_keys = {
+            key for value in posted if isinstance(value, dict) and (key := _finding_key(value))
         }
-        threads = _without_duplicate_live_findings(threads, live_by_id)
-        threads = [
-            thread
-            for thread in threads
-            if str(thread.get("severity") or "").strip().lower() in BLOCKING_SEVERITIES
+        item.payload["review_threads"] = [
+            dict(value) for value in raw_findings if _finding_key(value) in posted_keys
         ]
-        if any(not _is_postable_finding(thread) for thread in threads):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        # The surviving audit set is what gets posted. Classification and
-        # addressing use the normalized live read-back installed below.
-        item.payload["review_threads"] = threads
-        post_receipts: list[dict[str, Any]] = []
-        if threads:
-            try:
-                post_receipts = list(
-                    ctx.github.post_review_threads(
-                        item.pr,
-                        list(threads),
-                        expected_head_sha=reviewed_head,
-                        review_diff=str(item.payload.get("pr_diff") or ""),
-                    )
-                )
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%s: review finding publication failed (%s)",
-                    item.issue,
-                    type(error).__name__,
-                )
-                item.payload["review_audit_failure"] = True
-                return Continue(next_state=EVAL)
-        if len(post_receipts) != len(threads):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        item.payload["posted_thread_ids"] = [str(receipt["id"]) for receipt in post_receipts]
-        try:
-            live_threads = ctx.github.list_unresolved_review_threads(item.pr)
-        except Exception as error:
-            logger.warning(
-                "pr_review:%s: review finding live read-back failed (%s)",
-                item.issue,
-                type(error).__name__,
-            )
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
-        remediation_threads = _normalize_remediation_threads(live_threads)
-        if len(remediation_threads) != len(live_threads):
-            item.payload["review_audit_failure"] = True
-            return Continue(next_state=EVAL)
-        item.payload["remediation_threads"] = remediation_threads
-        item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
-        item.payload["unresolved_threads_before_address"] = len(remediation_threads)
-        if validation_only:
-            # The validator has made the exhaustive current-head decisions
-            # for the original review's threads.  It is now the fresh review
-            # evidence for this comment-validation-only pass; no new broad
-            # audit findings are invented or posted.
-            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+        item.payload["posted_thread_ids"] = [
+            str(value["id"]) for value in posted if isinstance(value, dict) and "id" in value
+        ]
+        item.payload["unresolved_threads"] = [dict(value) for value in unresolved]
+        item.payload["remediation_threads"] = [dict(value) for value in remediation]
+        item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]
+        item.payload["unresolved_threads_before_address"] = len(remediation)
+        if item.payload.pop(_COMMENT_VALIDATION_ONLY, None):
             item.payload["review_audit"] = ReviewAudit(
                 grade="A",
                 summary="Reviewer validated the implementation responses to all open threads.",
@@ -1340,12 +1147,106 @@ class PrReviewJobs(_PrReviewHost):
                 raw_feedback="",
                 valid=True,
             )
-        if not remediation_threads:
+        return Continue(next_state=ADDRESS_WAIT if remediation else EVAL)
+
+    def _post(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
+        """Freeze reconciliation inputs and dispatch all GitHub I/O to a worker."""
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
+        validation_only = bool(item.payload.get(_COMMENT_VALIDATION_ONLY))
+        audit = item.payload.get("review_audit")
+        if not validation_only and (not isinstance(audit, ReviewAudit) or not audit.valid):
+            item.payload["review_audit_failure"] = True
             return Continue(next_state=EVAL)
-        # The original review has already been submitted as one batch. Do not
-        # keep the detached reviewer checkout for a second classifier pass:
-        # implementation receives this complete snapshot directly.
-        return Continue(next_state=ADDRESS_WAIT)
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        if not is_full_commit_sha(reviewed_head):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+
+        findings = (
+            [] if validation_only else [dict(t) for t in item.payload.get("review_threads") or []]
+        )
+        item.payload["raw_review_threads"] = findings
+        validated_fingerprints = item.payload.get("validation_receipt_fingerprints")
+        if validated_fingerprints is not None and not isinstance(validated_fingerprints, dict):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        metadata_fingerprint = item.payload.get("validation_pr_metadata_fingerprint")
+        if metadata_fingerprint is not None and not isinstance(metadata_fingerprint, str):
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+
+        resolved_ids: tuple[str, ...] = ()
+        feedback: dict[str, str] = {}
+        validation_result = item.payload.get("validation_result")
+        # An empty bound fingerprint set proves the validator saw no exact
+        # implementation reply receipts.  Its free-form output has no
+        # reconciliation authority and must not suppress fresh audit work.
+        if validation_result is not None and validated_fingerprints != {}:
+            parsed = _parse_validation_result(validation_result)
+            validation_is_bound = (
+                validation_only
+                or validated_fingerprints is not None
+                or (metadata_fingerprint is not None)
+            )
+            if parsed is None or set(parsed) != {"resolved", "unaddressed"}:
+                if validation_is_bound:
+                    item.payload["review_audit_failure"] = True
+                    return Continue(next_state=EVAL)
+            else:
+                raw_resolved = parsed.get("resolved")
+                raw_unaddressed = parsed.get("unaddressed")
+                if not isinstance(raw_resolved, list) or not isinstance(raw_unaddressed, list):
+                    item.payload["review_audit_failure"] = True
+                    return Continue(next_state=EVAL)
+                if not all(
+                    isinstance(thread_id, str) and thread_id.strip() for thread_id in raw_resolved
+                ):
+                    item.payload["review_audit_failure"] = True
+                    return Continue(next_state=EVAL)
+                resolved_ids = tuple(sorted(thread_id.strip() for thread_id in raw_resolved))
+                for entry in raw_unaddressed:
+                    if not isinstance(entry, dict):
+                        item.payload["review_audit_failure"] = True
+                        return Continue(next_state=EVAL)
+                    thread_id = str(entry.get("thread_id") or entry.get("id") or "").strip()
+                    detail = str(entry.get("detail") or "").strip()
+                    if not thread_id or not detail or thread_id in feedback:
+                        item.payload["review_audit_failure"] = True
+                        return Continue(next_state=EVAL)
+                    feedback[thread_id] = detail
+
+        request = ReconcilePrReviewRequest(
+            pr_number=item.pr,
+            reviewed_head_sha=reviewed_head,
+            validated_receipt_fingerprints=(
+                FrozenJson.snapshot(validated_fingerprints)
+                if validated_fingerprints is not None
+                else None
+            ),
+            validated_metadata_fingerprint=metadata_fingerprint,
+            resolved_thread_ids=resolved_ids,
+            feedback=FrozenJson.snapshot(feedback),
+            findings=FrozenJson.snapshot(findings),
+            review_diff=str(item.payload.get("pr_diff") or ""),
+        )
+        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        if pending is None:
+            item.payload[_PENDING_GITHUB_REQUEST] = request
+        elif pending != request:
+            item.payload["review_audit_failure"] = True
+            return Continue(next_state=EVAL)
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)).resolve(),
+                request=request,
+                descr="reconcile_pr_review",
+            ),
+            on_done_state=POST_APPLY,
+        )
 
     def _address(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Record a NO-GO and hand immutable review findings to the writer.
@@ -1387,13 +1288,92 @@ class PrReviewJobs(_PrReviewHost):
         _clear_round_review_state(item)
         return None
 
-    @staticmethod
-    def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
-        """Delegate recovery to the common host-only reply handoff contract."""
-        return retry_pending_implementation_reply_handoff(
-            item.payload,
-            pr_number=item.pr,
-            issue_number=item.issue,
-            github=ctx.github,
-            logger=logger,
+    def _recovery_reply_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Dispatch one exact recovery-only reply handoff to a worker."""
+        if item.issue is None or item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        handoff = item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF)
+        retries = item.payload.get(
+            _REPLY_VISIBILITY_RETRIES,
+            0,
         )
+        if (
+            not isinstance(handoff, dict)
+            or isinstance(retries, bool)
+            or not isinstance(retries, int)
+            or retries < 0
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        try:
+            request = DeliverReplyHandoffRequest(
+                issue_number=item.issue,
+                pr_number=item.pr,
+                handoff=FrozenJson.snapshot(handoff),
+                visibility_retries=retries,
+            )
+        except (TypeError, ValueError):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        pending = item.payload.get(_PENDING_GITHUB_REQUEST)
+        if pending is None:
+            item.payload[_PENDING_GITHUB_REQUEST] = request
+        elif pending != request:
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_reply_handoff_invalid")
+        return JobRequest(
+            GitHubJob(
+                repo=item.repo,
+                repo_root=Path(str(ctx.paths.repo_root)).resolve(),
+                request=request,
+                descr="recover_implementation_reply_handoff",
+            ),
+            on_done_state=EVAL,
+        )
+
+    @staticmethod
+    def _on_reply_handoff_done(item: WorkItem, result: JobResult) -> None:
+        """Store only an exact request-bearing recovery receipt."""
+        if not result.ok:
+            item.payload[_REPLY_HANDOFF_RECEIPT_ERROR] = "retry"
+            return
+        receipt = result.value
+        if not isinstance(receipt, ReplyHandoffAttempted) or receipt.request != item.payload.get(
+            _PENDING_GITHUB_REQUEST
+        ):
+            item.payload[_REPLY_HANDOFF_RECEIPT_ERROR] = "invalid"
+            return
+        item.payload[_REPLY_HANDOFF_RECEIPT] = receipt
+
+    @staticmethod
+    def _consume_reply_handoff_receipt(item: WorkItem) -> str:
+        """Apply a correlated immutable recovery receipt to local payload."""
+        if not item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF):
+            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+            item.payload.pop(_REPLY_HANDOFF_RECEIPT, None)
+            item.payload.pop(_REPLY_HANDOFF_RECEIPT_ERROR, None)
+            return "completed"
+        error = item.payload.pop(_REPLY_HANDOFF_RECEIPT_ERROR, None)
+        if error is not None:
+            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+            return "retry" if error == "retry" else "invalid"
+        receipt = item.payload.pop(_REPLY_HANDOFF_RECEIPT, None)
+        if not isinstance(receipt, ReplyHandoffAttempted) or receipt.request != item.payload.get(
+            _PENDING_GITHUB_REQUEST
+        ):
+            return "invalid"
+        item.payload.pop(_PENDING_GITHUB_REQUEST, None)
+        remaining = (
+            receipt.remaining_handoff.thaw() if receipt.remaining_handoff is not None else None
+        )
+        if remaining is not None and not isinstance(remaining, dict):
+            return "invalid"
+        if remaining is None:
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+        else:
+            item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = remaining
+        item.payload[_REPLY_VISIBILITY_RETRIES] = receipt.visibility_retries
+        if receipt.retry_delay_s is None:
+            item.payload.pop("retry_delay_s", None)
+        else:
+            item.payload["retry_delay_s"] = receipt.retry_delay_s
+        if receipt.status in {"completed", "stale"}:
+            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        return receipt.status

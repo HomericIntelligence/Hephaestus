@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
 
+from hephaestus.automation.pipeline.github_jobs import GitHubJob, RunMergeWaitCycleRequest
+from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
-from hephaestus.automation.pipeline.stages import ConditionalMergeResult, Continue, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    ConditionalMergeResult,
+    Continue,
+    JobRequest,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 MERGE = "MERGE"
@@ -99,6 +108,61 @@ def _reviewed_item(make_work_item: Any, *, head: str = "a" * 40) -> Any:
     )
 
 
+def _complete_merge_cycle(stage: MergeWaitStage, item: Any, ctx: Any) -> Any:
+    """Execute a dispatched merge cycle at the worker boundary, then apply it."""
+    request = stage.step(item, ctx)
+    if not isinstance(request, JobRequest) or not isinstance(request.job, GitHubJob):
+        return request
+    assert isinstance(request.job.request, RunMergeWaitCycleRequest)
+    try:
+        receipt = PipelineGitHubJobRunner._run_merge_wait_cycle(
+            request.job.request,
+            ctx.github,
+        )
+        result = JobResult(ok=True, value=receipt)
+    except Exception as error:
+        result = JobResult(ok=False, error=f"{type(error).__name__}: {error}")
+    stage.on_job_done(item, result, ctx)
+    item.state = request.on_done_state
+    applied = stage.step(item, ctx)
+    if isinstance(applied, StageOutcome) and applied.disposition is Disposition.RETRY:
+        item.state = MERGE
+    return applied
+
+
+def test_merge_cycle_dispatches_without_inline_github_calls(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """MERGE freezes its exact proof before any admission or mutation call."""
+
+    class InlineGitHubForbidden(FakeStageGitHub):
+        def __getattribute__(self, name: str) -> object:
+            if name in {
+                "gh_pr_state",
+                "pr_has_implementation_state_label",
+                "list_unresolved_review_threads",
+                "base_branch_requires_conversation_resolution",
+                "gh_pr_merge_readiness",
+                "merge_pr_if_head",
+            }:
+                raise AssertionError(f"GitHub call ran inline: {name}")
+            return super().__getattribute__(name)
+
+    item = _reviewed_item(make_work_item)
+    stage = MergeWaitStage()
+    ctx = make_ctx(github=InlineGitHubForbidden())
+
+    started = time.monotonic()
+    result = stage.step(item, ctx)
+    elapsed = time.monotonic() - started
+
+    assert isinstance(result, JobRequest)
+    assert isinstance(result.job, GitHubJob)
+    assert isinstance(result.job.request, RunMergeWaitCycleRequest)
+    assert result.job.request.reviewed_head_sha == "a" * 40
+    assert elapsed < 0.25
+
+
 def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     make_ctx: Any, make_work_item: Any
 ) -> None:
@@ -107,7 +171,7 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
     ctx = make_ctx(github=github)
     ctx.config.enable_learn = False
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
+    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -130,7 +194,7 @@ def test_mergeable_requestable_readiness_merges_successfully(
     ctx.config.enable_learn = False
     item = _reviewed_item(make_work_item)
 
-    result = MergeWaitStage().step(item, ctx)
+    result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -154,7 +218,7 @@ def test_optional_failure_unstable_readiness_attempts_conditional_merge(
     ctx.config.enable_learn = False
     item = _reviewed_item(make_work_item)
 
-    result = MergeWaitStage().step(item, ctx)
+    result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -184,13 +248,13 @@ def test_blocked_readiness_waits_before_the_first_conditional_merge(
     ctx.config.enable_learn = False
     item = _reviewed_item(make_work_item)
 
-    first = MergeWaitStage().step(item, ctx)
+    first = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
     assert github.merge_attempts == []
 
-    second = MergeWaitStage().step(item, ctx)
+    second = _complete_merge_cycle(MergeWaitStage(), item, ctx)
 
     assert second == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -210,9 +274,11 @@ def test_readiness_wake_rechecks_the_head_before_a_conditional_merge(
     stage = MergeWaitStage()
     ctx = make_ctx(github=github)
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
 
-    result = stage.step(item, ctx)
+    result = _complete_merge_cycle(stage, item, ctx)
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
     assert github.merge_attempts == []
@@ -246,8 +312,10 @@ def test_readiness_wake_fails_closed_when_a_thread_appears_while_ci_is_pending(
     stage = MergeWaitStage()
     ctx = make_ctx(github=github)
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert stage.step(item, ctx) == StageOutcome(
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.FINISH_FAIL,
         "unresolved_review_threads",
     )
@@ -282,8 +350,10 @@ def test_readiness_wake_fails_closed_when_conversation_protection_is_removed(
     stage = MergeWaitStage()
     ctx = make_ctx(github=github)
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
-    assert stage.step(item, ctx) == StageOutcome(
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.FINISH_FAIL,
         "conversation_resolution_required",
     )
@@ -328,12 +398,12 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
     stage = MergeWaitStage()
 
     while now[0] < 10 * 60:
-        result = stage.step(item, ctx)
+        result = _complete_merge_cycle(stage, item, ctx)
         assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
         assert github.merge_attempts == []
         now[0] += item.payload["retry_delay_s"]
 
-    result = stage.step(item, ctx)
+    result = _complete_merge_cycle(stage, item, ctx)
 
     assert now[0] >= 10 * 60
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
@@ -353,7 +423,7 @@ def test_open_thread_immediately_before_merge_fails_back_without_put(
     github = LateThreadGitHub(states=[_open_pr()])
 
     item = _reviewed_item(make_work_item)
-    result = MergeWaitStage().step(item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads")
     assert github.merge_attempts == []
@@ -368,7 +438,9 @@ def test_missing_conversation_resolution_policy_blocks_merge_put(
     """A branch without server-enforced conversation resolution cannot merge."""
     github = _ConditionalGitHub(conversation_resolution=conversation_resolution)
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
     assert github.merge_attempts == []
@@ -389,7 +461,9 @@ def test_missing_admin_enforcement_policy_blocks_merge_put(
 
     github = NoAdminEnforcementGitHub()
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_required")
     assert github.merge_attempts == []
@@ -410,7 +484,9 @@ def test_unreadable_conversation_resolution_policy_blocks_merge_put(
 
     github = UnreadablePolicyGitHub()
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "conversation_resolution_unavailable")
     assert github.merge_attempts == []
@@ -453,7 +529,7 @@ def test_server_policy_rejects_thread_that_appears_after_local_thread_read(
     github = ServerRejectsLateThreadGitHub()
     item = _reviewed_item(make_work_item)
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
@@ -466,7 +542,9 @@ def test_external_arm_blocks_conditional_merge_without_any_mutation(
     """An arm observed at final admission belongs to an external actor."""
     github = _ConditionalGitHub(states=[_open_pr(auto_merge_request={"enabledAt": "elsewhere"})])
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
     assert github.merge_attempts == []
@@ -479,7 +557,9 @@ def test_stale_proof_fails_back_without_revoking_a_label(
     """A stale process owns no later label and must only request fresh review."""
     github = _ConditionalGitHub(states=[_open_pr("b" * 40)])
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
     assert github.merge_attempts == []
@@ -517,7 +597,7 @@ def test_already_merged_retry_never_attempts_a_second_merge(
     ctx = make_ctx(github=github)
     ctx.config.enable_learn = False
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
+    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == []
@@ -529,7 +609,9 @@ def test_already_merged_retry_preserves_post_merge_learning(
     """A retry that discovers a merge keeps the existing exactly-once learn path."""
     github = _ConditionalGitHub(states=[{"state": "MERGED"}])
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == Continue(next_state="LEARN_WAIT")
     assert github.merge_attempts == []
@@ -554,7 +636,7 @@ def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
     ctx = make_ctx(github=github)
     ctx.config.enable_learn = False
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), ctx)
+    result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
     assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -577,7 +659,9 @@ def test_ambiguous_transport_head_drift_fails_back_without_label_mutation(
         ],
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -602,7 +686,9 @@ def test_ambiguous_transport_retries_only_after_delayed_same_head_read(
     )
     item = _reviewed_item(make_work_item)
 
-    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _route: 2))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_ctx(github=github, budget_fn=lambda _route: 2)
+    )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_not_ready")
     assert item.attempts["merge"] == 1
@@ -628,7 +714,9 @@ def test_ambiguous_transport_with_unreadable_reconciliation_is_terminal(
         ],
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "pr_state_unavailable")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -642,7 +730,7 @@ def test_restarted_merge_without_process_local_proof_fails_back_without_put(
     github = _ConditionalGitHub(states=[_open_pr()])
     item = make_work_item(stage=StageName.MERGE_WAIT, pr=12, state=MERGE)
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_missing")
     assert github.merge_attempts == []
@@ -666,7 +754,9 @@ def test_409_head_drift_fails_back_without_label_mutation(
         ],
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "reviewed_head_drift")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -696,7 +786,9 @@ def test_405_reenters_readiness_wait_without_a_second_conditional_put(
     )
     item = _reviewed_item(make_work_item)
 
-    result = MergeWaitStage().step(item, make_ctx(github=github, budget_fn=lambda _route: 2))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_ctx(github=github, budget_fn=lambda _route: 2)
+    )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
@@ -730,14 +822,14 @@ def test_persistent_405_unchanged_readiness_does_not_duplicate_the_put(
     stage = MergeWaitStage()
     ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
 
-    first = stage.step(item, ctx)
+    first = _complete_merge_cycle(stage, item, ctx)
 
     assert first == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 5.0
     assert item.attempts["merge"] == 1
     assert github.merge_attempts == [(12, "a" * 40)]
 
-    second = stage.step(item, ctx)
+    second = _complete_merge_cycle(stage, item, ctx)
 
     assert second == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["retry_delay_s"] == 10.0
@@ -786,21 +878,29 @@ def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
     ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
     ctx.config.enable_learn = False
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
     assert item.attempts["merge"] == 1
     assert github.merge_attempts == [(12, "a" * 40)]
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
     assert item.attempts["merge"] == 1
     assert github.merge_attempts == [(12, "a" * 40)]
 
     # A second unchanged HAS_HOOKS wake must remain non-mutating. This makes
     # the regression independent of the one-step in-call 405 reconciliation.
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
     assert item.attempts["merge"] == 1
     assert github.merge_attempts == [(12, "a" * 40)]
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.FINISH_PASS, "merged"
+    )
     assert item.attempts["merge"] == 2
     assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
 
@@ -844,11 +944,15 @@ def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
     ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
     ctx.config.enable_learn = False
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.RETRY, "merge_readiness_wait"
+    )
 
     item.payload["reviewed_pr_proof_generation"] = 1
 
-    assert stage.step(item, ctx) == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
+        Disposition.FINISH_PASS, "merged"
+    )
     assert github.merge_attempts == [(12, "a" * 40), (12, "a" * 40)]
 
 
@@ -878,7 +982,9 @@ def test_405_conflicting_or_dirty_readiness_is_terminal(
         ],
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -902,7 +1008,9 @@ def test_409_reconciliation_external_arm_blocks_without_label_mutation(
         ],
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.BLOCKED, "auto_merge_already_armed")
     assert github.merge_attempts == [(12, "a" * 40)]
@@ -916,11 +1024,11 @@ def test_label_loss_or_non_main_base_prevents_the_conditional_request(
     label_lost = _ConditionalGitHub(labels=(False, False), states=[_open_pr()])
     wrong_base = _ConditionalGitHub(states=[_open_pr(base="release")])
 
-    assert MergeWaitStage().step(
-        _reviewed_item(make_work_item), make_ctx(github=label_lost)
+    assert _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=label_lost)
     ) == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
-    assert MergeWaitStage().step(
-        _reviewed_item(make_work_item), make_ctx(github=wrong_base)
+    assert _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=wrong_base)
     ) == StageOutcome(Disposition.FINISH_FAIL, "non_main_base")
     assert label_lost.merge_attempts == []
     assert wrong_base.merge_attempts == []
@@ -932,7 +1040,9 @@ def test_contradictory_implementation_labels_prevent_the_conditional_request(
     """A contradictory durable state is not an exclusive implementation approval."""
     github = _ConditionalGitHub(labels=(True, True), states=[_open_pr()])
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert github.merge_attempts == []
@@ -947,7 +1057,7 @@ def test_review_prose_cannot_replace_a_missing_implementation_go_label(
     item = _reviewed_item(make_work_item)
     item.payload["review_feedback"] = "Verdict: GO"
 
-    result = MergeWaitStage().step(item, make_ctx(github=github))
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
     assert result == StageOutcome(Disposition.FAIL_BACK, "not_implementation_go")
     assert github.merge_attempts == []
@@ -968,7 +1078,9 @@ def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any)
         ]
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
 
@@ -998,12 +1110,12 @@ def test_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
     )
 
     for _ in range(33):
-        result = stage.step(item, ctx)
+        result = _complete_merge_cycle(stage, item, ctx)
         assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
         assert github.merge_attempts == []
         now[0] += item.payload["retry_delay_s"]
 
-    result = stage.step(item, ctx)
+    result = _complete_merge_cycle(stage, item, ctx)
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
     assert github.merge_attempts == []
@@ -1033,9 +1145,8 @@ def test_requestable_readiness_honors_an_existing_matching_deadline_without_puts
         }
     )
 
-    result = MergeWaitStage().step(
-        item,
-        make_ctx(github=github, now_fn=lambda: now),
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: now)
     )
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
@@ -1066,9 +1177,8 @@ def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
         }
     )
 
-    result = MergeWaitStage().step(
-        item,
-        make_ctx(github=github, now_fn=lambda: 100.0),
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: 100.0)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
@@ -1100,9 +1210,8 @@ def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
         }
     )
 
-    result = MergeWaitStage().step(
-        item,
-        make_ctx(github=github, now_fn=lambda: 100.0),
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_ctx(github=github, now_fn=lambda: 100.0)
     )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
@@ -1124,7 +1233,9 @@ def test_unknown_mergeability_waits_without_a_conditional_put(
         }
     )
 
-    result = MergeWaitStage().step(_reviewed_item(make_work_item), make_ctx(github=github))
+    result = _complete_merge_cycle(
+        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+    )
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert github.merge_attempts == []

@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
-from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.github_jobs import GitHubJob
+from hephaestus.automation.pipeline.jobs import (
+    AgentJob,
+    BuildTestJob,
+    CompactJob,
+    GitJob,
+    JobHandle,
+    JobResult,
+)
 from hephaestus.automation.pipeline.queues import StageQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.stages.base import JobRequest
@@ -100,12 +108,17 @@ class _AlwaysJob:
 class _PendingPool(FakeWorkerPool):
     """Record submissions while deliberately withholding completions."""
 
-    def submit(self, job: Any, on_done_state: StageName, **kwargs: Any) -> Any:
-        from hephaestus.automation.pipeline.jobs import JobHandle
-
+    def submit(
+        self,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        on_done_state: str | StageName,
+        *,
+        claim_key: str = "",
+        claim_stage: str = "",
+    ) -> JobHandle:
         handle = JobHandle(job=job, on_done_state=on_done_state)
         self.submitted.append(handle)
-        self.submitted_claims.append((kwargs.get("claim_key", ""), kwargs.get("claim_stage", "")))
+        self.submitted_claims.append((claim_key, claim_stage))
         return handle
 
 

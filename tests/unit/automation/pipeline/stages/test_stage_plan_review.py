@@ -1565,7 +1565,7 @@ class TestReviewFlowWithFakePool:
 
         pool = FakeWorkerPool()
         pool.script(JobResult(ok=True, value=_verdict("GO")))
-        handle = pool.submit(request.job, request.on_done_state)  # type: ignore[arg-type]
+        handle = pool.submit(request.job, request.on_done_state)
         done_handle, done_result = pool.completion_q.get_nowait()
         assert done_handle is handle
         assert not done_result.interrupted  # on_job_done contract precondition
@@ -1612,7 +1612,7 @@ class TestReviewFlowWithFakePool:
                 item.state = result.next_state
                 continue
             if isinstance(result, JobRequest):
-                pool.submit(result.job, result.on_done_state)  # type: ignore[arg-type]
+                pool.submit(result.job, result.on_done_state)
                 _handle, job_result = pool.completion_q.get_nowait()
                 assert not job_result.interrupted
                 stage.on_job_done(item, job_result, ctx)

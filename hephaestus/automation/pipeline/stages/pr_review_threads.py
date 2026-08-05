@@ -135,9 +135,9 @@ from ..reply_handoff import (
     IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF as _PENDING_IMPLEMENTATION_REPLY_HANDOFF,
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES as _PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES,
+    PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES as _REPLY_VISIBILITY_RETRIES,
     implementation_reply_handoff,
     pr_is_current_open_head,
-    retry_pending_implementation_reply_handoff,
 )
 from ..scope_retraction import scope_retraction_paths_for_threads
 from ..work_item import ItemKind
@@ -210,6 +210,8 @@ REVIEW_CHECKOUT_WAIT = "REVIEW_CHECKOUT_WAIT"
 HOST_VERIFICATION_WAIT = "HOST_VERIFICATION_WAIT"
 VALIDATE_WAIT = "VALIDATE_WAIT"
 POST = "POST"
+POST_APPLY = "POST_APPLY"
+RECOVERY_REPLY_WAIT = "RECOVERY_REPLY_WAIT"
 ADDRESS_WAIT = "ADDRESS_WAIT"
 PUSH_WAIT = "PUSH_WAIT"
 EVAL = "EVAL"
@@ -236,6 +238,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     HOST_VERIFICATION_WAIT: "_host_verification_wait",
     VALIDATE_WAIT: "_validate_wait",
     POST: "_post",
+    POST_APPLY: "_post_apply",
+    RECOVERY_REPLY_WAIT: "_recovery_reply_wait",
     ADDRESS_WAIT: "_address",
     PUSH_WAIT: "_push_wait",
     EVAL: "_eval",
@@ -243,6 +247,12 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     COMPACT_WRITER_WAIT: "_compact_writer_wait",
     CLEANUP_REVIEW_WORKTREE_WAIT: "_cleanup_review_worktree_wait",
 }
+
+_PENDING_GITHUB_REQUEST = "_pending_github_request"
+_PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
+_PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
+_REPLY_HANDOFF_RECEIPT = "_reply_handoff_receipt"
+_REPLY_HANDOFF_RECEIPT_ERROR = "_reply_handoff_receipt_error"
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -713,7 +723,7 @@ if _typing.TYPE_CHECKING:
             raise NotImplementedError
 
         @staticmethod
-        def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
+        def _consume_reply_handoff_receipt(item: WorkItem) -> str:
             raise NotImplementedError
 
 else:
@@ -761,11 +771,14 @@ __all__ = [
     'COMPACT_REVIEWER_WAIT', 'COMPACT_WRITER_WAIT', 'DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP',
     'DIRECT_PUSH_RETRY_CAP', 'ENTER', 'EVAL', 'GIT_JOB_TIMEOUT_S',
     'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S', 'HOST_VERIFICATION_WAIT',
-    'IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP', 'POST', 'PUSH_WAIT', 'REVIEW_CHECKOUT_RETRY_CAP',
+    'IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP', 'POST', 'PUSH_WAIT', 'RECOVERY_REPLY_WAIT',
+    'REVIEW_CHECKOUT_RETRY_CAP',
     'REVIEW_CHECKOUT_WAIT', 'REVIEW_ERROR_RETRY_CAP', 'REVIEW_WAIT', 'STATE_SKIP', 'VALIDATE_WAIT',
     'VALID_SEVERITIES', '_COMMENT_VALIDATION_ONLY', '_HOST_VERIFICATION_PENDING',
     '_JSON_RESPONSE_BLOCK_RE', '_PENDING_IMPLEMENTATION_REPLY_HANDOFF',
-    '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES', '_ROUND_PAYLOAD_KEYS', '_STEP_HANDLER_NAMES',
+    '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',
+    '_REPLY_HANDOFF_RECEIPT', '_REPLY_HANDOFF_RECEIPT_ERROR', '_REPLY_VISIBILITY_RETRIES',
+    '_ROUND_PAYLOAD_KEYS', '_STEP_HANDLER_NAMES',
     'AgentJob', 'Any', 'BuildTestJob', 'Callable', 'CompactJob', 'Continue', 'Disposition',
     'GitJob', 'ItemKind', 'JobRequest', 'JobResult', 'PrReviewStage', 'ReviewAudit', 'Stage',
     'StageContext', 'StageOutcome', 'StepResult', 'WorkItem', '_HostVerificationSpec',
@@ -784,6 +797,6 @@ __all__ = [
     'implementation_reply_handoff', 'implementer_claude_timeout', 'implementer_model',
     'is_full_commit_sha', 'json', 'logger', 'logging', 'parse_addressed_replies',
     'parse_review_audit', 'pr_is_current_open_head', 'pr_reviewer_claude_timeout', 're',
-    'retry_pending_implementation_reply_handoff', 'reviewer_model',
+    'reviewer_model',
     'scope_retraction_paths_for_threads', 'secrets', 'stage_model', 'write_skip_label']
 # fmt: on

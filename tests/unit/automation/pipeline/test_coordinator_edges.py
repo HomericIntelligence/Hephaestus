@@ -134,11 +134,13 @@ class TestWiring:
                 shutdown: Any,
                 completion_q: Any,
                 gh_extra_path_root: Path | None = None,
+                github_job_runner: Any = None,
             ) -> None:
                 created["size"] = size
                 created["shutdown"] = shutdown
                 created["completion_q"] = completion_q
                 created["gh_extra_path_root"] = gh_extra_path_root
+                created["github_job_runner"] = github_job_runner
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
         gh_root = tmp_path / "custom-gh"
@@ -156,6 +158,7 @@ class TestWiring:
         assert created["shutdown"] is coordinator.shutdown
         assert created["completion_q"] is coordinator.completion_q
         assert created["gh_extra_path_root"] == gh_root
+        assert created["github_job_runner"] is not None
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -605,7 +608,9 @@ class TestSubmitEdges:
 
         coordinator._submit(_item(), JobRequest(_agent_job(), on_done_state="V"))
 
-        assert pool.submitted[0].job.timeout_s == 1234
+        submitted = pool.submitted[0].job
+        assert isinstance(submitted, AgentJob)
+        assert submitted.timeout_s == 1234
 
     def test_git_job_bypasses_rate_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
