@@ -20,8 +20,8 @@ Per tick (epic #1809 "Coordinator event loop"):
    RESUMABLE and never advance (``on_job_done`` is never called for them);
 4. drain queues DOWNSTREAM-FIRST (finished → merge_wait → ... → repo; finish
    work before admitting new) with admission control;
-5. fully drained: re-seed up to ``--loops`` with a zero-work convergence
-   exit; otherwise block on the completion queue.
+5. fully drained: re-seed discovery up to ``--loops``; explicit
+   ``--issues``/``--prs`` selections drain once; otherwise block or converge.
 
 ``_run_item`` drives ``on_enter``/``step`` until a ``JobRequest`` (park +
 submit) or a ``StageOutcome`` (route via ROUTES). Per-item ``try/except``: a
