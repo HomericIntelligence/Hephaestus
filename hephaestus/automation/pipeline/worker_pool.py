@@ -1982,6 +1982,34 @@ class WorkerPool:
         publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
+        cwd = Path(str(kwargs.get("cwd") or ""))
+        if publish_rebased_head:
+            if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
+                return JobResult(ok=False, error="writer rebase publish arguments invalid")
+            remote = str(kwargs.get("remote", "origin"))
+            base_branch = str(kwargs.get("base_branch", "main"))
+            base_ref = f"{remote}/{base_branch}"
+            git_utils.run(
+                ["git", "fetch", remote, base_branch],
+                cwd=cwd,
+                timeout=job.timeout_s,
+            )
+            ancestry = git_utils.run(
+                ["git", "merge-base", "--is-ancestor", base_ref, "HEAD"],
+                cwd=cwd,
+                check=False,
+                timeout=job.timeout_s,
+            )
+            if ancestry.returncode == 0:
+                return self._verify_noop_writer_rebase(
+                    cwd,
+                    remote=remote,
+                    branch=branch,
+                    expected_remote_sha=expected_remote_sha,
+                    timeout=job.timeout_s,
+                )
+            if ancestry.returncode != 1:
+                return JobResult(ok=False, error="cannot determine writer base ancestry")
         result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
         if not result:
             if not publish_rebased_head:
@@ -1997,9 +2025,6 @@ class WorkerPool:
             )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
-        cwd = Path(str(kwargs.get("cwd") or ""))
-        if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
-            return JobResult(ok=False, error="writer rebase publish arguments invalid")
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
@@ -2827,6 +2852,68 @@ class WorkerPool:
         if not _is_full_commit_sha(head):
             return JobResult(ok=False, error="cannot bind implementation publish head")
         return head
+
+    @staticmethod
+    def _read_remote_branch_head(
+        worktree_path: Path,
+        *,
+        remote: str,
+        branch: str,
+        timeout: int,
+    ) -> str | JobResult:
+        """Read one exact remote branch head without updating local refs."""
+        expected_ref = f"refs/heads/{branch}"
+        try:
+            fields = git_utils.run(
+                ["git", "ls-remote", "--refs", remote, expected_ref],
+                cwd=worktree_path,
+                timeout=timeout,
+            ).stdout.split()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot verify remote writer head")
+        if len(fields) != 2 or not _is_full_commit_sha(fields[0]) or fields[1] != expected_ref:
+            return JobResult(ok=False, error="cannot verify remote writer head")
+        return fields[0]
+
+    def _verify_noop_writer_rebase(
+        self,
+        worktree_path: Path,
+        *,
+        remote: str,
+        branch: str,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> JobResult:
+        """Bind an already-current local writer to its unchanged remote head."""
+        source_sha = self._read_publish_head(worktree_path, timeout=timeout)
+        if isinstance(source_sha, JobResult):
+            return source_sha
+        if source_sha != expected_remote_sha:
+            return JobResult(
+                ok=False,
+                error="current writer head does not match expected remote head",
+            )
+        remote_head = self._read_remote_branch_head(
+            worktree_path,
+            remote=remote,
+            branch=branch,
+            timeout=timeout,
+        )
+        if isinstance(remote_head, JobResult):
+            return remote_head
+        if remote_head != expected_remote_sha:
+            return JobResult(
+                ok=False,
+                error="remote writer head changed during rebase preparation",
+            )
+        return JobResult(
+            ok=True,
+            value={
+                "rebased": False,
+                "published": False,
+                "head_sha": source_sha,
+            },
+        )
 
     @staticmethod
     def _commit_push_requires_publish(
