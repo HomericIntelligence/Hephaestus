@@ -168,8 +168,7 @@ def test_conditional_merge_succeeds_only_after_lifecycle_confirms_merged(
 ) -> None:
     """A 200 response is insufficient until the terminal lifecycle read is merged."""
     github = _ConditionalGitHub(states=[_open_pr(), _open_pr(), {"state": "MERGED"}])
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -190,8 +189,7 @@ def test_mergeable_requestable_readiness_merges_successfully(
             "mergeStateStatus": merge_state_status,
         },
     )
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
     item = _reviewed_item(make_work_item)
 
     result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
@@ -214,8 +212,7 @@ def test_optional_failure_unstable_readiness_attempts_conditional_merge(
             "mergeStateStatus": "UNSTABLE",
         },
     )
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
     item = _reviewed_item(make_work_item)
 
     result = _complete_merge_cycle(MergeWaitStage(), item, ctx)
@@ -244,8 +241,7 @@ def test_blocked_readiness_waits_before_the_first_conditional_merge(
         states=[_open_pr(), _open_pr(), _open_pr(), {"state": "MERGED"}],
         readiness=[not_ready, ready],
     )
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
     item = _reviewed_item(make_work_item)
 
     first = _complete_merge_cycle(MergeWaitStage(), item, ctx)
@@ -392,8 +388,11 @@ def test_minute_scale_readiness_wait_merges_once_when_github_becomes_ready(
             )
 
     github = DelayedReadyGitHub()
-    ctx = make_ctx(github=github, now_fn=lambda: now[0])
-    ctx.config.enable_learn = False
+    ctx = make_ctx(
+        github=github,
+        now_fn=lambda: now[0],
+        config_overrides={"enable_learn": False},
+    )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
 
@@ -594,8 +593,7 @@ def test_already_merged_retry_never_attempts_a_second_merge(
 ) -> None:
     """A retry that observes terminal merged state is a success without a PUT."""
     github = _ConditionalGitHub(states=[{"state": "MERGED"}])
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -633,8 +631,7 @@ def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(
             )
         ],
     )
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 
@@ -875,8 +872,11 @@ def test_persistent_405_has_hooks_retries_only_after_readiness_changes(
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(
+        github=github,
+        budget_fn=lambda _route: 2,
+        config_overrides={"enable_learn": False},
+    )
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"
@@ -941,8 +941,11 @@ def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
     )
     item = _reviewed_item(make_work_item)
     stage = MergeWaitStage()
-    ctx = make_ctx(github=github, budget_fn=lambda _route: 2)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(
+        github=github,
+        budget_fn=lambda _route: 2,
+        config_overrides={"enable_learn": False},
+    )
 
     assert _complete_merge_cycle(stage, item, ctx) == StageOutcome(
         Disposition.RETRY, "merge_readiness_wait"

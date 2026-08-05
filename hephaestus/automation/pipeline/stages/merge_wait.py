@@ -575,7 +575,7 @@ class MergeWaitStage(Stage):
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dispatch the existing deduplicated post-merge learning step."""
-        if item.issue is None or not getattr(ctx.config, "enable_learn", True):
+        if item.issue is None or not ctx.config.enable_learn:
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         if ctx.github.drive_green_learn_terminal(item.issue):
             return StageOutcome(Disposition.FINISH_PASS, "merged")
