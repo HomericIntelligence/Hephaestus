@@ -67,6 +67,20 @@ _NONHERMETIC_HOST_UNIT_TEST_PATHS = frozenset(
 # diff header, never from reviewer or GitHub prose.
 _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
+        changed_path="tests/unit/automation/pipeline/test_worker_pool.py",
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            "tests/unit/automation/pipeline/test_worker_pool.py::TestAgentErrorHandling::test_codex_event_failure_is_explicit_agent_error",
+            "-q",
+            "--tb=short",
+        ),
+        descr="review_worker_pool_agent_execution_error",
+    ),
+    _HostVerificationSpec(
         changed_path="tests/performance/test_worker_pool_load.py",
         argv=(
             "uv",
