@@ -20,7 +20,7 @@ class StructureValidator:
         required_directories: list[str],
         required_files: dict[str, list[str]],
         required_subdirs: dict[str, list[str]],
-    ):
+    ) -> None:
         """Initialize structure validator.
 
         Args:

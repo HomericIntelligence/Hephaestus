@@ -44,7 +44,7 @@ class LinkFixerOptions:
 class LinkFixer:
     """Fixes invalid absolute path links in markdown files."""
 
-    def __init__(self, options: LinkFixerOptions | None = None):
+    def __init__(self, options: LinkFixerOptions | None = None) -> None:
         """Initialize the link fixer.
 
         Args:

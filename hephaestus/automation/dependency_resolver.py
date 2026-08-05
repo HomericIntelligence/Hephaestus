@@ -45,7 +45,7 @@ class DependencyResolver:
     Uses topological sorting to ensure dependencies are satisfied.
     """
 
-    def __init__(self, skip_closed: bool = True):
+    def __init__(self, skip_closed: bool = True) -> None:
         """Initialize dependency resolver.
 
         Args:

@@ -131,7 +131,7 @@ class ReadmeValidator:
         "which",
     ]
 
-    def __init__(self, allowed_prefixes: list[str] | None = None):
+    def __init__(self, allowed_prefixes: list[str] | None = None) -> None:
         """Initialize the readme validator.
 
         Args:
