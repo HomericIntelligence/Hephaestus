@@ -696,24 +696,25 @@ if _typing.TYPE_CHECKING:
         """Cross-collaborator methods supplied by the review-stage façade."""
 
         @staticmethod
-        def _require_confirmed_unarmed(
-            pr_number: int, ctx: StageContext
-        ) -> StageOutcome | None: ...
+        def _require_confirmed_unarmed(pr_number: int, ctx: StageContext) -> StageOutcome | None:
+            raise NotImplementedError
 
         @staticmethod
-        def _write_no_go(item: WorkItem, ctx: StageContext) -> StepResult | None: ...
+        def _write_no_go(item: WorkItem, ctx: StageContext) -> StepResult | None:
+            raise NotImplementedError
 
         def _cleanup_review_worktree_then(
             self, item: WorkItem, outcome: StageOutcome
-        ) -> StepResult: ...
+        ) -> StepResult:
+            raise NotImplementedError
 
         @staticmethod
-        def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None: ...
+        def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None:
+            raise NotImplementedError
 
         @staticmethod
-        def _retry_pending_implementation_reply_handoff(
-            item: WorkItem, ctx: StageContext
-        ) -> str: ...
+        def _retry_pending_implementation_reply_handoff(item: WorkItem, ctx: StageContext) -> str:
+            raise NotImplementedError
 
 else:
 
