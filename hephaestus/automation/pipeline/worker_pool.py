@@ -2001,21 +2001,12 @@ class WorkerPool:
                 timeout=job.timeout_s,
             )
             if ancestry.returncode == 0:
-                source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
-                if isinstance(source_sha, JobResult):
-                    return source_sha
-                if source_sha != expected_remote_sha:
-                    return JobResult(
-                        ok=False,
-                        error="current writer head does not match expected remote head",
-                    )
-                return JobResult(
-                    ok=True,
-                    value={
-                        "rebased": False,
-                        "published": False,
-                        "head_sha": source_sha,
-                    },
+                return self._verify_noop_writer_rebase(
+                    cwd,
+                    remote=remote,
+                    branch=branch,
+                    expected_remote_sha=expected_remote_sha,
+                    timeout=job.timeout_s,
                 )
             if ancestry.returncode != 1:
                 return JobResult(ok=False, error="cannot determine writer base ancestry")
@@ -2861,6 +2852,68 @@ class WorkerPool:
         if not _is_full_commit_sha(head):
             return JobResult(ok=False, error="cannot bind implementation publish head")
         return head
+
+    @staticmethod
+    def _read_remote_branch_head(
+        worktree_path: Path,
+        *,
+        remote: str,
+        branch: str,
+        timeout: int,
+    ) -> str | JobResult:
+        """Read one exact remote branch head without updating local refs."""
+        expected_ref = f"refs/heads/{branch}"
+        try:
+            fields = git_utils.run(
+                ["git", "ls-remote", "--refs", remote, expected_ref],
+                cwd=worktree_path,
+                timeout=timeout,
+            ).stdout.split()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot verify remote writer head")
+        if len(fields) != 2 or not _is_full_commit_sha(fields[0]) or fields[1] != expected_ref:
+            return JobResult(ok=False, error="cannot verify remote writer head")
+        return fields[0]
+
+    def _verify_noop_writer_rebase(
+        self,
+        worktree_path: Path,
+        *,
+        remote: str,
+        branch: str,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> JobResult:
+        """Bind an already-current local writer to its unchanged remote head."""
+        source_sha = self._read_publish_head(worktree_path, timeout=timeout)
+        if isinstance(source_sha, JobResult):
+            return source_sha
+        if source_sha != expected_remote_sha:
+            return JobResult(
+                ok=False,
+                error="current writer head does not match expected remote head",
+            )
+        remote_head = self._read_remote_branch_head(
+            worktree_path,
+            remote=remote,
+            branch=branch,
+            timeout=timeout,
+        )
+        if isinstance(remote_head, JobResult):
+            return remote_head
+        if remote_head != expected_remote_sha:
+            return JobResult(
+                ok=False,
+                error="remote writer head changed during rebase preparation",
+            )
+        return JobResult(
+            ok=True,
+            value={
+                "rebased": False,
+                "published": False,
+                "head_sha": source_sha,
+            },
+        )
 
     @staticmethod
     def _commit_push_requires_publish(
