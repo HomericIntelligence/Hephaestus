@@ -1,8 +1,9 @@
-"""Filter pip-audit JSON output to fail only on HIGH/CRITICAL severity vulnerabilities.
+"""Filter pip-audit JSON output using a fail-closed severity policy.
 
 Reads pip-audit JSON from stdin, classifies vulnerabilities by CVSS v3 base score,
-and exits non-zero only for HIGH (7.0+) or CRITICAL (9.0+) findings. Lower-severity
-findings are reported as warnings. Supports an ignore list via ``.pip-audit-ignore.txt``.
+and exits non-zero for HIGH (7.0+), CRITICAL (9.0+), or unscored findings. Lower-
+severity findings are reported as warnings. Supports an ignore list via
+``.pip-audit-ignore.txt``.
 
 Usage::
 
@@ -200,12 +201,67 @@ def severity_label(score: float | None) -> str:
 AuditEntry = tuple[str, str, str, str]  # (package, version, vuln_id, label)
 
 
+def _validate_audit_vulnerability(vulnerability: object, path: str) -> None:
+    """Validate one vulnerability record and its optional severity list."""
+    if not isinstance(vulnerability, dict):
+        raise ValueError(f"{path} must be an object")
+
+    vulnerability_id = vulnerability.get("id")
+    if not isinstance(vulnerability_id, str) or not vulnerability_id.strip():
+        raise ValueError(f"{path}.id must be a nonempty string")
+
+    severity = vulnerability.get("severity", [])
+    if not isinstance(severity, list):
+        raise ValueError(f"{path}.severity must be a list")
+    if any(not isinstance(entry, dict) for entry in severity):
+        raise ValueError(f"{path}.severity entries must be objects")
+
+
+def _validate_audit_dependency(dependency: object, index: int) -> None:
+    """Validate one dependency record and all of its vulnerabilities."""
+    path = f"dependencies[{index}]"
+    if not isinstance(dependency, dict):
+        raise ValueError(f"{path} must be an object")
+
+    for field in ("name", "version"):
+        value = dependency.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{path}.{field} must be a nonempty string")
+
+    vulnerabilities = dependency.get("vulns")
+    if not isinstance(vulnerabilities, list):
+        raise ValueError(f"{path}.vulns must be a list")
+
+    for vulnerability_index, vulnerability in enumerate(vulnerabilities):
+        vuln_path = f"{path}.vulns[{vulnerability_index}]"
+        _validate_audit_vulnerability(vulnerability, vuln_path)
+
+
+def _validate_audit_result(data: object) -> dict[str, Any]:
+    """Validate the pip-audit result shape consumed by this filter."""
+    if not isinstance(data, dict):
+        raise ValueError("expected a top-level object")
+
+    dependencies = data.get("dependencies")
+    if not isinstance(dependencies, list):
+        raise ValueError("dependencies must be a list")
+
+    fixes = data.get("fixes")
+    if not isinstance(fixes, list):
+        raise ValueError("fixes must be a list")
+
+    for dependency_index, dependency in enumerate(dependencies):
+        _validate_audit_dependency(dependency, dependency_index)
+
+    return cast(dict[str, Any], data)
+
+
 def filter_audit_results(
-    data: dict[str, Any],
+    data: object,
     ignore_ids: frozenset[str] = frozenset(),
     threshold: float = HIGH_THRESHOLD,
 ) -> tuple[list[AuditEntry], list[AuditEntry]]:
-    """Filter pip-audit JSON results by severity.
+    """Filter validated pip-audit results using a fail-closed severity policy.
 
     Args:
         data: Parsed pip-audit JSON output.
@@ -216,22 +272,30 @@ def filter_audit_results(
         Tuple of ``(blocking, suppressed)`` where each is a list of
         ``(package, version, vuln_id, severity_label)`` tuples.
 
+    Raises:
+        ValueError: If data is not a complete scanner-result structure.
+
     """
+    validated = _validate_audit_result(data)
     blocking: list[AuditEntry] = []
     suppressed: list[AuditEntry] = []
 
-    for dep in data.get("dependencies", []):
-        name = dep.get("name", "?")
-        version = dep.get("version", "?")
-        for vuln in dep.get("vulns", []):
-            vuln_id = vuln.get("id", "?")
-            if vuln_id in ignore_ids:
+    for dependency in validated["dependencies"]:
+        name = dependency["name"]
+        version = dependency["version"]
+        for vulnerability in dependency["vulns"]:
+            vulnerability_id = vulnerability["id"]
+            if vulnerability_id in ignore_ids:
                 continue
-            severity_list = vuln.get("severity", [])
-            score = extract_cvss_score(severity_list)
-            label = severity_label(score)
-            entry: AuditEntry = (name, version, vuln_id, label)
-            if score is not None and score >= threshold:
+
+            score = extract_cvss_score(vulnerability.get("severity", []))
+            entry: AuditEntry = (
+                name,
+                version,
+                vulnerability_id,
+                severity_label(score),
+            )
+            if score is None or score >= threshold:
                 blocking.append(entry)
             else:
                 suppressed.append(entry)
@@ -240,7 +304,7 @@ def filter_audit_results(
 
 
 def main() -> int:
-    """Parse pip-audit JSON from stdin and exit non-zero on HIGH/CRITICAL findings.
+    """Parse pip-audit JSON and exit non-zero on blocking findings.
 
     Returns:
         Exit code (0 if no blocking vulnerabilities, 1 otherwise).
@@ -249,14 +313,14 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
+    try:
+        data = _parse_audit_input(sys.stdin.read())
+    except ValueError as exc:
+        return _audit_input_error(str(exc), args.json)
+
     ignore_ids = load_ignore_list(args.ignore_file)
     if ignore_ids and not args.json:
         print(f"pip-audit: ignoring {len(ignore_ids)} advisory ID(s)")
-
-    parsed = _parse_audit_input(sys.stdin.read(), args.json)
-    if isinstance(parsed, int):
-        return parsed
-    data = parsed
 
     blocking, suppressed = filter_audit_results(data, ignore_ids)
 
@@ -264,12 +328,12 @@ def main() -> int:
         return _emit_audit_json(blocking, suppressed)
 
     if suppressed:
-        print("pip-audit: suppressed vulnerabilities (LOW/MEDIUM/UNKNOWN — not blocking CI):")
+        print("pip-audit: non-blocking vulnerabilities (below configured threshold):")
         for name, version, vuln_id, label in suppressed:
             print(f"  [{label}] {name}=={version} {vuln_id}")
 
     if blocking:
-        print("pip-audit: BLOCKING vulnerabilities found (HIGH/CRITICAL):")
+        print("pip-audit: BLOCKING vulnerabilities found (HIGH/CRITICAL/UNKNOWN):")
         for name, version, vuln_id, label in blocking:
             print(f"  [{label}] {name}=={version} {vuln_id}")
         return 1
@@ -279,28 +343,23 @@ def main() -> int:
     return 0
 
 
-def _parse_audit_input(raw: str, json_mode: bool) -> dict[str, Any] | int:
-    """Parse pip-audit stdin payload.
+def _audit_input_error(detail: str, json_mode: bool) -> int:
+    """Emit a fail-closed scanner-evidence error in the requested mode."""
+    message = f"invalid pip-audit evidence: {detail}"
+    if json_mode:
+        emit_json_status(1, message=message)
+    else:
+        print(f"filter_audit: {message}", file=sys.stderr)
+    return 1
 
-    Returns the parsed dict, or an integer exit code if the input was empty
-    or failed to parse.
-    """
-    json_start = raw.find("{")
-    if json_start == -1:
-        if json_mode:
-            emit_json_status(0, message="no vulnerabilities found")
-        else:
-            print("pip-audit: no vulnerabilities found", file=sys.stderr)
-        return 0
 
+def _parse_audit_input(raw: str) -> dict[str, Any]:
+    """Decode and validate one complete pip-audit JSON document."""
     try:
-        return cast(dict[str, Any], json.loads(raw[json_start:]))
+        parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        if json_mode:
-            emit_json_status(1, message=f"failed to parse pip-audit JSON: {exc}")
-        else:
-            print(f"filter_audit: failed to parse pip-audit JSON: {exc}", file=sys.stderr)
-        return 1
+        raise ValueError(f"failed to parse JSON: {exc}") from exc
+    return _validate_audit_result(parsed)
 
 
 def _emit_audit_json(blocking: list[AuditEntry], suppressed: list[AuditEntry]) -> int:
@@ -322,7 +381,7 @@ def _emit_audit_json(blocking: list[AuditEntry], suppressed: list[AuditEntry]) -
 def _build_parser() -> argparse.ArgumentParser:
     """Build argument parser for the filter-audit CLI."""
     parser = create_validation_parser(
-        "Filter pip-audit JSON to fail only on HIGH/CRITICAL vulnerabilities",
+        "Validate pip-audit JSON and fail on HIGH, CRITICAL, or unscored advisories",
         include_repo_root=False,
         epilog="Usage: pip-audit --format json | %(prog)s",
     )
