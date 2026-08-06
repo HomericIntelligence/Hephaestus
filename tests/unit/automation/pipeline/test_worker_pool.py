@@ -3281,7 +3281,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3337,7 +3337,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3381,7 +3381,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3505,7 +3505,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3514,6 +3514,32 @@ class TestGitOps:
         ]
         assert result.ok is False
         assert "dirty" in (result.error or "")
+
+    def test_checkout_state_allows_untracked_artifacts(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Generated untracked files do not prevent a clean checkout from syncing."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+
+        def git_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "git" and "status" in argv:
+                output = "?? build/pipeline-events.jsonl\n"
+                if "--untracked-files=no" in argv:
+                    output = ""
+                return subprocess.CompletedProcess([], 0, stdout=output)
+            if argv[:3] == ["git", "symbolic-ref", "--quiet"]:
+                return subprocess.CompletedProcess([], 0, stdout="main\n")
+            pytest.fail(f"unexpected Git command: {argv}")
+
+        with patch("hephaestus.automation.git_utils.run", side_effect=git_run):
+            error = pool._checkout_state_error(
+                checkout=checkout,
+                default_branch="main",
+                timeout_s=120,
+            )
+
+        assert error is None
 
     def test_sync_checkout_rejects_unexpected_origin(
         self,
@@ -4049,7 +4075,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -4111,7 +4137,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
