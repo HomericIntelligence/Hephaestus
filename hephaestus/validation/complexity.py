@@ -16,8 +16,38 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
+from hephaestus.cli.utils import (
+    create_validation_parser,
+    emit_json_status,
+    format_output,
+    resolve_repo_root,
+)
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, get_repo_root
+
+
+class RuffComplexityError(RuntimeError):
+    """Raised when Ruff cannot produce a trustworthy complexity report."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: str = "",
+        returncode: int | None = None,
+    ) -> None:
+        """Initialize a Ruff tool failure."""
+        super().__init__(message)
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    """Return subprocess exception output as display-safe text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def run_ruff_complexity_check(
@@ -36,39 +66,94 @@ def run_ruff_complexity_check(
         List of violation dicts with keys: ``file``, ``row``, ``col``,
         ``code``, ``message``.
 
-    """
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ruff",
-            "check",
-            "--select=C901",
-            f"--config=lint.mccabe.max-complexity={threshold}",
-            "--output-format=json",
-            path,
-        ],
-        capture_output=True,
-        text=True,
-        cwd=repo_root,
-        timeout=NETWORK_TIMEOUT,
-    )
+    Raises:
+        RuffComplexityError: If the target is missing or Ruff does not return
+            a successful, valid JSON report.
 
-    if not result.stdout.strip():
-        return []
+    """
+    target = Path(path)
+    if not target.is_absolute():
+        target = repo_root / target
+    if not target.exists():
+        raise RuffComplexityError(f"Ruff target does not exist: {target}")
 
     try:
-        raw = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return []
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--select=C901",
+                f"--config=lint.mccabe.max-complexity={threshold}",
+                "--output-format=json",
+                "--exit-zero",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=NETWORK_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout = exc.timeout if exc.timeout is not None else NETWORK_TIMEOUT
+        raise RuffComplexityError(
+            f"Ruff timed out after {timeout} seconds",
+            stderr=_subprocess_text(exc.stderr).strip(),
+        ) from exc
+    except OSError as exc:
+        raise RuffComplexityError(
+            f"Failed to launch Ruff: {exc}",
+            stderr=str(exc),
+        ) from exc
 
-    violations = []
-    for item in raw:
+    stderr = result.stderr.strip()
+    if result.returncode != 0:
+        raise RuffComplexityError(
+            f"Ruff failed with exit code {result.returncode}",
+            stderr=stderr,
+            returncode=result.returncode,
+        )
+
+    output = result.stdout.strip()
+    if not output:
+        raise RuffComplexityError(
+            "Ruff returned empty JSON output",
+            stderr=stderr,
+        )
+
+    try:
+        raw = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuffComplexityError(
+            f"Ruff returned invalid JSON output: {exc}",
+            stderr=stderr,
+        ) from exc
+
+    if not isinstance(raw, list):
+        raise RuffComplexityError(
+            "Ruff returned invalid JSON output: expected a JSON array",
+            stderr=stderr,
+        )
+
+    violations: list[dict[str, str]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise RuffComplexityError(
+                f"Ruff returned invalid JSON output: finding {index} is not an object",
+                stderr=stderr,
+            )
+        location = item.get("location", {})
+        if not isinstance(location, dict):
+            raise RuffComplexityError(
+                f"Ruff returned invalid JSON output: finding {index} has an invalid location",
+                stderr=stderr,
+            )
         violations.append(
             {
                 "file": item.get("filename", ""),
-                "row": str(item.get("location", {}).get("row", "")),
-                "col": str(item.get("location", {}).get("column", "")),
+                "row": str(location.get("row", "")),
+                "col": str(location.get("column", "")),
                 "code": item.get("code", ""),
                 "message": item.get("message", ""),
             }
@@ -100,7 +185,13 @@ def check_max_complexity(
     if verbose:
         print(f"\nChecking cyclomatic complexity (threshold={threshold}) in: {path}")
 
-    violations = run_ruff_complexity_check(path, threshold, repo_root)
+    try:
+        violations = run_ruff_complexity_check(path, threshold, repo_root)
+    except RuffComplexityError as exc:
+        print(f"\n[ERROR] Complexity check failed: {exc}", file=sys.stderr)
+        if exc.stderr:
+            print(exc.stderr, file=sys.stderr)
+        return False
 
     if not violations:
         print(f"\n[OK] Complexity check passed: all functions <= CC {threshold} in {path}")
@@ -147,7 +238,17 @@ def main() -> int:
     repo_root = resolve_repo_root(args)
 
     if args.json:
-        violations = run_ruff_complexity_check(args.path, args.threshold, repo_root)
+        try:
+            violations = run_ruff_complexity_check(args.path, args.threshold, repo_root)
+        except RuffComplexityError as exc:
+            emit_json_status(
+                1,
+                message=str(exc),
+                stderr=exc.stderr,
+                ruff_exit_code=exc.returncode,
+            )
+            return 1
+
         report = {
             "path": args.path,
             "threshold": args.threshold,
