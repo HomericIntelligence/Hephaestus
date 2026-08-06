@@ -81,28 +81,21 @@ PRE_PR_TEST_TIMEOUT: int = 600
 _REPO_ROOT_MARKER = "pyproject.toml"
 
 
-def read_timeout_env(
-    env_name: str,
-    default: int,
-    *,
-    legacy_names: tuple[str, ...] = (),
-) -> int:
+def read_timeout_env(env_name: str, default: int) -> int:
     """Read a timeout env var at call time, falling back to ``default``."""
-    for name in (env_name, *legacy_names):
-        raw = os.environ.get(name)
-        if raw is None:
-            continue
-        try:
-            return int(raw)
-        except ValueError:
-            _logger.warning(
-                "Ignoring non-integer %s=%r; using default %ds",
-                name,
-                raw,
-                default,
-            )
-            return default
-    return default
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _logger.warning(
+            "Ignoring non-integer %s=%r; using default %ds",
+            env_name,
+            raw,
+            default,
+        )
+        return default
 
 
 def agent_impl_timeout() -> int:

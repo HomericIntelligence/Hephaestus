@@ -15,14 +15,12 @@ DEFAULT_THROUGHPUT_TIMEOUT_S = 1200
 
 def _clear_planner_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
-    monkeypatch.delenv("HEPH_PLANNER_AGENT_TIMEOUT", raising=False)
     monkeypatch.delenv("HEPH_PLANNER_CLAUDE_TIMEOUT", raising=False)
 
 
 def _clear_plan_stage_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
     monkeypatch.delenv("HEPH_PLAN_STAGE_TIMEOUT", raising=False)
-    monkeypatch.delenv("HEPH_PLANNER_AGENT_TIMEOUT", raising=False)
 
 
 def test_planner_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,16 +74,6 @@ def test_plan_stage_timeout_env(
     """HEPH_PLAN_STAGE_TIMEOUT tunes the outer plan-stage wrapper."""
     _clear_plan_stage_timeout_env(monkeypatch)
     monkeypatch.setenv("HEPH_PLAN_STAGE_TIMEOUT", "9000")
-
-    assert claude_timeouts.plan_stage_timeout() == 9000
-
-
-def test_plan_stage_timeout_legacy_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The old planner-specific env name still tunes the wrapper for compatibility."""
-    _clear_plan_stage_timeout_env(monkeypatch)
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "9000")
 
     assert claude_timeouts.plan_stage_timeout() == 9000
 
@@ -193,57 +181,58 @@ def test_agent_timeout_envs_are_read_per_call(
 
 
 @pytest.mark.parametrize(
-    ("primary_env", "legacy_env", "timeout_fn"),
+    ("canonical_env", "deprecated_env", "timeout_fn", "default"),
     [
         (
             "HEPH_AGENT_PLAN_TIMEOUT",
             "HEPH_PLANNER_AGENT_TIMEOUT",
             claude_timeouts.planner_claude_timeout,
+            DEFAULT_THROUGHPUT_TIMEOUT_S,
+        ),
+        (
+            "HEPH_PLAN_STAGE_TIMEOUT",
+            "HEPH_PLANNER_AGENT_TIMEOUT",
+            claude_timeouts.plan_stage_timeout,
+            TWO_HOURS_S,
         ),
         (
             "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",
             claude_timeouts.plan_reviewer_claude_timeout,
+            DEFAULT_THROUGHPUT_TIMEOUT_S,
         ),
         (
             "HEPH_AGENT_IMPL_TIMEOUT",
             "HEPH_IMPLEMENTER_AGENT_TIMEOUT",
             claude_timeouts.implementer_claude_timeout,
+            1800,
         ),
         (
             "HEPH_AGENT_REVIEW_TIMEOUT",
             "HEPH_PR_REVIEWER_AGENT_TIMEOUT",
             claude_timeouts.pr_reviewer_claude_timeout,
+            DEFAULT_THROUGHPUT_TIMEOUT_S,
         ),
         (
             "HEPH_AGENT_LEARN_TIMEOUT",
             "HEPH_LEARN_AGENT_TIMEOUT",
             claude_timeouts.learn_claude_timeout,
+            DEFAULT_THROUGHPUT_TIMEOUT_S,
         ),
     ],
 )
-def test_phase_specific_agent_envs_are_legacy_fallbacks(
+def test_deprecated_agent_timeout_aliases_are_ignored(
     monkeypatch: pytest.MonkeyPatch,
-    primary_env: str,
-    legacy_env: str,
+    canonical_env: str,
+    deprecated_env: str,
     timeout_fn: Callable[[], int],
+    default: int,
 ) -> None:
-    """Old phase-specific HEPH_*_AGENT_TIMEOUT names remain supported."""
-    monkeypatch.delenv(primary_env, raising=False)
-    monkeypatch.setenv(legacy_env, "555")
+    """Deprecated phase-specific timeout aliases do not affect configuration."""
+    monkeypatch.delenv(canonical_env, raising=False)
+    monkeypatch.setenv(deprecated_env, "555")
 
-    assert timeout_fn() == 555
-
-
-def test_planner_timeout_primary_env_wins_over_legacy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The new HEPH_AGENT_PLAN_TIMEOUT wins over the old planner-specific name."""
-    _clear_planner_timeout_env(monkeypatch)
-    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "444")
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "555")
-
-    assert claude_timeouts.planner_claude_timeout() == 444
+    assert timeout_fn() == default
 
 
 def test_planner_timeout_invalid_agent_env_logs_and_defaults(
