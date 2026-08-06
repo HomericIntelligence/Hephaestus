@@ -37,3 +37,17 @@ def test_precommit_uses_uv_bandit() -> None:
         if hook.get("id") == "bandit"
     )
     assert hook["entry"].startswith("uv run bandit")
+
+
+def test_low_baseline_scan_defers_exit_status_to_checker() -> None:
+    """The LOW scan must emit its report before the custom checker decides."""
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["sast"]["steps"]
+    low_step = next(step for step in steps if step.get("id") == "bandit-low")
+    summary_step = next(step for step in steps if step.get("name") == "Post bandit summary")
+
+    assert "--exit-zero" in low_step["run"]
+    assert "bandit_baseline_check.py" in low_step["run"]
+    assert summary_step["env"]["BANDIT_LOW_OUTCOME"] == ("${{ steps.bandit-low.outcome }}")
