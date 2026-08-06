@@ -91,21 +91,25 @@ jobs:
         id: bandit-low
         run: |
           mkdir -p build
-          uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level low -f json -o build/bandit_low.json
+          uv run bandit -c pyproject.toml -r hephaestus scripts \
+            --severity-level low --exit-zero -f json -o build/bandit_low.json
           uv run python hephaestus/ci/bandit_baseline_check.py build/bandit_low.json hephaestus/ci/bandit_low_baseline.json
 
       - name: Post bandit summary
         if: always()
         env:
           BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+          BANDIT_LOW_OUTCOME: ${{ steps.bandit-low.outcome }}
         run: |
           {
             echo "## Bandit Static Application Security Testing"
             echo ""
-            if [ "$BANDIT_OUTCOME" = "success" ]; then
-              echo "No security issues found."
+            if [ "$BANDIT_OUTCOME" != "success" ]; then
+              echo "Medium-or-higher security findings detected — see job logs."
+            elif [ "$BANDIT_LOW_OUTCOME" != "success" ]; then
+              echo "LOW-severity baseline mismatch detected — see job logs."
             else
-              echo "Security issues detected — see job logs for details."
+              echo "No unreviewed security findings or baseline drift detected."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

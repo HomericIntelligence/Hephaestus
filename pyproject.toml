@@ -349,4 +349,5 @@ exclude_dirs = ["tests", "build", ".venv"]
 #     drift against hephaestus/ci/bandit_low_baseline.json.
 #
 # Re-review: quarterly, or whenever the weekly bandit-low-baseline job reports
-# drift (new test ID or increased count vs. hephaestus/ci/bandit_low_baseline.json).
+# any mismatch (new/increased LOW findings are regressions; reduced/removed
+# findings mean hephaestus/ci/bandit_low_baseline.json is stale).
