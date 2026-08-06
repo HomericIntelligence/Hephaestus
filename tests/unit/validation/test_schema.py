@@ -150,9 +150,13 @@ class TestCheckFiles:
         yaml_file.write_text("name: hello\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map)
-        assert exit_code == 0
-        assert error_count == 0
+        result = check_files([yaml_file], tmp_path, schema_map)
+        assert result.exit_code == 0
+        assert result.error_count == 0
+        assert result.requested == 1
+        assert result.validated == 1
+        assert result.passed == 1
+        assert result.failed == 0
 
     def test_valid_files_verbose_prints_pass(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -168,9 +172,11 @@ class TestCheckFiles:
         yaml_file.write_text("name: hello\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map, verbose=True)
-        assert exit_code == 0
-        assert error_count == 0
+        result = check_files([yaml_file], tmp_path, schema_map, verbose=True)
+        assert result.exit_code == 0
+        assert result.error_count == 0
+        assert result.validated == 1
+        assert result.passed == 1
         captured = capsys.readouterr()
         assert "PASS:" in captured.out
 
@@ -186,9 +192,13 @@ class TestCheckFiles:
         yaml_file.write_text("version: 1\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map, dry_run=True)
-        assert exit_code == 0
-        assert error_count >= 1
+        result = check_files([yaml_file], tmp_path, schema_map, dry_run=True)
+        assert result.exit_code == 0
+        assert result.error_count >= 1
+        assert result.validated == 1
+        assert result.passed == 0
+        assert result.failed == 1
+        assert result.skipped == 0
 
     def test_schema_load_oserror(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         """OSError when loading schema file is caught and counted."""
@@ -200,9 +210,11 @@ class TestCheckFiles:
         # Create a schema file path that will raise OSError when read
         schema_file = tmp_path / "nonexistent_schema.json"
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map)
-        assert exit_code == 1
-        assert error_count >= 1
+        result = check_files([yaml_file], tmp_path, schema_map)
+        assert result.exit_code == 1
+        assert result.error_count >= 1
+        assert result.failed == 1
+        assert result.validated == 0
         captured = capsys.readouterr()
         assert "Could not load schema" in captured.err
 
@@ -219,24 +231,65 @@ class TestCheckFiles:
         schema_file = tmp_path / "bad_schema.json"
         schema_file.write_text("{invalid json")
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        exit_code, error_count = check_files([yaml_file], tmp_path, schema_map)
-        assert exit_code == 1
-        assert error_count >= 1
+        result = check_files([yaml_file], tmp_path, schema_map)
+        assert result.exit_code == 1
+        assert result.error_count >= 1
+        assert result.failed == 1
+        assert result.validated == 0
         captured = capsys.readouterr()
         assert "Could not load schema" in captured.err
 
-    def test_no_matching_schema_warns(self, tmp_path: Path) -> None:
-        """File with no matching schema is warned, not failed."""
+    def test_no_matching_schema_fails_by_default(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """File with no matching schema fails unless explicitly skipped."""
         yaml_file = tmp_path / "random.yaml"
         yaml_file.write_text("key: value\n")
-        schema_map: list = []
-        exit_code, _error_count = check_files([yaml_file], tmp_path, schema_map)
-        assert exit_code == 0
+
+        result = check_files([yaml_file], tmp_path, [])
+
+        assert result.exit_code == 1
+        assert result.requested == 1
+        assert result.validated == 0
+        assert result.skipped == 0
+        assert result.passed == 0
+        assert result.failed == 1
+        assert result.error_count == 1
+        assert "ERROR: No schema mapping" in capsys.readouterr().err
+
+    def test_mixed_files_tracks_counts(self, tmp_path: Path) -> None:
+        """Mapped and unmapped files receive separate outcome counts."""
+        pytest.importorskip("jsonschema")
+        schema_file = tmp_path / "schema.json"
+        schema_file.write_text(json.dumps({"type": "object"}))
+        mapped = tmp_path / "config" / "mapped.yaml"
+        mapped.parent.mkdir()
+        mapped.write_text("{}\n")
+        unmapped = tmp_path / "unmapped.yaml"
+        unmapped.write_text("{}\n")
+
+        result = check_files(
+            [mapped, unmapped],
+            tmp_path,
+            [(re.compile(r"^config/.*\.yaml$"), schema_file)],
+        )
+
+        assert result.requested == 2
+        assert result.validated == 1
+        assert result.skipped == 0
+        assert result.passed == 1
+        assert result.failed == 1
 
     def test_empty_files_list(self, tmp_path: Path) -> None:
         """Empty files list returns 0."""
-        exit_code, _error_count = check_files([], tmp_path, [])
-        assert exit_code == 0
+        result = check_files([], tmp_path, [])
+        assert result.exit_code == 0
+        assert result.error_count == 0
+        assert result.requested == 0
+        assert result.validated == 0
+        assert result.skipped == 0
+        assert result.passed == 0
+        assert result.failed == 0
 
 
 class TestMain:
@@ -421,6 +474,11 @@ class TestMain:
         output = json.loads(captured.out)
         assert output["exit_code"] == 0
         assert "message" in output or "error_count" in output
+        assert output["requested"] == 0
+        assert output["validated"] == 0
+        assert output["skipped"] == 0
+        assert output["passed"] == 0
+        assert output["failed"] == 0
 
     def test_json_flag_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
@@ -465,6 +523,118 @@ class TestMain:
         assert output["exit_code"] == 0
         assert output["error_count"] == 0
         assert output["files_checked"] == 1
+        assert output["requested"] == 1
+        assert output["validated"] == 1
+        assert output["skipped"] == 0
+        assert output["passed"] == 1
+        assert output["failed"] == 0
+
+    def test_allow_unmapped_flag_skips_unmapped_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """--allow-unmapped restores explicit permissive skip behavior."""
+        from hephaestus.validation.schema import main
+
+        target = tmp_path / "unmapped.yaml"
+        target.write_text("{}\n")
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text("[]")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                "--allow-unmapped",
+                str(target),
+            ],
+        )
+
+        assert main() == 0
+        assert "skipped=1" in capsys.readouterr().out
+
+    def test_json_mixed_inputs_reports_all_counts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """JSON output distinguishes mapped validation from unmapped failure."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(json.dumps({"type": "object"}))
+        mapped = tmp_path / "config" / "mapped.yaml"
+        mapped.parent.mkdir()
+        mapped.write_text("{}\n")
+        unmapped = tmp_path / "unmapped.yaml"
+        unmapped.write_text("{}\n")
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]))
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                "--json",
+                str(mapped),
+                str(unmapped),
+            ],
+        )
+
+        assert main() == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["requested"] == 2
+        assert output["validated"] == 1
+        assert output["skipped"] == 0
+        assert output["passed"] == 1
+        assert output["failed"] == 1
+        assert output["files_checked"] == output["validated"]
+
+    def test_json_allow_unmapped_reports_skipped_count(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """JSON output reports explicit permissive skips separately."""
+        from hephaestus.validation.schema import main
+
+        target = tmp_path / "unmapped.yaml"
+        target.write_text("{}\n")
+        schema_map = tmp_path / "map.json"
+        schema_map.write_text("[]")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-schemas",
+                "--schema-map",
+                str(schema_map),
+                "--repo-root",
+                str(tmp_path),
+                "--allow-unmapped",
+                "--json",
+                str(target),
+            ],
+        )
+
+        assert main() == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["requested"] == 1
+        assert output["validated"] == 0
+        assert output["skipped"] == 1
+        assert output["passed"] == 0
+        assert output["failed"] == 0
+        assert output["files_checked"] == output["validated"]
 
     def test_verbose_pass_output(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
@@ -536,9 +706,9 @@ class TestMain:
 
         schema_map = [(re.compile(r"config/.*\.yaml$"), Path("nonexistent.json"))]
 
-        exit_code, error_count = check_files([target], tmp_path, schema_map)
-        assert exit_code == 1
-        assert error_count == 1
+        result = check_files([target], tmp_path, schema_map)
+        assert result.exit_code == 1
+        assert result.error_count == 1
 
     def test_check_files_schema_load_json_decode_error(self, tmp_path: Path) -> None:
         """check_files handles JSONDecodeError when parsing schema file."""
@@ -555,6 +725,6 @@ class TestMain:
 
         schema_map = [(re.compile(r"config/.*\.yaml$"), schema_file)]
 
-        exit_code, error_count = check_files([target], tmp_path, schema_map)
-        assert exit_code == 1
-        assert error_count == 1
+        result = check_files([target], tmp_path, schema_map)
+        assert result.exit_code == 1
+        assert result.error_count == 1

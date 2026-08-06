@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,19 @@ import yaml
 from hephaestus.cli.utils import create_validation_parser, emit_json_status, resolve_repo_root
 
 SchemaMapping = list[tuple[re.Pattern[str], Path]]
+
+
+@dataclass(frozen=True)
+class SchemaCheckResult:
+    """Aggregate outcome of checking requested files against schemas."""
+
+    exit_code: int
+    error_count: int
+    requested: int
+    validated: int
+    skipped: int
+    passed: int
+    failed: int
 
 
 def load_schema_map(schema_map_file: Path) -> SchemaMapping:
@@ -111,8 +125,9 @@ def check_files(
     schema_map: SchemaMapping,
     verbose: bool = False,
     dry_run: bool = False,
-) -> tuple[int, int]:
-    """Validate each file against its matching schema.
+    allow_unmapped: bool = False,
+) -> SchemaCheckResult:
+    """Validate each requested file and return distinct outcome counts.
 
     Args:
         files: List of file paths to check.
@@ -120,25 +135,33 @@ def check_files(
         schema_map: List of ``(regex_pattern, schema_path)`` tuples.
         verbose: If True, print passing file names.
         dry_run: If True, print errors but return 0.
+        allow_unmapped: If True, skip files without a schema mapping.
 
     Returns:
-        Tuple of ``(exit_code, error_count)``.
+        Aggregate exit code, diagnostic count, and file outcome counts.
 
     """
-    if not files:
-        return 0, 0
-
+    requested = len(files)
+    validated = 0
+    skipped = 0
+    passed = 0
+    failed = 0
     schema_cache: dict[Path, dict[str, Any]] = {}
-    any_failure = False
     error_count = 0
 
     for file_path in files:
         schema_path = resolve_schema(file_path, repo_root, schema_map)
         if schema_path is None:
-            print(
-                f"WARNING: No schema mapping for {file_path} — skipping",
-                file=sys.stderr,
-            )
+            if allow_unmapped:
+                print(
+                    f"WARNING: No schema mapping for {file_path} — skipping",
+                    file=sys.stderr,
+                )
+                skipped += 1
+            else:
+                print(f"ERROR: No schema mapping for {file_path}", file=sys.stderr)
+                failed += 1
+                error_count += 1
             continue
 
         if schema_path not in schema_cache:
@@ -149,23 +172,33 @@ def check_files(
                     f"ERROR: Could not load schema {schema_path}: {exc}",
                     file=sys.stderr,
                 )
-                any_failure = True
+                failed += 1
                 error_count += 1
                 continue
 
+        validated += 1
         errors = validate_file(file_path, schema_cache[schema_path])
         if errors:
             print(f"FAIL: {file_path}", file=sys.stderr)
             for error in errors:
                 print(error, file=sys.stderr)
-            any_failure = True
+            failed += 1
             error_count += len(errors)
-        elif verbose:
-            print(f"PASS: {file_path}")
+        else:
+            passed += 1
+            if verbose:
+                print(f"PASS: {file_path}")
 
-    if any_failure and dry_run:
-        return 0, error_count
-    return (1 if any_failure else 0), error_count
+    exit_code = 0 if dry_run or failed == 0 else 1
+    return SchemaCheckResult(
+        exit_code=exit_code,
+        error_count=error_count,
+        requested=requested,
+        validated=validated,
+        skipped=skipped,
+        passed=passed,
+        failed=failed,
+    )
 
 
 def main() -> int:
@@ -202,12 +235,27 @@ def main() -> int:
         action="store_true",
         help="Print errors but exit 0",
     )
+    parser.add_argument(
+        "--allow-unmapped",
+        action="store_true",
+        help="Explicitly skip requested files that have no matching schema",
+    )
 
     args = parser.parse_args()
 
     if not args.files:
         if args.json:
-            emit_json_status(0, message="no files to validate", error_count=0)
+            emit_json_status(
+                0,
+                message="no files to validate",
+                error_count=0,
+                files_checked=0,
+                requested=0,
+                validated=0,
+                skipped=0,
+                passed=0,
+                failed=0,
+            )
         return 0
 
     repo_root = resolve_repo_root(args)
@@ -232,17 +280,36 @@ def main() -> int:
             print(f"ERROR: Could not load schema map: {exc}", file=sys.stderr)
         return 1
 
-    exit_code, error_count = check_files(
-        args.files, repo_root, schema_map, verbose=args.verbose, dry_run=args.dry_run
+    result = check_files(
+        args.files,
+        repo_root,
+        schema_map,
+        verbose=args.verbose,
+        dry_run=args.dry_run,
+        allow_unmapped=args.allow_unmapped,
     )
     if args.json:
         emit_json_status(
-            exit_code,
-            error_count=error_count,
-            files_checked=len(args.files),
+            result.exit_code,
+            error_count=result.error_count,
+            files_checked=result.validated,
+            requested=result.requested,
+            validated=result.validated,
+            skipped=result.skipped,
+            passed=result.passed,
+            failed=result.failed,
             dry_run=args.dry_run,
         )
-    return exit_code
+    else:
+        print(
+            "Summary: "
+            f"requested={result.requested}, "
+            f"validated={result.validated}, "
+            f"skipped={result.skipped}, "
+            f"passed={result.passed}, "
+            f"failed={result.failed}"
+        )
+    return result.exit_code
 
 
 if __name__ == "__main__":
