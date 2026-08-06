@@ -92,9 +92,6 @@ _UNMERGED_STATUS_CODES: frozenset[str] = frozenset({"DD", "AU", "UD", "UA", "DU"
 # the exact test it claims to fix (root cause of PR #2056's stranding).
 _FAILED_TEST_LINE_RE = re.compile(r"(?:^|\s)(?:FAILED|ERROR)\s+(tests/[\w./-]+\.py(?:::[\w./-]+)*)")
 _AFFECTED_TESTS_TIMEOUT_SECONDS = 900
-# pytest exit code 5 = "no tests ran": the failing test may have been deleted by
-# the fix/rebase itself (exactly the #2056 remedy) — not a gate failure.
-_PYTEST_NO_TESTS_RAN = 5
 
 
 def extract_failing_pytest_node_ids(ci_logs: str) -> list[str]:
