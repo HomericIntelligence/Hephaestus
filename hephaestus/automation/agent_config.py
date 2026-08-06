@@ -38,10 +38,12 @@ the Codex provider and never modify Claude or Pi model IDs.
 
 Timeouts
 --------
-Each phase that shells out to an agent CLI or ``gh`` has historically
-hard-coded its own timeout. Centralising them here gives operators a way to
-tune slow repos / network conditions without code changes via
-``HEPH_<PHASE>_AGENT_TIMEOUT`` environment variables (values in seconds).
+Agent timeout overrides are accepted only from their canonical environment
+variables. Shared phase budgets use ``HEPH_AGENT_PLAN_TIMEOUT``,
+``HEPH_AGENT_REVIEW_TIMEOUT``, ``HEPH_AGENT_IMPL_TIMEOUT``, and
+``HEPH_AGENT_LEARN_TIMEOUT``; the outer planning wrapper uses
+``HEPH_PLAN_STAGE_TIMEOUT``. The remaining timeout accessors retain their
+function-specific ``HEPH_*`` variables defined below.
 
 If an env var is set but not an integer, the default is used and a warning is
 logged on first read; we never crash on a malformed timeout because the cost
@@ -249,38 +251,22 @@ def agent_default_timeout() -> int:
 
 def planner_claude_timeout() -> int:
     """Timeout for planner agent calls (default 1200s)."""
-    return read_timeout_env(
-        "HEPH_AGENT_PLAN_TIMEOUT",
-        AGENT_PLAN_TIMEOUT,
-        legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
-    )
+    return read_timeout_env("HEPH_AGENT_PLAN_TIMEOUT", AGENT_PLAN_TIMEOUT)
 
 
 def plan_stage_timeout() -> int:
     """Timeout for the outer ``hephaestus-plan-issues`` stage (default 7200s)."""
-    return read_timeout_env(
-        "HEPH_PLAN_STAGE_TIMEOUT",
-        PLAN_STAGE_TIMEOUT,
-        legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
-    )
+    return read_timeout_env("HEPH_PLAN_STAGE_TIMEOUT", PLAN_STAGE_TIMEOUT)
 
 
 def plan_reviewer_claude_timeout() -> int:
     """Timeout for agent calls inside the plan reviewer (default 1200s)."""
-    return read_timeout_env(
-        "HEPH_AGENT_REVIEW_TIMEOUT",
-        AGENT_REVIEW_TIMEOUT,
-        legacy_names=("HEPH_PLAN_REVIEWER_AGENT_TIMEOUT",),
-    )
+    return read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", AGENT_REVIEW_TIMEOUT)
 
 
 def implementer_claude_timeout() -> int:
     """Timeout for the implementer's agent invocation (default 1800s)."""
-    return read_timeout_env(
-        "HEPH_AGENT_IMPL_TIMEOUT",
-        AGENT_IMPL_TIMEOUT,
-        legacy_names=("HEPH_IMPLEMENTER_AGENT_TIMEOUT",),
-    )
+    return read_timeout_env("HEPH_AGENT_IMPL_TIMEOUT", AGENT_IMPL_TIMEOUT)
 
 
 def advise_claude_timeout() -> int:
@@ -290,11 +276,7 @@ def advise_claude_timeout() -> int:
 
 def pr_reviewer_claude_timeout() -> int:
     """Timeout for the PR reviewer's agent analysis (default 1200s)."""
-    return read_timeout_env(
-        "HEPH_AGENT_REVIEW_TIMEOUT",
-        AGENT_REVIEW_TIMEOUT,
-        legacy_names=("HEPH_PR_REVIEWER_AGENT_TIMEOUT",),
-    )
+    return read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", AGENT_REVIEW_TIMEOUT)
 
 
 def address_review_claude_timeout() -> int:
@@ -309,11 +291,7 @@ def ci_driver_claude_timeout() -> int:
 
 def learn_claude_timeout() -> int:
     """Timeout for ``/learn`` agent calls (default 1200s)."""
-    return read_timeout_env(
-        "HEPH_AGENT_LEARN_TIMEOUT",
-        AGENT_LEARN_TIMEOUT,
-        legacy_names=("HEPH_LEARN_AGENT_TIMEOUT",),
-    )
+    return read_timeout_env("HEPH_AGENT_LEARN_TIMEOUT", AGENT_LEARN_TIMEOUT)
 
 
 def follow_up_claude_timeout() -> int:
