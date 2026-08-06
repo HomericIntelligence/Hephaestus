@@ -451,7 +451,7 @@ zero totals, and zero requested/processed counts.
 
 | Command | Description |
 |---|---|
-| `hephaestus-scaffold-subpackage` | Scaffold a new hephaestus subpackage skeleton with matching test directory |
+| `hephaestus-scaffold-subpackage` | Scaffold a minimal importable subpackage with a structural unit test and no behavior stubs |
 
 ### Configuration & Dependencies
 

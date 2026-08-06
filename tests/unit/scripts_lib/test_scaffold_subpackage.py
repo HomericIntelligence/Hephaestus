@@ -8,6 +8,18 @@ from pathlib import Path
 import pytest
 
 from hephaestus.scripts_lib.scaffold_subpackage import main
+from hephaestus.validation.test_layout import check_test_structure
+
+_EXPECTED_FILES = (
+    Path("hephaestus/myutils/__init__.py"),
+    Path("tests/unit/myutils/__init__.py"),
+    Path("tests/unit/myutils/test_myutils.py"),
+)
+
+
+def _generated_files(root: Path) -> set[Path]:
+    """Return generated files relative to the scaffold root."""
+    return {path.relative_to(root) for path in root.rglob("*") if path.is_file()}
 
 
 def _run(args: list[str], tmp_path: Path) -> int:
@@ -18,6 +30,12 @@ def _run(args: list[str], tmp_path: Path) -> int:
 class TestValidNames:
     """Happy-path: valid snake_case name produces expected file tree."""
 
+    def test_creates_only_minimal_structure(self, tmp_path: Path) -> None:
+        rc = _run(["myutils"], tmp_path)
+
+        assert rc == 0
+        assert _generated_files(tmp_path) == set(_EXPECTED_FILES)
+
     def test_creates_package_init(self, tmp_path: Path) -> None:
         rc = _run(["myutils"], tmp_path)
         assert rc == 0
@@ -25,11 +43,26 @@ class TestValidNames:
         assert pkg_init.exists()
         assert "Myutils" in pkg_init.read_text() or "myutils" in pkg_init.read_text()
 
-    def test_creates_module_stub(self, tmp_path: Path) -> None:
-        rc = _run(["myutils"], tmp_path)
-        assert rc == 0
-        module = tmp_path / "hephaestus" / "myutils" / "myutils.py"
-        assert module.exists()
+    def test_does_not_generate_placeholder_application_behavior(self, tmp_path: Path) -> None:
+        _run(["myutils"], tmp_path)
+
+        package_dir = tmp_path / "hephaestus" / "myutils"
+        generated_test = tmp_path / "tests" / "unit" / "myutils" / "test_myutils.py"
+        assert not (package_dir / "myutils.py").exists()
+        assert "placeholder" not in package_dir.joinpath("__init__.py").read_text(encoding="utf-8")
+        assert "placeholder" not in generated_test.read_text(encoding="utf-8")
+
+    def test_generated_test_asserts_import_contract(self, tmp_path: Path) -> None:
+        _run(["myutils"], tmp_path)
+
+        generated_test = tmp_path / "tests" / "unit" / "myutils" / "test_myutils.py"
+        source = generated_test.read_text(encoding="utf-8")
+        assert 'importlib.import_module("hephaestus.myutils")' in source
+
+    def test_generated_tree_satisfies_test_layout_policy(self, tmp_path: Path) -> None:
+        _run(["myutils"], tmp_path)
+
+        assert check_test_structure(tmp_path, src_package="hephaestus") is True
 
     def test_creates_test_init(self, tmp_path: Path) -> None:
         rc = _run(["myutils"], tmp_path)
@@ -155,15 +188,23 @@ class TestJsonOutput:
         data = json.loads(out)
         assert isinstance(data, dict)
 
-    def test_json_lists_created_files(
+    def test_json_lists_exact_created_files(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _run(["--json", "myutils"], tmp_path)
-        data = json.loads(capsys.readouterr().out)
-        files = data.get("files_created", [])
-        assert isinstance(files, list)
-        assert len(files) >= 3
+        assert json.loads(capsys.readouterr().out) == {
+            "name": "myutils",
+            "files_created": [str(tmp_path / path) for path in _EXPECTED_FILES],
+        }
 
-    def test_json_dry_run_no_writes(self, tmp_path: Path) -> None:
+    def test_json_dry_run_lists_exact_plan_without_writes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         _run(["--json", "--dry-run", "myutils"], tmp_path)
+        assert json.loads(capsys.readouterr().out) == {
+            "dry_run": True,
+            "name": "myutils",
+            "files_planned": [str(tmp_path / path) for path in _EXPECTED_FILES],
+        }
         assert not (tmp_path / "hephaestus").exists()
+        assert not (tmp_path / "tests").exists()
