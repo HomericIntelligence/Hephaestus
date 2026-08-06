@@ -71,6 +71,7 @@ class TestLabelVocabulary:
         for spec in STATE_LABEL_SPECS.values():
             assert "color" in spec
             assert "description" in spec
+            assert len(spec["description"]) <= 100
             # Hex colour without leading '#'.
             assert len(spec["color"]) == 6
             int(spec["color"], 16)
