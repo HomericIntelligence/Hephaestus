@@ -1,13 +1,28 @@
 """Tests for the curses_ui module."""
 
-import curses as curses_module
+import importlib
 import threading
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hephaestus.automation.curses_ui import CursesUI, LogBuffer, ThreadLogManager
 from hephaestus.automation.status_tracker import StatusTracker
+
+if TYPE_CHECKING:
+    import curses as curses_module
+
+    from hephaestus.automation.curses_ui import CursesUI, LogBuffer, ThreadLogManager
+else:
+    try:
+        curses_module = importlib.import_module("curses")
+    except ModuleNotFoundError:
+        pytest.skip("curses_ui tests require the stdlib curses module", allow_module_level=True)
+
+    _curses_ui = importlib.import_module("hephaestus.automation.curses_ui")
+    CursesUI = _curses_ui.CursesUI
+    LogBuffer = _curses_ui.LogBuffer
+    ThreadLogManager = _curses_ui.ThreadLogManager
 
 
 class TestLogBuffer:
