@@ -89,21 +89,19 @@ Significant architectural decisions are recorded as ADRs in `docs/adr/`; see
 
 ### Coverage omit-list invariant
 
-A small set of `hephaestus/automation/*` orchestration modules whose loops
-shell out to live `claude`/`gh` CLIs are excluded from coverage via
-`[tool.coverage.run].omit`. The contract: an omitted module's pure-function
-helpers MUST still be unit-tested in `tests/unit/automation/`. This is enforced
-executably — `tests/unit/validation/test_omit_allowlist.py` freezes the list's
-membership, and `tests/unit/validation/test_omit_justification.py` (using `ast`
-import-parsing) fails CI if any omitted module lacks a backing unit-test suite.
-That guard checks a *proxy* (a test file imports the module and defines a test),
-not that every helper is asserted. Reducing the omit list (target: −50% over two
-releases, issue #1422) means promoting a module's orchestration logic to
-mocked-subprocess unit coverage and removing its `omit` entry. The
-`hephaestus.automation.pipeline` package follows the same product-layer
-boundary: adding or moving pipeline modules is not a reason to expand the omit
-list; prefer coordinator/stage seams that remain unit-testable without live
-agent or GitHub CLIs.
+Whole `hephaestus/automation/*.py` modules remain in coverage measurement.
+Hermetic unit tests inject agent, GitHub, Git, subprocess, clock, and terminal
+seams, while `coverage.toml` applies explicit per-module line-coverage floors
+to orchestration facades.
+
+`tests/unit/validation/test_omit_allowlist.py` requires the Coverage.py omit
+list to equal the two generic exclusions for tests and package
+`__init__.py` files. It also freezes issue #2371's twelve-module migration:
+eleven surviving orchestration sources are measured directly, and retired
+`address_review.py` maps to pipeline-owned `address_review_core.py`. A future
+live-external omission requires a narrowly documented boundary and an explicit
+change to this exact allowlist contract; import/test-name presence is not
+coverage evidence.
 
 ## Python Development Guidelines
 

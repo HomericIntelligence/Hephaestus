@@ -1,8 +1,7 @@
-"""Behavioral tests for pure-function helpers in coverage-omitted orchestration modules.
+"""Behavioral tests for orchestration helper functions.
 
-These source files are in pyproject.toml [tool.coverage.run].omit (live claude/gh CLI
-boundary), so they do not count toward the coverage denominator. These tests prove
-behavioral correctness of the pure helpers inside them.
+These tests complement the owning orchestration suites and count directly
+toward the per-module execution floors in coverage.toml.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import pytest
 # loop_runner — confirmed from loop_runner.py:122-129 and :534-539
 # ---------------------------------------------------------------------------
 class TestLoopRunnerPureFunctions:
-    """Test pure helpers in loop_runner (omitted from coverage measurement)."""
+    """Test pure helpers in loop_runner."""
 
     def test_parse_repo_list_comma_separated(self) -> None:
         from hephaestus.automation.loop_runner import _parse_repo_list
@@ -65,7 +64,7 @@ class TestLoopRunnerPureFunctions:
 # github_api — confirmed from github_api.py:417-422 and :533-544
 # ---------------------------------------------------------------------------
 class TestGithubApiPureFunctions:
-    """Test pure helpers in github_api (omitted from coverage measurement)."""
+    """Test pure helpers in github_api."""
 
     def test_parse_issue_number_from_url(self) -> None:
         # Regex: r"/issues/(\d+)" — github_api.py:419
@@ -115,7 +114,7 @@ class TestGithubApiPureFunctions:
 # audit_reviewer — confirmed from audit_reviewer.py:38-57
 # ---------------------------------------------------------------------------
 class TestAuditReviewerPureFunctions:
-    """Test pure helpers in audit_reviewer (omitted from coverage measurement)."""
+    """Test pure helpers in audit_reviewer."""
 
     def test_parse_coordinator_results_single_pr_dict(self) -> None:
         # Dict with "pr_number" field → appended directly

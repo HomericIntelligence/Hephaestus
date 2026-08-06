@@ -5,7 +5,7 @@ from xml.etree.ElementTree import Element, ElementTree
 
 import pytest
 
-from hephaestus.validation.coverage import parse_module_coverage
+from hephaestus.validation.coverage import main, parse_module_coverage
 
 
 @pytest.fixture
@@ -104,3 +104,100 @@ class TestParseModuleCoverage:
         line_rate, branch_rate = result["test_module.py"]
         assert line_rate == 75.0
         assert branch_rate == 50.0
+
+
+def _run_module_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    line_rate: str,
+    branch_rate: str,
+    metric: str,
+) -> int:
+    """Run the coverage CLI against one synthetic module report."""
+    coverage_file = tmp_path / "coverage.xml"
+    root = Element("coverage", {"line-rate": line_rate, "branch-rate": branch_rate})
+    root.append(
+        Element(
+            "class",
+            {
+                "filename": "automation/target.py",
+                "line-rate": line_rate,
+                "branch-rate": branch_rate,
+            },
+        )
+    )
+    ElementTree(root).write(coverage_file)
+
+    config_file = tmp_path / "coverage.toml"
+    config_file.write_text(
+        "[coverage]\n"
+        "minimum = 0\n"
+        "[coverage.modules]\n"
+        f'"automation/target.py" = {{ minimum = 70, metric = "{metric}" }}\n'
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hephaestus-check-coverage",
+            "--coverage-file",
+            str(coverage_file),
+            "--config",
+            str(config_file),
+        ],
+    )
+    return main()
+
+
+@pytest.mark.parametrize(("line_rate", "expected"), [("0.69", 1), ("0.70", 0)])
+def test_explicit_line_floor_enforces_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    line_rate: str,
+    expected: int,
+) -> None:
+    """An explicit line floor compares the line rate at its boundary."""
+    assert (
+        _run_module_floor(
+            tmp_path,
+            monkeypatch,
+            line_rate=line_rate,
+            branch_rate="0.99",
+            metric="line",
+        )
+        == expected
+    )
+
+
+def test_explicit_branch_floor_does_not_fall_back_when_branch_rate_is_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit branch floor fails even when line coverage is high."""
+    assert (
+        _run_module_floor(
+            tmp_path,
+            monkeypatch,
+            line_rate="0.99",
+            branch_rate="0",
+            metric="branch",
+        )
+        == 1
+    )
+
+
+def test_unknown_module_metric_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported metric names cannot bypass a module floor."""
+    assert (
+        _run_module_floor(
+            tmp_path,
+            monkeypatch,
+            line_rate="0.99",
+            branch_rate="0.99",
+            metric="paths",
+        )
+        == 1
+    )

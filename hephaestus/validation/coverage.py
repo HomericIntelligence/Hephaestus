@@ -243,6 +243,33 @@ def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
     return False
 
 
+def _select_module_metric(
+    module_path: str,
+    module_config: dict[str, Any],
+    *,
+    line_rate: float,
+    branch_rate: float,
+) -> tuple[str, float]:
+    """Return the configured metric name and measured module rate.
+
+    Legacy module entries use branch coverage when it is available and line
+    coverage otherwise. Explicit entries select one metric without fallback,
+    so a configured branch floor cannot silently pass with zero branch
+    coverage.
+    """
+    metric = str(module_config.get("metric", "auto"))
+    if metric == "line":
+        return "line", line_rate
+    if metric == "branch":
+        return "branch", branch_rate
+    if metric == "auto":
+        return ("branch", branch_rate) if branch_rate > 0 else ("line", line_rate)
+    raise ValueError(
+        f"Module {module_path} has unsupported coverage metric {metric!r}; "
+        "expected 'line', 'branch', or 'auto'"
+    )
+
+
 def _check_module_floors(
     args: argparse.Namespace,
     config: dict[str, Any],
@@ -292,18 +319,31 @@ def _check_module_floors(
             continue
 
         line_rate, branch_rate = module_coverage[module_path]
-        # Use branch rate for comparison if available, otherwise line rate
-        coverage_metric = branch_rate if branch_rate > 0 else line_rate
+        module_config = modules_config[module_path]
+        try:
+            metric_name, coverage_metric = _select_module_metric(
+                module_path,
+                module_config,
+                line_rate=line_rate,
+                branch_rate=branch_rate,
+            )
+        except ValueError as exc:
+            if not args.json:
+                print(f"\nERROR: {exc}", file=sys.stderr)
+            all_modules_pass = False
+            continue
+
         if coverage_metric < module_threshold:
             if not args.json:
                 print(
-                    f"\nModule {module_path}: {coverage_metric:.2f}% "
+                    f"\nModule {module_path}: {metric_name} coverage "
+                    f"{coverage_metric:.2f}% "
                     f"(below threshold of {module_threshold:.2f}%)",
                     file=sys.stderr,
                 )
             all_modules_pass = False
         elif not args.json and args.verbose:
-            print(f"  {module_path}: {coverage_metric:.2f}% ✓")
+            print(f"  {module_path}: {metric_name} coverage {coverage_metric:.2f}% ✓")
 
     return 0 if all_modules_pass else 1
 

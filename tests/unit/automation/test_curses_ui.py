@@ -1,7 +1,10 @@
 """Tests for the curses_ui module."""
 
+import curses as curses_module
 import threading
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from hephaestus.automation.curses_ui import CursesUI, LogBuffer, ThreadLogManager
 from hephaestus.automation.status_tracker import StatusTracker
@@ -165,6 +168,50 @@ class TestCursesUI:
             ui._run_ui()
 
         assert ui.running is False
+
+    def test_curses_unavailable_raises_actionable_error(self) -> None:
+        with (
+            patch("hephaestus.automation.curses_ui.curses", None),
+            pytest.raises(RuntimeError, match="--no-ui"),
+        ):
+            CursesUI(StatusTracker(1), ThreadLogManager())
+
+    def test_refresh_display_renders_and_refreshes(self) -> None:
+        ui = CursesUI(StatusTracker(1), ThreadLogManager())
+        screen = MagicMock()
+        screen.getmaxyx.return_value = (20, 80)
+        ui.stdscr = screen
+
+        with (
+            patch.object(ui, "_draw_workers", return_value=3),
+            patch.object(ui, "_draw_separator", return_value=4),
+            patch.object(ui, "_draw_logs", return_value=5),
+        ):
+            ui._refresh_display()
+
+        screen.clear.assert_called_once()
+        screen.refresh.assert_called_once()
+
+    def test_curses_main_recovers_from_resize_without_sleeping(self) -> None:
+        ui = CursesUI(StatusTracker(1), ThreadLogManager())
+        ui.running = True
+        screen = MagicMock()
+        screen.getmaxyx.return_value = (24, 80)
+        with (
+            patch.object(curses_module, "curs_set"),
+            patch.object(curses_module, "has_colors", return_value=False),
+            patch.object(curses_module, "resizeterm") as resize,
+            patch.object(
+                ui,
+                "_refresh_display",
+                side_effect=[curses_module.error(), KeyboardInterrupt()],
+            ),
+            patch("hephaestus.automation.curses_ui.time.sleep") as sleep,
+        ):
+            ui._curses_main(screen)
+
+        resize.assert_called_once_with(24, 80)
+        sleep.assert_not_called()
 
     def test_draw_workers_returns_next_row(self) -> None:
         """Test _draw_workers returns the next free row."""
