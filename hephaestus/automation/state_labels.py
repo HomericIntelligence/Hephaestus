@@ -135,8 +135,7 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_IMPLEMENTATION_GO: {
         "color": "0e8a16",  # green — approved
         "description": (
-            "Exact reviewed head has no unresolved review threads; "
-            "merge-wait still requires the process-local reviewed-head proof."
+            "Reviewed head is clean; merge-wait still requires the reviewed-head proof."
         ),
     },
     STATE_SKIP: {

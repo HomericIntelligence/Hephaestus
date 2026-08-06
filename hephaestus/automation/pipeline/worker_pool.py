@@ -2134,14 +2134,17 @@ class WorkerPool:
                 "core.fsmonitor=false",
                 "status",
                 "--porcelain",
-                "--untracked-files=all",
+                "--untracked-files=no",
             ],
             cwd=checkout,
             timeout=timeout_s,
             env=_controlled_git_env(),
         )
         if status.stdout.strip():
-            return JobResult(ok=False, error=f"checkout is dirty: {checkout}")
+            return JobResult(
+                ok=False,
+                error=f"checkout has tracked changes: {checkout}: {status.stdout.strip()}",
+            )
         branch_result = git_utils.run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=checkout,
@@ -2194,14 +2197,14 @@ class WorkerPool:
                 "core.fsmonitor=false",
                 "status",
                 "--porcelain",
-                "--untracked-files=all",
+                "--untracked-files=no",
             ],
             cwd=checkout,
             timeout=timeout_s,
             env=_controlled_git_env(),
         )
         if status.stdout.strip():
-            return f"checkout is dirty: {checkout}"
+            return f"checkout has tracked changes: {checkout}: {status.stdout.strip()}"
         branch_result = git_utils.run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=checkout,

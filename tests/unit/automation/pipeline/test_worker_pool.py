@@ -3311,7 +3311,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3367,7 +3367,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3411,7 +3411,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3490,12 +3490,32 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert "checkout is dirty" in (result.error or "")
+        assert "checkout has tracked changes" in (result.error or "")
         argvs = [call.args[0] for call in mock_run.call_args_list]
         assert ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"] not in argvs
         assert not any(
             argv[:3] == ["git", "-c", f"core.hooksPath={os.devnull}"] and "merge" in argv
             for argv in argvs
+        )
+
+    def test_checkout_state_allows_untracked_artifacts(self, tmp_path: Path) -> None:
+        """Logs and build output do not block a clean checkout from synchronizing (#2645)."""
+        checkout = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "init", "-b", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+        )
+        (checkout / "output.log").write_text("pipeline output\n")
+        (checkout / "build").mkdir()
+
+        assert (
+            WorkerPool._checkout_state_error(
+                checkout=checkout,
+                default_branch="main",
+                timeout_s=120,
+            )
+            is None
         )
 
     def test_sync_checkout_rejects_dirty_worktree_before_fetching(
@@ -3535,7 +3555,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3543,7 +3563,7 @@ class TestGitOps:
             ),
         ]
         assert result.ok is False
-        assert "dirty" in (result.error or "")
+        assert "tracked changes" in (result.error or "")
 
     def test_sync_checkout_rejects_unexpected_origin(
         self,
@@ -4079,7 +4099,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -4141,7 +4161,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
