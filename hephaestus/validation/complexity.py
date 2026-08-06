@@ -41,6 +41,15 @@ class RuffComplexityError(RuntimeError):
         self.returncode = returncode
 
 
+def _subprocess_text(value: str | bytes | None) -> str:
+    """Return subprocess exception output as display-safe text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
 def run_ruff_complexity_check(
     path: str,
     threshold: int,
@@ -68,23 +77,35 @@ def run_ruff_complexity_check(
     if not target.exists():
         raise RuffComplexityError(f"Ruff target does not exist: {target}")
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ruff",
-            "check",
-            "--select=C901",
-            f"--config=lint.mccabe.max-complexity={threshold}",
-            "--output-format=json",
-            "--exit-zero",
-            path,
-        ],
-        capture_output=True,
-        text=True,
-        cwd=repo_root,
-        timeout=NETWORK_TIMEOUT,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruff",
+                "check",
+                "--select=C901",
+                f"--config=lint.mccabe.max-complexity={threshold}",
+                "--output-format=json",
+                "--exit-zero",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=NETWORK_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout = exc.timeout if exc.timeout is not None else NETWORK_TIMEOUT
+        raise RuffComplexityError(
+            f"Ruff timed out after {timeout} seconds",
+            stderr=_subprocess_text(exc.stderr).strip(),
+        ) from exc
+    except OSError as exc:
+        raise RuffComplexityError(
+            f"Failed to launch Ruff: {exc}",
+            stderr=str(exc),
+        ) from exc
 
     stderr = result.stderr.strip()
     if result.returncode != 0:

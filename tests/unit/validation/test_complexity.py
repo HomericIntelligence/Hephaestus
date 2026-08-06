@@ -1,6 +1,7 @@
 """Tests for hephaestus.validation.complexity."""
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +67,34 @@ class TestRunRuffComplexityCheck:
 
         assert exc_info.value.stderr == "ruff failed to inspect target"
         assert exc_info.value.returncode == 2
+
+    def test_timeout_is_tool_failure(self, tmp_path: Path) -> None:
+        """A hung Ruff process is translated into the normal tool-failure type."""
+        target = tmp_path / "target.py"
+        target.write_text("def f():\n    return 1\n")
+        with patch("hephaestus.validation.complexity.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd="ruff",
+                timeout=NETWORK_TIMEOUT,
+                stderr=b"partial timeout diagnostic",
+            )
+            with pytest.raises(RuffComplexityError, match="timed out") as exc_info:
+                run_ruff_complexity_check(str(target), 10, tmp_path)
+
+        assert exc_info.value.stderr == "partial timeout diagnostic"
+        assert exc_info.value.returncode is None
+
+    def test_process_launch_failure_is_tool_failure(self, tmp_path: Path) -> None:
+        """A subprocess launch failure is translated into the normal tool-failure type."""
+        target = tmp_path / "target.py"
+        target.write_text("def f():\n    return 1\n")
+        with patch("hephaestus.validation.complexity.subprocess.run") as mock_run:
+            mock_run.side_effect = OSError(2, "No such file or directory")
+            with pytest.raises(RuffComplexityError, match="Failed to launch Ruff") as exc_info:
+                run_ruff_complexity_check(str(target), 10, tmp_path)
+
+        assert "No such file or directory" in exc_info.value.stderr
+        assert exc_info.value.returncode is None
 
     def test_empty_output_is_tool_failure(self, tmp_path: Path) -> None:
         """A successful process without Ruff JSON cannot pass validation."""
@@ -141,6 +170,24 @@ class TestCheckMaxComplexity:
 
         assert "ruff crashed" in capsys.readouterr().err
 
+    def test_timeout_returns_false(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Human output treats a Ruff timeout as a failed check, not a traceback."""
+        target = tmp_path / "target.py"
+        target.write_text("def f():\n    return 1\n")
+        with patch("hephaestus.validation.complexity.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd="ruff",
+                timeout=NETWORK_TIMEOUT,
+                stderr="partial timeout diagnostic",
+            )
+            assert check_max_complexity(str(target), 10, repo_root=tmp_path) is False
+
+        err = capsys.readouterr().err
+        assert "timed out" in err
+        assert "partial timeout diagnostic" in err
+
 
 class TestMain:
     """Tests for main() CLI entry point."""
@@ -213,6 +260,41 @@ class TestMain:
         assert payload["exit_code"] == 1
         assert payload["ruff_exit_code"] == 2
         assert payload["stderr"] == "ruff crashed"
+
+    def test_json_timeout_failure_is_structured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """JSON mode emits the standard tool-failure envelope for Ruff timeouts."""
+        target = tmp_path / "target.py"
+        target.write_text("def f():\n    return 1\n")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-complexity",
+                "--path",
+                str(target),
+                "--repo-root",
+                str(tmp_path),
+                "--json",
+            ],
+        )
+        with patch("hephaestus.validation.complexity.subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd="ruff",
+                timeout=NETWORK_TIMEOUT,
+                stderr="partial timeout diagnostic",
+            )
+            assert main() == 1
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 1
+        assert "timed out" in payload["message"]
+        assert payload["ruff_exit_code"] is None
+        assert payload["stderr"] == "partial timeout diagnostic"
 
 
 class TestComplexitySubprocessTimeout:
