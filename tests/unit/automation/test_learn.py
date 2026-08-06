@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.automation.learn import (
     _LEARN_RATE_LIMIT_MAX_RETRIES,
     build_learn_prompt,
@@ -104,7 +106,7 @@ class TestRunLearn:
         mock_result.stdout = "Learn complete. PR created."
 
         with patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run:
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is True
         cmd_args = mock_run.call_args.args[0]
@@ -130,7 +132,7 @@ class TestRunLearn:
         worktree_path.mkdir()
 
         with patch("hephaestus.automation.learn.run", side_effect=RuntimeError("claude crashed")):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is False
         log_file = tmp_path / "learn-42.log"
@@ -144,26 +146,34 @@ class TestRunLearn:
         assert record["error"] == "claude crashed"
         assert record["mnemosyne_update_status"] == "failed"
 
-    def test_codex_skips_legacy_claude_session(self, tmp_path: Path) -> None:
-        """Legacy sessions must not be resumed through Codex."""
+    @pytest.mark.parametrize(("agent", "session_agent"), [("claude", None), ("codex", "claude")])
+    def test_invalid_provider_metadata_never_resumes(
+        self, tmp_path: Path, agent: str, session_agent: str | None
+    ) -> None:
+        """Absent and cross-provider metadata never resume."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        with patch("hephaestus.automation.learn.resume_agent_session") as mock_resume:
+        with (
+            patch("hephaestus.automation.learn.run") as mock_run,
+            patch("hephaestus.automation.learn.resume_agent_session") as mock_resume,
+        ):
             result = run_learn(
                 "session-abc",
                 worktree_path,
                 42,
                 tmp_path,
-                agent="codex",
+                agent=agent,
+                session_agent=session_agent,
             )
 
         assert result is False
+        mock_run.assert_not_called()
         mock_resume.assert_not_called()
         assert (tmp_path / "learn-42.log").read_text().startswith("FAILED:")
         record = json.loads((tmp_path / "learn-42.json").read_text())
         assert record["learn_status"] == "failed"
-        assert "selected agent is codex" in record["error"]
+        assert "skipping" in record["error"]
 
     def test_codex_resumes_matching_codex_session(self, tmp_path: Path) -> None:
         """Codex sessions with provider metadata should resume through Codex."""
@@ -205,7 +215,7 @@ class TestRunLearn:
         mock_result.stdout = "done"
 
         with patch("hephaestus.automation.learn.run", return_value=mock_result):
-            run_learn("session-abc", worktree_path, 42, state_dir)
+            run_learn("session-abc", worktree_path, 42, state_dir, session_agent="claude")
 
         assert state_dir.exists()
 
@@ -218,7 +228,14 @@ class TestRunLearn:
         mock_result.stdout = "done"
 
         with patch("hephaestus.automation.learn.run", return_value=mock_result):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path, slot_id=3)
+            result = run_learn(
+                "session-abc",
+                worktree_path,
+                42,
+                tmp_path,
+                slot_id=3,
+                session_agent="claude",
+            )
 
         assert result is True
 
@@ -236,7 +253,7 @@ class TestRunLearn:
                 "hephaestus.automation.learn.learn_model", return_value="claude-haiku-4-5"
             ) as mock_learn_model,
         ):
-            run_learn("session-abc", worktree_path, 42, tmp_path)
+            run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         mock_learn_model.assert_called_once()
         # Verify "--model" "claude-haiku-4-5" appears in the command args
@@ -259,7 +276,7 @@ class TestRunLearn:
             patch.dict(os.environ, {"HEPH_LEARN_MODEL": "claude-opus-4-7"}),
             patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run,
         ):
-            run_learn("session-abc", worktree_path, 42, tmp_path)
+            run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         cmd_args = mock_run.call_args[0][0]
         model_idx = cmd_args.index("--model")
@@ -287,7 +304,7 @@ class TestRunLearnRateLimitRetry:
             patch("hephaestus.automation.learn.run", side_effect=[first, second]) as mock_run,
             patch("hephaestus.automation.learn.wait_until") as mock_wait,
         ):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is True
         # Two invocations: the rate-limited one and the successful retry.
@@ -315,7 +332,7 @@ class TestRunLearnRateLimitRetry:
             patch("hephaestus.automation.learn.run", side_effect=[err, success]) as mock_run,
             patch("hephaestus.automation.learn.wait_until") as mock_wait,
         ):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is True
         assert mock_run.call_count == 2
@@ -341,7 +358,7 @@ class TestRunLearnRateLimitRetry:
             patch("hephaestus.automation.learn.wait_until") as mock_wait,
             patch("hephaestus.automation.learn.time.time", return_value=1_000_000),
         ):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is True
         # Backed off a fixed interval (now + backoff), not epoch 0.
@@ -359,7 +376,7 @@ class TestRunLearnRateLimitRetry:
             patch("hephaestus.automation.learn.run", return_value=always) as mock_run,
             patch("hephaestus.automation.learn.wait_until") as mock_wait,
         ):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is False
         # Bounded: max_retries + 1 attempts, then give up (no infinite loop).
@@ -383,7 +400,7 @@ class TestRunLearnRateLimitRetry:
             ) as mock_run,
             patch("hephaestus.automation.learn.wait_until") as mock_wait,
         ):
-            result = run_learn("session-abc", worktree_path, 42, tmp_path)
+            result = run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
 
         assert result is False
         # Genuine failure: a single attempt, no wait, no retry.

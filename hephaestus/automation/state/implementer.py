@@ -74,7 +74,13 @@ class ImplementationStateManager:
 
     def save(self, state: ImplementationState) -> None:
         """Atomically persist *state* to ``issue-<n>.json`` under ``state_dir``."""
-        save_state_file(self.state_dir, "issue", state.issue_number, state)
+        validated_state = ImplementationState.model_validate(state.model_dump())
+        save_state_file(
+            self.state_dir,
+            "issue",
+            validated_state.issue_number,
+            validated_state,
+        )
 
     def load_all(self) -> None:
         """Load every ``issue-*.json`` file under ``state_dir`` into memory.

@@ -659,9 +659,9 @@ def load_impl_session_id(state_dir: Path, issue_number: int, agent: str) -> str 
 
     The implementer persists its state to ``issue-<n>.json`` (see
     ``ImplementationStateManager.save``), not ``state-<n>.json``. A stored
-    session is only returned when its ``session_agent`` is compatible with the
-    selected ``agent``; legacy files with no ``session_agent`` are treated as
-    Claude sessions by ``session_agent_matches``.
+    session is only returned when its ``session_agent`` explicitly names a
+    supported provider compatible with the selected ``agent``. Missing,
+    malformed, unknown, and cross-provider metadata is not resumable.
 
     Args:
         state_dir: Directory holding the implementer state files.
@@ -680,13 +680,19 @@ def load_impl_session_id(state_dir: Path, issue_number: int, agent: str) -> str 
 
     try:
         data = json.loads(state_file.read_text())
-        session_id: str | None = data.get("session_id")
-        session_agent: str | None = data.get("session_agent")
-        if session_id and not session_agent_matches(session_agent, agent):
+        if not isinstance(data, dict):
+            raise ValueError("expected JSON object")
+
+        session_id = data.get("session_id")
+        session_agent = data.get("session_agent")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        if not session_agent_matches(session_agent, agent):
             logger.info(
-                "Skipping impl session for issue #%s: session belongs to %s, selected agent is %s",
+                "Skipping impl session for issue #%s: provider metadata is %r, "
+                "selected provider is %s",
                 issue_number,
-                session_agent or "claude",
+                session_agent,
                 agent,
             )
             return None

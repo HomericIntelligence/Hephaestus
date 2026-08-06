@@ -11,8 +11,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from hephaestus.agents.runtime import AgentName
 
 # The canonical heading the planner writes at the top of the single plan
 # comment is now defined in :mod:`hephaestus.automation.protocol` together
@@ -101,7 +104,7 @@ class ImplementationState(BaseModel):
     branch_name: str | None = None
     pr_number: int | None = None
     session_id: str | None = None
-    session_agent: str | None = None
+    session_agent: AgentName | None = None
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
     error: str | None = None
@@ -110,6 +113,13 @@ class ImplementationState(BaseModel):
     review_iterations: int = 0  # number of review loop iterations executed
     last_review_verdict: str | None = None  # "GO", "NOGO", "AMBIGUOUS"
     last_review_grade: str | None = None  # letter grade from final review
+
+    @model_validator(mode="after")
+    def require_session_provider(self) -> Self:
+        """Require supported provider metadata for every persisted session ID."""
+        if self.session_id is not None and self.session_agent is None:
+            raise ValueError("session_agent must name a supported provider when session_id is set")
+        return self
 
 
 class WorkerResult(BaseModel):
