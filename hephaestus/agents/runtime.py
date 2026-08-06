@@ -53,6 +53,7 @@ CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
+CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
 PI_MODEL_ENV = "HEPH_PI_MODEL"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -750,11 +751,28 @@ def run_claude_text(
     sandbox: str = "workspace-write",
     allowed_tools: str = "Read,Write,Edit,Glob,Grep,Bash",
 ) -> subprocess.CompletedProcess[str]:
-    """Run Claude Code non-interactively and return a text completed process."""
+    """Run Claude Code with an explicit tool policy for read-only calls."""
     cmd = ["claude", "--print", "--output-format", "text"]
     if model:
         cmd.extend(["--model", model])
-    if sandbox != "read-only":
+
+    if sandbox == "read-only":
+        # --allowedTools only pre-approves tools; --tools fixes the model-visible
+        # built-in surface. Bare mode and strict MCP mode without a supplied
+        # config prevent ambient configuration from adding executable paths.
+        cmd.extend(
+            [
+                "--bare",
+                "--permission-mode",
+                "dontAsk",
+                "--tools",
+                CLAUDE_READ_ONLY_TOOLS,
+                "--allowedTools",
+                CLAUDE_READ_ONLY_TOOLS,
+                "--strict-mcp-config",
+            ]
+        )
+    else:
         cmd.extend(
             [
                 "--permission-mode",

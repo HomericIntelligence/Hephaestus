@@ -648,8 +648,16 @@ allowlists, cwd/worktree scoping, subprocess timeouts, prompt fencing for
 untrusted GitHub content, secure logs, and GitHub branch protection plus the
 required CI/CD checks.
 
+`--allowedTools` pre-approves tools but is not by itself a tool-availability
+boundary. `run_claude_text(..., sandbox="read-only")` additionally fixes the
+built-in surface with `--tools Read,Glob,Grep`, disables ambient discovery with
+`--bare` and strict MCP mode without a supplied config, and fails when the
+installed CLI rejects the required policy. This remains a model-tool
+restriction, not an OS-level sandbox.
+
 | Call site | Tools | Scope / controls |
 | --- | --- | --- |
+| `agents/runtime.py:run_claude_text` | `Read,Glob,Grep` | One-shot `agent_stage` read-only execution uses `--bare`, a fixed `--tools`/`--allowedTools` scope, `dontAsk`, and strict MCP mode without a supplied config; incompatible CLIs fail the invocation instead of falling back. |
 | `audit_reviewer.py:run_audit_coordinator` | `Read,Glob,Grep` | Repo-root audit analysis; no write tools; direct-runner parity uses `sandbox="read-only"`. |
 | `comment_difficulty.py:_run_classifier_session` | `Read,Glob,Grep` | Worktree comment classification; no write tools; result is parsed JSON only. |
 | `pr_review_core.py:_invoke_and_parse_review_session` | `Read,Glob,Grep,Bash,Skill,Agent,WebFetch` | Worktree PR analysis invokes the normal read-only `$athena:pr-review` workflow when available (or its inline fallback); the agent does not post reviews or mutate CI/CD. |

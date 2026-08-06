@@ -37,7 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default="workspace-write",
-        help="Sandbox mode for agents that support it",
+        help=(
+            "Execution policy: Codex sandbox mode; Claude read-only applies "
+            "a fixed non-mutating tool surface"
+        ),
     )
     parser.add_argument(
         "--approval",
@@ -145,9 +148,10 @@ def run_direct_agent(
 # Flag values that silently no-op when --agent=claude is selected.
 # - `approval` is not a parameter of run_claude_text at all, so any
 #   non-default value (i.e. != "never") is a no-op.
-# - `sandbox="read-only"` IS honored (run_claude_text:125 gates
-#   --permission-mode on it), so only `danger-full-access` is a no-op.
-# See issue #773.
+# - `sandbox="read-only"` maps to run_claude_text's fixed Claude tool policy;
+#   it is enforced through CLI tool/configuration flags, not an OS sandbox.
+# - `danger-full-access` remains unsupported for Claude.
+# See issues #773 and #2369.
 _CLAUDE_NOOP_VALUES: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("approval", "--approval", frozenset({"untrusted", "on-request"})),
     ("sandbox", "--sandbox", frozenset({"danger-full-access"})),
