@@ -170,7 +170,7 @@ class TestFilterAuditResults:
         name: str = "pkg",
         version: str = "1.0",
     ) -> dict[str, object]:
-        return {"dependencies": [{"name": name, "version": version, "vulns": vulns}]}
+        return {"dependencies": [{"name": name, "version": version, "vulns": vulns}], "fixes": []}
 
     def test_high_severity_blocks(self) -> None:
         """HIGH severity vulnerabilities are blocking."""
@@ -196,7 +196,7 @@ class TestFilterAuditResults:
 
     def test_no_vulnerabilities(self) -> None:
         """No vulnerabilities returns empty lists."""
-        data = {"dependencies": [{"name": "safe", "version": "1.0", "vulns": []}]}
+        data = {"dependencies": [{"name": "safe", "version": "1.0", "vulns": []}], "fixes": []}
         blocking, suppressed = filter_audit_results(data)
         assert blocking == []
         assert suppressed == []
@@ -237,9 +237,9 @@ class TestFilterAuditResults:
     @pytest.mark.parametrize(
         "data",
         [
-            pytest.param({"dependencies": [{}]}, id="empty-dependency"),
+            pytest.param({"dependencies": [{}], "fixes": []}, id="empty-dependency"),
             pytest.param(
-                {"dependencies": [{"name": "pkg", "version": "1.0"}]},
+                {"dependencies": [{"name": "pkg", "version": "1.0"}], "fixes": []},
                 id="missing-vulns",
             ),
             pytest.param(
@@ -250,7 +250,8 @@ class TestFilterAuditResults:
                             "version": "1.0",
                             "vulns": [{}],
                         }
-                    ]
+                    ],
+                    "fixes": [],
                 },
                 id="missing-vulnerability-id",
             ),
@@ -259,6 +260,18 @@ class TestFilterAuditResults:
     def test_invalid_nested_result_raises(self, data: object) -> None:
         """Malformed nested scanner data cannot produce a clean verdict."""
         with pytest.raises(ValueError, match=r"dependencies\[0\]"):
+            filter_audit_results(data)
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param({"dependencies": []}, id="missing-fixes"),
+            pytest.param({"dependencies": [], "fixes": {}}, id="fixes-not-list"),
+        ],
+    )
+    def test_fixes_list_is_required(self, data: object) -> None:
+        """Incomplete scanner evidence without a fixes list cannot pass."""
+        with pytest.raises(ValueError, match="fixes must be a list"):
             filter_audit_results(data)
 
     def test_cvss_vector_only_high_severity_blocks(self) -> None:
@@ -320,6 +333,8 @@ class TestMain:
             pytest.param([], id="array"),
             pytest.param({}, id="missing-dependencies"),
             pytest.param({"dependencies": {}}, id="dependencies-not-list"),
+            pytest.param({"dependencies": []}, id="missing-fixes"),
+            pytest.param({"dependencies": [], "fixes": {}}, id="fixes-not-list"),
         ],
     )
     def test_invalid_top_level_shape_fails_closed(
@@ -329,7 +344,7 @@ class TestMain:
         data: object,
         json_mode: bool,
     ) -> None:
-        """Only an object containing a dependencies list is accepted."""
+        """Only an object containing dependencies and fixes lists is accepted."""
         argv = ["filter-audit", *(["--json"] if json_mode else [])]
         monkeypatch.setattr("sys.argv", argv)
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
@@ -347,26 +362,26 @@ class TestMain:
     @pytest.mark.parametrize(
         "data",
         [
-            pytest.param({"dependencies": [None]}, id="dependency-not-object"),
-            pytest.param({"dependencies": [{}]}, id="empty-dependency"),
+            pytest.param({"dependencies": [None], "fixes": []}, id="dependency-not-object"),
+            pytest.param({"dependencies": [{}], "fixes": []}, id="empty-dependency"),
             pytest.param(
-                {"dependencies": [{"name": "pkg", "version": "1.0"}]},
+                {"dependencies": [{"name": "pkg", "version": "1.0"}], "fixes": []},
                 id="missing-vulns",
             ),
             pytest.param(
-                {"dependencies": [{"name": "pkg", "skip_reason": "not auditable"}]},
+                {"dependencies": [{"name": "pkg", "skip_reason": "not auditable"}], "fixes": []},
                 id="skipped-dependency",
             ),
             pytest.param(
-                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": {}}]},
+                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": {}}], "fixes": []},
                 id="vulns-not-list",
             ),
             pytest.param(
-                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": [None]}]},
+                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": [None]}], "fixes": []},
                 id="vulnerability-not-object",
             ),
             pytest.param(
-                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": [{}]}]},
+                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": [{}]}], "fixes": []},
                 id="missing-vulnerability-id",
             ),
             pytest.param(
@@ -377,7 +392,8 @@ class TestMain:
                             "version": "1.0",
                             "vulns": [{"id": "CVE-1", "severity": {}}],
                         }
-                    ]
+                    ],
+                    "fixes": [],
                 },
                 id="severity-not-list",
             ),
@@ -389,7 +405,8 @@ class TestMain:
                             "version": "1.0",
                             "vulns": [{"id": "CVE-1", "severity": [None]}],
                         }
-                    ]
+                    ],
+                    "fixes": [],
                 },
                 id="severity-entry-not-object",
             ),
@@ -418,7 +435,7 @@ class TestMain:
 
     def test_clean_audit(self, monkeypatch) -> None:
         """Clean audit with no vulns returns 0."""
-        data = {"dependencies": [{"name": "safe", "version": "1.0", "vulns": []}]}
+        data = {"dependencies": [{"name": "safe", "version": "1.0", "vulns": []}], "fixes": []}
         monkeypatch.setattr("sys.argv", ["filter-audit"])
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
         assert main() == 0
@@ -432,7 +449,8 @@ class TestMain:
                     "version": "1.0",
                     "vulns": [{"id": "CVE-1", "severity": [{"score": 9.5}]}],
                 }
-            ]
+            ],
+            "fixes": [],
         }
         monkeypatch.setattr("sys.argv", ["filter-audit"])
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
@@ -447,7 +465,8 @@ class TestMain:
                     "version": "1.0",
                     "vulns": [{"id": "CVE-2", "severity": [{"score": 3.0}]}],
                 }
-            ]
+            ],
+            "fixes": [],
         }
         monkeypatch.setattr("sys.argv", ["filter-audit"])
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
@@ -468,7 +487,8 @@ class TestMain:
                     "version": "1.0",
                     "vulns": [{"id": "CVE-UNKNOWN"}],
                 }
-            ]
+            ],
+            "fixes": [],
         }
         argv = ["filter-audit", *(["--json"] if json_mode else [])]
         monkeypatch.setattr("sys.argv", argv)

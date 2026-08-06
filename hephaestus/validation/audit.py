@@ -246,6 +246,10 @@ def _validate_audit_result(data: object) -> dict[str, Any]:
     if not isinstance(dependencies, list):
         raise ValueError("dependencies must be a list")
 
+    fixes = data.get("fixes")
+    if not isinstance(fixes, list):
+        raise ValueError("fixes must be a list")
+
     for dependency_index, dependency in enumerate(dependencies):
         _validate_audit_dependency(dependency, dependency_index)
 
