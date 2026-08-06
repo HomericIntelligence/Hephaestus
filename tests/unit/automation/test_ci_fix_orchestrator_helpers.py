@@ -188,6 +188,47 @@ class TestRetryWorktreeChanges:
 class TestPushCiFix:
     """The post-agent push path normalizes dirty but resolved tracked changes."""
 
+    def test_no_tests_collected_refuses_push_with_reason(
+        self,
+        orchestrator: CIFixOrchestrator,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        node = "tests/unit/docs/test_x.py"
+        (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / node).write_text("def test_a():\n    pass\n")
+
+        with (
+            patch.object(orchestrator, "_head_advanced", return_value=True),
+            patch.object(orchestrator, "_ci_fix_head_is_pushable", return_value=True),
+            patch("hephaestus.automation.ci_fix_orchestrator.ensure_branch_commit_metadata"),
+            patch(
+                "hephaestus.automation.ci_fix_push_guard.subprocess.run",
+                return_value=MagicMock(
+                    returncode=5,
+                    stdout="no tests collected",
+                    stderr="",
+                ),
+            ),
+            patch(
+                "hephaestus.automation.ci_fix_orchestrator."
+                "push_current_branch_with_lease_on_divergence"
+            ) as push,
+        ):
+            pushed = orchestrator.push_ci_fix(
+                worktree_path=tmp_path,
+                pre_agent_sha="abc123",
+                issue_number=2383,
+                pr_number=2400,
+                pr_head_branch="2383-pytest-exit-code",
+                session_id=None,
+                ci_logs=f"FAILED {node}::test_a\n",
+            )
+
+        assert pushed is False
+        assert "pytest exit code 5: no tests collected" in caplog.text
+        push.assert_not_called()
+
     def test_commits_resolved_dirty_tracked_changes_before_push(
         self, orchestrator: CIFixOrchestrator, tmp_path: Path
     ) -> None:
@@ -680,18 +721,62 @@ class TestAffectedTestsPass:
             assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is True
         mock_run.assert_not_called()
 
-    def test_passing_rerun_allows_push(
-        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("returncode", "expected", "failure_reason"),
+        [
+            pytest.param(0, True, None, id="passed"),
+            pytest.param(
+                1,
+                False,
+                "pytest exit code 1: tests failed",
+                id="tests-failed",
+            ),
+            pytest.param(
+                2,
+                False,
+                "pytest exit code 2: test execution interrupted",
+                id="interrupted",
+            ),
+            pytest.param(
+                3,
+                False,
+                "pytest exit code 3: internal error",
+                id="internal-error",
+            ),
+            pytest.param(
+                4,
+                False,
+                "pytest exit code 4: command-line usage error",
+                id="usage-error",
+            ),
+            pytest.param(
+                5,
+                False,
+                "pytest exit code 5: no tests collected",
+                id="no-tests-collected",
+            ),
+        ],
+    )
+    def test_pytest_exit_codes(
+        self,
+        orchestrator: CIFixOrchestrator,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        returncode: int,
+        expected: bool,
+        failure_reason: str | None,
     ) -> None:
         node = "tests/unit/docs/test_x.py"
         (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / node).write_text("def test_a():\n    pass\n")
         logs = f"FAILED {node}::test_a\n"
         with patch(
-            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
-            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            "hephaestus.automation.ci_fix_push_guard.subprocess.run",
+            return_value=MagicMock(returncode=returncode, stdout="", stderr=""),
         ) as mock_run:
-            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is True
+            result = orchestrator._affected_tests_pass(tmp_path, 7, logs)
+
+        assert result is expected
         assert mock_run.call_args.args[0][:5] == [
             "uv",
             "run",
@@ -699,34 +784,26 @@ class TestAffectedTestsPass:
             "-m",
             "pytest",
         ]
-        assert f"{node}::test_a" in mock_run.call_args.args[0]
+        if failure_reason is not None:
+            assert failure_reason in caplog.text
 
-    def test_failing_rerun_refuses_push(
-        self, orchestrator: CIFixOrchestrator, tmp_path: Path
+    def test_signal_refuses_push(
+        self,
+        orchestrator: CIFixOrchestrator,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         node = "tests/unit/docs/test_x.py"
         (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / node).write_text("def test_a():\n    assert False\n")
+        (tmp_path / node).write_text("def test_a():\n    pass\n")
         logs = f"FAILED {node}::test_a\n"
         with patch(
-            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
-            return_value=MagicMock(returncode=1, stdout="1 failed", stderr=""),
+            "hephaestus.automation.ci_fix_push_guard.subprocess.run",
+            return_value=MagicMock(returncode=-15, stdout="", stderr=""),
         ):
             assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is False
 
-    def test_no_tests_ran_exit_code_is_treated_as_pass(
-        self, orchestrator: CIFixOrchestrator, tmp_path: Path
-    ) -> None:
-        """Exit code 5 = the failing test was deleted by the fix/rebase (#2056 remedy)."""
-        node = "tests/unit/docs/test_x.py"
-        (tmp_path / node).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / node).write_text("# test removed by the fix\n")
-        logs = f"FAILED {node}::test_a\n"
-        with patch(
-            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
-            return_value=MagicMock(returncode=5, stdout="no tests ran", stderr=""),
-        ):
-            assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is True
+        assert "pytest terminated by signal 15" in caplog.text
 
     def test_timeout_refuses_push(self, orchestrator: CIFixOrchestrator, tmp_path: Path) -> None:
         node = "tests/unit/docs/test_x.py"
@@ -734,7 +811,7 @@ class TestAffectedTestsPass:
         (tmp_path / node).write_text("def test_a():\n    pass\n")
         logs = f"FAILED {node}::test_a\n"
         with patch(
-            "hephaestus.automation.ci_fix_orchestrator.subprocess.run",
+            "hephaestus.automation.ci_fix_push_guard.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="pytest", timeout=900),
         ):
             assert orchestrator._affected_tests_pass(tmp_path, 7, logs) is False

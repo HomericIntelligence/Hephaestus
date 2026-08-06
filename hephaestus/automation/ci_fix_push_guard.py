@@ -68,9 +68,13 @@ _UNMERGED_STATUS_CODES: frozenset[str] = frozenset({"DD", "AU", "UD", "UA", "DU"
 # the exact test it claims to fix (root cause of PR #2056's stranding).
 _FAILED_TEST_LINE_RE = re.compile(r"(?:^|\s)(?:FAILED|ERROR)\s+(tests/[\w./-]+\.py(?:::[\w./-]+)*)")
 _AFFECTED_TESTS_TIMEOUT_SECONDS = 900
-# pytest exit code 5 = "no tests ran": the failing test may have been deleted by
-# the fix/rebase itself (exactly the #2056 remedy) — not a gate failure.
-_PYTEST_NO_TESTS_RAN = 5
+_PYTEST_FAILURE_REASONS: dict[int, str] = {
+    1: "pytest exit code 1: tests failed",
+    2: "pytest exit code 2: test execution interrupted",
+    3: "pytest exit code 3: internal error",
+    4: "pytest exit code 4: command-line usage error",
+    5: "pytest exit code 5: no tests collected",
+}
 
 
 def extract_failing_pytest_node_ids(ci_logs: str) -> list[str]:
@@ -201,13 +205,11 @@ class CIFixPushGuard(_CIFixHost):
             return False
 
     def _affected_tests_pass(self, worktree_path: Path, issue_number: int, ci_logs: str) -> bool:
-        """Re-run the CI-failing tests locally; refuse the push if they still fail (#2122).
+        """Re-run the CI-failing tests locally before allowing a push (#2122).
 
-        Parses the failing pytest node IDs from ``ci_logs`` and re-runs them in
-        the worktree. Node IDs whose file no longer exists are dropped (a rebase
-        can legitimately delete the failing test — exactly the #2056 remedy).
-        Returns True (gate skipped) when no runnable node IDs are found, so a
-        BEHIND/green PR or an unparseable log never deadlocks the push.
+        The gate is skipped before invocation only when the CI logs contain no
+        runnable node IDs after missing files are filtered. Once pytest is
+        invoked, only exit code 0 passes.
 
         Args:
             worktree_path: Worktree the fix branch is checked out in.
@@ -215,8 +217,8 @@ class CIFixPushGuard(_CIFixHost):
             ci_logs: Combined CI failure log text.
 
         Returns:
-            True if the affected tests pass (or the gate does not apply),
-            False if they still fail or the run times out.
+            True if the affected tests pass or the gate does not apply, False
+            for every nonzero pytest result or timeout.
 
         """
         node_ids = [
@@ -243,10 +245,19 @@ class CIFixPushGuard(_CIFixHost):
         except subprocess.TimeoutExpired:
             logger.error("Issue #%s: pre-push test gate timed out; refusing to push", issue_number)
             return False
-        if result.returncode not in (0, _PYTEST_NO_TESTS_RAN):
+        if result.returncode != 0:
+            reason = (
+                f"pytest terminated by signal {-result.returncode}"
+                if result.returncode < 0
+                else _PYTEST_FAILURE_REASONS.get(
+                    result.returncode,
+                    f"pytest exited with unexpected code {result.returncode}",
+                )
+            )
             logger.error(
-                "Issue #%s: affected tests still failing locally; refusing to push: %s",
+                "Issue #%s: pre-push test gate failed (%s); refusing to push: %s",
                 issue_number,
+                reason,
                 (result.stdout or result.stderr or "")[-500:],
             )
             return False
