@@ -32,6 +32,7 @@ import pickle
 import struct
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -420,25 +421,31 @@ class CIFAR10Downloader(DatasetDownloader):
         output_path.mkdir(parents=True, exist_ok=True)
 
         tarball_name = "cifar-10-python.tar.gz"
-        tar_path = output_path / tarball_name
+        with tempfile.TemporaryDirectory(prefix="hephaestus-cifar10-") as staging_dir:
+            staging_path = Path(staging_dir)
+            tar_path = staging_path / tarball_name
 
-        logger.info("Downloading CIFAR-10 tarball...")
-        if not self.download_with_retry(tarball_name, tar_path):
-            return False
+            logger.info("Downloading CIFAR-10 tarball...")
+            if not self.download_with_retry(tarball_name, tar_path):
+                return False
 
-        logger.info("Extracting CIFAR-10 tarball...")
-        batch_dir = output_path / "cifar-10-batches-py"
-        try:
-            with tarfile.open(tar_path) as tf:
-                _extract_tar_safely(tf, output_path)
-        except (tarfile.TarError, OSError) as exc:
-            logger.error("Failed to extract CIFAR-10 tarball: %s", exc)
-            return False
+            # Recheck after download_with_retry returns so a replacement cannot
+            # cross the verification-to-extraction seam unnoticed.
+            if not _verify_or_remove(tar_path, tarball_name):
+                return False
 
-        tar_path.unlink(missing_ok=True)
+            logger.info("Extracting CIFAR-10 tarball...")
+            batch_dir = staging_path / "cifar-10-batches-py"
+            try:
+                with tarfile.open(tar_path) as tf:
+                    _extract_tar_safely(tf, staging_path)
+            except (tarfile.TarError, OSError) as exc:
+                logger.error("Failed to extract CIFAR-10 tarball: %s", exc)
+                return False
 
-        logger.info("Converting CIFAR-10 batches to IDX format...")
-        success = self._convert_batches(batch_dir, output_path, np)
+            logger.info("Converting CIFAR-10 batches to IDX format...")
+            success = self._convert_batches(batch_dir, output_path, np)
+
         if success:
             logger.info("CIFAR-10 dataset ready at: %s", output_path)
         return success
@@ -460,22 +467,22 @@ class CIFAR10Downloader(DatasetDownloader):
         train_images: list[Any] = []
         train_labels: list[Any] = []
 
-        # NOTE: pickle.load on untrusted input is dangerous. CIFAR-10 batch files
-        # are trusted here because the downloader fetched them from a canonical
-        # torchvision mirror, then verified the bundle's MD5 against the
-        # upstream-published checksum (see _MD5_CHECKSUMS dict and the
-        # checksum-verification step above). batch_dir lives under the
-        # project's write-restricted state directory, so a local attacker
-        # would need to defeat both the URL pinning and the MD5 check to
-        # inject a malicious pickle here. This is the project's only
-        # intentional bypass of the safe-pickle policy documented in
-        # io/utils.py::load_data (allow_unsafe_deserialization=False default)
-        # and SECURITY.md; do NOT generalize this pattern.
+        # NOTE: pickle can execute arbitrary code. This exception is confined to
+        # download_cifar10(), which downloads the upstream CIFAR-10 archive,
+        # checks its pinned digest from _DATASET_MD5, rechecks it immediately
+        # before safe extraction, and converts its batches inside a private
+        # temporary directory. The caller-selected output directory is not part
+        # of the trust decision and receives only derived IDX writes from this
+        # path. Code running as the same operating-system identity or with
+        # elevated privilege remains outside this protection. This is the
+        # project's only intentional safe-pickle bypass; do not generalize it.
         for i in range(1, 6):
             batch_path = batch_dir / f"data_batch_{i}"
             try:
                 with open(batch_path, "rb") as f:
-                    batch = pickle.load(f, encoding="bytes")  # nosec B301 - file is MD5-verified against upstream CIFAR-10 checksums; see security comment above
+                    batch = pickle.load(  # nosec B301 - constrained CIFAR exception; see above
+                        f, encoding="bytes"
+                    )
             except (OSError, pickle.UnpicklingError) as exc:
                 logger.error("Failed to load batch %d: %s", i, exc)
                 return False
@@ -485,7 +492,9 @@ class CIFAR10Downloader(DatasetDownloader):
         try:
             test_path = batch_dir / "test_batch"
             with open(test_path, "rb") as f:
-                test_batch = pickle.load(f, encoding="bytes")  # nosec B301 - file is MD5-verified against upstream CIFAR-10 checksums; see security comment above
+                test_batch = pickle.load(  # nosec B301 - constrained CIFAR exception; see above
+                    f, encoding="bytes"
+                )
         except (OSError, pickle.UnpicklingError) as exc:
             logger.error("Failed to load test batch: %s", exc)
             return False

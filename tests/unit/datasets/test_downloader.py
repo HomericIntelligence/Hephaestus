@@ -2,6 +2,10 @@
 """Tests for dataset downloading utilities."""
 
 import gzip
+import hashlib
+import io
+import os
+import stat
 import tarfile
 from http.client import HTTPMessage
 from pathlib import Path
@@ -21,6 +25,17 @@ from hephaestus.datasets.downloader import (
     FashionMNISTDownloader,
     MNISTDownloader,
 )
+
+
+def _cifar_archive_bytes(batch_bytes: bytes) -> bytes:
+    """Build a minimal CIFAR tar archive for downloader lifecycle tests."""
+    archive = io.BytesIO()
+    member = tarfile.TarInfo("cifar-10-batches-py/data_batch_1")
+    member.size = len(batch_bytes)
+    member.mode = 0o600
+    with tarfile.open(fileobj=archive, mode="w") as tf:
+        tf.addfile(member, io.BytesIO(batch_bytes))
+    return archive.getvalue()
 
 
 class TestDatasetDownloader:
@@ -388,23 +403,106 @@ class TestCIFAR10Downloader:
             with pytest.raises(ImportError, match="numpy"):
                 CIFAR10Downloader().download_cifar10(str(tmp_path))
 
-    @patch.object(DatasetDownloader, "download_with_retry", return_value=True)
-    def test_download_uses_safe_extraction_helper(self, _mock, tmp_path: Path) -> None:
-        """CIFAR-10 routes extraction through the cross-version safety helper."""
+    def test_download_uses_private_staging_through_conversion(self, tmp_path: Path) -> None:
+        """CIFAR pickles remain private and ephemeral through conversion."""
         import sys
 
-        tar_path = tmp_path / "cifar-10-python.tar.gz"
-        with tarfile.open(tar_path, "w"):
-            pass
+        tarball_name = "cifar-10-python.tar.gz"
+        archive_bytes = _cifar_archive_bytes(b"verified batch")
+        expected_md5 = hashlib.md5(archive_bytes, usedforsecurity=False).hexdigest()
+        caller_batch_dir = tmp_path / "cifar-10-batches-py"
+        caller_batch_dir.mkdir()
+        (caller_batch_dir / "data_batch_1").write_bytes(b"caller replacement")
+
+        staged_root: Path | None = None
+        subject = CIFAR10Downloader()
+
+        def fake_download(
+            filename: str,
+            path: Path,
+            max_retries: int | None = None,
+        ) -> bool:
+            assert filename == tarball_name
+            assert max_retries is None
+            assert path.parent != tmp_path
+            path.write_bytes(archive_bytes)
+            return True
+
+        def observe_conversion(
+            batch_dir: Path,
+            output_dir: Path,
+            _np: object,
+        ) -> bool:
+            nonlocal staged_root
+            staged_root = batch_dir.parent
+            assert output_dir == tmp_path
+            assert batch_dir != caller_batch_dir
+            assert (batch_dir / "data_batch_1").read_bytes() == b"verified batch"
+            assert (staged_root / tarball_name).is_file()
+            if os.name == "posix":
+                assert stat.S_IMODE(staged_root.stat().st_mode) == 0o700
+            return True
 
         with (
             patch.dict(sys.modules, {"numpy": MagicMock()}),
-            patch.object(CIFAR10Downloader, "_convert_batches", return_value=True),
-            patch.object(downloader, "_extract_tar_safely") as extract,
+            patch.dict(downloader._DATASET_MD5, {tarball_name: expected_md5}),
+            patch.object(subject, "download_with_retry", side_effect=fake_download),
+            patch.object(subject, "_convert_batches", side_effect=observe_conversion),
+            patch.object(
+                downloader,
+                "_extract_tar_safely",
+                wraps=downloader._extract_tar_safely,
+            ) as extract,
         ):
-            assert CIFAR10Downloader().download_cifar10(str(tmp_path)) is True
+            assert subject.download_cifar10(str(tmp_path)) is True
 
         extract.assert_called_once()
+        assert staged_root is not None
+        assert not staged_root.exists()
+        assert (caller_batch_dir / "data_batch_1").read_bytes() == b"caller replacement"
+
+    def test_download_rejects_archive_replaced_after_verification(self, tmp_path: Path) -> None:
+        """A post-verification archive replacement fails before extraction."""
+        import sys
+
+        tarball_name = "cifar-10-python.tar.gz"
+        verified_bytes = _cifar_archive_bytes(b"verified batch")
+        replacement_bytes = _cifar_archive_bytes(b"replacement batch")
+        expected_md5 = hashlib.md5(verified_bytes, usedforsecurity=False).hexdigest()
+
+        staged_root: Path | None = None
+        subject = CIFAR10Downloader()
+
+        def replace_after_verification(
+            filename: str,
+            path: Path,
+            max_retries: int | None = None,
+        ) -> bool:
+            nonlocal staged_root
+            assert max_retries is None
+            path.write_bytes(verified_bytes)
+            assert downloader._verify_or_remove(path, filename) is True
+            path.write_bytes(replacement_bytes)
+            staged_root = path.parent
+            return True
+
+        with (
+            patch.dict(sys.modules, {"numpy": MagicMock()}),
+            patch.dict(downloader._DATASET_MD5, {tarball_name: expected_md5}),
+            patch.object(
+                subject,
+                "download_with_retry",
+                side_effect=replace_after_verification,
+            ),
+            patch.object(downloader, "_extract_tar_safely") as extract,
+            patch.object(subject, "_convert_batches") as convert,
+        ):
+            assert subject.download_cifar10(str(tmp_path)) is False
+
+        extract.assert_not_called()
+        convert.assert_not_called()
+        assert staged_root is not None
+        assert not staged_root.exists()
 
 
 class TestEMNISTDownloader:
