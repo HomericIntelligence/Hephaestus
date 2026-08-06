@@ -25,6 +25,67 @@ def _clean_registry() -> None:
     reset_all_circuit_breakers()
 
 
+class TestCircuitBreakerConfiguration:
+    """Tests for circuit-breaker configuration validation."""
+
+    @pytest.mark.parametrize(
+        (
+            "failure_threshold",
+            "recovery_timeout",
+            "half_open_max_calls",
+            "success_threshold",
+            "field",
+        ),
+        [
+            (0, 0.0, 1, 1, "failure_threshold"),
+            (1, -0.1, 1, 1, "recovery_timeout"),
+            (1, float("nan"), 1, 1, "recovery_timeout"),
+            (1, float("inf"), 1, 1, "recovery_timeout"),
+            (1, 0.0, 0, 1, "half_open_max_calls"),
+            (1, 0.0, 1, 0, "success_threshold"),
+        ],
+    )
+    def test_invalid_configuration_raises_at_construction(
+        self,
+        failure_threshold: int,
+        recovery_timeout: float,
+        half_open_max_calls: int,
+        success_threshold: int,
+        field: str,
+    ) -> None:
+        """Invalid configuration raises before protected work can start."""
+        target = MagicMock()
+
+        with pytest.raises(ValueError, match=field):
+            breaker = CircuitBreaker(
+                "invalid",
+                failure_threshold=failure_threshold,
+                recovery_timeout=recovery_timeout,
+                half_open_max_calls=half_open_max_calls,
+                success_threshold=success_threshold,
+            )
+            breaker.call(target)
+
+        target.assert_not_called()
+
+    def test_valid_minimum_configuration_completes_recovery_cycle(self) -> None:
+        """Minimum thresholds and an immediate timeout remain supported."""
+        breaker = CircuitBreaker(
+            "minimum",
+            failure_threshold=1,
+            recovery_timeout=0.0,
+            half_open_max_calls=1,
+            success_threshold=1,
+        )
+
+        with pytest.raises(RuntimeError, match="down"):
+            breaker.call(MagicMock(side_effect=RuntimeError("down")))
+
+        assert breaker.state is CircuitBreakerState.HALF_OPEN
+        assert breaker.call(lambda: "recovered") == "recovered"
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+
 def test_registered_breaker_snapshots_are_json_safe_and_live() -> None:
     """The registry exposes actual open-breaker state for observability."""
     circuit_breaker = importlib.import_module("hephaestus.resilience.circuit_breaker")

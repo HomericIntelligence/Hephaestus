@@ -10,6 +10,7 @@ Provides automatic retry logic with configurable parameters:
 """
 
 import functools
+import math
 import random
 import time
 from collections.abc import Callable
@@ -34,6 +35,28 @@ _NETWORK_EXTRA_KEYWORDS: frozenset[str] = frozenset(
     }
 )
 NETWORK_ERROR_KEYWORDS: list[str] = sorted(TRANSIENT_ERROR_CORE | _NETWORK_EXTRA_KEYWORDS)
+
+
+def _validate_integer(value: object, parameter: str, minimum: int, requirement: str) -> None:
+    """Validate an integer configuration value without accepting booleans."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{parameter} must be a {requirement} integer")
+
+
+def _validate_non_negative_number(
+    value: object, parameter: str, *, allow_none: bool = False
+) -> None:
+    """Validate a finite, non-negative numeric configuration value."""
+    if allow_none and value is None:
+        return
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (isinstance(value, float) and not math.isfinite(value))
+        or value < 0
+    ):
+        optional = " or None" if allow_none else ""
+        raise ValueError(f"{parameter} must be a finite non-negative number{optional}")
 
 
 def is_network_error(error: BaseException) -> bool:
@@ -99,14 +122,18 @@ def retry_with_backoff(
     """Retry a function with exponential backoff.
 
     Args:
-        max_retries: Maximum number of retry attempts (default: 3)
-        initial_delay: Initial delay in seconds before first retry (default: 1.0)
-        backoff_factor: Multiplier for delay between retries (default: 2)
+        max_retries: Maximum number of retry attempts; must be a non-negative
+            integer (default: 3)
+        initial_delay: Initial delay in seconds before first retry; must be a
+            finite, non-negative number (default: 1.0)
+        backoff_factor: Multiplier for delay between retries; must be a positive
+            integer (default: 2)
         jitter: Add random jitter to delay times (default: True)
         retry_on: Tuple of exception types to retry on (default: all exceptions)
         logger: Optional logging function for retry attempts
-        max_delay: Maximum delay cap in seconds — a hard ceiling honored even
-            with jitter enabled (default: None, no cap)
+        max_delay: Maximum delay cap in seconds — a finite, non-negative number
+            and hard ceiling honored even with jitter enabled (default: None, no
+            cap)
         retry_predicate: Optional callable applied *after* the ``retry_on``
             isinstance check. If provided and the predicate returns ``False``
             for the raised exception, the exception is re-raised immediately
@@ -115,6 +142,9 @@ def retry_with_backoff(
 
     Returns:
         Decorated function with retry logic
+
+    Raises:
+        ValueError: If retry counts, delays, or the backoff factor are invalid.
 
     Example:
         @retry_with_backoff(max_retries=3, initial_delay=2.0)
@@ -137,6 +167,10 @@ def retry_with_backoff(
             ...
 
     """
+    _validate_integer(max_retries, "max_retries", 0, "non-negative")
+    _validate_non_negative_number(initial_delay, "initial_delay")
+    _validate_integer(backoff_factor, "backoff_factor", 1, "positive")
+    _validate_non_negative_number(max_delay, "max_delay", allow_none=True)
 
     def decorator(func: F) -> F:
         @functools.wraps(func)

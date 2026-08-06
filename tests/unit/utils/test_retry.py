@@ -12,6 +12,63 @@ from hephaestus.utils.retry import (
 )
 
 
+class TestRetryConfiguration:
+    """Tests for retry configuration validation."""
+
+    @pytest.mark.parametrize(
+        (
+            "max_retries",
+            "initial_delay",
+            "backoff_factor",
+            "max_delay",
+            "field",
+        ),
+        [
+            (-1, 0.0, 1, None, "max_retries"),
+            (0, -0.1, 1, None, "initial_delay"),
+            (0, float("nan"), 1, None, "initial_delay"),
+            (0, 0.0, 0, None, "backoff_factor"),
+            (0, 0.0, 1, -0.1, "max_delay"),
+            (0, 0.0, 1, float("inf"), "max_delay"),
+        ],
+    )
+    def test_invalid_configuration_raises_before_wrapped_call(
+        self,
+        max_retries: int,
+        initial_delay: float,
+        backoff_factor: int,
+        max_delay: float | None,
+        field: str,
+    ) -> None:
+        """Invalid configuration raises before protected work can start."""
+        target = MagicMock()
+
+        with pytest.raises(ValueError, match=field):
+            retry_with_backoff(
+                max_retries=max_retries,
+                initial_delay=initial_delay,
+                backoff_factor=backoff_factor,
+                max_delay=max_delay,
+            )(target)
+
+        target.assert_not_called()
+
+    def test_valid_minimum_configuration_attempts_call_once(self) -> None:
+        """Zero retries means one initial attempt, not zero total calls."""
+        target = MagicMock(side_effect=RuntimeError("failure"))
+        decorated = retry_with_backoff(
+            max_retries=0,
+            initial_delay=0.0,
+            backoff_factor=1,
+            max_delay=0.0,
+        )(target)
+
+        with pytest.raises(RuntimeError, match="failure"):
+            decorated()
+
+        target.assert_called_once_with()
+
+
 class TestIsNetworkError:
     """Tests for is_network_error."""
 
