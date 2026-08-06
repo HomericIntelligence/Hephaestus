@@ -134,6 +134,36 @@ weekly `Security` workflow drops the offline flag to add the API-backed online
 audits. Suppressions use inline `# zizmor: ignore[rule]` comments and must
 carry a rationale.
 
+#### Bandit LOW-severity baseline maintenance
+
+The scheduled Bandit LOW scan compares both increases and reductions against
+`hephaestus/ci/bandit_low_baseline.json`. Any mismatch fails: new or increased
+counts are regressions, while reduced or removed counts mean the baseline is
+stale.
+
+Generate and inspect the current report:
+
+```bash
+mkdir -p build
+uv run bandit -c pyproject.toml -r hephaestus scripts \
+  --severity-level low --exit-zero -f json -o build/bandit_low.json
+uv run python hephaestus/ci/bandit_baseline_check.py \
+  build/bandit_low.json hephaestus/ci/bandit_low_baseline.json
+```
+
+Review each changed finding and record that security review in an issue or pull
+request. Only then update and re-check the baseline:
+
+```bash
+uv run python hephaestus/ci/bandit_baseline_check.py \
+  build/bandit_low.json hephaestus/ci/bandit_low_baseline.json \
+  --update-baseline --review-reference "issue #NNNN"
+uv run python hephaestus/ci/bandit_baseline_check.py \
+  build/bandit_low.json hephaestus/ci/bandit_low_baseline.json
+```
+
+Normal comparison mode never rewrites the baseline.
+
 ### Abuse & Rate Limiting
 
 Because this repository exposes no network service, there is no in-process
