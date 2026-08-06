@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -37,7 +38,7 @@ except ModuleNotFoundError:
 else:
     _yaml = _pyyaml
 
-# Security limit: skip workflow files larger than 1 MB
+# Security limit: reject workflow files larger than 1 MB.
 _MAX_FILE_SIZE = 1_048_576
 
 # Matches a .yml filename (with or without a markdown hyperlink) inside a
@@ -139,6 +140,34 @@ class Violation(NamedTuple):
     composite_action: str
 
 
+class WorkflowToolError(NamedTuple):
+    """A failure that prevented a workflow target from being validated."""
+
+    target: Path
+    code: str
+    message: str
+
+
+class WorkflowValidationError(RuntimeError):
+    """Raised when workflow discovery or validation is incomplete."""
+
+    def __init__(self, errors: list[WorkflowToolError]) -> None:
+        """Initialize the error with every incomplete-validation finding."""
+        self.errors: tuple[WorkflowToolError, ...] = tuple(errors)
+        detail = "; ".join(f"{error.target}: {error.message}" for error in errors)
+        super().__init__(detail)
+
+
+class _WorkflowCollectionResult(NamedTuple):
+    workflow_files: list[Path]
+    tool_errors: list[WorkflowToolError]
+
+
+class _WorkflowCheckResult(NamedTuple):
+    violations: list[Violation]
+    tool_errors: list[WorkflowToolError]
+
+
 def _is_checkout_step(step: object) -> bool:
     """Return True if the step uses ``actions/checkout`` (any version or hash).
 
@@ -210,6 +239,78 @@ def _check_job_steps(workflow_file: Path, job_name: str, steps: list[Any]) -> li
     return violations
 
 
+def _read_workflow_document(
+    workflow_file: Path,
+) -> tuple[Any, WorkflowToolError | None]:
+    """Read and parse a workflow, returning a typed tool failure when needed."""
+    if _yaml is None:
+        return None, WorkflowToolError(
+            workflow_file,
+            "dependency_unavailable",
+            "PyYAML is not installed",
+        )
+
+    try:
+        file_size = workflow_file.stat().st_size
+    except OSError as exc:
+        return None, WorkflowToolError(workflow_file, "stat_error", f"cannot stat file: {exc}")
+
+    if file_size > _MAX_FILE_SIZE:
+        return None, WorkflowToolError(
+            workflow_file,
+            "oversized",
+            f"file exceeds {_MAX_FILE_SIZE} byte limit",
+        )
+
+    try:
+        with workflow_file.open(encoding="utf-8") as fh:
+            data: Any = _yaml.safe_load(fh)
+    except _yaml.YAMLError as exc:
+        return None, WorkflowToolError(workflow_file, "yaml_parse", f"YAML parse error: {exc}")
+    except UnicodeError as exc:
+        return None, WorkflowToolError(workflow_file, "decode_error", f"cannot decode UTF-8: {exc}")
+    except OSError as exc:
+        return None, WorkflowToolError(workflow_file, "read_error", f"cannot read file: {exc}")
+    return data, None
+
+
+def _validate_workflow_detailed(workflow_file: Path) -> _WorkflowCheckResult:
+    """Validate one workflow and retain tool failures for CLI aggregation."""
+    data, tool_error = _read_workflow_document(workflow_file)
+    if tool_error is not None:
+        return _WorkflowCheckResult([], [tool_error])
+
+    if data is None:
+        return _WorkflowCheckResult(
+            [],
+            [WorkflowToolError(workflow_file, "empty_document", "YAML document is empty")],
+        )
+    if not isinstance(data, dict):
+        return _WorkflowCheckResult(
+            [],
+            [
+                WorkflowToolError(
+                    workflow_file,
+                    "invalid_document",
+                    "YAML document root must be a mapping",
+                )
+            ],
+        )
+
+    violations: list[Violation] = []
+    jobs = data.get("jobs")
+    if isinstance(jobs, dict):
+        for job_name, job_data in jobs.items():
+            if not isinstance(job_data, dict):
+                continue
+
+            steps = job_data.get("steps")
+            if isinstance(steps, list):
+                violations.extend(_check_job_steps(workflow_file, str(job_name), steps))
+
+    return _WorkflowCheckResult(violations, [])
+
+
 def validate_workflow(workflow_file: Path) -> list[Violation]:
     """Validate checkout-first ordering for all jobs in a workflow file.
 
@@ -219,47 +320,81 @@ def validate_workflow(workflow_file: Path) -> list[Violation]:
     Returns:
         List of :class:`Violation` objects; empty list means the file passes.
 
+    Raises:
+        WorkflowValidationError: If the file could not be completely validated.
+
     """
-    if _yaml is None:
-        print(f"WARNING: Skipping {workflow_file} (pyyaml not installed)", file=sys.stderr)
-        return []
+    result = _validate_workflow_detailed(workflow_file)
+    if result.tool_errors:
+        raise WorkflowValidationError(result.tool_errors)
+    return result.violations
 
-    if workflow_file.stat().st_size > _MAX_FILE_SIZE:
-        print(
-            f"WARNING: Skipping {workflow_file} (exceeds {_MAX_FILE_SIZE} byte limit)",
-            file=sys.stderr,
-        )
-        return []
 
-    with open(workflow_file, encoding="utf-8") as fh:
+def _collect_workflow_files_detailed(paths: list[str]) -> _WorkflowCollectionResult:
+    """Collect workflow files and retain discovery failures for CLI aggregation."""
+    files: list[Path] = []
+    tool_errors: list[WorkflowToolError] = []
+
+    for raw in paths:
+        target = Path(raw)
         try:
-            data: Any = _yaml.safe_load(fh)
-        except _yaml.YAMLError as exc:
-            print(
-                f"WARNING: Skipping {workflow_file} (YAML parse error: {exc})",
-                file=sys.stderr,
+            mode = target.stat().st_mode
+        except OSError as exc:
+            tool_errors.append(
+                WorkflowToolError(
+                    target,
+                    "target_stat_error",
+                    f"cannot inspect target: {exc}",
+                )
             )
-            return []
-
-    if not isinstance(data, dict):
-        return []
-
-    jobs = data.get("jobs")
-    if not isinstance(jobs, dict):
-        return []
-
-    violations: list[Violation] = []
-    for job_name, job_data in jobs.items():
-        if not isinstance(job_data, dict):
             continue
 
-        steps = job_data.get("steps")
-        if not isinstance(steps, list):
+        if stat.S_ISREG(mode):
+            files.append(target)
+        elif stat.S_ISDIR(mode):
+            try:
+                directory_entries = list(target.iterdir())
+                yml_files = sorted(path for path in directory_entries if path.suffix == ".yml")
+                yaml_files = sorted(path for path in directory_entries if path.suffix == ".yaml")
+            except OSError as exc:
+                tool_errors.append(
+                    WorkflowToolError(
+                        target,
+                        "directory_read_error",
+                        f"cannot enumerate directory: {exc}",
+                    )
+                )
+            else:
+                files.extend(yml_files)
+                files.extend(yaml_files)
+        else:
+            tool_errors.append(
+                WorkflowToolError(
+                    target,
+                    "unsupported_target",
+                    "target is neither a regular file nor a directory",
+                )
+            )
+
+    seen: set[Path] = set()
+    deduplicated: list[Path] = []
+    for workflow_file in files:
+        try:
+            key = workflow_file.resolve()
+        except (OSError, RuntimeError) as exc:
+            tool_errors.append(
+                WorkflowToolError(
+                    workflow_file,
+                    "target_resolve_error",
+                    f"cannot resolve target: {exc}",
+                )
+            )
             continue
+        if key not in seen:
+            seen.add(key)
+            deduplicated.append(workflow_file)
 
-        violations.extend(_check_job_steps(workflow_file, str(job_name), steps))
-
-    return violations
+    return _WorkflowCollectionResult(deduplicated, tool_errors)
 
 
 def collect_workflow_files(paths: list[str]) -> list[Path]:
@@ -272,26 +407,14 @@ def collect_workflow_files(paths: list[str]) -> list[Path]:
     Returns:
         Deduplicated list of :class:`~pathlib.Path` objects for each candidate.
 
-    """
-    files: list[Path] = []
-    for raw in paths:
-        p = Path(raw)
-        if p.is_file():
-            files.append(p)
-        elif p.is_dir():
-            files.extend(sorted(p.glob("*.yml")))
-            files.extend(sorted(p.glob("*.yaml")))
-        else:
-            print(f"WARNING: Path not found: {p}", file=sys.stderr)
+    Raises:
+        WorkflowValidationError: If any requested target cannot be inspected.
 
-    seen: set[Path] = set()
-    result: list[Path] = []
-    for f in files:
-        key = f.resolve()
-        if key not in seen:
-            seen.add(key)
-            result.append(f)
-    return result
+    """
+    result = _collect_workflow_files_detailed(paths)
+    if result.tool_errors:
+        raise WorkflowValidationError(result.tool_errors)
+    return result.workflow_files
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +503,11 @@ def validate_workflow_checkout_main() -> int:
         nargs="*",
         help="Workflow files or directories (default: .github/workflows/)",
     )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Allow readable requested targets to contain no workflow YAML files",
+    )
     add_json_arg(parser)
     add_version_arg(parser)
     args = parser.parse_args()
@@ -391,43 +519,81 @@ def validate_workflow_checkout_main() -> int:
         repo_root = get_repo_root()
         target_paths = [str(repo_root / ".github" / "workflows")]
 
-    workflow_files = collect_workflow_files(target_paths)
-
-    if not workflow_files:
-        if args.json:
-            emit_json_status(0, message="no workflow files found", files_checked=0)
-            return 0
-        print("No workflow files found to validate.")
-        return 0
-
+    collection = _collect_workflow_files_detailed(target_paths)
+    workflow_files = collection.workflow_files
+    tool_errors = list(collection.tool_errors)
     all_violations: list[Violation] = []
     for wf_file in workflow_files:
-        all_violations.extend(validate_workflow(wf_file))
+        result = _validate_workflow_detailed(wf_file)
+        all_violations.extend(result.violations)
+        tool_errors.extend(result.tool_errors)
+
+    policy_violations: list[dict[str, Any]] = [
+        {
+            "code": "checkout_order",
+            "workflow_file": str(violation.workflow_file),
+            "job_name": violation.job_name,
+            "step_index": violation.step_index,
+            "step_name": violation.step_name,
+            "composite_action": violation.composite_action,
+        }
+        for violation in all_violations
+    ]
+
+    empty_inventory = not workflow_files and not collection.tool_errors
+    if empty_inventory and not args.allow_empty:
+        policy_violations.append(
+            {
+                "code": "empty_inventory",
+                "targets": target_paths,
+                "message": "no workflow files found in requested targets",
+            }
+        )
+
+    exit_code = 1 if tool_errors or policy_violations else 0
 
     if args.json:
-        exit_code = 0 if not all_violations else 1
         emit_json_status(
             exit_code,
-            message=(
-                "all workflows pass checkout-first invariant"
-                if not all_violations
-                else f"found {len(all_violations)} violation(s)"
-            ),
+            message="workflow validation failed" if exit_code else "workflow validation passed",
             files_checked=len(workflow_files),
             violation_count=len(all_violations),
+            policy_violation_count=len(policy_violations),
+            tool_error_count=len(tool_errors),
+            policy_violations=policy_violations,
+            tool_errors=[
+                {
+                    "target": str(error.target),
+                    "code": error.code,
+                    "message": error.message,
+                }
+                for error in tool_errors
+            ],
         )
         return exit_code
 
-    if all_violations:
-        for v in all_violations:
-            print(
-                f"\nERROR: {v.workflow_file} :: job '{v.job_name}' :: step {v.step_index} "
-                f"uses '{v.composite_action}'\n"
-                f"       but actions/checkout is not a preceding step.\n"
-                f"       Composite actions and reusable workflows require checkout first."
-            )
-        print(f"\nFound {len(all_violations)} violation(s) in {len(workflow_files)} file(s).")
+    for error in tool_errors:
+        print(
+            f"TOOL ERROR [{error.code}]: {error.target}: {error.message}",
+            file=sys.stderr,
+        )
+
+    if empty_inventory and not args.allow_empty:
+        print("POLICY VIOLATION [empty_inventory]: no workflow files found to validate.")
+
+    for violation in all_violations:
+        print(
+            f"POLICY VIOLATION [checkout_order]: {violation.workflow_file} :: "
+            f"job '{violation.job_name}' :: step {violation.step_index} "
+            f"uses '{violation.composite_action}' before actions/checkout."
+        )
+
+    if exit_code:
         return 1
+
+    if empty_inventory:
+        print("No workflow files found to validate.")
+        return 0
 
     print(f"OK: {len(workflow_files)} workflow file(s) checked. All pass checkout-first invariant.")
     return 0

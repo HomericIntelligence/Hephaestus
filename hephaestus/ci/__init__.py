@@ -16,6 +16,8 @@ from hephaestus.ci.precommit import (
     write_step_summary,
 )
 from hephaestus.ci.workflows import (
+    WorkflowToolError,
+    WorkflowValidationError,
     check_inventory,
     collect_workflow_files,
     collect_yml_files,
@@ -24,6 +26,8 @@ from hephaestus.ci.workflows import (
 )
 
 __all__ = [
+    "WorkflowToolError",
+    "WorkflowValidationError",
     "build_summary_table",
     "check_inventory",
     "check_threshold",
