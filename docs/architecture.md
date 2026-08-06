@@ -1603,18 +1603,27 @@ serves the JSON shape:
 
 ```json
 {
- "queue_depths": {"repo": 0, "planning": 3,...},
- "inflight_per_repo": {"Hephaestus": 2},
- "inflight_jobs": 2,
- "circuit_breakers": {},
- "loops_run": 1,
- "status": "ok" | "stopping"
+  "queue_depths": {"repo": 0, "planning": 3},
+  "inflight_per_repo": {"Hephaestus": 2},
+  "inflight_jobs": 2,
+  "circuit_breakers": {},
+  "loops_run": 1,
+  "stalled_ticks": 0,
+  "status": "ok"
 }
 ```
 
-The `status` field flips to `"stopping"` the moment `shutdown.is_set()`
-returns True, so a scratch `/healthz` probe is sufficient for liveness
-without subscribing to the event log.
+The accepted top-level statuses are `ok`, `degraded`, `stopping`, and `error`.
+`ok` returns HTTP 200. Every other accepted status returns HTTP 503.
+Missing, non-string, and unknown provider statuses are replaced with the
+bounded `{"status": "error"}` HTTP 503 response.
+
+The coordinator reports `stopping` once shutdown is requested, otherwise
+`degraded` while any `evaluate_alerts()` condition is active, and otherwise
+`ok`. These conditions use only the in-memory coordinator snapshot and the
+configured in-memory circuit-breaker snapshot provider. Receiving an HTTP
+response proves that the loopback server is live; only HTTP 200 with
+`status: ok` declares the pipeline ready.
 
 ### Dry-run operator check
 

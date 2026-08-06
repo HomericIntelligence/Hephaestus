@@ -30,6 +30,18 @@ _requires_loopback_socket = pytest.mark.skipif(
 )
 
 
+def _fetch_health(port: int) -> tuple[int, dict[str, object]]:
+    """Fetch the health endpoint while returning bodies for error statuses."""
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+            return response.status, json.loads(response.read())
+    except HTTPError as error:
+        try:
+            return error.code, json.loads(error.read())
+        finally:
+            error.close()
+
+
 @_requires_loopback_socket
 def test_server_serves_metrics_and_health_then_releases_port() -> None:
     """The server has a bounded lifecycle and serves live registry state."""
@@ -47,9 +59,10 @@ def test_server_serves_metrics_and_health_then_releases_port() -> None:
             assert response.status == 200
             assert response.headers["Content-Type"].startswith("text/plain")
             assert 'hephaestus_queue_depth{stage="repo"} 3' in response.read().decode()
-        with urlopen(f"http://127.0.0.1:{server.bound_port}/health", timeout=2) as response:
-            assert response.status == 200
-            assert json.loads(response.read()) == {"queue_depths": {"repo": 3}, "status": "ok"}
+        assert _fetch_health(server.bound_port) == (
+            200,
+            {"queue_depths": {"repo": 3}, "status": "ok"},
+        )
     finally:
         server.stop()
 
@@ -57,6 +70,104 @@ def test_server_serves_metrics_and_health_then_releases_port() -> None:
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", bound_port))
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "expected_http_status"),
+    [
+        ("stopping", 503),
+        ("degraded", 503),
+        ("error", 503),
+    ],
+)
+@_requires_loopback_socket
+def test_health_status_controls_readiness_http_status(
+    provider_status: str,
+    expected_http_status: int,
+) -> None:
+    """Readiness statuses other than ``ok`` return service unavailable."""
+    payload: dict[str, object] = {
+        "status": provider_status,
+        "queue_depths": {"repo": 1},
+    }
+    server_module = importlib.import_module("hephaestus.observability.server")
+    server = server_module.MetricsHTTPServer(
+        MetricsRegistry(),
+        health_provider=lambda: payload,
+    )
+
+    server.start()
+    try:
+        assert _fetch_health(server.bound_port) == (expected_http_status, payload)
+    finally:
+        server.stop()
+
+
+@_requires_loopback_socket
+def test_health_missing_status_returns_normalized_error() -> None:
+    """A provider response without a status uses the bounded error schema."""
+    server_module = importlib.import_module("hephaestus.observability.server")
+    server = server_module.MetricsHTTPServer(
+        MetricsRegistry(),
+        health_provider=lambda: {"queue_depths": {"repo": 1}},
+    )
+
+    server.start()
+    try:
+        assert _fetch_health(server.bound_port) == (503, {"status": "error"})
+    finally:
+        server.stop()
+
+
+@_requires_loopback_socket
+def test_health_unknown_status_returns_normalized_error() -> None:
+    """A provider response with an unknown status uses the bounded error schema."""
+    server_module = importlib.import_module("hephaestus.observability.server")
+    server = server_module.MetricsHTTPServer(
+        MetricsRegistry(),
+        health_provider=lambda: {"status": "warming_up"},
+    )
+
+    server.start()
+    try:
+        assert _fetch_health(server.bound_port) == (503, {"status": "error"})
+    finally:
+        server.stop()
+
+
+@_requires_loopback_socket
+def test_health_non_string_status_returns_normalized_error() -> None:
+    """A provider response with a malformed status uses the bounded error schema."""
+    server_module = importlib.import_module("hephaestus.observability.server")
+    server = server_module.MetricsHTTPServer(
+        MetricsRegistry(),
+        health_provider=lambda: {"status": ["ok"]},
+    )
+
+    server.start()
+    try:
+        assert _fetch_health(server.bound_port) == (503, {"status": "error"})
+    finally:
+        server.stop()
+
+
+@_requires_loopback_socket
+def test_health_recovers_without_restarting_server() -> None:
+    """A provider can recover to ready without restarting the HTTP server."""
+    state: dict[str, object] = {"status": "degraded"}
+    server_module = importlib.import_module("hephaestus.observability.server")
+    server = server_module.MetricsHTTPServer(
+        MetricsRegistry(),
+        health_provider=lambda: dict(state),
+    )
+
+    server.start()
+    try:
+        assert _fetch_health(server.bound_port) == (503, {"status": "degraded"})
+        state["status"] = "ok"
+        assert _fetch_health(server.bound_port) == (200, {"status": "ok"})
+    finally:
+        server.stop()
 
 
 @pytest.mark.parametrize("port", [-1, 65536])
@@ -85,9 +196,6 @@ def test_health_provider_failure_returns_bounded_service_unavailable() -> None:
     )
     server.start()
     try:
-        with pytest.raises(HTTPError) as raised:
-            urlopen(f"http://127.0.0.1:{server.bound_port}/health", timeout=2)
-        assert raised.value.code == 503
-        assert json.loads(raised.value.read()) == {"status": "error"}
+        assert _fetch_health(server.bound_port) == (503, {"status": "error"})
     finally:
         server.stop()

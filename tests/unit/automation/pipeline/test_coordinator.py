@@ -147,6 +147,85 @@ def _issue_item(
     return WorkItem(repo=repo, kind=ItemKind.ISSUE, issue=issue, stage=stage, state="ENTER")
 
 
+class TestCoordinatorHealth:
+    """Cover readiness status transitions from coordinator-owned state."""
+
+    def test_health_snapshot_reports_ok_and_stopping_with_shutdown_precedence(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown takes precedence over an otherwise degraded snapshot."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                alert_queue_depth_threshold=0,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator._health_snapshot()["status"] == "ok"
+
+        coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
+        assert coordinator._health_snapshot()["status"] == "degraded"
+
+        coordinator.shutdown.set()
+        assert coordinator._health_snapshot()["status"] == "stopping"
+
+    @pytest.mark.parametrize("condition", ["queue_depth", "open_breaker", "stalled_ticks"])
+    def test_health_snapshot_reports_each_defined_degradation(
+        self,
+        tmp_path: Path,
+        condition: str,
+    ) -> None:
+        """Each alert condition makes the coordinator not ready."""
+        breakers: dict[str, dict[str, Any]] = {}
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                alert_queue_depth_threshold=0,
+                circuit_breaker_snapshot_provider=lambda: breakers,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        if condition == "queue_depth":
+            coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
+        elif condition == "open_breaker":
+            breakers["github"] = {"state": "open"}
+        else:
+            coordinator._stalled_ticks = 3
+
+        assert coordinator._health_snapshot()["status"] == "degraded"
+
+    def test_health_snapshot_recovers_after_degradation_clears(self, tmp_path: Path) -> None:
+        """Readiness returns to ok when the active alert condition clears."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                alert_queue_depth_threshold=0,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
+
+        assert coordinator._health_snapshot()["status"] == "degraded"
+
+        coordinator.queues[StageName.PLANNING].pop()
+        assert coordinator._health_snapshot()["status"] == "ok"
+
+
 def test_github_receipt_applies_before_on_done_state_and_routing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

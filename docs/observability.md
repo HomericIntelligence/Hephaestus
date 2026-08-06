@@ -32,9 +32,12 @@ are constructed only when a metrics port is configured.
   counter in the catalog below. The server binds a literal loopback address
   only (`hephaestus/observability/server.py`); it rejects any non-loopback
   host, so the unauthenticated diagnostic endpoint is never exposed off-host.
-- **`/health`** serves the JSON snapshot returned by the coordinator's
-  `_health_snapshot`: the same lifecycle fields as the metrics, plus a
-  top-level `status` of `ok` (running) or `stopping` (shutdown requested).
+- **`/health`** is the coordinator readiness endpoint. A valid response always
+  has a top-level `status`: `ok` returns HTTP 200, while `degraded`,
+  `stopping`, and `error` return HTTP 503. Missing, non-string, or unknown
+  provider statuses and provider failures are normalized to
+  `{"status": "error"}` with HTTP 503. Valid provider snapshots retain their
+  existing lifecycle fields.
 - **Structured event log (JSONL).** When a loop runs, the coordinator can append
   a best-effort JSONL diagnostic log (default:
   `build/.issue_implementer/pipeline-events-<timestamp>-<pid>.jsonl`, set via
@@ -51,6 +54,19 @@ The alert queue-depth threshold is configurable via
 `PipelineConfig.alert_queue_depth_threshold` (default `100`); the stall
 threshold defaults to `3`, matching the coordinator's own
 `_STALL_TICKS_BEFORE_FORCE`.
+
+### `/health` compatibility and rollout
+
+The HTTP status change is intentionally incompatible with consumers that
+assumed `/health` always returned HTTP 200. Before deploying this change,
+configure readiness consumers to require both HTTP 200 and `status: ok`.
+Liveness consumers must use a successful TCP connection or treat any completed
+local HTTP response, including HTTP 503, as proof that the diagnostic server is
+live; `/health` HTTP 200 now means ready, not merely live.
+
+Roll out consumer changes before the server change. If a consumer cannot handle
+the new HTTP 503 responses, roll back to the preceding Hephaestus release. No
+state, payload-field, or configuration migration is required.
 
 ## Metrics
 
@@ -103,7 +119,7 @@ real exported data rather than intent. Targets are per automation run.
 
 | SLO | Target | Measured by |
 | --- | --- | --- |
-| Pipeline liveness | `/health` reports `status: ok` for ≥ 99% of ticks during a run. | `/health` snapshot `status` field. |
+| Pipeline readiness | `/health` returns HTTP 200 with `status: ok` for ≥ 99% of ticks during a run. | `/health` HTTP status and snapshot `status` field. |
 | Stall budget | `hephaestus_pipeline_stalled_ticks` < 3 for ≥ 99% of ticks. | `hephaestus_pipeline_stalled_ticks` gauge. |
 | Queue depth | `hephaestus_pipeline_queue_depth` ≤ the configured threshold for ≥ 99% of ticks. | `hephaestus_pipeline_queue_depth` gauge. |
 | Agent job success rate | `hephaestus_pipeline_jobs_total{outcome="ok"}` / total completed jobs ≥ 90% per run. | `hephaestus_pipeline_jobs_total` counter. |
