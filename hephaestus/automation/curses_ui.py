@@ -21,6 +21,7 @@ import time
 from collections import deque
 from typing import Any
 
+from hephaestus.cli.colors import Colors
 from hephaestus.utils.terminal import restore_terminal
 
 from .status_tracker import StatusTracker
@@ -153,6 +154,7 @@ class CursesUI:
         self.stdscr: Any = None
         self.running = False
         self.thread: threading.Thread | None = None
+        self._colors_enabled = False
 
     def _emergency_cleanup(self) -> None:
         """Emergency cleanup for atexit — restores terminal if stop() was not called."""
@@ -204,8 +206,9 @@ class CursesUI:
         curses.curs_set(0)  # Hide cursor
         stdscr.nodelay(True)  # Non-blocking input
 
-        # Initialize color pairs if available
-        if curses.has_colors():
+        # Cache the shared color policy for the lifetime of this curses session.
+        self._colors_enabled = curses.has_colors() and bool(Colors.ENDC)
+        if self._colors_enabled:
             curses.start_color()
             curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
             curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)
@@ -264,10 +267,10 @@ class CursesUI:
 
             if status is None:
                 status_text = f"Worker {i}: [idle]"
-                attr = curses.color_pair(1) if curses.has_colors() else curses.A_DIM
+                attr = curses.color_pair(1) if self._colors_enabled else curses.A_DIM
             else:
                 status_text = f"Worker {i}: {status}"
-                attr = curses.color_pair(2) if curses.has_colors() else curses.A_NORMAL
+                attr = curses.color_pair(2) if self._colors_enabled else curses.A_NORMAL
 
             # Truncate to fit width
             if len(status_text) > width - 1:

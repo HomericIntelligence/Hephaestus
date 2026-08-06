@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 
-"""ANSI color codes for terminal output.
+"""ANSI color codes with automatic terminal accessibility controls.
 
-Provides a thread-safe Colors class with standard ANSI codes and utilities
-for disabling colors in non-terminal environments. Each thread maintains
-its own enabled/disabled state via ``threading.local()``.
+Colors are enabled automatically only for TTY output unless an environment
+override changes that policy. The precedence is the calling thread's explicit
+``enable()`` or ``disable()``, non-empty ``NO_COLOR``, non-empty
+``FORCE_COLOR`` or non-zero ``CLICOLOR_FORCE``, ``CLICOLOR=0``, and finally
+stdout TTY detection. Explicit state is kept in ``threading.local()`` so one
+thread cannot change another thread's override.
 """
 
+import os
 import sys
 import threading
 
@@ -27,22 +31,39 @@ _CODES: dict[str, str] = {
 }
 
 
+def _automatic_colors_enabled() -> bool:
+    """Return whether the process environment permits terminal color."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+
+    clicolor_force = os.environ.get("CLICOLOR_FORCE")
+    if clicolor_force and clicolor_force != "0":
+        return True
+    if os.environ.get("CLICOLOR") == "0":
+        return False
+    return sys.stdout.isatty()
+
+
 class _ColorsMeta(type):
-    """Metaclass that computes color codes on access from thread-local state."""
+    """Metaclass that computes color codes on access from the current policy."""
 
     def __getattr__(cls, name: str) -> str:
         if name in _CODES:
-            enabled = getattr(_state, "enabled", True)
+            override = getattr(_state, "enabled", None)
+            enabled = _automatic_colors_enabled() if override is None else override
             return _CODES[name] if enabled else ""
         raise AttributeError(f"type object 'Colors' has no attribute {name!r}")
 
 
 class Colors(metaclass=_ColorsMeta):
-    """ANSI color codes for terminal output.
+    """ANSI color codes governed by environment, TTY, and thread-local state.
 
-    Thread-safe: each thread maintains its own enabled/disabled state.
-    Calling ``disable()`` or ``enable()`` only affects the calling thread.
-    Color codes are computed on access from an immutable mapping, never mutated.
+    Colors follow the automatic policy on every access. Calling ``disable()``
+    or ``enable()`` explicitly overrides that policy for the calling thread;
+    ``auto()`` removes that override. Color codes are computed from an
+    immutable mapping and never mutate the shared mapping.
 
     Usage::
 
@@ -51,34 +72,21 @@ class Colors(metaclass=_ColorsMeta):
         print(f"{Colors.OKGREEN}Success{Colors.ENDC}")
         Colors.disable()   # disables for current thread only
         Colors.enable()    # re-enables for current thread only
-        Colors.auto()      # disables if stdout is not a TTY
+        Colors.auto()      # restores environment and TTY evaluation
     """
 
     @staticmethod
     def disable() -> None:
-        """Disable colors for the current thread.
-
-        Sets the per-thread enabled flag to ``False`` so all color code
-        lookups return empty strings for this thread only.
-        """
+        """Disable colors for the calling thread."""
         _state.enabled = False
 
     @staticmethod
     def enable() -> None:
-        """Enable colors for the current thread.
-
-        Sets the per-thread enabled flag to ``True`` so all color code
-        lookups return ANSI escape sequences for this thread only.
-        """
+        """Enable colors for the calling thread."""
         _state.enabled = True
 
     @staticmethod
     def auto() -> None:
-        """Automatically disable colors if stdout is not a TTY.
-
-        Call this at the start of a script to automatically handle
-        color output based on the environment. Only affects the
-        calling thread.
-        """
-        if not sys.stdout.isatty():
-            Colors.disable()
+        """Restore automatic environment and TTY policy for this thread."""
+        if hasattr(_state, "enabled"):
+            del _state.enabled
