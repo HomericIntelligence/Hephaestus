@@ -22,8 +22,16 @@ logger = get_logger(__name__)
 # METADATA_TIMEOUT: local, non-network queries (git status, git config, uv tree)
 # NETWORK_TIMEOUT: operations touching the network (gh calls, git clone/fetch/push)
 # Both support env-var overrides for CI tuning. read_timeout_env logs and falls
-# back to the default on a non-integer value rather than crashing at import.
-METADATA_TIMEOUT: int = read_timeout_env("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", 10)
+# back to the default on malformed or out-of-range values rather than crashing
+# at import. Metadata commands accept overrides from 1 second through 24 hours.
+_METADATA_TIMEOUT_MAX_SECONDS = 86_400
+
+METADATA_TIMEOUT: int = read_timeout_env(
+    "HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT",
+    10,
+    minimum=1,
+    maximum=_METADATA_TIMEOUT_MAX_SECONDS,
+)
 NETWORK_TIMEOUT: int = read_timeout_env("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", 120)
 
 

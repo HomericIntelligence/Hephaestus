@@ -7,6 +7,9 @@ git tags, not a file. Tests inject a canonical version by monkeypatching
 ``_version_from_git_tag`` rather than writing a static ``[project].version``.
 """
 
+import subprocess
+from unittest.mock import Mock
+
 import pytest
 
 import hephaestus.version.consistency as consistency
@@ -34,6 +37,44 @@ def set_canonical(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 # check_version_consistency
 # ---------------------------------------------------------------------------
+
+
+def test_version_from_git_tag_passes_metadata_timeout(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The git-tag probe forwards the shared metadata timeout."""
+    completed = subprocess.CompletedProcess([], 0, stdout="v1.2.3\n", stderr="")
+    run = Mock(return_value=completed)
+    monkeypatch.setattr(consistency, "METADATA_TIMEOUT", 17)
+    monkeypatch.setattr(consistency.subprocess, "run", run)
+
+    assert consistency._version_from_git_tag(tmp_path) == "1.2.3"
+    assert run.call_args.kwargs["timeout"] == 17
+
+
+def test_version_from_git_tag_timeout_warns_and_falls_back(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """A git timeout uses metadata fallback and a fixed diagnostic."""
+    hostile = "secret-" * 20_000
+    error = subprocess.TimeoutExpired(
+        cmd=[hostile],
+        timeout=10,
+        output=hostile,
+        stderr=hostile,
+    )
+    monkeypatch.setattr(consistency.subprocess, "run", Mock(side_effect=error))
+    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "7.8.9")
+
+    assert consistency._get_canonical_version(tmp_path) == "7.8.9"
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "[hephaestus-version] WARNING: git tag lookup timed out; using installed package metadata\n"
+    )
+    assert hostile not in captured.err
 
 
 def test_check_version_consistency_resolves_canonical_version(tmp_path, set_canonical):

@@ -86,22 +86,31 @@ def read_timeout_env(
     default: int,
     *,
     legacy_names: tuple[str, ...] = (),
+    minimum: int | None = None,
+    maximum: int | None = None,
 ) -> int:
-    """Read a timeout env var at call time, falling back to ``default``."""
+    """Read and validate a timeout env var, falling back to ``default``."""
     for name in (env_name, *legacy_names):
         raw = os.environ.get(name)
         if raw is None:
             continue
         try:
-            return int(raw)
+            value = int(raw)
         except ValueError:
             _logger.warning(
-                "Ignoring non-integer %s=%r; using default %ds",
+                "Ignoring non-integer %s; using default %ds",
                 name,
-                raw,
                 default,
             )
             return default
+        if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+            _logger.warning(
+                "Ignoring out-of-range %s; using default %ds",
+                name,
+                default,
+            )
+            return default
+        return value
     return default
 
 
