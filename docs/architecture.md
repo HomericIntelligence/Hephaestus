@@ -566,7 +566,7 @@ value would be a static `TypeError` and a safe routing table edit.
 ### State-label vocabulary
 
 Defined in [`state_labels.py`](../hephaestus/automation/state_labels.py) and
-imported throughout the pipeline. Seven labels: four mutually exclusive
+imported throughout the pipeline. Eight labels: four mutually exclusive
 planning states, two mutually exclusive implementation-review states, and one
 absolute operator state:
 
@@ -579,6 +579,7 @@ absolute operator state:
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
+| `state:in-progress` | orthogonal guard | ref-backed issue ownership in [`issue_guard.py`](../hephaestus/automation/issue_guard.py); never a plan-stage verdict |
 
 Every **stage-issued** `state:skip` durable write (the `pr_review` and
 `implementation` write paths, plus repo-stage epic tagging) has a
@@ -594,6 +595,19 @@ before excluding the epic from the rest of the pipeline.
 Label colors per [`STATE_LABEL_SPECS`](../hephaestus/automation/state_labels.py).
 Provisioning script
 ([`hephaestus-ensure-state-labels`](../scripts/)) creates them on a repo.
+
+#### Issue work ownership
+
+Issue-bearing source admission acquires and confirms the ref-backed
+`state:in-progress` guard before dispatching an agent or writing durable issue
+state. The label may coexist with one normal plan-state label, but it is not
+included in [`ALL_STATE_LABELS`](../hephaestus/automation/state_labels.py),
+`_LABEL_RANK`, or any plan transition. Worker GitHub access is target-bound to
+the guard credential and re-confirms ownership before each issue, comment,
+label, branch, or PR mutation. Normal completion releases only its own claim.
+Lease expiry requires the explicit operator procedure in
+[`docs/runbooks/issue-work-guard-recovery.md`](runbooks/issue-work-guard-recovery.md);
+automation never clears another run's guard or changes `state:plan-blocked`.
 
 #### Ordered rank (`_LABEL_RANK`)
 

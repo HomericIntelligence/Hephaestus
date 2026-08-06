@@ -421,7 +421,10 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         Repo-stage step 1 [M] (doc section 1): idempotent
         ``_ensure_labels_exist`` over the full ``state_labels`` vocabulary.
         """
-        wanted = [*ALL_STATE_LABELS, *ALL_IMPLEMENTATION_STATE_LABELS, STATE_SKIP]
+        # Keep provisioning driven by the one shared vocabulary.  In
+        # particular, the orthogonal issue-work guard must be created without
+        # accidentally joining the plan-state routing groups.
+        wanted = list(STATE_LABEL_SPECS)
         if self._skip(f"ensure state labels exist: {wanted}"):
             return
         if self._repo_slug is not None:

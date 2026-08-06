@@ -1,5 +1,8 @@
 import sys
+from contextlib import nullcontext
 from typing import Any
+
+from hephaestus.automation.pipeline.guarded_github import GuardTargetError
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
@@ -98,7 +101,6 @@ class SourceCoordinator(_CoordinatorHost):
         """
         repo = active.repo
         source = active.source
-        ctx = self._ctx_for_repo(repo)
         while True:
             metadata = source.pending
             if metadata is None:
@@ -121,83 +123,75 @@ class SourceCoordinator(_CoordinatorHost):
                     repo, f"discovery failed: malformed metadata: {exc}"
                 )
                 return False
-            # Metadata epics need no expensive issue fetch.  The durable
-            # label write is completed before source consumption advances.
-            if is_epic(labels, title):
-                try:
-                    ctx.github.skip_epics({number: labels})
-                except Exception as exc:
-                    logger.warning(
-                        "repo:%s: could not tag excluded epic #%d state:skip: %s",
-                        repo,
-                        number,
-                        exc,
-                    )
-                    self._record_repo_source_failure(repo, f"epic skip tag failed: {exc}")
-                    return False
-                logger.info("repo:%s: #%d is an epic; tagged state:skip, excluded", repo, number)
-                source.pending = None
-                self._progress = True
-                return True
-
-            if not self._repo_source_can_admit():
+            # A temporary source claim consumes the same bounded work window
+            # as an admitted item.  A live guard always defers without an
+            # issue mutation or agent dispatch.
+            if (
+                self.live_work_count >= _work_window(self.config)
+                or not self._repo_source_can_admit()
+            ):
                 source.pending = metadata
                 return True
-
-            try:
-                facts = _seeding.seed_issue_from_github(number, ctx.github)
-                if STATE_PLAN_BLOCKED in facts.labels:
-                    ctx.github.ensure_blocked_audit(number)
-                entry = _seeding.seed_entry_from_facts(facts)
-                scope_stages = self.config.scope.stages if self.config.scope is not None else None
-                stage, reason, passed = self._scope_seed_decision(
-                    number, entry.stage, entry.reason, scope_stages
-                )
-                entry = replace(entry, stage=stage, reason=reason, passed=passed)
-            except Exception as exc:
-                logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
-                self._record_repo_source_failure(repo, f"discovery failed: {exc}")
-                return False
-
-            if entry.stage is None:
+            with self._claim_source_issue(repo, number, "repo-source") as claim:
+                if claim is None:
+                    source.pending = metadata
+                    return True
+                github = claim.github
                 try:
-                    if entry.skip_tag_obligation is not None:
-                        ctx.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                    # Metadata epics need no expensive issue fetch, but their
+                    # sanctioned state:skip write is still guarded.
+                    if is_epic(labels, title):
+                        github.skip_epics({number: labels})
+                        logger.info(
+                            "repo:%s: #%d is an epic; tagged state:skip, excluded",
+                            repo,
+                            number,
+                        )
+                        source.pending = None
+                        self._progress = True
+                        return True
+                    facts = _seeding.seed_issue_from_github(number, github)
+                    if STATE_PLAN_BLOCKED in facts.labels:
+                        github.ensure_blocked_audit(number)
+                    entry = _seeding.seed_entry_from_facts(facts)
+                    scope_stages = (
+                        self.config.scope.stages if self.config.scope is not None else None
+                    )
+                    stage, reason, passed = self._scope_seed_decision(
+                        number, entry.stage, entry.reason, scope_stages
+                    )
+                    entry = replace(entry, stage=stage, reason=reason, passed=passed)
+                    if entry.stage is None:
+                        if entry.skip_tag_obligation is not None:
+                            github.skip_epics({entry.skip_tag_obligation.issue: []})
+                        logger.info("[%s] excluded: %s", repo, entry.reason)
+                        source.pending = None
+                        self._progress = True
+                        return True
+                    new_item = self._entry_to_item(entry, repo)
+                    if new_item.stage is StageName.FINISHED and new_item.result is None:
+                        new_item.result = ItemResult(
+                            passed=entry.passed,
+                            reason=entry.reason,
+                            final_stage=StageName.FINISHED,
+                        )
+                    elif new_item.stage is not StageName.REPO:
+                        self._pass_work_count += 1
+                    claim.transfer_to(new_item)
+                    source.pending = None
+                    if self._push_item(new_item, new_item.stage, enter=True):
+                        source.seeded_count += 1
+                        self._progress = True
+                        return True
+                    self._release_item_guard(new_item, "duplicate source admission")
+                    self._progress = True
+                    return True
                 except Exception as exc:
                     logger.warning(
-                        "repo:%s: could not tag excluded epic #%d state:skip: %s",
-                        repo,
-                        number,
-                        exc,
+                        "repo:%s: issue #%d classification failed: %s", repo, number, exc
                     )
-                    self._record_repo_source_failure(repo, f"epic skip tag failed: {exc}")
+                    self._record_repo_source_failure(repo, f"discovery failed: {exc}")
                     return False
-                logger.info("[%s] excluded: %s", repo, entry.reason)
-                source.pending = None
-                self._progress = True
-                return True
-
-            new_item = self._entry_to_item(entry, repo)
-            if new_item.stage is StageName.FINISHED and new_item.result is None:
-                new_item.result = ItemResult(
-                    passed=entry.passed,
-                    reason=entry.reason,
-                    final_stage=StageName.FINISHED,
-                )
-            elif new_item.stage is not StageName.REPO:
-                self._pass_work_count += 1
-
-            source.pending = None
-            if self._push_item(new_item, new_item.stage, enter=True):
-                source.seeded_count += 1
-                self._progress = True
-                return True
-            # The preflight covers capacity; a false push is therefore only
-            # the existing idempotent duplicate guard.  Do not retain it in
-            # a second source buffer.  The duplicate's live peer now governs
-            # the next admission opportunity.
-            self._progress = True
-            return True
 
     def _record_repo_source_failure(self, repo: str, reason: str) -> None:
         """Retain a bounded terminal failure after a detached cursor aborts."""
@@ -353,7 +347,16 @@ class SourceCoordinator(_CoordinatorHost):
                 # here through the skip_epics chokepoint BEFORE the exclusion
                 # is honored (seeding.py write-path boundary).
                 if entry.skip_tag_obligation is not None:
-                    self.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                    issue = entry.skip_tag_obligation.issue
+                    with self._claim_source_issue(default_repo, issue, "seed-source") as claim:
+                        if claim is None:
+                            logger.info(
+                                "deferring guarded epic exclusion for %s#%s",
+                                default_repo,
+                                issue,
+                            )
+                            continue
+                        claim.github.skip_epics({issue: []})
                 logger.info("seed excluded: %s", entry.reason)
                 continue
             item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
@@ -482,36 +485,28 @@ class SourceCoordinator(_CoordinatorHost):
         overlap_enabled: bool,
     ) -> tuple[WorkItem | None, bool]:
         """Classify one source issue and snapshot its overlap reservation."""
-        entry = self._seed_direct_issue_entry(source.repo, issue)
-        if entry.stage is None:
-            if entry.skip_tag_obligation is not None:
-                self.github.skip_epics({entry.skip_tag_obligation.issue: []})
-            logger.info("seed excluded: %s", entry.reason)
-            return None, False
+        with self._claim_source_issue(source.repo, issue, "direct-issue-source") as claim:
+            if claim is None:
+                source.issues.append(issue)
+                return None, False
+            entry = self._seed_direct_issue_entry(source.repo, issue, github=claim.github)
+            if entry.stage is None:
+                if entry.skip_tag_obligation is not None:
+                    claim.github.skip_epics({entry.skip_tag_obligation.issue: []})
+                logger.info("seed excluded: %s", entry.reason)
+                return None, False
 
-        item = self._entry_to_item(entry, source.repo)
-        if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
-            repo = (self.config.org, item.repo)
-            planned = _admission._fetch_planned_files(issue, repo=repo)
-            item_claims = {(repo, path) for path in planned} if planned else set()
-            if item_claims and item_claims.intersection(active_claims):
-                return None, True
-            item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+            item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
+            if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
+                repo = (self.config.org, item.repo)
+                planned = _admission._fetch_planned_files(issue, repo=repo)
+                item_claims = {(repo, path) for path in planned} if planned else set()
+                if item_claims and item_claims.intersection(active_claims):
+                    return None, True
+                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
 
-        if is_full_commit_sha(source.base_sha):
-            item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
-            if item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
-                item.branch = f"{item.issue}-auto-impl-direct-{source.run_nonce}"
-                item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = source.run_nonce
-        if item.stage not in (StageName.REPO, StageName.FINISHED):
-            self._pass_work_count += 1
-        if item.stage is StageName.FINISHED and item.result is None:
-            item.result = ItemResult(
-                passed=entry.passed,
-                reason=entry.reason,
-                final_stage=StageName.FINISHED,
-            )
-        return item, False
+            claim.transfer_to(item)
+            return item, False
 
     def _drain_direct_issue_source(self) -> int:
         """Pull explicit issues directly into queues without a seed spill buffer.
@@ -589,31 +584,45 @@ class SourceCoordinator(_CoordinatorHost):
 
         pushed = 0
         while self._direct_issue_queues_can_accept():
-            try:
-                pr = next(source.prs)
-            except StopIteration:
-                self._direct_pr_source = None
-                break
+            if source.pending_pr is not None:
+                pr = source.pending_pr
+                source.pending_pr = None
+            else:
+                try:
+                    pr = next(source.prs)
+                except StopIteration:
+                    self._direct_pr_source = None
+                    break
 
             # The compatibility helper returns exactly one entry here; unlike
             # the legacy call over ``config.prs`` it cannot retain a source
             # sized list while waiting for capacity.
-            entry = self._seed_direct_pr_scope(source.repo, (pr,))[0]
-            if entry.stage is None:
-                logger.info("seed excluded: %s", entry.reason)
-                continue
+            raw_github = self._ctx_for_repo(source.repo).github
+            linked_issue = (
+                raw_github.find_issue_for_pr(pr)
+                if self._guard_enabled and not self.config.dry_run
+                else None
+            )
+            claim = (
+                self._claim_source_issue(source.repo, linked_issue, "direct-pr-source")
+                if linked_issue is not None
+                else None
+            )
+            with claim if claim is not None else nullcontext() as owned:
+                if claim is not None and owned is None:
+                    source.pending_pr = pr
+                    break
+                github = owned.github if owned is not None else raw_github
+                if claim is not None and github.find_issue_for_pr(pr) != linked_issue:
+                    raise GuardTargetError("PR-to-issue association changed during admission")
+                entry = self._seed_direct_pr_scope(source.repo, (pr,), github=github)[0]
+                if entry.stage is None:
+                    logger.info("seed excluded: %s", entry.reason)
+                    continue
 
-            item = self._entry_to_item(entry, source.repo)
-            if is_full_commit_sha(source.base_sha):
-                item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
-            if item.stage not in (StageName.REPO, StageName.FINISHED):
-                self._pass_work_count += 1
-            if item.stage is StageName.FINISHED and item.result is None:
-                item.result = ItemResult(
-                    passed=entry.passed,
-                    reason=entry.reason,
-                    final_stage=StageName.FINISHED,
-                )
+                item = self._prepare_direct_item(entry, source.repo, source.base_sha)
+                if claim is not None and item.issue is not None:
+                    claim.transfer_to(item)
             # The common direct-entry admission predicate reserves every
             # possible classifier target and the global permit. A failed push
             # is therefore only an idempotent duplicate, not saturation.
@@ -715,24 +724,11 @@ class SourceCoordinator(_CoordinatorHost):
         entries.extend(self._seed_direct_pr_scope(repo))
         return entries
 
-    def _seed_direct_issue_entry(self, repo: str, issue: int) -> _seeding.SeedEntry:
-        """Classify one direct issue through its target repository accessor."""
-        github = self._ctx_for_repo(repo).github if repo else self.github
-        scope_stages = self.config.scope.stages if self.config.scope is not None else None
-        facts = _seeding.seed_issue_from_github(issue, github)
-        if STATE_PLAN_BLOCKED in facts.labels:
-            github.ensure_blocked_audit(issue)
-        entry = _seeding.seed_entry_from_facts(facts)
-        stage, reason, passed = self._scope_seed_decision(
-            issue, entry.stage, entry.reason, scope_stages
-        )
-        return replace(entry, stage=stage, reason=reason, passed=passed)
-
     def _seed_direct_pr_scope(
-        self, repo: str, prs: Iterable[int] | None = None
+        self, repo: str, prs: Iterable[int] | None = None, *, github: StageGitHub | None = None
     ) -> list[_seeding.SeedEntry]:
         """Classify explicit PRs for compatibility callers or a one-PR source pull."""
-        github = self._ctx_for_repo(repo).github if repo else self.github
+        github = github or (self._ctx_for_repo(repo).github if repo else self.github)
         entries: list[_seeding.SeedEntry] = []
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
         for pr in self.config.prs if prs is None else prs:

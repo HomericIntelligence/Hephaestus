@@ -46,6 +46,11 @@ STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
 STATE_PLAN_BLOCKED = "state:plan-blocked"
 
+# Orthogonal issue-level ownership signal.  This is deliberately excluded
+# from every routing tuple and rank below: the ref-backed issue guard is the
+# authority, while this label only makes contention visible to operators.
+STATE_IN_PROGRESS = "state:in-progress"
+
 #: All four state labels in one tuple — useful for "ensure none of these are
 #: present" / "remove all of these" operations.
 ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED)
@@ -142,6 +147,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert
         "description": "Automation normally skips this issue/PR in every phase.",
+    },
+    STATE_IN_PROGRESS: {
+        "color": "1d76db",
+        "description": "Automation currently owns this issue; recovery is operator-controlled.",
     },
 }
 

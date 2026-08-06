@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, Self
 
+from hephaestus.automation.issue_guard import GuardCredential
+
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _JOURNAL_MARKER_RE = re.compile(
     r"<!-- hephaestus-implementation-reply-handoff:"
@@ -139,6 +141,7 @@ class ReconcilePrReviewRequest:
     feedback: FrozenJson
     findings: FrozenJson
     review_diff: str
+    issue_number: int | None = None
 
     def __post_init__(self) -> None:
         """Validate the exact-head reconciliation request."""
@@ -162,6 +165,8 @@ class ReconcilePrReviewRequest:
         _json_root(self.findings, list, "findings")
         if not isinstance(self.review_diff, str):
             raise ValueError("review_diff must be a string")
+        if self.issue_number is not None:
+            _positive_identifier(self.issue_number, "issue_number")
 
 
 @dataclass(frozen=True)
@@ -172,6 +177,7 @@ class RunMergeWaitCycleRequest:
     reviewed_head_sha: str
     proof_generation: int
     declined_readiness_fingerprint: tuple[str, ...] | None
+    issue_number: int | None = None
 
     def __post_init__(self) -> None:
         """Validate the exact-head merge proof and readiness fingerprint."""
@@ -189,6 +195,8 @@ class RunMergeWaitCycleRequest:
             or not all(isinstance(part, str) for part in fingerprint)
         ):
             raise ValueError("declined_readiness_fingerprint must be a tuple of strings or None")
+        if self.issue_number is not None:
+            _positive_identifier(self.issue_number, "issue_number")
 
 
 type GitHubRequest = (
@@ -228,6 +236,39 @@ class GitHubJob:
             raise TypeError("request must be a supported GitHub request")
         if not isinstance(self.descr, str) or not self.descr:
             raise ValueError("descr must be a non-empty string")
+
+
+def github_request_issue(request: GitHubRequest) -> int | None:
+    """Return the issue target carried by a closed request, if present."""
+    value = getattr(request, "issue_number", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+@dataclass(frozen=True)
+class GuardedGitHubJob:
+    """Worker-only envelope pairing an operation with its issue authority."""
+
+    operation: GitHubJob
+    guard: GuardCredential
+
+    @classmethod
+    def bind(
+        cls,
+        operation: GitHubJob,
+        guard: GuardCredential,
+        *,
+        org: str,
+    ) -> Self:
+        """Bind a stage-created operation to an exact repository and issue."""
+        expected_repo = f"{org}/{operation.repo}"
+        if guard.repository != expected_repo:
+            raise ValueError("guard repository differs from job repository")
+        issue_number = github_request_issue(operation.request)
+        if issue_number is None:
+            raise ValueError("GitHub job has no issue target")
+        if guard.issue != issue_number:
+            raise ValueError("guard issue differs from job issue")
+        return cls(operation=operation, guard=guard)
 
 
 @dataclass(frozen=True)
@@ -340,6 +381,6 @@ type GitHubReceipt = (
 class GitHubJobRunner(Protocol):
     """Executes closed GitHub requests with job-scoped accessors."""
 
-    def run(self, job: GitHubJob) -> GitHubReceipt:
+    def run(self, job: GitHubJob | GuardedGitHubJob) -> GitHubReceipt:
         """Execute one closed GitHub request and return its immutable receipt."""
         raise NotImplementedError

@@ -3,6 +3,8 @@ from typing import Any, cast
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
+from .github_jobs import GitHubJob, GuardedGitHubJob
+from .guarded_github import GuardedStageGitHub, GuardTargetError
 
 # This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
@@ -85,7 +87,18 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _ctx_for(self, item: WorkItem) -> StageContext:
         """Return the (cached, per-repo) StageContext for *item*."""
-        return self._ctx_for_repo(item.repo)
+        base = self._ctx_for_repo(item.repo)
+        if item.issue is None or self.config.dry_run or not self._guard_enabled:
+            return base
+        handle = self._guard_for_item(item)
+        return replace(
+            base,
+            github=GuardedStageGitHub(
+                raw=base.github,
+                guard_store=self.guard_store_factory(handle.credential.repository),
+                credential=handle.credential,
+            ),
+        )
 
     def _budget_for(self, name: str) -> int:
         """Config-aware budget accessor injected as ``StageContext.budget_fn``.
@@ -281,6 +294,7 @@ class CoordinatorRuntime(_CoordinatorHost):
             # subprocesses (e.g. claude reviewers) would leak (#2059). Idempotent
             # via _pool_shut_down, so the signal path's earlier call is a no-op.
             self._shutdown_pool()
+            self._release_all_guards("pipeline run finished")
             self._finalize_resumable()
             exit_code = self._exit_code()
             stats = RunStats(
@@ -973,7 +987,19 @@ class CoordinatorRuntime(_CoordinatorHost):
         sanctioned fallback).
         """
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
-        job = request.job
+        job: Any = request.job
+        if self._guard_enabled and item.issue is not None:
+            self._confirm_item_guard(item, self._minimum_dispatch_lease(job))
+            if item.pr is not None:
+                linked = self._ctx_for_repo(item.repo).github.find_issue_for_pr(item.pr)
+                if linked != item.issue:
+                    raise GuardTargetError("PR-to-issue association changed before dispatch")
+            if isinstance(job, GitHubJob):
+                job = GuardedGitHubJob.bind(
+                    job,
+                    self._guard_for_item(item).credential,
+                    org=self.config.org,
+                )
         if isinstance(job, AgentJob):
             ok, delay = self._rate_budget_ok()
             if not ok:
@@ -1042,6 +1068,7 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._record_event("done", self._item_key(item), outcome.note)
             self._record_terminal_result(item)
             self._release_source_lease(item)
+            self._release_item_guard(item, "finished stage completed")
             self._release_work_permit(item)
             return
 
@@ -1277,6 +1304,7 @@ class CoordinatorRuntime(_CoordinatorHost):
                 item.payload["_recorded"] = True
             self._record_terminal_result(item)
             self._release_source_lease(item)
+            self._release_item_guard(item, "finished stage completed")
             self._release_work_permit(item)
             return
         result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)

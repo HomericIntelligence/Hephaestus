@@ -148,6 +148,7 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
         try:
             request = RunMergeWaitCycleRequest(
+                issue_number=item.issue,
                 pr_number=item.pr,
                 reviewed_head_sha=reviewed_head,
                 proof_generation=proof_generation,
