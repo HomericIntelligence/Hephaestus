@@ -427,14 +427,14 @@ class _DirectIssueSource:
 class _DirectPrSource:
     """One bounded cursor over the caller-provided explicit PR scope.
 
-    As with direct issues, a PR is classified only at a safe admission point.
-    This avoids retaining an eager list of potentially large review-context
-    payloads while one of the downstream review queues is saturated.
+    As with direct issues, a PR is classified only at a safe admission point;
+    this avoids retaining large review-context payloads while queues saturate.
     """
 
     repo: str
     prs: Iterator[int]
     base_sha: str
+    pending_pr: int | None = None
 
 
 @dataclass

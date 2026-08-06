@@ -306,7 +306,7 @@ config = merge_with_env({}, convert_bools=True)
 
 Run any command with `--help` to see full usage.
 
-The package currently installs 56 console scripts from `[project.scripts]`.
+The package currently installs 57 console scripts from `[project.scripts]`.
 
 ### Automation
 
@@ -318,6 +318,7 @@ The package currently installs 56 console scripts from `[project.scripts]`.
 | `hephaestus-review-prs` | PR review/remediation automation using Claude Code or Codex in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
 | `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
 | `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) on one or more repos |
+| `hephaestus-recover-issue-guard` | Inspect or explicitly recover an expired, ref-backed `state:in-progress` issue guard |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 | `hephaestus-drive-prs-green` | Review directly scoped PRs or PRs linked from discovered issues through the pr_review/merge_wait pipeline slice; it does not sweep unrelated open PRs |
 

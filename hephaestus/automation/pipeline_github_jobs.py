@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, assert_never
 
+from hephaestus.automation.issue_guard import GitHubIssueGuardStore, GuardStore
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
     GitHubReceipt,
+    GuardedGitHubJob,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
@@ -19,10 +22,12 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalRecovered,
     RunMergeWaitCycleRequest,
 )
+from hephaestus.automation.pipeline.guarded_github import GuardedStageGitHub
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     journaled_implementation_reply_handoff,
 )
+from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 
 
@@ -32,42 +37,54 @@ class PipelineGitHubJobRunner:
 
     org: str
     dry_run: bool
+    guard_store_factory: Callable[[str], GuardStore] | None = None
 
-    def run(self, job: GitHubJob) -> GitHubReceipt:
+    def run(self, job: GitHubJob | GuardedGitHubJob) -> GitHubReceipt:
         """Execute one request without sharing a coordinator/client instance."""
-        github = PipelineGitHub(
+        operation = job.operation if isinstance(job, GuardedGitHubJob) else job
+        github: StageGitHub = PipelineGitHub(
             self.org,
-            repo=job.repo,
+            repo=operation.repo,
             dry_run=self.dry_run,
-            repo_root=job.repo_root,
+            repo_root=operation.repo_root,
         )
-        match job.request:
+        if isinstance(job, GuardedGitHubJob):
+            expected_repo = f"{self.org}/{operation.repo}"
+            if job.guard.repository != expected_repo:
+                raise ValueError("worker repository mismatch")
+            factory = self.guard_store_factory or GitHubIssueGuardStore
+            github = GuardedStageGitHub(
+                raw=github,
+                guard_store=factory(expected_repo),
+                credential=job.guard,
+            )
+        match operation.request:
             case RecoverReplyJournalRequest():
-                threads = job.request.threads.thaw()
+                threads = operation.request.threads.thaw()
                 if not isinstance(threads, list):  # constructor guard; keeps narrowing explicit
                     raise ValueError("recovery threads must be a list")
                 handoff = journaled_implementation_reply_handoff(
-                    github.issue_comments(job.request.issue_number),
-                    pr_number=job.request.pr_number,
+                    github.issue_comments(operation.request.issue_number),
+                    pr_number=operation.request.pr_number,
                     threads=threads,
                 )
                 return ReplyJournalRecovered(
-                    request=job.request,
+                    request=operation.request,
                     handoff=FrozenJson.snapshot(handoff) if handoff is not None else None,
                 )
             case AppendReplyJournalRequest():
                 github.append_issue_comment(
-                    job.request.issue_number,
-                    job.request.marker,
-                    job.request.body,
+                    operation.request.issue_number,
+                    operation.request.marker,
+                    operation.request.body,
                 )
-                return ReplyJournalAppended(request=job.request)
+                return ReplyJournalAppended(request=operation.request)
             case DeliverReplyHandoffRequest():
-                return attempt_reply_handoff(job.request, github)
+                return attempt_reply_handoff(operation.request, github)
             case ReconcilePrReviewRequest():
-                return self._reconcile_pr_review(job.request, github)
+                return self._reconcile_pr_review(operation.request, github)
             case RunMergeWaitCycleRequest():
-                return self._run_merge_wait_cycle(job.request, github)
+                return self._run_merge_wait_cycle(operation.request, github)
             case unknown:
                 return assert_never(unknown)
         raise AssertionError("unreachable closed GitHub request dispatch")

@@ -40,7 +40,11 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    GitHubJobRunner,
+    GuardedGitHubJob,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -1420,7 +1424,7 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | GuardedGitHubJob | CompactJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -1531,7 +1535,7 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | GuardedGitHubJob | CompactJob,
         claim_key: str = "",
         claim_stage: str = "",
     ) -> JobResult:
@@ -1571,7 +1575,7 @@ class WorkerPool:
                     result = self._run_build_test(job)
                 elif isinstance(job, GitJob):
                     result = self._run_git(job)
-                elif isinstance(job, GitHubJob):
+                elif isinstance(job, (GitHubJob, GuardedGitHubJob)):
                     result = self._run_github(job)
                 elif isinstance(job, CompactJob):
                     result = self._run_compact(job)
@@ -1613,11 +1617,12 @@ class WorkerPool:
             worker_id=worker_id,
         )
 
-    def _run_github(self, job: GitHubJob) -> JobResult:
+    def _run_github(self, job: GitHubJob | GuardedGitHubJob) -> JobResult:
         """Execute one closed GitHub operation exactly once per submission."""
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
-        with self._repo_lock(job.repo):
+        operation = job.operation if isinstance(job, GuardedGitHubJob) else job
+        with self._repo_lock(operation.repo):
             receipt = self._github_job_runner.run(job)
         return JobResult(ok=True, value=receipt)
 

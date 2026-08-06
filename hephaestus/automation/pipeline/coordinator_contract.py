@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     from threading import Event
     from typing import Any, Protocol
 
+    from hephaestus.automation.issue_guard import GuardHandle, GuardStore
+
     from . import admission as _admission
     from .coordinator_types import (
         CompletionQueue,
@@ -83,6 +85,9 @@ if TYPE_CHECKING:
         _seq: int
         _agent_job_count: int
         _agent_job_time_s: float
+        _guard_enabled: bool
+        guard_store_factory: Callable[[str], GuardStore]
+        _issue_guards: dict[tuple[str, int], GuardHandle]
 
         @property
         def live_work_count(self) -> int:
@@ -113,6 +118,25 @@ if TYPE_CHECKING:
             pass
 
         def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
+            pass
+
+        def _guard_for_item(self, item: WorkItem) -> GuardHandle:
+            pass
+
+        def _confirm_item_guard(self, item: WorkItem, minimum_valid_for: Any) -> None:
+            pass
+
+        @staticmethod
+        def _minimum_dispatch_lease(job: object) -> Any:
+            pass
+
+        def _release_item_guard(self, item: WorkItem, reason: str) -> None:
+            pass
+
+        def _release_all_guards(self, reason: str) -> None:
+            pass
+
+        def _claim_source_issue(self, repo: str, issue: int, stage: str) -> Any:
             pass
 
         def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
@@ -154,6 +178,16 @@ if TYPE_CHECKING:
             pass
 
         def _drain_direct_pr_source(self) -> int:
+            pass
+
+        def _prepare_direct_item(
+            self, entry: Any, repo: str, base_sha: str, run_nonce: str | None = None
+        ) -> WorkItem:
+            pass
+
+        def _seed_direct_issue_entry(
+            self, repo: str, issue: int, *, github: StageGitHub | None = None
+        ) -> Any:
             pass
 
         def _reseed_if_converged(self) -> bool:
