@@ -10,6 +10,7 @@ GitHub call is made.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import patch
 
@@ -149,17 +150,29 @@ def test_main_discovers_open_issues_when_none_given() -> None:
     assert config.issues == [41, 42]
 
 
-def test_main_returns_zero_when_rate_limited() -> None:
-    """If issue discovery is rate-limited, main() exits cleanly without dispatching."""
+@pytest.mark.parametrize(
+    ("reset_epoch", "expected_reset_epoch"),
+    [(1_800_000_000, 1_800_000_000), (0, None)],
+    ids=["known-reset", "unknown-reset"],
+)
+def test_main_reports_rate_limit_deferral(
+    reset_epoch: int,
+    expected_reset_epoch: int | None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rate-limited discovery reports a retryable nonzero deferral."""
     from hephaestus.automation.github_api import GitHubRateLimitError
 
     with (
-        patch("sys.argv", ["hephaestus-plan-issues", "--agent", "claude"]),
+        patch("sys.argv", ["hephaestus-plan-issues", "--agent", "claude", "--json"]),
         patch.object(planner_mod, "_resolve_repo", return_value=("acme", "widget")),
         patch.object(planner_mod, "resolve_agent", return_value="claude"),
         patch(
             "hephaestus.automation.planner.gh_list_open_issues",
-            side_effect=GitHubRateLimitError("rate limit", reset_epoch=0),
+            side_effect=GitHubRateLimitError(
+                "rate limit",
+                reset_epoch=reset_epoch,
+            ),
         ),
         patch(
             "hephaestus.automation.pipeline.coordinator.run_pipeline",
@@ -168,5 +181,48 @@ def test_main_returns_zero_when_rate_limited() -> None:
     ):
         rc = planner_mod.main()
 
-    assert rc == 0
+    assert rc == planner_mod.RATE_LIMIT_DEFERRED_EXIT_CODE
     mock_run.assert_not_called()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == planner_mod.RATE_LIMIT_DEFERRED_EXIT_CODE
+    assert payload["deferred"] is True
+    assert payload["retryable"] is True
+    assert payload["reset_epoch"] == expected_reset_epoch
+    assert payload["affected_issues"] is None
+    assert payload["incomplete_issue_scope"] == {
+        "org": "acme",
+        "repo": "widget",
+        "selection": "all-open-issues",
+    }
+
+
+def test_main_succeeds_when_deferred_discovery_is_retried() -> None:
+    """A later retry dispatches the discovered issues normally."""
+    from hephaestus.automation.github_api import GitHubRateLimitError
+
+    with (
+        patch("sys.argv", ["hephaestus-plan-issues", "--agent", "claude"]),
+        patch.object(planner_mod, "_resolve_repo", return_value=("acme", "widget")),
+        patch.object(planner_mod, "resolve_agent", return_value="claude"),
+        patch.object(
+            planner_mod,
+            "gh_list_open_issues",
+            side_effect=[
+                GitHubRateLimitError("rate limit", reset_epoch=1_800_000_000),
+                [41, 42],
+            ],
+        ),
+        patch(
+            "hephaestus.automation.pipeline.coordinator.run_pipeline",
+            return_value=0,
+        ) as mock_run,
+    ):
+        deferred_rc = planner_mod.main()
+        retry_rc = planner_mod.main()
+
+    assert deferred_rc == planner_mod.RATE_LIMIT_DEFERRED_EXIT_CODE
+    assert retry_rc == 0
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0].issues == [41, 42]
+    assert mock_run.call_args.args[0].force is False
