@@ -99,6 +99,7 @@ bypass a misfiring hook locally use
 | `hephaestus-drive-prs-green` | Provisional | PR-review and merge-wait stage slice; CI remains independent branch protection |
 | `hephaestus-agent-stage` | Provisional | Single-stage agent runner |
 | `hephaestus-ensure-state-labels` | Internal | Used by this repo's CI label bootstrap |
+| `hephaestus-recover-issue-guard` | Internal | Operator-only inspection and stale-claim recovery for `state:in-progress` |
 | `hephaestus-gh` | Provisional | Shell-facing wrapper around the shared `gh_call` adapter |
 | `hephaestus-merge-prs` | Provisional | Merge helper using the shared `gh_call` adapter |
 | `hephaestus-fleet-sync` | Provisional | Fleet-wide repo sync helper |

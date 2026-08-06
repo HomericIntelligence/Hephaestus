@@ -27,6 +27,7 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 
 from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
@@ -401,6 +402,7 @@ def _gh_call_impl(
     max_retries: int = 6,
     log_on_error: bool = True,
     timeout: int | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -434,6 +436,7 @@ def _gh_call_impl(
                 check=check,
                 timeout=timeout if timeout is not None else gh_cli_timeout(),
                 log_on_error=log_on_error,
+                env=env,
             )
             return result
         except subprocess.CalledProcessError as e:
@@ -507,6 +510,7 @@ def _gh_call(
     max_retries: int = 6,
     log_on_error: bool = True,
     timeout: int | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -538,15 +542,16 @@ def _gh_call(
 
     """
     try:
-        return _GH_BREAKER.call(
-            _gh_call_impl,
-            args,
-            check=check,
-            retry_on_rate_limit=retry_on_rate_limit,
-            max_retries=max_retries,
-            log_on_error=log_on_error,
-            timeout=timeout,
-        )
+        kwargs: dict[str, object] = {
+            "check": check,
+            "retry_on_rate_limit": retry_on_rate_limit,
+            "max_retries": max_retries,
+            "log_on_error": log_on_error,
+            "timeout": timeout,
+        }
+        if env is not None:
+            kwargs["env"] = env
+        return _GH_BREAKER.call(_gh_call_impl, args, **kwargs)
     except CircuitBreakerOpenError as exc:
         # Translate to a domain exception (RuntimeError subclass) so existing
         # exception handlers that catch RuntimeError/Exception continue to work.
