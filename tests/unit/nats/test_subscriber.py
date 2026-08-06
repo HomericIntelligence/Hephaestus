@@ -6,6 +6,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.events import NATSEvent
 from hephaestus.nats.subscriber import (
@@ -69,9 +71,7 @@ class TestNATSSubscriberThread:
             assert thread.state is SubscriberState.ERROR
             assert isinstance(thread.last_error, TimeoutError)
             assert thread.health_dict()["state"] == "error"
-            assert thread.health_dict()["last_error"] == (
-                "NATS subscriber thread did not stop within 0.01s — still running"
-            )
+            assert thread.health_dict()["last_error"] == "shutdown_timeout"
         finally:
             release.set()
             thread.join(timeout=1.0)
@@ -161,6 +161,61 @@ class TestHealthObservability:
         assert hd["last_message_at"] is None
         assert hd["url"] == "nats://localhost:4222"
 
+    def test_health_dict_redacts_url_credentials_and_query(self) -> None:
+        config = _config(
+            url=(
+                "tls://alice:credential-value@broker.example.com:4222/jetstream?"
+                "token=query-value&name=diagnostic#fragment"
+            ),
+            stream="EVENTS",
+        )
+        thread = NATSSubscriberThread(config=config, handler=MagicMock())
+
+        health = thread.health_dict()
+
+        assert health["url"] == "tls://broker.example.com:4222/jetstream"
+        assert "alice" not in health["url"]
+        assert "credential-value" not in health["url"]
+        assert "query-value" not in health["url"]
+
+    def test_health_dict_preserves_non_sensitive_diagnostics(self) -> None:
+        thread = NATSSubscriberThread(
+            config=_config(
+                url="tls://broker.example.com:4222/jetstream",
+                stream="EVENTS",
+            ),
+            handler=MagicMock(),
+        )
+
+        health = thread.health_dict()
+
+        assert health["state"] == "initializing"
+        assert health["url"] == "tls://broker.example.com:4222/jetstream"
+        assert health["stream"] == "EVENTS"
+        assert health["circuit_breaker_state"] == "closed"
+
+    def test_startup_log_redacts_url_credentials_and_query(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        thread = NATSSubscriberThread(
+            config=_config(
+                url=(
+                    "tls://alice:credential-value@broker.example.com:4222/jetstream?"
+                    "token=query-value"
+                )
+            ),
+            handler=MagicMock(),
+        )
+        thread._stop_event.set()
+        caplog.set_level("INFO", logger="hephaestus.nats.subscriber")
+
+        thread.run()
+
+        assert "tls://broker.example.com:4222/jetstream" in caplog.text
+        assert "alice" not in caplog.text
+        assert "credential-value" not in caplog.text
+        assert "query-value" not in caplog.text
+
     def test_health_dict_state_is_string_not_enum(self) -> None:
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
         hd = thread.health_dict()
@@ -191,6 +246,7 @@ class TestHealthObservability:
         thread._record_error(exc)
         assert thread.last_error is exc
         assert thread.state is SubscriberState.DISCONNECTED
+        assert thread.health_dict()["last_error"] == "connection_error"
 
     def test_record_message_updates_last_message_at(self) -> None:
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
@@ -213,10 +269,10 @@ class TestHealthObservability:
         try:
             thread._handler(event)
         except Exception as caught:
-            with thread._state_lock:
-                thread._last_error = caught
+            thread._record_handler_error(caught)
 
         assert thread.last_error is exc
+        assert thread.health_dict()["last_error"] == "handler_error"
 
     def test_last_message_at_not_updated_when_handler_raises(self) -> None:
         """last_message_at stays None if handler always raises."""
@@ -230,8 +286,7 @@ class TestHealthObservability:
         thread._record_error(exc)
         hd = thread.health_dict()
         assert hd["state"] == "disconnected"
-        assert hd["last_error"] is not None
-        assert "nats gone" in hd["last_error"]
+        assert hd["last_error"] == "connection_error"
 
     def test_stop_transitions_to_stopping_then_stopped(self) -> None:
         """stop() immediately flips state to STOPPING; STOPPED is set after run() exits."""

@@ -7,6 +7,8 @@ from collections.abc import Coroutine
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.subscriber import (
     NATS_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
@@ -29,13 +31,17 @@ def _config(**kwargs: object) -> NATSConfig:
 class TestNATSSubscriberCircuitBreaker:
     """Tests for subscriber reconnection circuit-breaker behavior."""
 
-    def test_persistent_connection_failures_open_circuit_and_enter_error(self) -> None:
+    def test_persistent_connection_failures_open_circuit_and_enter_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         thread = NATSSubscriberThread(config=_config(), handler=MagicMock())
         loop = MagicMock()
+        sensitive_text = "token=known-test-value"
+        caplog.set_level("ERROR", logger="hephaestus.nats.subscriber")
 
         def fail_subscribe(coro: Coroutine[Any, Any, Any]) -> None:
             coro.close()
-            raise RuntimeError("nats down")
+            raise RuntimeError(f"nats down {sensitive_text}")
 
         loop.run_until_complete.side_effect = fail_subscribe
 
@@ -56,12 +62,13 @@ class TestNATSSubscriberCircuitBreaker:
         assert loop.run_until_complete.call_count == NATS_CIRCUIT_BREAKER_FAILURE_THRESHOLD
         assert thread.state is SubscriberState.ERROR
         assert thread.last_error is not None
-        assert "nats down" in str(thread.last_error)
+        assert sensitive_text in str(thread.last_error)
         health = thread.health_dict()
         assert health["state"] == "error"
-        assert health["last_error"] is not None
-        assert "nats down" in health["last_error"]
+        assert health["last_error"] == "connection_error"
         assert health["circuit_breaker_state"] == "open"
+        assert "kind=connection_error" in caplog.text
+        assert sensitive_text not in caplog.text
 
     def test_open_circuit_fails_fast_without_subscribing(self) -> None:
         thread = NATSSubscriberThread(
@@ -85,6 +92,5 @@ class TestNATSSubscriberCircuitBreaker:
         assert isinstance(thread.last_error, CircuitBreakerOpenError)
         health = thread.health_dict()
         assert health["state"] == "error"
-        assert health["last_error"] is not None
-        assert "Circuit breaker 'nats-subscriber' is open" in health["last_error"]
+        assert health["last_error"] == "circuit_breaker_open"
         assert health["circuit_breaker_state"] == "open"
