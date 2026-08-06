@@ -1,10 +1,16 @@
 """Tests for hephaestus.validation.coverage."""
 
+import builtins
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hephaestus.validation.coverage import (
+    CoverageDataAbsentError,
+    CoverageParserUnavailableError,
+    CoverageReportParseError,
     check_coverage,
     get_module_threshold,
     load_coverage_config,
@@ -88,10 +94,10 @@ class TestGetModuleThreshold:
 class TestParseCoverageReport:
     """Tests for parse_coverage_report()."""
 
-    def test_missing_file(self, tmp_path: Path) -> None:
-        """Missing file returns None."""
-        result = parse_coverage_report(tmp_path / "coverage.xml")
-        assert result is None
+    def test_missing_file_raises(self, tmp_path: Path) -> None:
+        """Missing files are distinct from parsed reports with absent data."""
+        with pytest.raises(FileNotFoundError, match="Coverage file not found"):
+            parse_coverage_report(tmp_path / "coverage.xml")
 
     def test_parses_cobertura_xml(self, tmp_path: Path) -> None:
         """Parses line-rate from Cobertura XML."""
@@ -106,21 +112,44 @@ class TestParseCoverageReport:
         assert result is not None
         assert abs(result - 85.0) < 0.01
 
-    def test_no_line_rate(self, tmp_path: Path) -> None:
-        """XML without line-rate returns None."""
+    def test_no_line_rate_raises_absent_data(self, tmp_path: Path) -> None:
+        """A parsed report without line-rate raises the absent-data error."""
         pytest.importorskip("defusedxml")
         coverage_xml = tmp_path / "coverage.xml"
         coverage_xml.write_text('<?xml version="1.0" ?>\n<coverage version="7.4"></coverage>\n')
-        result = parse_coverage_report(coverage_xml)
-        assert result is None
 
-    def test_malformed_xml(self, tmp_path: Path) -> None:
-        """Malformed XML returns None."""
+        with pytest.raises(CoverageDataAbsentError, match="no root line-rate"):
+            parse_coverage_report(coverage_xml)
+
+    def test_malformed_xml_raises_parse_error(self, tmp_path: Path) -> None:
+        """Malformed XML raises the secure parse error."""
         pytest.importorskip("defusedxml")
         coverage_xml = tmp_path / "coverage.xml"
         coverage_xml.write_text("this is not xml")
-        result = parse_coverage_report(coverage_xml)
-        assert result is None
+
+        with pytest.raises(CoverageReportParseError, match="securely parse"):
+            parse_coverage_report(coverage_xml)
+
+    def test_missing_parser_raises_actionable_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unavailable secure parser identifies the required extra."""
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text('<coverage line-rate="0.90"></coverage>\n')
+        real_import = builtins.__import__
+
+        def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name.startswith("defusedxml"):
+                raise ImportError("simulated missing defusedxml")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        with pytest.raises(
+            CoverageParserUnavailableError,
+            match=r"HomericIntelligence-Hephaestus\[xml\]",
+        ):
+            parse_coverage_report(coverage_xml)
 
 
 class TestCheckCoverage:
@@ -146,10 +175,10 @@ class TestCheckCoverage:
         result = check_coverage(80.0, "mypackage/", coverage_xml)
         assert result is False
 
-    def test_missing_coverage_file_passes(self, tmp_path: Path) -> None:
-        """Missing coverage file passes gracefully."""
+    def test_missing_coverage_file_fails(self, tmp_path: Path) -> None:
+        """Missing coverage files fail closed."""
         result = check_coverage(80.0, "mypackage/", tmp_path / "missing.xml")
-        assert result is True
+        assert result is False
 
 
 class TestMain:
@@ -218,8 +247,6 @@ class TestMain:
 
     def test_json_missing_coverage_file(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """--json emits an error envelope when the coverage file is missing."""
-        import json
-
         monkeypatch.setattr(
             "sys.argv",
             [
@@ -234,12 +261,13 @@ class TestMain:
         assert main() == 1
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
+        assert payload["passed"] is False
+        assert payload["coverage"] is None
+        assert payload["error"] == "coverage_file_missing"
         assert "not found" in payload["message"]
 
     def test_json_passing(self, tmp_path: Path, monkeypatch, capsys, empty_config: Path) -> None:
         """--json emits a structured payload when coverage passes."""
-        import json
-
         pytest.importorskip("defusedxml")
         coverage_xml = tmp_path / "coverage.xml"
         coverage_xml.write_text(
@@ -268,8 +296,6 @@ class TestMain:
 
     def test_json_failing(self, tmp_path: Path, monkeypatch, capsys, empty_config: Path) -> None:
         """--json returns 1 and reports failure when below threshold."""
-        import json
-
         pytest.importorskip("defusedxml")
         coverage_xml = tmp_path / "coverage.xml"
         coverage_xml.write_text(
@@ -297,9 +323,7 @@ class TestMain:
     def test_json_unparseable_coverage(
         self, tmp_path: Path, monkeypatch, capsys, empty_config: Path
     ) -> None:
-        """--json returns 0 with passed=True when coverage is unparseable."""
-        import json
-
+        """--json fails with actionable context for malformed XML."""
         coverage_xml = tmp_path / "coverage.xml"
         coverage_xml.write_text("not xml at all")
         monkeypatch.setattr(
@@ -317,7 +341,97 @@ class TestMain:
                 str(empty_config),
             ],
         )
-        assert main() == 0
+        assert main() == 1
         payload = json.loads(capsys.readouterr().out)
-        assert payload["passed"] is True
+        assert payload["passed"] is False
         assert payload["coverage"] is None
+        assert payload["error"] == "report_unparseable"
+        assert str(coverage_xml) in payload["message"]
+
+    def test_unparseable_coverage_returns_one(
+        self, tmp_path: Path, monkeypatch, capsys, empty_config: Path
+    ) -> None:
+        """Human-readable mode fails explicitly for malformed XML."""
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text("not xml at all")
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--threshold",
+                "80",
+                "--coverage-file",
+                str(coverage_xml),
+                "--config",
+                str(empty_config),
+            ],
+        )
+
+        assert main() == 1
+        assert "Could not securely parse coverage report" in capsys.readouterr().err
+
+    def test_json_missing_parser(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_config: Path,
+    ) -> None:
+        """--json identifies an unavailable secure parser."""
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text('<coverage line-rate="0.90"></coverage>\n')
+        real_import = builtins.__import__
+
+        def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name.startswith("defusedxml"):
+                raise ImportError("simulated missing defusedxml")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--threshold",
+                "80",
+                "--coverage-file",
+                str(coverage_xml),
+                "--json",
+                "--config",
+                str(empty_config),
+            ],
+        )
+
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is False
+        assert payload["coverage"] is None
+        assert payload["error"] == "parser_unavailable"
+        assert "[xml]" in payload["message"]
+
+    def test_json_missing_coverage_data(
+        self, tmp_path: Path, monkeypatch, capsys, empty_config: Path
+    ) -> None:
+        """--json identifies reports without aggregate line-rate data."""
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text('<coverage version="7.4"></coverage>\n')
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "check-coverage",
+                "--threshold",
+                "80",
+                "--coverage-file",
+                str(coverage_xml),
+                "--json",
+                "--config",
+                str(empty_config),
+            ],
+        )
+
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["passed"] is False
+        assert payload["coverage"] is None
+        assert payload["error"] == "coverage_data_absent"
+        assert "line-rate" in payload["message"]

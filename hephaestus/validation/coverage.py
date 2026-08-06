@@ -94,40 +94,81 @@ def get_module_threshold(path: str, config: dict[str, Any]) -> float:
     return cast(float, config.get("coverage", {}).get("minimum", 80.0))
 
 
-def parse_coverage_report(coverage_file: Path) -> float | None:
+class CoverageReportError(RuntimeError):
+    """Base error raised when a coverage report cannot be validated."""
+
+    error_code = "coverage_report_error"
+
+
+class CoverageParserUnavailableError(CoverageReportError):
+    """Raised when the secure XML parser is unavailable."""
+
+    error_code = "parser_unavailable"
+
+
+class CoverageReportParseError(CoverageReportError):
+    """Raised when a coverage report cannot be securely parsed."""
+
+    error_code = "report_unparseable"
+
+
+class CoverageDataAbsentError(CoverageReportError):
+    """Raised when a parsed report contains no aggregate coverage data."""
+
+    error_code = "coverage_data_absent"
+
+
+def _parse_coverage_xml(coverage_file: Path) -> Any:
+    """Securely parse a Cobertura XML report and return its root element."""
+    if not coverage_file.exists():
+        raise FileNotFoundError(f"Coverage file not found: {coverage_file}")
+
+    try:
+        import defusedxml.ElementTree as ElementTree
+    except ImportError as error:
+        raise CoverageParserUnavailableError(
+            "Secure XML parser unavailable. Install it with: "
+            "pip install HomericIntelligence-Hephaestus[xml]"
+        ) from error
+
+    try:
+        return ElementTree.parse(str(coverage_file)).getroot()
+    except Exception as error:
+        raise CoverageReportParseError(
+            f"Could not securely parse coverage report {coverage_file}: {error}"
+        ) from error
+
+
+def parse_coverage_report(coverage_file: Path) -> float:
     """Parse a Cobertura XML coverage report and extract total coverage.
 
     Args:
         coverage_file: Path to ``coverage.xml`` file.
 
     Returns:
-        Coverage percentage (0-100), or None if file not found or invalid.
+        Coverage percentage (0-100).
+
+    Raises:
+        FileNotFoundError: If the coverage report does not exist.
+        CoverageParserUnavailableError: If ``defusedxml`` is unavailable.
+        CoverageReportParseError: If the report cannot be parsed or has an
+            invalid line-rate value.
+        CoverageDataAbsentError: If the report has no root line-rate data.
 
     """
-    if not coverage_file.exists():
-        logger.error("Coverage file not found: %s", coverage_file)
-        return None
-
-    try:
-        import defusedxml.ElementTree as ElementTree
-    except ImportError:
-        logger.warning(
-            "defusedxml not installed. "
-            "Install with: pip install HomericIntelligence-Hephaestus[xml]"
+    root = _parse_coverage_xml(coverage_file)
+    line_rate = root.get("line-rate")
+    if line_rate is None:
+        raise CoverageDataAbsentError(
+            f"Coverage report {coverage_file} contains no root line-rate data"
         )
-        return None
 
     try:
-        tree = ElementTree.parse(str(coverage_file))
-        root = tree.getroot()
-        line_rate = root.get("line-rate")
-        if line_rate is not None:
-            return float(line_rate) * 100.0
-        logger.warning("No line-rate found in %s", coverage_file)
-        return None
-    except Exception as e:
-        logger.error("Error parsing coverage file: %s", e)
-        return None
+        return float(line_rate) * 100.0
+    except (TypeError, ValueError) as error:
+        raise CoverageReportParseError(
+            f"Coverage report {coverage_file} has invalid line-rate data: {line_rate!r}"
+        ) from error
 
 
 def parse_module_coverage(coverage_file: Path) -> dict[str, tuple[float, float]]:
@@ -145,25 +186,11 @@ def parse_module_coverage(coverage_file: Path) -> dict[str, tuple[float, float]]
 
     Raises:
         FileNotFoundError: If coverage file does not exist.
-        RuntimeError: If defusedxml is not available or parsing fails.
+        CoverageParserUnavailableError: If ``defusedxml`` is unavailable.
+        CoverageReportParseError: If parsing fails.
 
     """
-    if not coverage_file.exists():
-        raise FileNotFoundError(f"Coverage file not found: {coverage_file}")
-
-    try:
-        import defusedxml.ElementTree as ElementTree
-    except ImportError as err:
-        raise RuntimeError(
-            "defusedxml not installed. "
-            "Install with: pip install HomericIntelligence-Hephaestus[xml]"
-        ) from err
-
-    try:
-        tree = ElementTree.parse(str(coverage_file))
-        root = tree.getroot()
-    except Exception as e:
-        raise RuntimeError(f"Error parsing coverage file: {e}") from e
+    root = _parse_coverage_xml(coverage_file)
 
     modules: dict[str, tuple[float, float]] = {}
     for class_elem in root.findall(".//class"):
@@ -192,18 +219,15 @@ def check_coverage(threshold: float, path: str, coverage_file: Path) -> bool:
         coverage_file: Path to coverage report.
 
     Returns:
-        True if coverage meets threshold or coverage is not available,
-        False only if coverage parsing succeeds but is below threshold.
+        True if coverage meets the threshold, otherwise False. Missing or
+        unusable reports fail closed and return False.
 
     """
-    coverage = parse_coverage_report(coverage_file)
-
-    if coverage is None:
-        # User-facing CLI report output — intentionally written to stdout.
-        print(f"\nCoverage Report: {path}")
-        print("  Status: Coverage data not available")
-        print("  PASSED - Coverage check skipped")
-        return True
+    try:
+        coverage = parse_coverage_report(coverage_file)
+    except (FileNotFoundError, CoverageReportError) as error:
+        print(f"\nERROR: Coverage check failed for {path}: {error}", file=sys.stderr)
+        return False
 
     # User-facing CLI report output — intentionally written to stdout.
     print(f"\nCoverage Report: {path}")
@@ -237,11 +261,21 @@ def _check_module_floors(
     """
     try:
         module_coverage = parse_module_coverage(args.coverage_file)
-    except (FileNotFoundError, RuntimeError) as e:
+    except (FileNotFoundError, CoverageReportError) as error:
+        error_code = (
+            error.error_code if isinstance(error, CoverageReportError) else "coverage_file_missing"
+        )
+        message = f"Could not parse module coverage: {error}"
         if args.json:
-            emit_json_status(1, message=f"Could not parse module coverage: {e}")
+            emit_json_status(
+                1,
+                message=message,
+                passed=False,
+                coverage=None,
+                error=error_code,
+            )
         else:
-            print(f"\nERROR: Could not parse module coverage: {e}", file=sys.stderr)
+            print(f"\nERROR: {message}", file=sys.stderr)
         return 1
 
     all_modules_pass = True
@@ -282,20 +316,25 @@ def _emit_json_report(args: argparse.Namespace, threshold: float) -> int:
         threshold: Effective coverage threshold to test against.
 
     Returns:
-        0 if coverage passes (or data unavailable), 1 if below threshold.
+        0 if coverage passes, 1 if it is below threshold or cannot be parsed.
 
     """
-    coverage_value = parse_coverage_report(args.coverage_file)
-    if coverage_value is None:
+    try:
+        coverage_value = parse_coverage_report(args.coverage_file)
+    except (FileNotFoundError, CoverageReportError) as error:
+        error_code = (
+            error.error_code if isinstance(error, CoverageReportError) else "coverage_file_missing"
+        )
         report: dict[str, Any] = {
             "path": args.path,
             "threshold": threshold,
             "coverage": None,
-            "passed": True,
-            "message": "Coverage data not available; check skipped",
+            "passed": False,
+            "error": error_code,
+            "message": str(error),
         }
         print(format_output(report, "json"))
-        return 0
+        return 1
     passed = coverage_value >= threshold
     report = {
         "path": args.path,
@@ -367,7 +406,13 @@ def main() -> int:
 
     if not args.coverage_file.exists():
         if args.json:
-            emit_json_status(1, message=f"Coverage file not found: {args.coverage_file}")
+            emit_json_status(
+                1,
+                message=f"Coverage file not found: {args.coverage_file}",
+                passed=False,
+                coverage=None,
+                error="coverage_file_missing",
+            )
             return 1
         # User-facing actionable guidance — intentionally written to stderr so
         # the message appears even when stdout is redirected to a file.
