@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import UTC
@@ -547,24 +548,48 @@ class TestGlobalThrottle:
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
         monkeypatch.setenv("TMPDIR", str(tmp_path))
         configure_gh_global_throttle(rate=0, burst=10)
-        # Should return effectively immediately and never touch the state file.
-        before = time.monotonic()
-        gh_global_throttle_acquire()
-        elapsed = time.monotonic() - before
-        assert elapsed < 0.05
-        assert not _global_throttle_state_path().exists()
+        state_path = _global_throttle_state_path()
+
+        with (
+            patch("hephaestus.github.rate_limit.time.monotonic") as mock_monotonic,
+            patch(
+                "hephaestus.github.rate_limit.time.sleep",
+                side_effect=AssertionError("disabled throttle must not sleep"),
+            ) as mock_sleep,
+        ):
+            gh_global_throttle_acquire()
+
+        mock_monotonic.assert_not_called()
+        mock_sleep.assert_not_called()
+        assert not state_path.exists()
 
     def test_first_call_succeeds_immediately_with_full_burst(self, monkeypatch, tmp_path) -> None:
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
         monkeypatch.setenv("TMPDIR", str(tmp_path))
         configure_gh_global_throttle(rate=1000, burst=10)
-        before = time.monotonic()
-        gh_global_throttle_acquire()
-        elapsed = time.monotonic() - before
-        assert elapsed < 0.1
-        assert _global_throttle_state_path().exists()
-        assert oct(_global_throttle_state_path().parent.stat().st_mode & 0o777) == "0o700"
-        assert oct(_global_throttle_state_path().stat().st_mode & 0o777) == "0o600"
+        state_path = _global_throttle_state_path()
+        now = 1_000.0
+
+        with (
+            patch(
+                "hephaestus.github.rate_limit.time.monotonic",
+                return_value=now,
+            ) as mock_monotonic,
+            patch(
+                "hephaestus.github.rate_limit.time.sleep",
+                side_effect=AssertionError("full token bucket must not sleep"),
+            ) as mock_sleep,
+        ):
+            gh_global_throttle_acquire()
+
+        mock_monotonic.assert_called_once_with()
+        mock_sleep.assert_not_called()
+        assert json.loads(state_path.read_text(encoding="utf-8")) == {
+            "tokens": 9.0,
+            "updated": now,
+        }
+        assert oct(state_path.parent.stat().st_mode & 0o777) == "0o700"
+        assert oct(state_path.stat().st_mode & 0o777) == "0o600"
 
     def test_state_path_ignores_xdg_runtime_dir(self, monkeypatch, tmp_path) -> None:
         xdg = tmp_path / "xdg"
