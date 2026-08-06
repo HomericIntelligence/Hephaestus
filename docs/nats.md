@@ -96,3 +96,22 @@ the raw message and failure to a DLQ or replay store before acknowledging it.
 Simply withholding acknowledgement is not an adequate substitute because a
 permanently malformed or handler-rejected message can create an unbounded
 poison-message redelivery loop.
+
+## Metrics cardinality
+
+NATS metrics use closed label domains. Subscriber `state` permits exactly
+`initializing`, `connected`, `disconnected`, `stopping`, `stopped`, and
+`error`. Circuit-breaker `state` permits `closed`, `open`, and `half_open`.
+Error `kind` permits `connection`, `terminal`, `handler`, and `decode`.
+
+| Metric | Labels and allowed values | Series cap |
+| --- | --- | ---: |
+| `hephaestus_nats_subscriber_state` | `state`: `initializing`, `connected`, `disconnected`, `stopping`, `stopped`, `error` | 6 |
+| `hephaestus_nats_subscriber_circuit_breaker_state` | `state`: `closed`, `open`, `half_open` | 3 |
+| `hephaestus_nats_subscriber_errors_total` | `kind`: `connection`, `terminal`, `handler`, `decode` | 4 |
+| `hephaestus_nats_subscriber_messages_total` | — | 1 |
+| `hephaestus_nats_subscriber_last_message_timestamp_seconds` | — | 1 |
+
+Rejected new series are reported by the shared
+`hephaestus_metrics_series_overflow_total` counter; admitted series remain
+updateable and are never evicted.

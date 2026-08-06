@@ -1526,17 +1526,20 @@ PR state remain the only restart authority.
 ### Gauges
 
 [`_emit_observability_tick`](../hephaestus/automation/pipeline/coordinator.py)
-publishes the following gauges once per coordinator tick. Each gauge
-retains its label series across ticks so a completed job or
-state-transition is rendered as zero, not as stale active work.
+publishes the following gauges once per coordinator tick. Each metric producer
+declares its label dimensions, finite values where the domain is closed, and a
+per-family series cap. Gauges retain admitted series across ticks so a
+completed job or state-transition is rendered as zero, not as stale active
+work; new tuples beyond a cap are dropped without evicting existing data and
+are reported through `hephaestus_metrics_series_overflow_total`.
 
-| Gauge | Type | Labels | Default | Semantics |
-|-------------------------------------------|--------|-----------|---------|-----------|
-| `hephaestus_pipeline_queue_depth` | Gauge | `stage` | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
-| `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | `0` | Total in-flight jobs across all worker pools. |
-| `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo` | `0` | In-flight jobs by repo, capped by `max_workers`. |
-| `hephaestus_circuit_breaker_state` | Gauge | `name`,`state` | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |
-| `hephaestus_pipeline_alert_active` | Gauge | `name` | `0` | `1` while a fired alert is unresolved, `0` when resolved. |
+| Gauge | Type | Labels and allowed values | Cap | Default | Semantics |
+|-------------------------------------------|--------|-----------|-----:|---------|-----------|
+| `hephaestus_pipeline_queue_depth` | Gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `finished` | 7 | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
+| `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | 1 | `0` | Total in-flight jobs across all worker pools. |
+| `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo`: open repository names | 100 | `0` | In-flight jobs by repo, capped by `max_workers`. |
+| `hephaestus_circuit_breaker_state` | Gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |
+| `hephaestus_pipeline_alert_active` | Gauge | `name`: `circuit_breaker_open`, `queue_depth_exceeds`, `pipeline_stalled` | 3 | `0` | `1` while a fired alert is unresolved, `0` when resolved. |
 
 The `circuit_breaker_snapshot_provider` is **product-layer supplied**;
 the coordinator never imports the resilience capability directly

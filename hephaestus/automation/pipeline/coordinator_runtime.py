@@ -26,6 +26,12 @@ class _CompatModule:
 time = cast(Any, _CompatModule("time"))
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
+_DYNAMIC_METRIC_SERIES_CAP = 100
+_PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in StageName)
+_JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
+_BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
+_ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
+
 
 class CoordinatorRuntime(_CoordinatorHost):
     """Own the event loop, timers, completions, routing, and shutdown."""
@@ -163,14 +169,20 @@ class CoordinatorRuntime(_CoordinatorHost):
             registry.gauge(
                 "hephaestus_pipeline_queue_depth",
                 "Queued pipeline work items by stage.",
+                allowed_labels={"stage": _PIPELINE_STAGE_LABELS},
+                series_cap=len(_PIPELINE_STAGE_LABELS),
             ).set(depth, labels={"stage": stage})
         registry.gauge(
             "hephaestus_pipeline_inflight_jobs",
             "Pipeline jobs currently owned by the worker pool.",
+            allowed_labels={},
+            series_cap=1,
         ).set(snapshot["inflight_jobs"])
         inflight_by_repo = registry.gauge(
             "hephaestus_pipeline_inflight_per_repo",
             "Pipeline jobs currently in flight by repository.",
+            allowed_labels={"repo": None},
+            series_cap=_DYNAMIC_METRIC_SERIES_CAP,
         )
         current_repos: set[str] = set()
         for repo, count in snapshot["inflight_per_repo"].items():
@@ -184,15 +196,21 @@ class CoordinatorRuntime(_CoordinatorHost):
         registry.gauge(
             "hephaestus_pipeline_loops_total",
             "Reseed passes run by this coordinator process.",
+            allowed_labels={},
+            series_cap=1,
         ).set(snapshot["loops_run"])
         registry.gauge(
             "hephaestus_pipeline_stalled_ticks",
             "Consecutive drain ticks without pipeline progress.",
+            allowed_labels={},
+            series_cap=1,
         ).set(snapshot["stalled_ticks"])
 
         breaker_states = registry.gauge(
             "hephaestus_circuit_breaker_state",
             "Circuit-breaker lifecycle state (active state has value 1).",
+            allowed_labels={"name": None, "state": _BREAKER_STATE_LABELS},
+            series_cap=_DYNAMIC_METRIC_SERIES_CAP,
         )
         current_breaker_states: dict[str, str] = {}
         for name, breaker in snapshot["circuit_breakers"].items():
@@ -213,6 +231,8 @@ class CoordinatorRuntime(_CoordinatorHost):
             registry.gauge(
                 "hephaestus_pipeline_alert_active",
                 "Current active pipeline alert state (1 active, 0 resolved).",
+                allowed_labels={"name": _ALERT_NAME_LABELS},
+                series_cap=len(_ALERT_NAME_LABELS),
             ).set(int(event.status == "fired"), labels={"name": event.name})
             self._record_event(
                 f"alert_{event.status}",
@@ -723,6 +743,11 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._metrics_registry.counter(
                 "hephaestus_pipeline_jobs_total",
                 "Completed pipeline jobs by stage and outcome.",
+                allowed_labels={
+                    "stage": _PIPELINE_STAGE_LABELS,
+                    "outcome": _JOB_OUTCOME_LABELS,
+                },
+                series_cap=len(_PIPELINE_STAGE_LABELS) * len(_JOB_OUTCOME_LABELS),
             ).inc(labels={"stage": item.stage.value, "outcome": outcome})
             if isinstance(handle.job, AgentJob):
                 # Counter.inc rejects negative amounts; a monotonic-clock skew
@@ -730,6 +755,8 @@ class CoordinatorRuntime(_CoordinatorHost):
                 self._metrics_registry.counter(
                     "hephaestus_pipeline_agent_job_seconds_total",
                     "Cumulative agent job wall-clock seconds.",
+                    allowed_labels={},
+                    series_cap=1,
                 ).inc(max(result.duration_s, 0.0))
 
         if result.interrupted:
