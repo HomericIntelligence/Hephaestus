@@ -44,6 +44,14 @@ are constructed only when a metrics port is configured.
   comments, and PR state rather than this file. These are useful lines to cite
   when escalating, not a durable authority.
 
+  The automation-loop wrapper retains inactive event logs for 30 days and caps
+  the recognized set at 100 files by default. Operators can override these
+  limits with `--event-log-retention-days` and `--event-log-retention-count`; `0`
+  disables the corresponding limit. Active logs are protected by advisory locks
+  and may temporarily keep the directory above the count cap. `--dry-run`
+  reports prospective removals without deleting them. Cleanup failures are
+  warnings and never change pipeline routing or exit status.
+
 The alert queue-depth threshold is configurable via
 `PipelineConfig.alert_queue_depth_threshold` (default `100`); the stall
 threshold defaults to `3`, matching the coordinator's own

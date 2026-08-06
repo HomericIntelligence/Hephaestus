@@ -533,6 +533,26 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             )
         ),
         _action_spec(
+            ("--event-log-retention-days",),
+            "event_log_retention_days",
+            "_StoreAction",
+            30,
+            help_text=(
+                "Delete inactive pipeline event logs older than this many days; "
+                "0 disables age cleanup."
+            ),
+        ),
+        _action_spec(
+            ("--event-log-retention-count",),
+            "event_log_retention_count",
+            "_StoreAction",
+            100,
+            help_text=(
+                "Retain at most this many pipeline event logs when inactive logs permit; "
+                "0 disables the count limit."
+            ),
+        ),
+        _action_spec(
             ("--loops",),
             "loops",
             "_StoreAction",
@@ -633,6 +653,10 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "gh_extra_path_root",
             "_StoreAction",
             None,
+            help_text=(
+                "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
+                "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
+            ),
         ),
         _action_spec(
             ("--model",),
@@ -714,7 +738,8 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text=(
                 "Enumerate non-fork, non-archived repos in a GitHub org. Pass `--org NAME` "
                 "for a specific org, or `--org` alone to auto-detect the org from the "
-                "current repo's git remote. Default (no flag): run only for the current repo."
+                "current repo's git remote. With --issues or --prs, also pass exactly one "
+                "--repos REPO. Default (no flag): run only for the current repo."
             ),
         ),
         _action_spec(

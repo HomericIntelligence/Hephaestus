@@ -18,6 +18,10 @@ import pytest
 
 import hephaestus.automation.loop_runner as loop_runner
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
+from hephaestus.automation.event_log_retention import (
+    DEFAULT_EVENT_LOG_RETENTION_COUNT,
+    DEFAULT_EVENT_LOG_RETENTION_DAYS,
+)
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.stages.base import StageContext, stage_model
@@ -31,10 +35,14 @@ def dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         "run_pipeline": MagicMock(return_value=0),
         "preflight": MagicMock(),
         "clone": MagicMock(),
+        "event_log_lifecycle": MagicMock(),
     }
+    mocks["event_log_lifecycle"].return_value.__enter__.return_value = None
+    mocks["event_log_lifecycle"].return_value.__exit__.return_value = False
     monkeypatch.setattr(coordinator_mod, "run_pipeline", mocks["run_pipeline"])
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", mocks["preflight"])
     monkeypatch.setattr(loop_runner, "_clone_missing_repos", mocks["clone"])
+    monkeypatch.setattr(loop_runner, "event_log_lifecycle", mocks["event_log_lifecycle"])
     monkeypatch.setattr(
         loop_runner, "_resolve_org_and_repos", lambda args: ("org", ["repo-a"], None)
     )
@@ -111,6 +119,35 @@ def test_build_pipeline_config_maps_cli_fields(dispatch: dict[str, MagicMock]) -
     assert config.event_log_path is not None
     assert config.event_log_path.name.startswith("pipeline-events-")
     assert config.event_log_path.parent == Path(DEFAULT_STATE_DIR)
+    dispatch["event_log_lifecycle"].assert_called_once_with(
+        config.event_log_path,
+        retention_days=DEFAULT_EVENT_LOG_RETENTION_DAYS,
+        retention_count=DEFAULT_EVENT_LOG_RETENTION_COUNT,
+        dry_run=True,
+    )
+
+
+def test_event_log_retention_flags_reach_lifecycle(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """Custom retention settings are passed to the lifecycle wrapper."""
+    loop_runner.main(
+        [
+            "--dry-run",
+            "--event-log-retention-days",
+            "14",
+            "--event-log-retention-count",
+            "25",
+        ]
+    )
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    dispatch["event_log_lifecycle"].assert_called_once_with(
+        config.event_log_path,
+        retention_days=14,
+        retention_count=25,
+        dry_run=True,
+    )
 
 
 def test_build_pipeline_config_maps_explicit_gh_root(
