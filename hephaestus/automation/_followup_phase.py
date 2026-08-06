@@ -98,7 +98,7 @@ class FollowUpPhase(StageMixin):
         impl._save_state(state)
 
     def _parse_follow_up_items(self, text: str) -> list[dict[str, Any]]:
-        """Parse follow-up items from Claude's JSON response."""
+        """Parse follow-up items from the selected agent's JSON response."""
         return parse_follow_up_items(text)
 
     def _can_resume_state_session(self, state: ImplementationState) -> bool:
@@ -108,9 +108,10 @@ class FollowUpPhase(StageMixin):
         if session_agent_matches(state.session_agent, self.options.agent):
             return True
         logger.info(
-            "Skipping session resume for issue #%s: session belongs to %s, selected agent is %s",
+            "Skipping session resume for issue #%s: provider metadata is %r, "
+            "selected provider is %s",
             state.issue_number,
-            state.session_agent or "claude",
+            state.session_agent,
             self.options.agent,
         )
         return False

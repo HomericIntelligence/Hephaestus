@@ -733,13 +733,14 @@ def _redact_pi_command_args(cmd: SubprocessCommand, tokens: Iterable[str]) -> Su
     return cmd
 
 
-def session_agent_matches(session_agent: str | None, selected_agent: str) -> bool:
-    """Return True when a persisted session belongs to the selected provider.
-
-    Legacy state files predate provider metadata and only stored Claude session
-    ids, so missing metadata is treated as Claude.
-    """
-    return (session_agent or "claude") == selected_agent
+def session_agent_matches(session_agent: object, selected_agent: str) -> bool:
+    """Return whether explicit session metadata matches a supported provider."""
+    return (
+        isinstance(session_agent, str)
+        and session_agent in AGENT_CHOICES
+        and selected_agent in AGENT_CHOICES
+        and session_agent == selected_agent
+    )
 
 
 def run_claude_text(

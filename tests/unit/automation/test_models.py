@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pytest
+from pydantic import ValidationError
 
 from hephaestus.automation.models import (
     DEFAULT_WORKER_COUNT,
@@ -138,6 +139,31 @@ class TestImplementationState:
         assert restored.worktree_path == state.worktree_path
         assert restored.session_id == state.session_id
         assert restored.session_agent == state.session_agent
+
+    @pytest.mark.parametrize("provider", ["claude", "codex", "pi"])
+    def test_session_id_accepts_supported_provider(self, provider: str) -> None:
+        """A session ID may be persisted with any supported provider."""
+        state = ImplementationState.model_validate(
+            {
+                "issue_number": 123,
+                "session_id": "opaque",
+                "session_agent": provider,
+            }
+        )
+
+        assert state.session_agent == provider
+
+    @pytest.mark.parametrize("provider", [None, "", "unknown", 42])
+    def test_session_id_rejects_invalid_provider_metadata(self, provider: object) -> None:
+        """A session ID cannot be persisted without valid provider metadata."""
+        with pytest.raises(ValidationError):
+            ImplementationState.model_validate(
+                {
+                    "issue_number": 123,
+                    "session_id": "opaque",
+                    "session_agent": provider,
+                }
+            )
 
     def test_learn_phase(self) -> None:
         """Test LEARN phase in ImplementationPhase enum."""

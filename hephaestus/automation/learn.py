@@ -1,7 +1,7 @@
 """Learn lifecycle functions for issue implementation.
 
 Provides:
-- Running /learn skill in Claude sessions
+- Running /learn skill in agent sessions
 - Checking if learn needs re-run
 """
 
@@ -190,7 +190,8 @@ def run_learn(
     """Resume agent session to run /learn.
 
     Args:
-        session_id: Agent session ID
+        session_id: Agent session ID. A resumable ID requires explicit provider
+            metadata in ``session_agent``.
         worktree_path: Path to worktree
         issue_number: Issue number
         state_dir: Directory for state/log files
@@ -203,7 +204,7 @@ def run_learn(
     Returns:
         True if learn completed successfully, False otherwise
 
-    Runs from worktree directory so Claude can find the session.
+    Runs from the worktree directory so the selected provider can find the session.
     Output is logged to state_dir/learn-{issue_number}.log.
 
     """
@@ -211,7 +212,7 @@ def run_learn(
     log_file = log_file_path(state_dir, "learn", issue_number)
     if not session_agent_matches(session_agent, agent):
         message = (
-            f"Session belongs to {session_agent or 'claude'}, "
+            f"Session provider metadata is {session_agent!r}, "
             f"but selected agent is {agent}; skipping learn resume"
         )
         logger.warning("Learn skipped for issue #%s: %s", issue_number, message)
