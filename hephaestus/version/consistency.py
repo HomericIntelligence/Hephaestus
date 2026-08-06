@@ -9,14 +9,21 @@ requested version.
 
 Provides three operations:
 
-1. ``check_version_consistency`` — verify an expected version against the
-   canonical git tag and installed distribution.
+1. ``check_version_consistency`` — verify that a canonical git tag can be
+   resolved, preserving the historical status-code API.
+
+   ``_verify_requested_version`` is the stricter check used by release
+   automation to compare an expected version with both the canonical tag and
+   installed distribution.
 
 2. ``check_package_version_consistency`` — broader multi-source scan of
    ``__init__.py`` ``__version__`` and optional skill markdown files.
 
-3. ``bump_version`` — compute the next semver string by incrementing a chosen
-   part (major/minor/patch) without changing repository state.
+3. ``preview_version`` — compute the next semver string by incrementing a
+   chosen part (major/minor/patch) without changing repository state.
+
+4. ``bump_version`` — preserve the historical integer status-code API while
+   performing the same compute-only preview.
 
 Usage:
     hephaestus-check-version-consistency [--repo-root PATH] --expected-version VERSION [--verbose]
@@ -198,12 +205,33 @@ def _find_aspirational_versions(
 # ---------------------------------------------------------------------------
 
 
-def check_version_consistency(
+def check_version_consistency(repo_root: Path, verbose: bool = False) -> int:
+    """Verify that the canonical git-derived version can be resolved.
+
+    Args:
+        repo_root: Root directory of the repository.
+        verbose: If True, print the canonical version when it resolves.
+
+    Returns:
+        0 when a canonical version can be resolved.
+
+    """
+    canonical_version = _get_canonical_version(repo_root)
+    if verbose:
+        print(f"Canonical version (git tag): {canonical_version}")
+    return 0
+
+
+def _verify_requested_version(
     repo_root: Path,
     requested_version: str,
     verbose: bool = False,
 ) -> int:
-    """Verify the canonical tag and installed distribution equal a request.
+    """Verify an expected version against the tag and installed distribution.
+
+    This strict, release-oriented check is separate from the historical
+    ``check_version_consistency`` API so existing library callers retain their
+    status-code and argument semantics.
 
     Args:
         repo_root: Root directory of the repository.
@@ -334,7 +362,7 @@ def check_package_version_consistency(
     """
     canonical = _get_canonical_version(repo_root)
     if verbose:
-        print(f"Canonical version (git tag / metadata): {canonical}")
+        print(f"Canonical version (git tag): {canonical}")
 
     all_errors: list[str] = []
     all_errors.extend(_check_init_version_errors(package_init, canonical, verbose))
@@ -357,30 +385,8 @@ def check_package_version_consistency(
     return 0
 
 
-def bump_version(
-    repo_root: Path,
-    part: str,
-    verbose: bool = False,
-) -> str:
-    """Compute the next version from the authoritative tag without changing state.
-
-    The authoritative version is set by the signed Git tag created by the
-    explicitly dispatched release workflow. This function only previews the
-    next semantic version.
-
-    Args:
-        repo_root: Root directory of the repository.
-        part: Which part to increment — ``"major"``, ``"minor"``, or ``"patch"``.
-        verbose: If True, print additional details.
-
-    Returns:
-        The proposed ``X.Y.Z`` version.
-
-    Raises:
-        ValueError: If ``part`` is not a supported semantic-version component.
-        SystemExit: If no authoritative Git tag can be determined.
-
-    """
+def _calculate_next_version(repo_root: Path, part: str) -> tuple[str, str]:
+    """Return the current and next versions without changing repository state."""
     current_str = _get_canonical_version(repo_root)
     current = parse_version(current_str)
 
@@ -393,10 +399,63 @@ def bump_version(
     else:
         raise ValueError(f"invalid part {part!r}: must be 'major', 'minor', or 'patch'")
 
-    requested = ".".join(str(component) for component in new)
+    return current_str, ".".join(str(component) for component in new)
+
+
+def preview_version(repo_root: Path, part: str, verbose: bool = False) -> str:
+    """Compute the next semantic version without changing repository state.
+
+    Args:
+        repo_root: Root directory of the repository.
+        part: Which version part to increment — ``major``, ``minor``, or ``patch``.
+        verbose: If True, print the current and proposed versions.
+
+    Returns:
+        The proposed ``X.Y.Z`` version.
+
+    Raises:
+        ValueError: If ``part`` is not a supported semantic-version component.
+        SystemExit: If no authoritative Git tag can be determined.
+
+    """
+    current_str, requested = _calculate_next_version(repo_root, part)
     if verbose:
         print(f"Computed next version: {current_str} -> {requested}")
     return requested
+
+
+def bump_version(
+    repo_root: Path,
+    part: str,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> int:
+    """Preview a version bump while preserving the legacy status-code API.
+
+    Version changes are now compute-only. ``dry_run`` remains accepted for
+    callers of the historical API and is intentionally a no-op because every
+    invocation leaves files and tags untouched.
+
+    Args:
+        repo_root: Root directory of the repository.
+        part: Which part to increment — ``major``, ``minor``, or ``patch``.
+        dry_run: Retained for compatibility; no writes occur regardless of its value.
+        verbose: If True, print the current and proposed versions.
+
+    Returns:
+        0 on success, 1 when the requested part or current version is invalid.
+
+    """
+    del dry_run  # Retained solely for source compatibility; previews never write.
+    try:
+        current_str, requested = _calculate_next_version(repo_root, part)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    if verbose:
+        print(f"Computed next version: {current_str} -> {requested}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +488,7 @@ def check_version_consistency_main() -> int:
     args = parser.parse_args()
     root = resolve_repo_root(args)
     if args.json:
-        exit_code = check_version_consistency(
+        exit_code = _verify_requested_version(
             root, requested_version=args.expected_version, verbose=False
         )
         payload = {
@@ -440,7 +499,7 @@ def check_version_consistency_main() -> int:
         }
         print(format_output(payload, "json"))
         return exit_code
-    return check_version_consistency(
+    return _verify_requested_version(
         root, requested_version=args.expected_version, verbose=args.verbose
     )
 
@@ -522,6 +581,11 @@ def bump_version_main() -> int:
         help="Which version part to bump",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Deprecated compatibility flag; version previews are always compute-only",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -529,7 +593,7 @@ def bump_version_main() -> int:
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)
-    requested = bump_version(root, part=args.part, verbose=False)
+    requested = preview_version(root, part=args.part, verbose=args.verbose and not args.json)
     if args.json:
         print(
             format_output(
