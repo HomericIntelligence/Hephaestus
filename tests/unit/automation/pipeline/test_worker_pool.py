@@ -3311,7 +3311,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3367,7 +3367,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3411,7 +3411,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3490,7 +3490,7 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert "checkout has tracked changes" in (result.error or "")
+        assert "checkout has uncommitted changes" in (result.error or "")
         argvs = [call.args[0] for call in mock_run.call_args_list]
         assert ["git", "rev-list", "--left-right", "--count", "HEAD...origin/main"] not in argvs
         assert not any(
@@ -3498,16 +3498,50 @@ class TestGitOps:
             for argv in argvs
         )
 
-    def test_checkout_state_allows_untracked_artifacts(self, tmp_path: Path) -> None:
-        """Logs and build output do not block a clean checkout from synchronizing (#2645)."""
+    def test_checkout_state_rejects_untracked_files(self, tmp_path: Path) -> None:
+        """Non-ignored intermediate files keep a reusable checkout from synchronizing."""
         checkout = tmp_path / "checkout"
         subprocess.run(
             ["git", "init", "-b", "main", str(checkout)],
             check=True,
             capture_output=True,
         )
+        (checkout / "intermediate.txt").write_text("pipeline output\n")
+
+        assert WorkerPool._checkout_state_error(
+            checkout=checkout,
+            default_branch="main",
+            timeout_s=120,
+        ) == (f"checkout has uncommitted changes: {checkout}: ?? intermediate.txt")
+
+    def test_checkout_state_allows_ignored_intermediate_files(self, tmp_path: Path) -> None:
+        """Ignored build and log output do not make a reusable checkout dirty."""
+        checkout = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "init", "-b", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+        )
+        (checkout / ".gitignore").write_text("build/\n/*.log\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=checkout, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "test: add ignore rules",
+            ],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+        )
         (checkout / "output.log").write_text("pipeline output\n")
         (checkout / "build").mkdir()
+        (checkout / "build" / "artifact.txt").write_text("generated\n")
 
         assert (
             WorkerPool._checkout_state_error(
@@ -3555,7 +3589,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -3563,7 +3597,7 @@ class TestGitOps:
             ),
         ]
         assert result.ok is False
-        assert "tracked changes" in (result.error or "")
+        assert "uncommitted changes" in (result.error or "")
 
     def test_sync_checkout_rejects_unexpected_origin(
         self,
@@ -4099,7 +4133,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -4161,7 +4195,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
                 ],
                 cwd=checkout,
                 timeout=120,

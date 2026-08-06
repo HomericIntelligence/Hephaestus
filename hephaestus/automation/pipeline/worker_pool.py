@@ -2071,7 +2071,11 @@ class WorkerPool:
         )
 
     def _git_sync_checkout(self, job: GitJob) -> JobResult:
-        """Validate and fast-forward a reusable checkout without discarding local work."""
+        """Validate and fast-forward a clean reusable checkout.
+
+        Generated and intermediate files must be covered by the repository's
+        ignore rules; any other uncommitted path blocks synchronization.
+        """
         expected_repo = str(job.kwargs.get("repo") or "")
         dest = str(job.kwargs.get("dest") or "")
         if not expected_repo or not dest:
@@ -2134,7 +2138,7 @@ class WorkerPool:
                 "core.fsmonitor=false",
                 "status",
                 "--porcelain",
-                "--untracked-files=no",
+                "--untracked-files=all",
             ],
             cwd=checkout,
             timeout=timeout_s,
@@ -2143,7 +2147,7 @@ class WorkerPool:
         if status.stdout.strip():
             return JobResult(
                 ok=False,
-                error=f"checkout has tracked changes: {checkout}: {status.stdout.strip()}",
+                error=f"checkout has uncommitted changes: {checkout}: {status.stdout.strip()}",
             )
         branch_result = git_utils.run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -2197,14 +2201,14 @@ class WorkerPool:
                 "core.fsmonitor=false",
                 "status",
                 "--porcelain",
-                "--untracked-files=no",
+                "--untracked-files=all",
             ],
             cwd=checkout,
             timeout=timeout_s,
             env=_controlled_git_env(),
         )
         if status.stdout.strip():
-            return f"checkout has tracked changes: {checkout}: {status.stdout.strip()}"
+            return f"checkout has uncommitted changes: {checkout}: {status.stdout.strip()}"
         branch_result = git_utils.run(
             ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
             cwd=checkout,
