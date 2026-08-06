@@ -8,6 +8,11 @@ from typing import Any
 
 import hephaestus.automation.github_api as _api
 
+from .pagination import (
+    MAX_PR_REVIEW_THREAD_COMMENTS,
+    collect_graphql_connection_nodes,
+)
+
 
 def _unresolved_thread_fact(  # noqa: C901 - malformed GraphQL facts fail closed
     node: dict[str, Any],
@@ -91,14 +96,12 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
     )
 
     def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
-        comments: list[dict[str, Any]] = []
-        seen_comment_ids: set[str] = set()
-        seen_cursors: set[str] = set()
-        after: str | None = None
         page_count = 0
         requested_pr_id: str | None = None
         expected_thread_fields: tuple[bool, str, int | None, str | None] | None = None
-        while True:
+
+        def fetch_comment_page(after: str | None) -> dict[str, Any]:
+            nonlocal expected_thread_fields, page_count, requested_pr_id
             page_count += 1
             argv = [
                 "api",
@@ -127,14 +130,14 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
             requested_pr = repository.get("pullRequest") if isinstance(repository, dict) else None
             node = data_node.get("node") if isinstance(data_node, dict) else None
             if not isinstance(requested_pr, dict) or not isinstance(node, dict):
-                return None
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
             pr_id = requested_pr.get("id")
             if not isinstance(pr_id, str) or not pr_id or node.get("id") != thread_id:
-                return None
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
             if requested_pr_id is None:
                 requested_pr_id = pr_id
             elif requested_pr_id != pr_id:
-                return None
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
             pull_request = node.get("pullRequest")
             thread_pr_number = (
                 pull_request.get("number") if isinstance(pull_request, dict) else None
@@ -165,7 +168,7 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
                 )
                 or (node.get("side") is not None and not isinstance(node.get("side"), str))
             ):
-                return None
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
             thread_fields = (
                 node["isResolved"],
                 node["path"],
@@ -175,62 +178,67 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
             if expected_thread_fields is None:
                 expected_thread_fields = thread_fields
             elif expected_thread_fields != thread_fields:
-                return None
-            connection = node.get("comments")
-            comment_nodes = connection.get("nodes") if isinstance(connection, dict) else None
-            page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
-            if not isinstance(comment_nodes, list) or not isinstance(page_info, dict):
-                return None
-            for comment in comment_nodes:
-                if not isinstance(comment, dict):
-                    return None
-                if "author" not in comment:
-                    return None
-                author_node = comment.get("author")
-                if author_node is None:
-                    author = ""
-                elif isinstance(author_node, dict):
-                    author_login = author_node.get("login")
-                    if not isinstance(author_login, str):
-                        return None
-                    author = author_login
-                else:
-                    return None
-                comment_id = comment.get("id")
-                body = comment.get("body")
-                if (
-                    not isinstance(comment_id, str)
-                    or not comment_id
-                    or not isinstance(author, str)
-                    or not isinstance(body, str)
-                ):
-                    return None
-                if comment_id in seen_comment_ids:
-                    return None
-                seen_comment_ids.add(comment_id)
-                comments.append({"id": comment_id, "body": body, "author": author})
-            has_next_page = page_info.get("hasNextPage")
-            if not isinstance(has_next_page, bool):
-                return None
-            if not has_next_page:
-                if expected_thread_fields is None:
-                    return None
-                return (
-                    {
-                        "id": thread_id,
-                        "isResolved": expected_thread_fields[0],
-                        "path": expected_thread_fields[1],
-                        "line": expected_thread_fields[2],
-                        "side": expected_thread_fields[3],
-                        "comments": comments,
-                    },
-                    page_count > 1,
-                )
-            next_cursor = page_info.get("endCursor")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
                 raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            seen_cursors.add(next_cursor)
-            after = next_cursor
+            connection = node.get("comments")
+            if not isinstance(connection, dict):
+                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            return connection
+
+        try:
+            comment_nodes = collect_graphql_connection_nodes(
+                fetch_comment_page,
+                connection_name=f"comments for PR review thread {thread_id}",
+                max_nodes=MAX_PR_REVIEW_THREAD_COMMENTS,
+            )
+        except RuntimeError as exc:
+            if isinstance(exc, _api.GitHubRateLimitError):
+                raise
+            raise RuntimeError(
+                f"could not fetch all comments for PR review thread {thread_id}: {exc}"
+            ) from exc
+
+        comments: list[dict[str, Any]] = []
+        seen_comment_ids: set[str] = set()
+        for comment in comment_nodes:
+            if "author" not in comment:
+                return None
+            author_node = comment.get("author")
+            if author_node is None:
+                author = ""
+            elif isinstance(author_node, dict):
+                author_login = author_node.get("login")
+                if not isinstance(author_login, str):
+                    return None
+                author = author_login
+            else:
+                return None
+            comment_id = comment.get("id")
+            body = comment.get("body")
+            if (
+                not isinstance(comment_id, str)
+                or not comment_id
+                or not isinstance(author, str)
+                or not isinstance(body, str)
+            ):
+                return None
+            if comment_id in seen_comment_ids:
+                return None
+            seen_comment_ids.add(comment_id)
+            comments.append({"id": comment_id, "body": body, "author": author})
+
+        if expected_thread_fields is None:
+            return None
+        return (
+            {
+                "id": thread_id,
+                "isResolved": expected_thread_fields[0],
+                "path": expected_thread_fields[1],
+                "line": expected_thread_fields[2],
+                "side": expected_thread_fields[3],
+                "comments": comments,
+            },
+            page_count > 1,
+        )
 
     first = read_once()
     if first is None:
@@ -286,11 +294,8 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
 
     def read_thread_ids() -> tuple[str, ...]:
         """Read one complete unresolved-thread traversal without hydrating it."""
-        thread_ids: list[str] = []
-        seen: set[str] = set()
-        seen_cursors: set[str] = set()
-        after: str | None = None
-        while True:
+
+        def fetch_thread_page(after: str | None) -> dict[str, Any]:
             argv = [
                 "api",
                 "graphql",
@@ -316,36 +321,34 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
             )
             if not isinstance(review_threads, dict):
                 raise RuntimeError("could not fetch all PR review threads")
-            nodes = review_threads.get("nodes")
-            if not isinstance(nodes, list):
-                raise RuntimeError("could not fetch all PR review threads")
-            for node in nodes:
-                if not isinstance(node, dict):
-                    raise RuntimeError("could not fetch all PR review threads")
-                is_resolved = node.get("isResolved")
-                thread_id = node.get("id")
-                if (
-                    not isinstance(is_resolved, bool)
-                    or not isinstance(thread_id, str)
-                    or not thread_id
-                    or thread_id in seen
-                ):
-                    raise RuntimeError("could not fetch all PR review threads")
-                seen.add(thread_id)
-                if not is_resolved:
-                    thread_ids.append(thread_id)
-            page_info = review_threads.get("pageInfo")
-            if not isinstance(page_info, dict) or not isinstance(
-                page_info.get("hasNextPage"), bool
+            return review_threads
+
+        try:
+            nodes = collect_graphql_connection_nodes(
+                fetch_thread_page,
+                connection_name=f"review threads for PR #{pr_number}",
+            )
+        except RuntimeError as exc:
+            if isinstance(exc, _api.GitHubRateLimitError):
+                raise
+            raise RuntimeError("could not fetch all PR review threads") from exc
+
+        thread_ids: list[str] = []
+        seen: set[str] = set()
+        for node in nodes:
+            is_resolved = node.get("isResolved")
+            thread_id = node.get("id")
+            if (
+                not isinstance(is_resolved, bool)
+                or not isinstance(thread_id, str)
+                or not thread_id
+                or thread_id in seen
             ):
                 raise RuntimeError("could not fetch all PR review threads")
-            if not page_info["hasNextPage"]:
-                return tuple(thread_ids)
-            next_cursor = page_info.get("endCursor")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
-                raise RuntimeError("could not fetch all PR review threads")
-            seen_cursors.add(next_cursor)
-            after = next_cursor
+            seen.add(thread_id)
+            if not is_resolved:
+                thread_ids.append(thread_id)
+        return tuple(thread_ids)
 
     first_ids = read_thread_ids()
     if first_ids != read_thread_ids():
