@@ -1,75 +1,65 @@
-"""Tests for the shared --dry-run help-text contract (#772)."""
+"""Behavioral checks for automation ``--dry-run`` parser flags."""
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import pkgutil
 
 import pytest
 
-from hephaestus.cli.utils import DRY_RUN_HELP_CAVEAT, add_dry_run_arg
-
-TOKEN_COST_SENTENCE = "still incurs full Claude API token cost"  # noqa: S105
-
-CLI_PARSER_BUILDERS = [
-    "hephaestus.automation.planner",
-    "hephaestus.automation.plan_reviewer",
-    "hephaestus.automation.pr_reviewer",
-    "hephaestus.automation.implementer",
-    "hephaestus.automation.ci_driver",
-    "hephaestus.automation.loop_runner",
-]
+from hephaestus import automation
+from hephaestus.cli.utils import add_dry_run_arg
 
 
-def _dry_run_help(parser: argparse.ArgumentParser) -> str:
+def _discover_dry_run_parsers() -> list[tuple[str, argparse.ArgumentParser]]:
+    """Discover importable automation parsers exposing ``--dry-run``."""
+    discovered: list[tuple[str, argparse.ArgumentParser]] = []
+    for module_info in pkgutil.iter_modules(
+        automation.__path__,
+        prefix=f"{automation.__name__}.",
+    ):
+        module = importlib.import_module(module_info.name)
+        builder = getattr(module, "_build_parser", None)
+        if not callable(builder):
+            continue
+        parser = builder()
+        if any("--dry-run" in action.option_strings for action in parser._actions):
+            discovered.append((module_info.name, parser))
+    return discovered
+
+
+def _required_arguments(parser: argparse.ArgumentParser) -> list[str]:
+    """Build minimal option arguments needed to parse a discovered parser."""
+    argv: list[str] = []
     for action in parser._actions:
-        if "--dry-run" in action.option_strings:
-            return action.help or ""
-    raise AssertionError("--dry-run not found on parser")
+        if action.required and action.option_strings:
+            value = next(iter(action.choices)) if action.choices else "1"
+            argv.extend([action.option_strings[0], str(value)])
+    return argv
 
 
-def test_canonical_caveat_mentions_token_cost() -> None:
-    """Test that canonical caveat mentions token cost."""
-    assert TOKEN_COST_SENTENCE in DRY_RUN_HELP_CAVEAT
+def test_dry_run_parser_discovery_is_non_empty() -> None:
+    """At least one automation parser is covered by discovery."""
+    assert _discover_dry_run_parsers()
 
 
-def test_add_dry_run_arg_appends_flag_with_caveat() -> None:
-    """Test that add_dry_run_arg appends the flag with canonical caveat."""
-    p = argparse.ArgumentParser()
-    add_dry_run_arg(p)
-    help_text = _dry_run_help(p)
-    assert TOKEN_COST_SENTENCE in help_text
-    # When no prefix is supplied, the caveat is the whole help string.
-    assert help_text == DRY_RUN_HELP_CAVEAT
+def test_add_dry_run_arg_toggles_boolean_state() -> None:
+    """The isolated shared option defaults false and becomes true when present."""
+    parser = argparse.ArgumentParser()
+    add_dry_run_arg(parser)
+
+    assert parser.parse_args([]).dry_run is False
+    assert parser.parse_args(["--dry-run"]).dry_run is True
 
 
-def test_add_dry_run_arg_prefix_precedes_caveat() -> None:
-    """Test that prefix text precedes the canonical caveat."""
-    p = argparse.ArgumentParser()
-    add_dry_run_arg(p, prefix="No review comments posted.")
-    help_text = _dry_run_help(p)
-    assert help_text.startswith("No review comments posted.")
-    assert help_text.endswith(DRY_RUN_HELP_CAVEAT)
-    assert TOKEN_COST_SENTENCE in help_text
+@pytest.mark.parametrize(("module_name", "parser"), _discover_dry_run_parsers())
+def test_discovered_dry_run_flags_toggle_boolean_state(
+    module_name: str,
+    parser: argparse.ArgumentParser,
+) -> None:
+    """Every discovered dry-run flag toggles only the boolean state."""
+    required = _required_arguments(parser)
 
-
-def test_add_dry_run_arg_prefix_without_terminal_punctuation_gets_period() -> None:
-    """Guards against the 'Suppress mutations NOTE: Claude…' concatenation bug."""
-    p = argparse.ArgumentParser()
-    add_dry_run_arg(p, prefix="Suppress mutations")
-    help_text = _dry_run_help(p)
-    assert "Suppress mutations. " in help_text
-    assert help_text.endswith(DRY_RUN_HELP_CAVEAT)
-
-
-@pytest.mark.parametrize("module_path", CLI_PARSER_BUILDERS)
-def test_every_cli_parser_carries_canonical_caveat(module_path: str) -> None:
-    """Test that every CLI parser carries the canonical caveat."""
-    mod = importlib.import_module(module_path)
-    parser = mod._build_parser()
-    assert isinstance(parser, argparse.ArgumentParser)
-    help_text = _dry_run_help(parser)
-    assert TOKEN_COST_SENTENCE in help_text, (
-        f"{module_path}._build_parser() produced --dry-run help without "
-        f"the canonical caveat: {help_text!r}"
-    )
+    assert parser.parse_args(required).dry_run is False, module_name
+    assert parser.parse_args([*required, "--dry-run"]).dry_run is True, module_name

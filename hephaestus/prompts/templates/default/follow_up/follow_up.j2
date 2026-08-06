@@ -42,15 +42,15 @@ Return EXACTLY one JSON object with two arrays. Both arrays may be empty.
 {
   "follow_ups": [
     {
-      "category": "core" | "security" | "safety" | "critical_bug",
-      "title": "Short specific title (<70 chars)",
-      "body": "Concrete description with file:line evidence and a sketch fix"
+      "category": "core",
+      "title": "Short specific title",
+      "body": "module.py:1: Concrete defect and proposed fix"
     }
   ],
   "rejected": [
     {
-      "title": "Item you considered but rejected",
-      "reason": "One sentence: which scope rule it failed and why"
+      "title": "Excluded candidate",
+      "reason": "It does not meet a supported scope category."
     }
   ]
 }
