@@ -353,8 +353,9 @@ def _collect_workflow_files_detailed(paths: list[str]) -> _WorkflowCollectionRes
             files.append(target)
         elif stat.S_ISDIR(mode):
             try:
-                yml_files = sorted(target.glob("*.yml"))
-                yaml_files = sorted(target.glob("*.yaml"))
+                directory_entries = list(target.iterdir())
+                yml_files = sorted(path for path in directory_entries if path.suffix == ".yml")
+                yaml_files = sorted(path for path in directory_entries if path.suffix == ".yaml")
             except OSError as exc:
                 tool_errors.append(
                     WorkflowToolError(

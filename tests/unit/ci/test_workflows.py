@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import tomllib
@@ -412,14 +413,14 @@ class TestCollectWorkflowFilesFailClosed:
     def test_directory_enumeration_failure_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        real_glob = Path.glob
+        real_scandir = os.scandir
 
-        def fail_glob(path: Path, pattern: str) -> Any:
-            if path == tmp_path:
+        def fail_scandir(path: Any) -> Any:
+            if Path(path) == tmp_path:
                 raise PermissionError("denied")
-            return real_glob(path, pattern)
+            return real_scandir(path)
 
-        monkeypatch.setattr(Path, "glob", fail_glob)
+        monkeypatch.setattr(os, "scandir", fail_scandir)
 
         with pytest.raises(WorkflowValidationError) as caught:
             collect_workflow_files([str(tmp_path)])
@@ -538,18 +539,20 @@ class TestCheckoutValidationToolErrorExitCodes:
         assert exit_code == 1
         assert payload["tool_errors"][0]["code"] == "stat_error"
 
-    def test_directory_read_failure_returns_nonzero(
+    def test_unreadable_directory_returns_nonzero_with_allow_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        real_glob = Path.glob
+        real_scandir = os.scandir
 
-        def fail_glob(path: Path, pattern: str) -> Any:
-            if path == tmp_path:
+        def fail_scandir(path: Any) -> Any:
+            if Path(path) == tmp_path:
                 raise PermissionError("denied")
-            return real_glob(path, pattern)
+            return real_scandir(path)
 
-        monkeypatch.setattr(Path, "glob", fail_glob)
-        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [tmp_path])
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+        exit_code, payload = _run_checkout_cli_json(
+            monkeypatch, capsys, [tmp_path], allow_empty=True
+        )
 
         assert exit_code == 1
         assert payload["tool_errors"][0]["code"] == "directory_read_error"
