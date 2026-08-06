@@ -76,7 +76,10 @@ pipeline families above use the smaller explicit caps shown here. An admitted
 label tuple remains updateable; a new tuple after the cap is dropped without
 evicting an existing tuple or failing its producer. The overflow counter is
 absent until the first rejected update, then exposes one series per overflowing
-family. Low-cardinality families retain their existing exposition format.
+family. Independently of tuple cardinality, each label value is limited to
+1,024 bytes after Prometheus escaping and UTF-8 encoding. Oversized values are
+rejected before either a finite allowed-value domain or a metric sample can
+retain them. Low-cardinality families retain their existing exposition format.
 
 ## Alerts
 

@@ -215,7 +215,17 @@ class CoordinatorRuntime(_CoordinatorHost):
         current_breaker_states: dict[str, str] = {}
         for name, breaker in snapshot["circuit_breakers"].items():
             breaker_name = str(name)
-            state = str(breaker["state"])
+            if not isinstance(breaker, dict):
+                logger.warning("ignoring malformed circuit-breaker snapshot for %s", breaker_name)
+                continue
+            state = breaker.get("state")
+            if not isinstance(state, str) or state not in _BREAKER_STATE_LABELS:
+                logger.warning(
+                    "ignoring circuit-breaker snapshot with invalid state for %s: %r",
+                    breaker_name,
+                    state,
+                )
+                continue
             previous_state = self._observed_circuit_breaker_states.get(breaker_name)
             if previous_state is not None and previous_state != state:
                 breaker_states.set(0, labels={"name": breaker_name, "state": previous_state})

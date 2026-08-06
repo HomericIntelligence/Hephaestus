@@ -16,9 +16,30 @@ from typing import overload
 _METRIC_NAME_RE = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*\Z")
 _LABEL_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _DEFAULT_SERIES_CAP = 100
+_MAX_ENCODED_LABEL_VALUE_BYTES = 1024
 _SERIES_OVERFLOW_METRIC = "hephaestus_metrics_series_overflow_total"
 type LabelValues = tuple[tuple[str, str], ...]
 type AllowedLabels = tuple[tuple[str, frozenset[str] | None], ...]
+
+
+def _escape_label_value(value: str) -> str:
+    """Escape label values according to the Prometheus text format."""
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _normalise_label_value(name: str, value: object) -> str:
+    """Convert and bound one label value by its escaped UTF-8 size."""
+    normalised = str(value)
+    try:
+        encoded_size = len(_escape_label_value(normalised).encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"Prometheus label {name!r} value must be valid UTF-8") from exc
+    if encoded_size > _MAX_ENCODED_LABEL_VALUE_BYTES:
+        raise ValueError(
+            f"Prometheus label {name!r} value must be at most "
+            f"{_MAX_ENCODED_LABEL_VALUE_BYTES} escaped UTF-8 bytes"
+        )
+    return normalised
 
 
 def _normalise_labels(labels: Mapping[str, object] | None) -> LabelValues:
@@ -29,7 +50,7 @@ def _normalise_labels(labels: Mapping[str, object] | None) -> LabelValues:
     for name, value in labels.items():
         if not _LABEL_NAME_RE.fullmatch(name):
             raise ValueError(f"invalid Prometheus label name: {name!r}")
-        result.append((name, str(value)))
+        result.append((name, _normalise_label_value(name, value)))
     return tuple(sorted(result))
 
 
@@ -64,14 +85,9 @@ def _normalise_allowed_labels(
         else:
             if not isinstance(values, Collection) or isinstance(values, (str, bytes)):
                 raise ValueError(f"allowed values for label {name!r} must be a finite collection")
-            normalised_values = frozenset(str(value) for value in values)
+            normalised_values = frozenset(_normalise_label_value(name, value) for value in values)
         result.append((name, normalised_values))
     return tuple(sorted(result))
-
-
-def _escape_label_value(value: str) -> str:
-    """Escape label values according to the Prometheus text format."""
-    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
 
 def _escape_help(value: str) -> str:

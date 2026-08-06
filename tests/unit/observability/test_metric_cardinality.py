@@ -26,6 +26,36 @@ def test_allowed_label_dimensions_and_values_are_enforced() -> None:
         gauge.set(1, labels={"stage": "unknown"})
 
 
+def test_label_values_are_bounded_by_escaped_utf8_size() -> None:
+    """Label values at the byte boundary work, while oversized values are rejected."""
+    registry = MetricsRegistry()
+    counter = registry.counter(
+        "test_label_size_total",
+        allowed_labels={"tenant": None},
+        series_cap=1,
+    )
+    boundary_value = "é" * 512
+
+    counter.inc(labels={"tenant": boundary_value})
+    with pytest.raises(ValueError, match="at most 1024 escaped UTF-8 bytes"):
+        counter.inc(labels={"tenant": "\\" * 513})
+
+    rendered = registry.render_prometheus()
+    assert f'test_label_size_total{{tenant="{boundary_value}"}} 1' in rendered
+    assert "hephaestus_metrics_series_overflow_total" not in rendered
+
+
+def test_oversized_allowed_label_value_is_rejected_at_registration() -> None:
+    """Finite label domains cannot retain values too large for exposition."""
+    registry = MetricsRegistry()
+
+    with pytest.raises(ValueError, match="at most 1024 escaped UTF-8 bytes"):
+        registry.gauge(
+            "test_allowed_label_size",
+            allowed_labels={"tenant": {"x" * 1025}},
+        )
+
+
 def test_series_cap_is_per_family_and_overflow_is_exported() -> None:
     """Each family admits its own cap and exposes rejected new-series writes."""
     registry = MetricsRegistry(default_series_cap=2)
