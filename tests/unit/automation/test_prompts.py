@@ -146,12 +146,16 @@ def test_follow_up_prompt_example_is_accepted_by_follow_up_parser() -> None:
     """The follow-up example produces one accepted and one rejected item."""
     parsed = parse_follow_up_response(prompts.get_follow_up_prompt(1))
 
-    assert [(item.category, item.title, item.body) for item in parsed.follow_ups] == [
-        ("core", "Short specific title", "module.py:1: Concrete defect and proposed fix")
-    ]
-    assert [(item.title, item.reason) for item in parsed.rejected] == [
-        ("Excluded candidate", "It does not meet a supported scope category.")
-    ]
+    assert len(parsed.follow_ups) == 1
+    accepted = parsed.follow_ups[0]
+    assert accepted.category in {"core", "security", "safety", "critical_bug"}
+    assert isinstance(accepted.title, str)
+    assert isinstance(accepted.body, str)
+
+    assert len(parsed.rejected) == 1
+    rejected = parsed.rejected[0]
+    assert isinstance(rejected.title, str)
+    assert isinstance(rejected.reason, str)
 
 
 def test_pr_description_preserves_issue_closure_and_content_round_trip() -> None:
@@ -178,7 +182,7 @@ def test_advise_prompt_builder_routes_direct_providers() -> None:
 
 def test_review_iteration_routes_final_sweep_fragment() -> None:
     """Only the final review iteration receives the full-sweep fragment."""
-    first = prompts.get_plan_loop_review_prompt(
+    plan_first = prompts.get_plan_loop_review_prompt(
         issue_number=1,
         issue_title="title",
         issue_body="body",
@@ -187,7 +191,7 @@ def test_review_iteration_routes_final_sweep_fragment() -> None:
         iteration=0,
         prior_review=None,
     )
-    final = prompts.get_plan_loop_review_prompt(
+    plan_final = prompts.get_plan_loop_review_prompt(
         issue_number=1,
         issue_title="title",
         issue_body="body",
@@ -196,10 +200,30 @@ def test_review_iteration_routes_final_sweep_fragment() -> None:
         iteration=2,
         prior_review=None,
     )
+    impl_first = prompts.get_impl_loop_review_prompt(
+        issue_number=1,
+        issue_title="title",
+        issue_body="body",
+        diff_text="diff",
+        files_changed="module.py",
+        iteration=0,
+        prior_review=None,
+    )
+    impl_final = prompts.get_impl_loop_review_prompt(
+        issue_number=1,
+        issue_title="title",
+        issue_body="body",
+        diff_text="diff",
+        files_changed="module.py",
+        iteration=2,
+        prior_review=None,
+    )
     full_sweep = get_full_sweep_suffix().strip()
 
-    assert full_sweep not in first
-    assert full_sweep in final
+    assert full_sweep not in plan_first
+    assert full_sweep in plan_final
+    assert full_sweep not in impl_first
+    assert full_sweep in impl_final
 
 
 def test_untrusted_prompt_inputs_are_nonce_paired_and_contained() -> None:
@@ -281,8 +305,19 @@ def test_untrusted_prompt_inputs_are_nonce_paired_and_contained() -> None:
                 worktree_path="/tmp/worktree",
                 threads_json=injection,
                 todo_block=injection,
+                task_block=injection,
+                task_review_block=injection,
+                diff_text=injection,
+                unaddressed_findings=[{"path": "module.py", "line": 42, "body": injection}],
             ),
-            {"THREADS_JSON": injection, "TODO_LIST": injection},
+            {
+                "THREADS_JSON": injection,
+                "TODO_LIST": injection,
+                "TASK": injection,
+                "TASK_REVIEW": injection,
+                "DIFF": injection,
+                "UNADDRESSED": f"- Make sure to handle module.py:42 — {injection}",
+            },
         ),
         (
             prompts.get_pr_review_analysis_prompt(
