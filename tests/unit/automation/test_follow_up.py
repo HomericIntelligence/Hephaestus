@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hephaestus.automation.follow_up import (
     FollowUpItem,
     FollowUpResponse,
@@ -259,7 +261,9 @@ class TestRunFollowUpIssues:
             ) as mock_create,
             patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         assert response is not None
         assert len(response.follow_ups) == 2
@@ -278,21 +282,29 @@ class TestRunFollowUpIssues:
         mock_comment.assert_called_once()
         assert "#999" in mock_comment.call_args.args[1]
 
-    def test_codex_skips_legacy_claude_session(self, tmp_path: Path) -> None:
-        """Legacy sessions must not be resumed through Codex."""
+    @pytest.mark.parametrize(("agent", "session_agent"), [("claude", None), ("codex", "claude")])
+    def test_invalid_provider_metadata_never_resumes(
+        self, tmp_path: Path, agent: str, session_agent: str | None
+    ) -> None:
+        """Absent and cross-provider metadata never resume."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
-        with patch("hephaestus.automation.follow_up.resume_agent_session") as mock_resume:
+        with (
+            patch("hephaestus.automation.follow_up.run") as mock_run,
+            patch("hephaestus.automation.follow_up.resume_agent_session") as mock_resume,
+        ):
             response = run_follow_up_issues(
                 "sess",
                 worktree_path,
                 42,
                 tmp_path,
-                agent="codex",
+                agent=agent,
+                session_agent=session_agent,
             )
 
         assert response is None
+        mock_run.assert_not_called()
         mock_resume.assert_not_called()
         assert (tmp_path / "follow-up-42.log").read_text().startswith("FAILED:")
 
@@ -308,7 +320,9 @@ class TestRunFollowUpIssues:
             patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
             patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         assert response is not None
         mock_create.assert_not_called()
@@ -335,7 +349,9 @@ class TestRunFollowUpIssues:
             patch("hephaestus.automation.follow_up.gh_issue_create", return_value=1234),
             patch("hephaestus.automation.follow_up.gh_issue_comment"),
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         rejected_path = tmp_path / "follow-up-rejected-42.json"
         assert rejected_path.exists()
@@ -364,7 +380,14 @@ class TestRunFollowUpIssues:
             patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
             patch("hephaestus.automation.follow_up.gh_issue_comment") as mock_comment,
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path, dry_run=True)
+            run_follow_up_issues(
+                "sess",
+                worktree_path,
+                42,
+                tmp_path,
+                dry_run=True,
+                session_agent="claude",
+            )
 
         mock_create.assert_not_called()
         mock_comment.assert_not_called()
@@ -377,7 +400,9 @@ class TestRunFollowUpIssues:
             "hephaestus.automation.follow_up.run",
             side_effect=RuntimeError("claude failed"),
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         assert response is None
         log_file = tmp_path / "follow-up-42.log"
@@ -392,7 +417,7 @@ class TestRunFollowUpIssues:
         mock_result.stdout = self._make_claude_output({"follow_ups": [], "rejected": []})
 
         with patch("hephaestus.automation.follow_up.run", return_value=mock_result):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path, session_agent="claude")
 
         prompt_file = worktree_path / ".claude-followup-42.md"
         assert not prompt_file.exists()
@@ -405,7 +430,7 @@ class TestRunFollowUpIssues:
             "hephaestus.automation.follow_up.run",
             side_effect=RuntimeError("fail"),
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path, session_agent="claude")
 
         prompt_file = worktree_path / ".claude-followup-42.md"
         assert not prompt_file.exists()
@@ -418,7 +443,7 @@ class TestRunFollowUpIssues:
             "hephaestus.automation.follow_up.run",
             side_effect=RuntimeError("claude failed"),
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path, session_agent="claude")
         log_text = (tmp_path / "follow-up-42.log").read_text()
         assert log_text.startswith("FAILED: [RuntimeError]")
         assert "TRACEBACK:" in log_text
@@ -434,7 +459,9 @@ class TestRunFollowUpIssues:
                 side_effect=AttributeError("bug"),
             ),
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
         assert response is None  # safety contract still holds
         error_records = [
             r
@@ -458,7 +485,7 @@ class TestRunFollowUpIssues:
                 side_effect=subprocess.CalledProcessError(1, "claude"),
             ),
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            run_follow_up_issues("sess", worktree_path, 42, tmp_path, session_agent="claude")
         follow_up_records = [
             r for r in caplog.records if r.name == "hephaestus.automation.follow_up"
         ]
@@ -488,7 +515,15 @@ class TestRunFollowUpIssues:
             patch("hephaestus.automation.follow_up.gh_issue_create", return_value=201),
             patch("hephaestus.automation.follow_up.gh_issue_comment"),
         ):
-            run_follow_up_issues("sess", worktree_path, 42, tmp_path, mock_tracker, slot_id=1)
+            run_follow_up_issues(
+                "sess",
+                worktree_path,
+                42,
+                tmp_path,
+                mock_tracker,
+                slot_id=1,
+                session_agent="claude",
+            )
 
         # New policy: tracker is updated ONCE for the consolidated filing,
         # not once per item.
@@ -548,7 +583,9 @@ class TestRunFollowUpIsErrorHandling:
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
             patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         assert response is None
         mock_create.assert_not_called()
@@ -579,7 +616,9 @@ class TestRunFollowUpIsErrorHandling:
             patch("hephaestus.automation.follow_up.wait_until") as mock_wait,
             patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         assert response is None
         mock_wait.assert_called_once_with(future_epoch)
@@ -599,7 +638,9 @@ class TestRunFollowUpIsErrorHandling:
             patch("hephaestus.automation.follow_up.run", return_value=mock_result),
             patch("hephaestus.automation.follow_up.gh_issue_create") as mock_create,
         ):
-            response = run_follow_up_issues("sess", worktree_path, 42, tmp_path)
+            response = run_follow_up_issues(
+                "sess", worktree_path, 42, tmp_path, session_agent="claude"
+            )
 
         # No error — response parsed normally
         assert response is not None

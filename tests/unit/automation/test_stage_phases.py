@@ -327,7 +327,12 @@ def test_followup_can_resume_matches_agent(tmp_path: Path) -> None:
     """_can_resume_state_session is True when the saved agent matches."""
     phase = FollowUpPhase(_make_ctx(tmp_path))
     state = SimpleNamespace(session_id="s", session_agent="claude", issue_number=7)
-    with mock.patch(
-        "hephaestus.automation._followup_phase.session_agent_matches", return_value=True
-    ):
-        assert phase._can_resume_state_session(cast(Any, state)) is True
+    assert phase._can_resume_state_session(cast(Any, state)) is True
+
+
+def test_followup_cannot_resume_missing_provider_metadata(tmp_path: Path) -> None:
+    """A session without explicit provider metadata cannot be resumed."""
+    phase = FollowUpPhase(_make_ctx(tmp_path))
+    state = SimpleNamespace(session_id="s", session_agent=None, issue_number=7)
+
+    assert phase._can_resume_state_session(cast(Any, state)) is False

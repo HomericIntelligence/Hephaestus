@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import stat
 from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
 
 from hephaestus.automation.models import ImplementationPhase, ImplementationState
 from hephaestus.automation.state.implementer import ImplementationStateManager
@@ -40,6 +44,34 @@ def test_save_persists_issue_state_with_secure_permissions(tmp_path: Path) -> No
     assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
 
 
+def test_save_persists_session_provider_metadata(tmp_path: Path) -> None:
+    """A valid session ID and provider survive the secure write boundary."""
+    manager = ImplementationStateManager(tmp_path)
+    state = ImplementationState(
+        issue_number=1403,
+        session_id="opaque",
+        session_agent="codex",
+    )
+
+    manager.save(state)
+
+    payload = json.loads((tmp_path / "issue-1403.json").read_text())
+    assert payload["session_id"] == "opaque"
+    assert payload["session_agent"] == "codex"
+
+
+def test_save_rejects_mutated_session_without_provider(tmp_path: Path) -> None:
+    """Save revalidates models mutated after construction."""
+    manager = ImplementationStateManager(tmp_path)
+    state = ImplementationState(issue_number=123)
+    state.session_id = "opaque"
+
+    with pytest.raises(ValidationError):
+        manager.save(state)
+
+    assert not (tmp_path / "issue-123.json").exists()
+
+
 def test_load_all_loads_valid_state_and_skips_corrupt_file(tmp_path: Path) -> None:
     """ImplementationStateManager.load_all keeps valid files and skips corrupt files."""
     valid = ImplementationState(issue_number=123, phase=ImplementationPhase.TESTING)
@@ -51,6 +83,18 @@ def test_load_all_loads_valid_state_and_skips_corrupt_file(tmp_path: Path) -> No
 
     assert manager.states[123].phase is ImplementationPhase.TESTING
     assert 456 not in manager.states
+
+
+def test_load_all_skips_legacy_session_without_provider(tmp_path: Path) -> None:
+    """Legacy session state is skipped instead of being inferred as Claude."""
+    (tmp_path / "issue-123.json").write_text(
+        json.dumps({"issue_number": 123, "session_id": "legacy"})
+    )
+
+    manager = ImplementationStateManager(tmp_path)
+    manager.load_all()
+
+    assert 123 not in manager.states
 
 
 def test_load_only_hydrates_requested_issue_states(tmp_path: Path) -> None:

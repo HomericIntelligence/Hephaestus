@@ -325,14 +325,14 @@ class TestDiscoverPrsSimple:
 class TestLoadImplSessionId:
     """Tests for the shared load_impl_session_id helper."""
 
-    def test_returns_session_id_for_matching_claude(self, tmp_path: Path) -> None:
-        """Legacy state without session_agent belongs to Claude."""
+    def test_missing_provider_metadata_never_resumes_as_claude(self, tmp_path: Path) -> None:
+        """Historical state without provider metadata starts fresh."""
         (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "abc"}))
 
-        assert load_impl_session_id(tmp_path, 123, "claude") == "abc"
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
 
-    def test_skips_legacy_claude_session_for_codex(self, tmp_path: Path) -> None:
-        """Legacy Claude session must not resume as Codex."""
+    def test_skips_missing_provider_for_codex(self, tmp_path: Path) -> None:
+        """Missing provider metadata must not resume as Codex."""
         (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "abc"}))
 
         assert load_impl_session_id(tmp_path, 123, "codex") is None
@@ -344,6 +344,17 @@ class TestLoadImplSessionId:
         )
 
         assert load_impl_session_id(tmp_path, 123, "codex") == "codex-sess"
+
+    @pytest.mark.parametrize("session_agent", ["", "unknown", 42, {"name": "claude"}])
+    def test_malformed_or_unknown_provider_metadata_is_not_resumable(
+        self, tmp_path: Path, session_agent: object
+    ) -> None:
+        """Invalid provider metadata cannot authorize a session resume."""
+        (tmp_path / "issue-123.json").write_text(
+            json.dumps({"session_id": "opaque", "session_agent": session_agent})
+        )
+
+        assert load_impl_session_id(tmp_path, 123, "claude") is None
 
     def test_missing_file_returns_none(self, tmp_path: Path) -> None:
         """Missing implementer state returns None."""
@@ -373,7 +384,9 @@ class TestLoadImplSessionId:
 
         assert load_impl_session_id(tmp_path, 123, "claude") is None
 
-        (tmp_path / "issue-123.json").write_text(json.dumps({"session_id": "real"}))
+        (tmp_path / "issue-123.json").write_text(
+            json.dumps({"session_id": "real", "session_agent": "claude"})
+        )
 
         assert load_impl_session_id(tmp_path, 123, "claude") == "real"
 

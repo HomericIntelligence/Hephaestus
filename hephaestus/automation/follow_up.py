@@ -10,9 +10,9 @@ Public surface:
 
 - ``parse_follow_up_response(text)`` — returns a typed result with
   ``follow_ups`` and ``rejected`` lists.
-- ``run_follow_up_issues(...)`` — resumes the Claude session, parses the
+- ``run_follow_up_issues(...)`` — resumes the selected agent session, parses the
   response, files at most one consolidated issue, and returns the parsed
-  ``FollowUpResponse`` (or ``None`` if Claude failed). The rejected list is
+  ``FollowUpResponse`` (or ``None`` if the agent failed). The rejected list is
   also persisted to ``state_dir/follow-up-rejected-{issue_number}.json``
   so callers that don't read the return value still have access.
 - ``render_rejected_for_pr_body(rejected)`` — markdown helper for embedding
@@ -386,17 +386,17 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
     session_agent: str | None = None,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
 ) -> FollowUpResponse | None:
-    """Resume the implementation Claude session and file ONE consolidated follow-up issue.
+    """Resume the implementation agent session and file ONE consolidated follow-up issue.
 
     Returns the parsed ``FollowUpResponse`` so callers can render the rejected
-    items into the PR body. Returns ``None`` if Claude failed or the response
+    items into the PR body. Returns ``None`` if the agent failed or the response
     was unparseable — in that case the caller should not block the PR
     pipeline.
 
     Side effects:
 
     - Creates ``state_dir`` if missing.
-    - Writes ``state_dir/follow-up-{issue_number}.log`` with the raw Claude output.
+    - Writes ``state_dir/follow-up-{issue_number}.log`` with the raw agent output.
     - Writes ``state_dir/follow-up-rejected-{issue_number}.json`` with the
       rejected list.
     - Files at most ONE GitHub issue (the consolidated one), and posts a single
@@ -407,7 +407,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
     follow_up_log = log_file_path(state_dir, "follow-up", issue_number)
     if not session_agent_matches(session_agent, agent):
         message = (
-            f"Session belongs to {session_agent or 'claude'}, "
+            f"Session provider metadata is {session_agent!r}, "
             f"but selected agent is {agent}; skipping follow-up resume"
         )
         logger.warning("Follow-up skipped for issue #%d: %s", issue_number, message)
