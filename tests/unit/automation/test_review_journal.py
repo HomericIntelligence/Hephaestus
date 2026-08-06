@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     MAX_CURRENT_REVISION_CONTEXT_CHARS,
+    CommentJournalReadError,
     IssueComment,
+    PlanDiscoveryResult,
+    PlanDiscoveryStatus,
     archive_plan_body,
     archive_review_body,
     blocked_audit_recovery_body,
     current_plan_context,
     current_revision_context,
+    discover_plan_from_comments,
     journal_snapshot,
+    normalize_issue_comments,
     render_current_plan,
     render_current_review,
 )
@@ -19,6 +26,45 @@ from hephaestus.automation.review_journal import (
 
 def _owned(body: str) -> IssueComment:
     return IssueComment(body=body, author_login="hephaestus[bot]", viewer_did_author=True)
+
+
+def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
+    """The result contract keeps successful absence separate from read failure."""
+    found = discover_plan_from_comments([_owned(render_current_plan("Plan"))])
+    absent = discover_plan_from_comments([])
+    failed = PlanDiscoveryResult.read_error("offline")
+
+    assert found.status is PlanDiscoveryStatus.FOUND
+    assert found.plan_text is not None
+    assert absent.status is PlanDiscoveryStatus.ABSENT
+    assert failed.status is PlanDiscoveryStatus.READ_ERROR
+
+
+def test_normalization_derives_ownership_from_validated_logins() -> None:
+    """Ownership comes from REST author metadata and the authenticated viewer."""
+    comments = normalize_issue_comments(
+        [
+            {"body": render_current_plan("foreign"), "user": {"login": "other"}},
+            {"body": render_current_plan("owned"), "user": {"login": "BOT"}},
+        ],
+        viewer_login="bot",
+    )
+
+    result = discover_plan_from_comments(comments)
+
+    assert result.status is PlanDiscoveryStatus.FOUND
+    assert result.plan_text is not None
+    assert "owned" in result.plan_text
+
+
+@pytest.mark.parametrize("body", [None, 1, {}, []])
+def test_normalization_rejects_non_string_body(body: object) -> None:
+    """Malformed comment bodies cannot become successful plan absence."""
+    with pytest.raises(CommentJournalReadError, match="body was not a string"):
+        normalize_issue_comments(
+            [{"body": body, "user": {"login": "bot"}}],
+            viewer_login="bot",
+        )
 
 
 def test_snapshot_ignores_foreign_marker_spoofing() -> None:

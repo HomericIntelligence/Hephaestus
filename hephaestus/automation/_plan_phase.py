@@ -9,19 +9,21 @@ implementation plan, and if not, generate one" responsibility.
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from hephaestus.github.client import gh_call
-
 from ._stage_context import StageMixin
 from .agent_config import plan_stage_timeout
 from .git_utils import run
-from .planner_state import _comments_contain_plan
+from .github_api import fetch_issue_comments_metadata, gh_current_login
+from .review_journal import (
+    PlanDiscoveryResult,
+    discover_plan_from_comments,
+    normalize_issue_comments,
+)
 
 if TYPE_CHECKING:
     from ._stage_context import StageContext
@@ -46,28 +48,16 @@ class PlanPhase(StageMixin):
         """Store the shared :class:`StageContext`."""
         self.ctx = ctx
 
-    def _has_plan(self, issue_number: int) -> bool:
-        """Check if issue has an implementation plan.
-
-        Delegates to :func:`planner_state._comments_contain_plan` so the
-        prefix-anchored check stays in sync with the planner. Substring
-        matching here previously caused the implementer to mistake a
-        ``## 🔍 Plan Review`` comment (which quotes the plan body) for the
-        plan itself — the same bug class fixed in #455/#468/#484 (#715).
-
-        Note: ``_comments_contain_plan`` is a private helper but is the
-        canonical implementation per its own docstring; cross-module reuse
-        here is intentional to avoid a third copy of the same prefix logic.
-        """
+    def _discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Discover an actor-owned plan without converting read failure to absence."""
         try:
-            result = gh_call(
-                ["issue", "view", str(issue_number), "--comments", "--json", "comments"]
+            comments = normalize_issue_comments(
+                fetch_issue_comments_metadata(issue_number),
+                viewer_login=gh_current_login() or "",
             )
-            data = json.loads(result.stdout)
-            comments = data.get("comments", [])
-            return _comments_contain_plan(comments)
-        except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError, OSError):
-            return False
+        except Exception as exc:
+            return PlanDiscoveryResult.read_error(exc)
+        return discover_plan_from_comments(comments)
 
     def _generate(self, issue_number: int) -> None:
         """Generate plan for an issue using hephaestus-plan-issues.
