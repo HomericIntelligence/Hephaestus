@@ -321,6 +321,14 @@ The package currently installs 56 console scripts from `[project.scripts]`.
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 | `hephaestus-drive-prs-green` | Review directly scoped PRs or PRs linked from discovered issues through the pr_review/merge_wait pipeline slice; it does not sweep unrelated open PRs |
 
+`hephaestus-plan-issues` exits `75` when open-issue discovery is deferred by
+a GitHub rate limit. This is a retryable temporary failure, not success. With
+`--json`, `reset_epoch` is the known reset epoch or `null`, `affected_issues`
+is `null` when discovery could not enumerate them, and
+`incomplete_issue_scope` identifies the affected repository selection. Retry
+without `--force`; issues already at or past `state:plan-go` remain completed
+and are not planned again.
+
 #### Private Pi provider setup
 
 Pi uses operator-local provider configuration only. Do not commit Pi provider

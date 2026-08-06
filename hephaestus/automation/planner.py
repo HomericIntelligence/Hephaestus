@@ -45,6 +45,9 @@ from .pipeline.routing import PipelineScope, StageName
 
 logger = logging.getLogger(__name__)
 
+#: Retryable planner deferral, matching the conventional EX_TEMPFAIL value.
+RATE_LIMIT_DEFERRED_EXIT_CODE = 75
+
 #: Contiguous stage subset the planner CLI runs: initial plan generation
 #: (PLANNING) followed by the plan review/amend/learn loop (PLAN_REVIEW).
 #: PlanReviewStage's ADVANCE target (IMPLEMENTATION) is out of scope, so
@@ -158,7 +161,9 @@ def main() -> int:
 
     Returns:
         Exit code: the coordinator's exit code (0 clean, 1 any
-        fail/skip/blocked, 130 interrupt), or 0 on a clean rate-limited skip.
+        fail/skip/blocked, 130 interrupt), or
+        :data:`RATE_LIMIT_DEFERRED_EXIT_CODE` when open-issue discovery is
+        deferred by a GitHub rate limit.
 
     """
     # Imported here (not at module top) so ``import hephaestus.automation.planner``
@@ -185,17 +190,33 @@ def main() -> int:
         try:
             issues = gh_list_open_issues()
         except GitHubRateLimitError as e:
-            # Don't smear a traceback across the driver's loop output when the
-            # only problem is that the GraphQL hourly budget is gone. Exit
-            # cleanly so the outer loop moves on to the next repo.
+            reset_epoch = e.reset_epoch if e.reset_epoch > 0 else None
+            reset_description = (
+                f"at epoch {reset_epoch}" if reset_epoch is not None else "time unknown"
+            )
             log.error(
-                "GitHub API rate-limited; cannot discover issues this run "
-                "(reset at epoch %s). Skipping cleanly.",
-                e.reset_epoch,
+                "GitHub API rate-limited; planning deferred for open issues in "
+                "%s/%s (reset %s). Affected issue numbers are unavailable until "
+                "discovery succeeds.",
+                org,
+                repo,
+                reset_description,
             )
             if args.json:
-                emit_json_status(0, message="rate-limited; skipped", reset_epoch=e.reset_epoch)
-            return 0
+                emit_json_status(
+                    RATE_LIMIT_DEFERRED_EXIT_CODE,
+                    message="planning deferred by GitHub rate limit",
+                    deferred=True,
+                    retryable=True,
+                    reset_epoch=reset_epoch,
+                    affected_issues=None,
+                    incomplete_issue_scope={
+                        "org": org,
+                        "repo": repo,
+                        "selection": "all-open-issues",
+                    },
+                )
+            return RATE_LIMIT_DEFERRED_EXIT_CODE
         log.info("No --issues given; discovered %s open issues: %s", len(issues), issues)
 
     # Dedupe while preserving first-seen order (dict.fromkeys is the canonical
