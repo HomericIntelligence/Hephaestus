@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import deque
 from pathlib import Path
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.automation.address_review_core import _parse_addressed_block
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -44,6 +46,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
     build_implementation_prompt,
     build_test_fix_prompt,
 )
+from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
@@ -1389,7 +1392,12 @@ class TestImplementBudget:
         assert result.job.descr == "address_review"
         assert result.job.session_agent == "implementer"
         assert result.job.prompt_kwargs["pr_number"] == 1001
-        assert '"thread_id": "thread-1"' in result.job.prompt_kwargs["threads_json"]
+        assert result.job.prompt_builder is get_address_review_prompt
+        assert result.job.allowed_tools == "Read,Write,Edit,Glob,Grep,Bash,Task,Skill"
+        assert result.job.parse is _parse_addressed_block
+        assert json.loads(result.job.prompt_kwargs["threads_json"]) == [
+            {"thread_id": "thread-1", "path": "a.py", "line": 3, "body": "fix it"}
+        ]
         assert result.on_done_state == "TEST_WAIT"
 
     def test_remediation_preserves_the_scope_retraction_publish_guard(

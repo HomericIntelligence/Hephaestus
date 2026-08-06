@@ -83,9 +83,9 @@ Write your reasoning in prose. At the very end, emit a single fenced JSON block
 with an explicit decision for EVERY eligible thread:
 
 ```json
-{"resolved": ["..."], "unaddressed": [
-  {"thread_id": "...", "path": "...", "line": 1,
-    "original_body": "...", "detail": "why still unaddressed"}
+{"resolved": ["<resolved_thread_id>"], "unaddressed": [
+  {"thread_id": "<unaddressed_thread_id>", "path": "module.py", "line": 1,
+    "original_body": "original finding", "detail": "remaining problem"}
 ]}
 ```
 
