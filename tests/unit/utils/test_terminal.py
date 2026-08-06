@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -47,9 +48,32 @@ class TestRestoreTerminal:
             mock_stdin.isatty.return_value = True
             with patch("subprocess.run") as mock_run:
                 restore_terminal()
-                mock_run.assert_called_once()
-                args = mock_run.call_args[0][0]
-                assert args == ["stty", "sane"]
+                mock_run.assert_called_once_with(
+                    ["stty", "sane"],
+                    stdin=mock_stdin,
+                    check=False,
+                    timeout=2,
+                )
+
+    def test_timeout_emits_bounded_warning(self, capsys) -> None:
+        """A stty timeout emits a fixed warning without exposing exception data."""
+        hostile = "secret-" * 20_000
+        error = subprocess.TimeoutExpired(
+            cmd=[hostile],
+            timeout=2,
+            output=hostile,
+            stderr=hostile,
+        )
+        with (
+            patch("sys.stdin") as mock_stdin,
+            patch("subprocess.run", side_effect=error),
+        ):
+            mock_stdin.isatty.return_value = True
+            restore_terminal()
+
+        captured = capsys.readouterr()
+        assert captured.err == "[hephaestus] WARNING: terminal restoration timed out\n"
+        assert hostile not in captured.err
 
     def test_swallows_exceptions(self) -> None:
         """Does not raise even if subprocess raises."""

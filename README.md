@@ -271,6 +271,12 @@ uv add --editable ../Hephaestus
 - `run_git(args, retries=None)`: Execute Git commands through the shared subprocess adapter with bounded timeout and network retry protection
 - `get_setting(config, key_path)`: Get nested dict values with dot notation
 
+Local metadata subprocesses, including the version git-tag probe, default to
+10 seconds. `HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT` accepts integer values
+from 1 through 86400 seconds; malformed or out-of-range values emit a bounded
+warning and use the 10-second default. Terminal restoration uses a fixed
+2-second cleanup timeout and has no override.
+
 ### Configuration (`hephaestus.config`)
 
 - `load_config(path)`: Load YAML or JSON configuration files
@@ -420,6 +426,13 @@ zero totals, and zero requested/processed counts.
 |---|---|
 | `hephaestus-coredump-handler` | Kernel pipe-mode `core_pattern` handler for capturing cores from containerized crashes |
 | `hephaestus-run-under-gdb` | Run any command under `gdb -batch` to capture a real core before a runtime's own signal handler swallows the fault |
+
+`hephaestus-run-under-gdb` limits gdb and `RUN_UNDER_GDB=0` execution to
+7200 seconds by default. Pass `--timeout SECONDS` before `<core-dir>` to select
+a value from 1 through 86400. On timeout, POSIX platforms kill and boundedly
+reap the dedicated process group; platforms without process-group support kill
+and boundedly reap the direct child instead. Timeouts exit `124`. Lack of POSIX
+process-group support does not prevent normal execution.
 
 ### Validation
 

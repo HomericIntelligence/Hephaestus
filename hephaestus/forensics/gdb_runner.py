@@ -15,6 +15,11 @@ Usage::
 
     hephaestus-run-under-gdb <core-dir> <command> [args...]
 
+Execution is bounded to 7,200 seconds by default. ``--timeout`` must appear
+before ``<core-dir>`` and accepts values from 1 through 86,400 seconds. A
+timeout terminates the dedicated POSIX process group, or the direct child when
+process groups are unavailable, and returns exit code 124 after bounded cleanup.
+
 Environment variables:
 
 * ``RUN_UNDER_GDB=0`` — skip gdb entirely and exec the command directly
@@ -43,15 +48,18 @@ Exit code:
 * ``0`` / ``N`` — normal exit with the inferior's own exit code ``N``.
 * ``128 + signo`` — the inferior was stopped by a caught signal
   (134 = SIGABRT, 139 = SIGSEGV, 132 = SIGILL, ...).
+* ``124`` — gdb or direct command execution exceeded its timeout.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -65,6 +73,62 @@ from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 # only originate from shell-quoting (e.g. a quoted path), so the token is a
 # single, safe argv element rather than a word boundary an attacker controls.
 _GDB_PREFIX_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:=,@+~ \-]+")
+
+_EXECUTION_TIMEOUT_SECONDS = 7_200
+_EXECUTION_TIMEOUT_MAX_SECONDS = 86_400
+_PROCESS_REAP_TIMEOUT_SECONDS = 5
+_TIMEOUT_EXIT_CODE = 124
+_TIMEOUT_ERROR = "[run-under-gdb] ERROR: command timed out"
+_TIMEOUT_JSON_MESSAGE = "command timed out"
+_PROCESS_GROUPS_SUPPORTED = hasattr(os, "killpg") and hasattr(signal, "SIGKILL")
+
+
+def _validate_execution_timeout(timeout: int) -> int:
+    """Validate a gdb or direct-command execution timeout."""
+    if not 1 <= timeout <= _EXECUTION_TIMEOUT_MAX_SECONDS:
+        raise ValueError(f"timeout must be between 1 and {_EXECUTION_TIMEOUT_MAX_SECONDS} seconds")
+    return timeout
+
+
+def _parse_execution_timeout(raw: str) -> int:
+    """Parse and validate the CLI execution timeout."""
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be an integer") from exc
+    try:
+        return _validate_execution_timeout(timeout)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    """Kill a POSIX process group or fall back to the direct child."""
+    if _PROCESS_GROUPS_SUPPORTED:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, OSError):
+            pass
+    with contextlib.suppress(ProcessLookupError, OSError):
+        process.kill()
+
+
+def _run_bounded(command: list[str], timeout: int) -> int:
+    """Run a command with inherited streams and bounded timeout cleanup."""
+    process = subprocess.Popen(
+        command,
+        start_new_session=_PROCESS_GROUPS_SUPPORTED,
+    )
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process(process)
+        try:
+            process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _terminate_process(process)
+        raise exc
 
 
 def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
@@ -229,6 +293,8 @@ def run_under_gdb(
     command: str,
     command_args: list[str],
     gdb_cmd_prefix: str | None = None,
+    *,
+    timeout: int = _EXECUTION_TIMEOUT_SECONDS,
 ) -> int:
     """Run ``command`` under ``gdb -batch`` and return the inferior's exit code.
 
@@ -244,6 +310,7 @@ def run_under_gdb(
             match ``[A-Za-z0-9_./:=,@+~ -]+`` and not start with ``-``;
             otherwise a ``ValueError`` is raised (see module ``Security:``
             note).
+        timeout: Maximum execution time in seconds, from 1 through 86,400.
 
     Returns:
         ``0``/``N`` for a normal exit with code ``N``; ``128 + signo`` if the
@@ -256,6 +323,7 @@ def run_under_gdb(
             ``Security:`` note for the whitelist.
 
     """
+    timeout = _validate_execution_timeout(timeout)
     prefix = _validate_gdb_cmd_prefix(gdb_cmd_prefix)  # fail fast
 
     core_path = Path(core_dir)
@@ -282,11 +350,6 @@ def run_under_gdb(
         gdb_script = script_handle.name
 
     try:
-        print(f"[run-under-gdb] gdb log  : {gdb_log}", file=sys.stderr)
-        print(f"[run-under-gdb] core file: {core_file} (written on crash)", file=sys.stderr)
-        print(f"[run-under-gdb] binary   : {command_bin}", file=sys.stderr)
-        print(f"[run-under-gdb] args     : {' '.join(command_args)}", file=sys.stderr)
-
         gdb_cmd = [
             *prefix,
             "gdb",
@@ -298,19 +361,24 @@ def run_under_gdb(
             command_bin,
             *command_args,
         ]
-        gdb_status = subprocess.run(gdb_cmd, check=False).returncode
+        gdb_status = _run_bounded(gdb_cmd, timeout)
+
+        print(f"[run-under-gdb] gdb log  : {gdb_log}", file=sys.stderr)
+        print(f"[run-under-gdb] core file: {core_file} (written on crash)", file=sys.stderr)
+        print(f"[run-under-gdb] binary   : {command_bin}", file=sys.stderr)
+        print(f"[run-under-gdb] args     : {' '.join(command_args)}", file=sys.stderr)
 
         # Prefer the Python-recorded exit code; fall back to gdb's own status
         # if the file is missing (gdb died before the hook fired).
         if exit_file.is_file():
             recorded = exit_file.read_text(encoding="utf-8").strip()
-            exit_file.unlink(missing_ok=True)
             try:
                 return int(recorded)
             except ValueError:
                 return gdb_status
         return gdb_status
     finally:
+        exit_file.unlink(missing_ok=True)
         Path(gdb_script).unlink(missing_ok=True)
 
 
@@ -321,6 +389,16 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Run a command under gdb -batch so a real ELF core and backtrace "
             "are captured before the inferior's own signal handler runs."
+        ),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_parse_execution_timeout,
+        default=_EXECUTION_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Execution timeout in seconds, from 1 through 86400 "
+            f"(default: {_EXECUTION_TIMEOUT_SECONDS}); place before <core-dir>"
         ),
     )
     parser.add_argument(
@@ -359,27 +437,33 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
 
-    # Escape hatch: RUN_UNDER_GDB=0 bypasses gdb for local dev.
-    if os.environ.get("RUN_UNDER_GDB") == "0":
-        rc = subprocess.run([args.command, *args.command_args], check=False).returncode
-        if args.json:
-            emit_json_status(rc, message="ran command directly (RUN_UNDER_GDB=0)")
-        return rc
-
     try:
-        rc = run_under_gdb(
-            core_dir=args.core_dir,
-            command=args.command,
-            command_args=args.command_args,
-            gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
-        )
-    except ValueError as exc:
-        print(f"[run-under-gdb] ERROR: {exc}", file=sys.stderr)
+        # Escape hatch: RUN_UNDER_GDB=0 bypasses gdb for local dev.
+        if os.environ.get("RUN_UNDER_GDB") == "0":
+            rc = _run_bounded([args.command, *args.command_args], args.timeout)
+            json_message = "ran command directly (RUN_UNDER_GDB=0)"
+        else:
+            try:
+                rc = run_under_gdb(
+                    core_dir=args.core_dir,
+                    command=args.command,
+                    command_args=args.command_args,
+                    gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
+                    timeout=args.timeout,
+                )
+            except ValueError as exc:
+                print(f"[run-under-gdb] ERROR: {exc}", file=sys.stderr)
+                if args.json:
+                    emit_json_status(2, message=f"invalid GDB_CMD_PREFIX: {exc}")
+                return 2
+            json_message = "ran command under gdb"
+    except subprocess.TimeoutExpired:
+        print(_TIMEOUT_ERROR, file=sys.stderr)
         if args.json:
-            emit_json_status(2, message=f"invalid GDB_CMD_PREFIX: {exc}")
-        return 2
+            emit_json_status(_TIMEOUT_EXIT_CODE, message=_TIMEOUT_JSON_MESSAGE)
+        return _TIMEOUT_EXIT_CODE
     if args.json:
-        emit_json_status(rc, message="ran command under gdb")
+        emit_json_status(rc, message=json_message)
     return rc
 
 
