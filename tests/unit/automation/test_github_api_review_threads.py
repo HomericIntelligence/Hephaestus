@@ -9,10 +9,38 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.github_api import (
+    GitHubRateLimitError,
+    GitHubUnavailableError,
     _review_threads_for_review,
     gh_pr_list_unresolved_threads,
 )
 from hephaestus.automation.github_api.threads import _complete_thread_snapshot
+
+
+def _inline_thread_node(
+    thread_id: str,
+    *,
+    review_id: str = "REVIEW_1",
+    body: str = "finding",
+) -> dict[str, Any]:
+    """Build a complete root-comment node for inline review helper tests."""
+    return {
+        "id": thread_id,
+        "isResolved": False,
+        "path": "a.py",
+        "line": 1,
+        "side": "RIGHT",
+        "comments": {
+            "nodes": [
+                {
+                    "id": f"C-{thread_id}",
+                    "body": body,
+                    "viewerCanUpdate": True,
+                    "pullRequestReview": {"id": review_id},
+                }
+            ]
+        },
+    }
 
 
 class TestReviewThreadsForReviewParameterisation:
@@ -106,6 +134,102 @@ class TestReviewThreadsForReviewParameterisation:
         assert "pullRequest(number: 42)" not in query  # regression guard
         assert 'owner: "owner"' not in query
         assert "owner=owner" in argv and "name=repo" in argv and "number=42" in argv
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    def test_review_thread_duplicates_are_returned_once(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Identical duplicate thread payloads preserve one stable receipt ID."""
+        del mock_repo_info
+        node = _inline_thread_node("T1")
+        result = Mock()
+        result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [node, node.copy()],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = result
+
+        assert _review_threads_for_review(42, "REVIEW_1") == ["T1"]
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    def test_conflicting_duplicate_thread_ids_fail_safely(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """Conflicting duplicate IDs cannot produce an ambiguous receipt."""
+        del mock_repo_info
+        result = Mock()
+        result.stdout = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    _inline_thread_node("T1"),
+                                    _inline_thread_node("T1", body="changed"),
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        mock_gh_call.return_value = result
+
+        assert _review_threads_for_review(42, "REVIEW_1") == []
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
+    def test_graphql_errors_do_not_return_partial_review_threads(
+        self, mock_repo_info: Any, mock_gh_call: Any
+    ) -> None:
+        """A later-page GraphQL error discards nodes read from earlier pages."""
+        del mock_repo_info
+        calls: list[list[str]] = []
+
+        def side_effect(argv: list[str], **_: Any) -> Mock:
+            calls.append(argv)
+            result = Mock()
+            if any(entry == "after=cursor-1" for entry in argv):
+                result.stdout = json.dumps({"errors": [{"message": "page failed"}]})
+            else:
+                result.stdout = json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": [_inline_thread_node("T1")],
+                                        "pageInfo": {
+                                            "hasNextPage": True,
+                                            "endCursor": "cursor-1",
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            return result
+
+        mock_gh_call.side_effect = side_effect
+
+        assert _review_threads_for_review(42, "REVIEW_1") == []
+        assert len(calls) == 2
+        assert "after=cursor-1" in calls[1]
 
 
 class TestListUnresolvedThreadsParameterisation:
@@ -315,6 +439,30 @@ class TestListUnresolvedThreadsParameterisation:
         with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
             gh_pr_list_unresolved_threads(42)
 
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            pytest.param(GitHubUnavailableError("breaker open"), id="unavailable"),
+            pytest.param(GitHubRateLimitError("rate limited", reset_epoch=123), id="rate-limit"),
+        ],
+    )
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_preserves_provider_errors_from_thread_id_pagination(
+        self,
+        mock_repo_info: Any,
+        mock_gh_call: Any,
+        exception: RuntimeError,
+    ) -> None:
+        """Provider-domain errors must not be converted into pagination failures."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_gh_call.side_effect = exception
+
+        with pytest.raises(type(exception)) as exc_info:
+            gh_pr_list_unresolved_threads(42)
+
+        assert exc_info.value is exception
+
     @patch("hephaestus.automation.github_api._gh_call")
     def test_complete_thread_snapshot_rejects_unstable_comment_pages(
         self, mock_gh_call: Any
@@ -404,6 +552,27 @@ class TestListUnresolvedThreadsParameterisation:
         )
         mock_gh_call.return_value = result
         assert _complete_thread_snapshot("owner", "repo", 42, "T1") is None
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            pytest.param(GitHubUnavailableError("breaker open"), id="unavailable"),
+            pytest.param(GitHubRateLimitError("rate limited", reset_epoch=123), id="rate-limit"),
+        ],
+    )
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_preserves_provider_errors_from_comment_pagination(
+        self,
+        mock_gh_call: Any,
+        exception: RuntimeError,
+    ) -> None:
+        """Provider-domain errors from comment pagination keep their original type."""
+        mock_gh_call.side_effect = exception
+
+        with pytest.raises(type(exception)) as exc_info:
+            _complete_thread_snapshot("owner", "repo", 42, "T1")
+
+        assert exc_info.value is exception
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
