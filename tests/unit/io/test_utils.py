@@ -3,6 +3,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -289,6 +290,19 @@ class TestLoadData:
         result = load_data(f)
         assert result == {"key": "value"}
 
+    def test_load_yaml_without_pyyaml_is_actionable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Generic YAML loading reports the shared missing-dependency error."""
+        path = tmp_path / "data.yaml"
+        path.write_text("key: value\n", encoding="utf-8")
+        monkeypatch.setitem(sys.modules, "yaml", None)
+
+        with pytest.raises(RuntimeError, match=r"Install with: pip install PyYAML"):
+            load_data(path)
+
     def test_unsafe_format_blocked_by_default(self, tmp_path: Path) -> None:
         """Loading unsafe format raises without explicit opt-in."""
         # Create a minimal valid pickle (empty dict) without importing pickle in prod path
@@ -331,6 +345,20 @@ class TestSaveData:
         f = tmp_path / "out.yaml"
         save_data({"k": 1}, f)
         assert "k:" in f.read_text()
+
+    def test_save_yaml_without_pyyaml_is_actionable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Generic YAML saving reports the shared error before creating output."""
+        path = tmp_path / "out.yaml"
+        monkeypatch.setitem(sys.modules, "yaml", None)
+
+        with pytest.raises(RuntimeError, match=r"Install with: pip install PyYAML"):
+            save_data({"key": "value"}, path)
+
+        assert not path.exists()
 
     def test_unsafe_format_blocked_by_default(self, tmp_path: Path) -> None:
         """Saving to unsafe format raises without explicit opt-in."""

@@ -18,6 +18,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.io.yaml import import_yaml
 from hephaestus.logging.utils import get_logger
 
 _logger = get_logger(__name__)
@@ -239,6 +240,7 @@ def load_data(
         ValueError: If format is unsafe and allow_unsafe_deserialization is False,
             or if format cannot be determined.
         FileNotFoundError: If the file does not exist.
+        RuntimeError: If YAML is selected but PyYAML is unavailable.
 
     """
     filepath = Path(filepath)
@@ -254,8 +256,7 @@ def load_data(
         with open(filepath) as f:
             return json.load(f)
     if fmt == "yaml":
-        import yaml  # lazy import — optional dependency
-
+        yaml = import_yaml()
         with open(filepath) as f:
             return yaml.safe_load(f)
     if fmt == "pickle":
@@ -285,6 +286,7 @@ def save_data(
     Raises:
         ValueError: If format is unsafe and allow_unsafe_deserialization is False,
             or if format is unsupported or cannot be determined.
+        RuntimeError: If YAML is selected but PyYAML is unavailable.
 
     """
     filepath = Path(filepath)
@@ -301,8 +303,7 @@ def save_data(
     if fmt == "json":
         filepath.write_text(json.dumps(data, indent=2))
     elif fmt == "yaml":
-        import yaml  # lazy import
-
+        yaml = import_yaml()
         with open(filepath, "w") as f:
             yaml.dump(data, f, default_flow_style=False)
     elif fmt == "pickle":

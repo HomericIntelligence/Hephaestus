@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from hephaestus.scripts_lib import check_version_single_source as mod
 
@@ -13,6 +16,23 @@ dynamic = ["version"]
 [tool.hatch.version]
 source = "vcs"
 """
+
+
+def test_version_check_uses_shared_toml_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Version validation delegates TOML parsing to the shared resolver."""
+    (tmp_path / "pyproject.toml").write_text("not parsed directly", encoding="utf-8")
+    parser = SimpleNamespace(
+        load=lambda _handle: {
+            "project": {"dynamic": ["version"]},
+            "tool": {"hatch": {"version": {"source": "vcs"}}},
+        }
+    )
+    monkeypatch.setattr(mod, "import_tomllib", lambda: parser)
+
+    assert mod.check_pyproject_dynamic_version(tmp_path) is True
 
 
 def test_dynamic_hatch_vcs_configuration_passes(tmp_path: Path) -> None:

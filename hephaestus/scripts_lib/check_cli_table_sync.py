@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import re
 import sys
-import tomllib
 from pathlib import Path
+
+from hephaestus.io.toml import import_tomllib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -46,9 +47,10 @@ _DOC_SCAN_GLOBS = ("README.md", "COMPATIBILITY.md", "AGENTS.md", "docs/**/*.md")
 def _load_scripts(repo_root: Path | None = None) -> set[str]:
     """Return the set of command names from pyproject.toml [project.scripts]."""
     pyproject = (repo_root / "pyproject.toml") if repo_root is not None else PYPROJECT
+    tomllib = import_tomllib()
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     scripts: dict[str, str] = data.get("project", {}).get("scripts", {})
-    return set(scripts.keys())
+    return set(scripts)
 
 
 def _readme_documented_commands(repo_root: Path | None = None) -> set[str]:
