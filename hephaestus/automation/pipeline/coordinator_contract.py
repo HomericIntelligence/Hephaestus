@@ -62,6 +62,8 @@ if TYPE_CHECKING:
         _pending_handoffs: dict[int, _PendingHandoff]
         _direct_issue_source: _DirectIssueSource | None
         _direct_pr_source: _DirectPrSource | None
+        _direct_wave_lease: Any
+        _wave_mode_active: bool
         _repo_entry_source: _RepoEntrySource | None
         _repo_issue_sources: deque[_ActiveRepoIssueSource]
         _live_work_permit_ids: set[int]

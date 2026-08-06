@@ -1931,7 +1931,7 @@ class WorkerPool:
                 stderr_tail=(exc.stderr or "")[-_TAIL:],
             )
 
-    def _dispatch_git_op(self, job: GitJob) -> JobResult:
+    def _dispatch_git_op(self, job: GitJob) -> JobResult:  # noqa: C901
         """Dispatch a git operation to its handler.
 
         ``job.timeout_s`` is threaded into every git helper call so network
@@ -1997,9 +1997,49 @@ class WorkerPool:
         elif job.op == "sync_checkout":
             return self._git_sync_checkout(job)
 
+        elif job.op == "verify_issue_wave_ancestry":
+            return self._git_verify_issue_wave_ancestry(job)
+
         else:
             # Should be impossible due to GitJob.__post_init__ validation
             return JobResult(ok=False, error=f"unknown op {job.op!r}")
+
+    def _git_verify_issue_wave_ancestry(self, job: GitJob) -> JobResult:
+        """Verify checkpoint commits are ancestors of synchronized main."""
+        repo_root_value = job.kwargs.get("repo_root")
+        main_sha = job.kwargs.get("main_sha")
+        ancestor_values = job.kwargs.get("ancestor_shas")
+        repo_root = Path(str(repo_root_value or ""))
+        if (
+            not repo_root.is_dir()
+            or repo_root.is_symlink()
+            or not (repo_root / ".git").exists()
+            or not _is_full_commit_sha(main_sha)
+            or not isinstance(ancestor_values, (tuple, list))
+            or not all(_is_full_commit_sha(value) for value in ancestor_values)
+        ):
+            return JobResult(ok=False, error="invalid issue-wave ancestry request")
+        try:
+            for ancestor_sha in ancestor_values:
+                result = git_utils.run(
+                    ["git", "merge-base", "--is-ancestor", str(ancestor_sha), str(main_sha)],
+                    cwd=repo_root,
+                    check=False,
+                    log_errors=False,
+                    timeout=job.timeout_s,
+                    env=_controlled_git_env(),
+                )
+                if result.returncode != 0:
+                    return JobResult(
+                        ok=False,
+                        error=f"{ancestor_sha} is not an ancestor of synchronized main",
+                    )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return JobResult(ok=False, error=f"issue-wave ancestry verification failed: {exc}")
+        return JobResult(
+            ok=True,
+            value={"main_sha": main_sha, "ancestors": tuple(ancestor_values)},
+        )
 
     def _git_rebase(self, job: GitJob) -> JobResult:
         """Rebase an implementation writer and optionally lease-publish its head."""

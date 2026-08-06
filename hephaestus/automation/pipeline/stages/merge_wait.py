@@ -30,6 +30,12 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
+from hephaestus.automation.issue_waves import (
+    WAVE_LEASE_PAYLOAD,
+    IssueWaveError,
+    IssueWaveStore,
+    WaveLease,
+)
 from hephaestus.automation.learn import build_learn_prompt
 from hephaestus.automation.session_naming import AGENT_LEARNINGS
 from hephaestus.prompts import PromptCatalog
@@ -170,7 +176,7 @@ class MergeWaitStage(Stage):
             on_done_state=MERGE_APPLY,
         )
 
-    def _merge_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _merge_apply(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """Apply one correlated immutable merge-cycle receipt locally."""
         error = item.payload.pop(_MERGE_CYCLE_RECEIPT_ERROR, None)
         if error is not None:
@@ -188,6 +194,29 @@ class MergeWaitStage(Stage):
             item.payload[_DECLINED_READINESS_FINGERPRINT] = list(receipt.readiness_fingerprint)
         outcome = receipt.outcome
         if outcome == "merged":
+            lease = item.payload.get(WAVE_LEASE_PAYLOAD)
+            if lease is not None:
+                if (
+                    not isinstance(lease, WaveLease)
+                    or item.issue is None
+                    or item.pr is None
+                    or receipt.merge_sha is None
+                ):
+                    return StageOutcome(Disposition.FINISH_FAIL, "wave_merge_receipt_missing")
+                try:
+                    item.payload[WAVE_LEASE_PAYLOAD] = IssueWaveStore(
+                        Path(str(ctx.paths.repo_root)), ctx.org, item.repo
+                    ).record_merge_receipt(
+                        lease,
+                        issue_number=item.issue,
+                        pr_number=item.pr,
+                        reviewed_head_sha=receipt.request.reviewed_head_sha,
+                        merge_sha=receipt.merge_sha,
+                    )
+                except IssueWaveError as exc:
+                    return StageOutcome(
+                        Disposition.FINISH_FAIL, f"wave_merge_receipt_failed: {exc}"
+                    )
             return self._route_merged(item, ctx)
         if outcome == "closed":
             return StageOutcome(Disposition.FINISH_FAIL, "closed")
