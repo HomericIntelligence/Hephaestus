@@ -54,6 +54,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
+    apply_plan_state,
     enter_planning_transition,
     is_exclusive_plan_state,
     is_plan_go,
@@ -171,8 +172,10 @@ def _load_planning_journal(
     item: WorkItem,
     ctx: StageContext,
     labels: Sequence[str],
-) -> tuple[list[IssueComment], JournalSnapshot, bool, bool]:
-    """Reconcile GitHub, hydrate the work item, and recover replan intent."""
+    *,
+    force_replan: bool,
+) -> tuple[list[IssueComment], JournalSnapshot, bool, bool, bool]:
+    """Reconcile GitHub and classify durable planning entry state."""
     assert item.issue is not None  # noqa: S101 - on_enter validates the work item first
     comments = reconcile_plan_journal(item.issue, ctx.github)
     snapshot = journal_snapshot(comments)
@@ -184,15 +187,28 @@ def _load_planning_journal(
         and snapshot.current_review_revision == snapshot.revision
         and is_pending_review(snapshot.current_review, revision=snapshot.revision)
     )
-    is_replan_entry = _is_replan_entry(
+    forced_from_plan_go = force_replan and is_exclusive_plan_state(
         labels,
-        revision_already_published=revision_already_published,
+        STATE_PLAN_GO,
+    )
+    forced_initial_plan = forced_from_plan_go and not snapshot.current_plan
+    is_replan_entry = (
+        _is_replan_entry(
+            labels,
+            revision_already_published=revision_already_published,
+        )
+        or (
+            forced_from_plan_go
+            and bool(snapshot.current_plan)
+            and not revision_already_published
+        )
     )
     return (
         comments,
         snapshot,
         is_replan_entry,
         revision_already_published,
+        forced_initial_plan,
     )
 
 
@@ -215,26 +231,48 @@ def _write_planning_entry_labels(
     *,
     is_replan_entry: bool,
     revision_already_published: bool,
+    forced_initial_plan: bool,
 ) -> bool:
-    """Durably establish the mutually-exclusive planning entry label."""
-    if STATE_PLAN_NO_GO in labels and revision_already_published:
-        add, remove = enter_planning_transition()
-        logger.info("planning:%d: entry swap; add %s, remove %s", issue_number, add, remove)
-        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    """Durably establish and confirm the exclusive planning-entry label."""
+    if revision_already_published or forced_initial_plan:
+        if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
+            add_labels, remove_labels = enter_planning_transition()
+            logger.info(
+                "planning:%d: entry swap; add %s, remove %s",
+                issue_number,
+                add_labels,
+                remove_labels,
+            )
+            ctx.github.edit_labels(issue_number, add=add_labels, remove=remove_labels)
+        expected_state = STATE_NEEDS_PLAN
     elif is_replan_entry:
         # Keep state:plan-no-go authoritative until a revised canonical plan
         # has actually been published. This removes the crash window where a
         # needs-plan label plus stale rejected plan could be mistaken for a
         # fresh initial planning entry.
-        return is_exclusive_plan_state(
-            _require_issue_labels_for_transition(issue_number, ctx), STATE_PLAN_NO_GO
-        )
+        if not is_exclusive_plan_state(labels, STATE_PLAN_NO_GO):
+            label_to_add, remove_labels = apply_plan_state(STATE_PLAN_NO_GO)
+            logger.info(
+                "planning:%d: forced replan; add %s, remove %s",
+                issue_number,
+                label_to_add,
+                remove_labels,
+            )
+            ctx.github.edit_labels(
+                issue_number,
+                add=[label_to_add],
+                remove=remove_labels,
+            )
+        expected_state = STATE_PLAN_NO_GO
     elif STATE_NEEDS_PLAN not in labels:
         logger.info("planning:%d: adding %s label", issue_number, STATE_NEEDS_PLAN)
         ctx.github.add_labels(issue_number, [STATE_NEEDS_PLAN])
+        expected_state = STATE_NEEDS_PLAN
+    else:
+        expected_state = STATE_NEEDS_PLAN
     return is_exclusive_plan_state(
         _require_issue_labels_for_transition(issue_number, ctx),
-        STATE_NEEDS_PLAN,
+        expected_state,
     )
 
 
@@ -361,9 +399,10 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     """Publish or recover the candidate plan, then authorize advancement by label."""
     assert item.issue is not None  # noqa: S101 - stage validates the issue
     plan_text = item.payload.get("plan_text")
+    requires_revision = bool(item.payload.get("requires_plan_revision"))
+    awaiting_revision_candidate = requires_revision and plan_text is None
     posted_plan = False
     if plan_text is not None:
-        requires_revision = bool(item.payload.get("requires_plan_revision"))
         has_existing_plan = ctx.github.has_existing_plan(item.issue)
         if requires_revision or not has_existing_plan:
             logger.info("planning:%d: publishing plan revision", item.issue)
@@ -376,7 +415,9 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
                 return publication_outcome
             posted_plan = True
 
-    if posted_plan or ctx.github.has_existing_plan(item.issue):
+    if not awaiting_revision_candidate and (
+        posted_plan or ctx.github.has_existing_plan(item.issue)
+    ):
         labels = _require_issue_labels_for_transition(item.issue, ctx)
         if STATE_PLAN_BLOCKED in labels:
             return StageOutcome(
@@ -426,10 +467,12 @@ class PlanningStage(Stage):
 
     - ``state:skip`` -> SKIP (checked BEFORE plan-go; skip wins over
       everything, even a contradictory plan-go, logging a WARNing — #1835)
-    - already at-or-past ``state:plan-go`` -> ADVANCE (zero jobs)
+    - already at-or-past ``state:plan-go`` -> ADVANCE (zero jobs), unless
+      force requests a fresh plan revision
     - freshly closed issue + exact merged closing PR -> FINISH_PASS
     - open issue + historic merged closing PR -> continue planning
-    - open PR -> SKIP (PR already covers implementation)
+    - open PR -> SKIP (PR already covers implementation), unless force
+      requests replanning
     - unlabeled entry -> idempotent bare add of ``state:needs-plan``; entry
       carrying ``state:plan-no-go`` (or a stale ``state:plan-go``) after a
       plan_review fail-back -> ONE atomic ``edit_labels`` swap adding
@@ -440,6 +483,9 @@ class PlanningStage(Stage):
       fast-forward ``item.state`` to VERIFY so a restart mid-stage never
       redoes advise + plan (the base-protocol idempotency promise); the
       ``is_plan_review_go`` label check above stays the primary gate.
+    - forced revisions remain ``state:plan-no-go`` until durable publication;
+      a recovered pending revision resumes verification and plan review
+      without another planner job.
     """
 
     def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
@@ -484,9 +530,11 @@ class PlanningStage(Stage):
             ctx.github.ensure_blocked_audit(item.issue)
             return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
 
+        force_replan = bool(ctx.config.force)
+
         # Fast-forward only from the sole confirmed plan state. A stale sibling
         # makes the label set contradictory and must never authorize work.
-        if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+        if is_exclusive_plan_state(labels, STATE_PLAN_GO) and not force_replan:
             logger.info("planning:%d: already plan-go; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan already approved")
 
@@ -494,7 +542,7 @@ class PlanningStage(Stage):
         # merged PR is deliberately not a completion shortcut: only GitHub's
         # current closed issue state may terminalize work at seeding.
         open_pr = ctx.github.find_pr_for_issue(item.issue)
-        if open_pr:
+        if open_pr and not force_replan:
             logger.info("planning:%d: open PR #%d exists; skipping", item.issue, open_pr)
             return StageOutcome(Disposition.SKIP, f"open PR #{open_pr} exists")
 
@@ -511,20 +559,30 @@ class PlanningStage(Stage):
             _snapshot,
             is_replan_entry,
             revision_already_published,
-        ) = _load_planning_journal(item, ctx, labels)
-        if is_replan_entry:
-            item.payload["requires_plan_revision"] = True
+            forced_initial_plan,
+        ) = _load_planning_journal(
+            item,
+            ctx,
+            labels,
+            force_replan=force_replan,
+        )
         if not _write_planning_entry_labels(
             item.issue,
             ctx,
             labels,
             is_replan_entry=is_replan_entry,
             revision_already_published=revision_already_published,
+            forced_initial_plan=forced_initial_plan,
         ):
             return StageOutcome(
                 Disposition.RETRY,
                 "exclusive planning entry label was not confirmed",
             )
+        if is_replan_entry:
+            item.payload["requires_plan_revision"] = True
+            item.payload.pop("plan_text", None)
+        else:
+            item.payload.pop("requires_plan_revision", None)
 
         history = _planning_history(comments)
         if history:

@@ -211,6 +211,7 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self._seen_item_ids: set[int] = set()
         self._stage_config = _StageRunConfig(
             enable_advise=not config.no_advise,
+            force=config.force,
             agent=config.agent,
             model=config.model,
             planner_model=config.planner_model,
