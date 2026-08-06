@@ -2323,6 +2323,8 @@ class TestGitOps:
                 "worktree_path": str(tmp_path),
                 "branch": "70-existing",
                 "expected_head_sha": "a" * 40,
+                "expected_base_sha": "b" * 40,
+                "base_branch": "main",
                 "pr_number": 70,
             },
         )
@@ -2352,6 +2354,8 @@ class TestGitOps:
                 "worktree_path": str(tmp_path),
                 "branch": "70-existing",
                 "expected_head_sha": "a" * 40,
+                "expected_base_sha": "b" * 40,
+                "base_branch": "main",
                 "pr_number": 70,
             },
         )
@@ -2366,6 +2370,46 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == {"ready": False, "reason": "head_drift"}
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+
+    def test_verify_pr_review_checkout_retries_when_remote_base_drifted(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A moved base ref cannot produce review evidence for the captured PR."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "expected_base_sha": "c" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[
+                    MagicMock(stdout="a" * 40 + "\n"),
+                    MagicMock(stdout=""),
+                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(stdout="checkout diff for stale base"),
+                    MagicMock(stdout="stale.py\0"),
+                ],
+            ),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "base_drift"}
 
     def test_verify_pr_review_checkout_returns_diff_bound_to_verified_head(
         self,
@@ -2382,6 +2426,7 @@ class TestGitOps:
                 "worktree_path": str(tmp_path),
                 "branch": "70-existing",
                 "expected_head_sha": "a" * 40,
+                "expected_base_sha": "b" * 40,
                 "base_branch": "main",
                 "pr_number": 70,
             },
@@ -2412,6 +2457,7 @@ class TestGitOps:
             "changed_paths": ["old.py", "new.py"],
         }
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+        assert mock_run.call_args_list[2].args[0] == ["git", "rev-parse", "FETCH_HEAD"]
         assert mock_run.call_args_list[3].args[0] == [
             "git",
             "diff",
@@ -2443,6 +2489,8 @@ class TestGitOps:
                 "worktree_path": str(tmp_path),
                 "branch": "70-existing",
                 "expected_head_sha": "a" * 40,
+                "expected_base_sha": "b" * 40,
+                "base_branch": "main",
                 "pr_number": 70,
             },
         )
