@@ -14,6 +14,8 @@ from typing import Any
 
 import hephaestus.automation.github_api as _api
 
+from .pagination import collect_graphql_connection_nodes
+
 ReviewCommentIndexKey = tuple[str, Any] | tuple[str, Any, str]
 
 
@@ -23,25 +25,23 @@ def _fetch_pr_inline_review_thread_nodes(pr_number: int) -> list[dict[str, Any]]
     Fails open: returns ``[]`` on any API/parse error so callers preserve their
     existing post-as-usual behaviour.
     """
-    owner, repo = _api.get_repo_info()
-    if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
-        _api.logger.error("Invalid owner/repo format: %s/%s", owner, repo)
-        return []
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
-        "  repository(owner:$owner,name:$name){"
-        "    pullRequest(number:$number){"
-        "      reviewThreads(first:100){"
-        "        nodes{ isResolved path line side:diffSide "
-        "comments(first:20){ nodes{ id body viewerCanUpdate } } }"
-        "      }"
-        "    }"
-        "  }"
-        "}"
-    )
     try:
-        result = _api._gh_call(
-            [
+        owner, repo = _api.get_repo_info()
+        if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
+            _api.logger.error("Invalid owner/repo format: %s/%s", owner, repo)
+            return []
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
+            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+            "reviewThreads(first:100,after:$after){"
+            "pageInfo{hasNextPage endCursor}"
+            "nodes{id isResolved path line side:diffSide "
+            "comments(first:1){nodes{id body viewerCanUpdate "
+            "pullRequestReview{id}}}}}}}}"
+        )
+
+        def fetch_thread_page(after: str | None) -> dict[str, Any]:
+            argv = [
                 "api",
                 "graphql",
                 "-f",
@@ -52,26 +52,61 @@ def _fetch_pr_inline_review_thread_nodes(pr_number: int) -> list[dict[str, Any]]
                 f"name={repo}",
                 "-F",
                 f"number={int(pr_number)}",
-            ],
-            check=False,
+            ]
+            if after is not None:
+                argv.extend(["-F", f"after={after}"])
+            result = _api._gh_call(argv, check=False)
+            data = json.loads(result.stdout or "{}")
+            if not isinstance(data, dict):
+                raise RuntimeError("malformed inline review-thread GraphQL response")
+            _api._check_graphql_errors(data, f"inline review threads for PR #{pr_number}")
+            data_node = data.get("data")
+            repository = data_node.get("repository") if isinstance(data_node, dict) else None
+            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+            review_threads = (
+                pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
+            )
+            if not isinstance(review_threads, dict):
+                raise RuntimeError("malformed inline review-thread GraphQL response")
+            return review_threads
+
+        nodes = collect_graphql_connection_nodes(
+            fetch_thread_page,
+            connection_name=f"inline review threads for PR #{pr_number}",
         )
-        data = json.loads(result.stdout or "{}")
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        unique_nodes: dict[str, dict[str, Any]] = {}
+        for node in nodes:
+            thread_id = node.get("id")
+            comments = node.get("comments")
+            if (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or not isinstance(node.get("isResolved"), bool)
+                or not isinstance(comments, dict)
+                or not isinstance(comments.get("nodes"), list)
+                or not all(isinstance(comment, dict) for comment in comments["nodes"])
+            ):
+                raise RuntimeError("malformed inline review-thread node")
+            previous = unique_nodes.get(thread_id)
+            if previous is not None and previous != node:
+                raise RuntimeError(f"conflicting duplicate inline review thread {thread_id}")
+            if previous is None:
+                unique_nodes[thread_id] = node
+        return list(unique_nodes.values())
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        AttributeError,
+        KeyError,
+    ) as exc:
         _api.logger.warning(
             "PR #%s: could not fetch inline review-thread nodes (%s)", pr_number, exc
         )
         return []
-
-    nodes = (
-        data.get("data", {})
-        .get("repository", {})
-        .get("pullRequest", {})
-        .get("reviewThreads", {})
-        .get("nodes", [])
-    )
-    if not isinstance(nodes, list):
-        return []
-    return [node for node in nodes if isinstance(node, dict)]
 
 
 def gh_pr_inline_comment_index(
@@ -97,16 +132,20 @@ def gh_pr_inline_comment_index(
     for node in _api._fetch_pr_inline_review_thread_nodes(pr_number):
         if node.get("isResolved"):
             continue
-        comment_nodes = node.get("comments", {}).get("nodes", [])
-        if not comment_nodes:
+        comments = node.get("comments")
+        comment_nodes = comments.get("nodes") if isinstance(comments, dict) else None
+        if not isinstance(comment_nodes, list) or not comment_nodes:
             continue
-        comment_id = comment_nodes[0].get("id")
+        first_comment = comment_nodes[0]
+        if not isinstance(first_comment, dict):
+            continue
+        comment_id = first_comment.get("id")
         if not comment_id:
             continue
-        body = comment_nodes[0].get("body") or ""
+        body = first_comment.get("body") or ""
         # Default to editable when the field is absent so behaviour is unchanged
         # for callers/tests that predate the ``viewerCanUpdate`` selection.
-        editable = bool(comment_nodes[0].get("viewerCanUpdate", True))
+        editable = bool(first_comment.get("viewerCanUpdate", True))
         path = node.get("path") or ""
         line = node.get("line")
         side = node.get("side") or "RIGHT"
@@ -590,70 +629,39 @@ def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
     Returns an empty list on any failure (the caller treats it as no durable
     thread snapshot, which is safe).
     """
-    owner, repo = _api.get_repo_info()
-    if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
-        _api.logger.error("Invalid owner/repo format: %s/%s", owner, repo)
-        return []
-
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-        "  repository(owner:$owner,name:$name){"
-        "    pullRequest(number:$number){"
-        "      reviewThreads(first:100,after:$after){"
-        "        pageInfo{ hasNextPage endCursor }"
-        "        nodes{ id isResolved comments(first:1){ nodes{ pullRequestReview{ id } } } }"
-        "      }"
-        "    }"
-        "  }"
-        "}"
-    )
     seen: dict[str, None] = {}
-    after: str | None = None
     try:
-        while True:
-            argv = [
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={repo}",
-                "-F",
-                f"number={int(pr_number)}",
-            ]
-            if after is not None:
-                argv.extend(["-F", f"after={after}"])
-            result = _api._gh_call(argv)
-            data = json.loads(result.stdout)
-            _api._check_graphql_errors(data, f"_review_threads_for_review(pr={pr_number})")
-            review_threads = (
-                data.get("data", {})
-                .get("repository", {})
-                .get("pullRequest", {})
-                .get("reviewThreads", {})
-            )
-            for node in review_threads.get("nodes", []):
-                if node.get("isResolved"):
-                    continue
-                first_comments = node.get("comments", {}).get("nodes", [])
-                if not first_comments:
-                    continue
-                review = first_comments[0].get("pullRequestReview") or {}
-                if review.get("id") != review_id:
-                    continue
-                tid = node.get("id")
-                if tid:
-                    seen[tid] = None
-            page_info = review_threads.get("pageInfo", {})
-            if not page_info.get("hasNextPage"):
-                break
-            next_cursor = page_info.get("endCursor")
-            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == after:
-                raise RuntimeError("could not fetch all PR review threads")
-            after = next_cursor
-    except (subprocess.CalledProcessError, json.JSONDecodeError, RuntimeError) as exc:
+        for node in _api._fetch_pr_inline_review_thread_nodes(pr_number):
+            if node.get("isResolved"):
+                continue
+            comments = node.get("comments")
+            comment_nodes = comments.get("nodes") if isinstance(comments, dict) else None
+            if not isinstance(comment_nodes, list):
+                raise RuntimeError("malformed inline review-thread comments")
+            if not comment_nodes:
+                continue
+            first_comment = comment_nodes[0]
+            if not isinstance(first_comment, dict):
+                raise RuntimeError("malformed inline review-thread comment")
+            review = first_comment.get("pullRequestReview")
+            thread_id = node.get("id")
+            if (
+                isinstance(review, dict)
+                and review.get("id") == review_id
+                and isinstance(thread_id, str)
+                and thread_id
+            ):
+                seen[thread_id] = None
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        AttributeError,
+        KeyError,
+    ) as exc:
         _api.logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
         return []
 

@@ -1048,6 +1048,11 @@ Architectural contract:
   never attempts an unsafe compensating unresolve mutation.
 - Open-thread pagination and multi-page conversation reads are stabilized by
   matching complete rereads before they become remediation or mutation facts.
+- Standalone PR review-thread connections follow every `hasNextPage` cursor.
+  Full per-thread comment histories are limited to 2,000 comments; exceeding
+  that ceiling, malformed pagination, or a cursor cycle fails the read without
+  exposing partial review facts. Root-comment-only ownership and dedupe queries
+  use `comments(first:1)` because later comments are outside those contracts.
 - The review decision proof is a fresh GitHub snapshot plus a clean checkout
   at that snapshot's head. A GitHub marker can recover only a candidate reply
   after restart; it is never a substitute for that fresh proof.

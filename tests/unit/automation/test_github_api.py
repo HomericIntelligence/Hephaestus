@@ -2950,7 +2950,18 @@ class TestGhPrReviewPost:
                 result.stdout = json.dumps({"id": 999, "node_id": review_id})
             elif "reviewThreads" in joined:
                 result.stdout = json.dumps(
-                    {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": threads}}}}}
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": threads,
+                                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    }
+                                }
+                            }
+                        }
+                    }
                 )
             elif "diff" in args:
                 # No diff text by default → diff-hunk validation fails open
@@ -3800,6 +3811,7 @@ class TestGhPrInlineCommentIndex:
                             "reviewThreads": {
                                 "nodes": [
                                     {
+                                        "id": "T1",
                                         "isResolved": False,
                                         "path": "a.py",
                                         "line": 2,
@@ -3815,6 +3827,7 @@ class TestGhPrInlineCommentIndex:
                                         },
                                     },
                                     {  # unresolved but foreign (Copilot) → not editable
+                                        "id": "T3",
                                         "isResolved": False,
                                         "path": "c.py",
                                         "line": 4,
@@ -3830,12 +3843,14 @@ class TestGhPrInlineCommentIndex:
                                         },
                                     },
                                     {
+                                        "id": "T2",
                                         "isResolved": True,
                                         "path": "b.py",
                                         "line": 9,
                                         "comments": {"nodes": [{"id": "N2", "body": "resolved"}]},
                                     },
-                                ]
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
                             }
                         }
                     }
