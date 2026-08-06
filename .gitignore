@@ -1,7 +1,7 @@
 # Worktrees for parallel development
 /worktree/
 
-# Build artifacts
+# Build and automation scratch artifacts; intermediate files belong here.
 build/
 
 # Auto-generated API reference (pdoc output)
