@@ -33,7 +33,8 @@ import threading
 import time
 import warnings
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from hephaestus.nats.config import NATSConfig
 from hephaestus.nats.events import NATSEvent
@@ -61,6 +62,31 @@ The value matches :class:`hephaestus.resilience.CircuitBreaker`'s default so
 the NATS subscriber adopts the shared resilience behavior without adding a
 NATS-specific tuning surface.
 """
+
+_ErrorKind = Literal[
+    "connection_error",
+    "handler_error",
+    "circuit_breaker_open",
+    "terminal_error",
+    "shutdown_timeout",
+]
+
+
+def _diagnostic_nats_url(url: str) -> str:
+    """Return a credential-free NATS URL suitable for health and logs."""
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return "<invalid-nats-url>"
+
+    if not parsed.scheme or hostname is None:
+        return "<invalid-nats-url>"
+
+    display_host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = display_host if port is None else f"{display_host}:{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 class SubscriberState(enum.Enum):
@@ -101,7 +127,7 @@ class NATSSubscriberThread(threading.Thread):
     monitoring and /health endpoints:
 
     - :attr:`state` — current :class:`SubscriberState` (enum, thread-safe).
-    - :attr:`last_error` — last exception or ``None`` (thread-safe).
+    - :attr:`last_error` — last raw exception or ``None`` (thread-safe).
     - :attr:`last_message_at` — Unix timestamp of the most recent successfully
       dispatched message, or ``None`` if no message has been processed yet.
     - :meth:`health_dict()` — JSON-serialisable snapshot of the above plus the
@@ -111,8 +137,9 @@ class NATSSubscriberThread(threading.Thread):
     ------------------
     This subscriber provides best-effort, *at-most-once* handling for
     non-critical events. Malformed UTF-8 or JSON payloads are warning-logged
-    and acked without invoking the handler. Handler exceptions are recorded in
-    :attr:`last_error`, logged via ``logger.exception``, and acked without
+    and acked without invoking the handler. Handler exceptions are retained in
+    the in-process :attr:`last_error` property, classified in health responses,
+    and logged without exception text or tracebacks. They are acked without
     updating :attr:`last_message_at`.
 
     There is no built-in retry, replay store, or DLQ; neither failure class is
@@ -181,6 +208,7 @@ class NATSSubscriberThread(threading.Thread):
         self._state_lock = threading.Lock()
         self._state: SubscriberState = SubscriberState.INITIALIZING
         self._last_error: BaseException | None = None
+        self._last_error_kind: _ErrorKind | None = None
         self._last_message_at: float | None = None
         self._started_at: float = time.monotonic()
         self._emit_metrics()
@@ -197,7 +225,12 @@ class NATSSubscriberThread(threading.Thread):
 
     @property
     def last_error(self) -> BaseException | None:
-        """Most recent exception observed, or ``None`` (thread-safe, read-only)."""
+        """Most recent raw exception, or ``None`` (thread-safe, read-only).
+
+        This in-process property intentionally retains the exception object for
+        callers that need detailed diagnostics. Use :meth:`health_dict` for
+        externally visible, classified diagnostics.
+        """
         with self._state_lock:
             return self._last_error
 
@@ -222,11 +255,12 @@ class NATSSubscriberThread(threading.Thread):
 
             - ``"state"`` (:class:`str`): current state name, e.g.
               ``"connected"``.
-            - ``"last_error"`` (:class:`str` or ``None``): string
-              representation of the last exception, or ``None``.
+            - ``"last_error"`` (:class:`str` or ``None``): bounded failure
+              category, or ``None``. Exception text is never published.
             - ``"last_message_at"`` (:class:`float` or ``None``): Unix
               timestamp of last dispatched message, or ``None``.
-            - ``"url"`` (:class:`str`): configured NATS URL.
+            - ``"url"`` (:class:`str`): diagnostic NATS URL with userinfo,
+              query parameters, and fragments removed.
             - ``"stream"`` (:class:`str`): configured stream name.
             - ``"circuit_breaker_state"`` (:class:`str`): current circuit
               breaker state, e.g. ``"closed"`` or ``"open"``.
@@ -236,13 +270,13 @@ class NATSSubscriberThread(threading.Thread):
         """
         with self._state_lock:
             state_name = self._state.value
-            error_str = str(self._last_error) if self._last_error is not None else None
+            error_kind = self._last_error_kind
             last_msg = self._last_message_at
         return {
             "state": state_name,
-            "last_error": error_str,
+            "last_error": error_kind,
             "last_message_at": last_msg,
-            "url": self._config.url,
+            "url": _diagnostic_nats_url(self._config.url),
             "stream": self._config.stream,
             "circuit_breaker_state": self._circuit_breaker.state.value,
             "uptime_seconds": time.monotonic() - self._started_at,
@@ -259,17 +293,24 @@ class NATSSubscriberThread(threading.Thread):
         self._emit_metrics()
 
     def _record_error(self, exc: BaseException) -> None:
-        """Record *exc* as the latest error and transition to DISCONNECTED."""
+        """Record a connection failure and transition to DISCONNECTED."""
         with self._state_lock:
             self._last_error = exc
+            self._last_error_kind = "connection_error"
             self._state = SubscriberState.DISCONNECTED
         self._increment_error_metric("connection")
         self._emit_metrics()
 
-    def _record_terminal_error(self, exc: BaseException) -> None:
-        """Record *exc* as the latest error and transition to ERROR."""
+    def _record_terminal_error(
+        self,
+        exc: BaseException,
+        *,
+        kind: _ErrorKind = "terminal_error",
+    ) -> None:
+        """Record a classified terminal failure and transition to ERROR."""
         with self._state_lock:
             self._last_error = exc
+            self._last_error_kind = kind
             self._state = SubscriberState.ERROR
         self._increment_error_metric("terminal")
         self._emit_metrics()
@@ -290,6 +331,7 @@ class NATSSubscriberThread(threading.Thread):
         """Record a handler failure while preserving at-most-once delivery."""
         with self._state_lock:
             self._last_error = exc
+            self._last_error_kind = "handler_error"
         self._increment_error_metric("handler")
         self._emit_metrics()
 
@@ -346,7 +388,7 @@ class NATSSubscriberThread(threading.Thread):
         """Run the subscriber loop with exponential-backoff reconnection."""
         logger.info(
             "NATSSubscriberThread started (url=%s, stream=%s, durable=%s)",
-            self._config.url,
+            _diagnostic_nats_url(self._config.url),
             self._config.stream,
             self._config.durable_name,
         )
@@ -366,9 +408,10 @@ class NATSSubscriberThread(threading.Thread):
 
                         self._circuit_breaker.call(_run_subscribe_once)
                     except CircuitBreakerOpenError as exc:
-                        self._record_terminal_error(exc)
+                        self._record_terminal_error(exc, kind="circuit_breaker_open")
                         logger.error(
-                            "NATS circuit breaker is open; subscriber entering ERROR state"
+                            "NATS circuit breaker is open; subscriber entering ERROR "
+                            "state (kind=circuit_breaker_open)"
                         )
                         return
                     finally:
@@ -379,14 +422,15 @@ class NATSSubscriberThread(threading.Thread):
                         break
                     self._record_error(exc)
                     if self._circuit_breaker.state is CircuitBreakerState.OPEN:
-                        self._record_terminal_error(exc)
+                        self._record_terminal_error(exc, kind="connection_error")
                         logger.error(
                             "NATS circuit breaker opened after sustained connection "
-                            "failures; subscriber entering ERROR state"
+                            "failures; subscriber entering ERROR state "
+                            "(kind=connection_error)"
                         )
                         return
-                    logger.exception(
-                        "NATS connection error, retrying in %.1fs",
+                    logger.error(
+                        "NATS connection error, retrying in %.1fs (kind=connection_error)",
                         backoff,
                     )
                     self._stop_event.wait(timeout=backoff)
@@ -396,7 +440,9 @@ class NATSSubscriberThread(threading.Thread):
                     )
         except Exception as exc:
             self._record_terminal_error(exc)
-            logger.exception("NATSSubscriberThread terminated with unhandled error")
+            logger.error(
+                "NATSSubscriberThread terminated with unhandled error (kind=terminal_error)"
+            )
             return
 
         self._set_state(SubscriberState.STOPPED)
@@ -496,8 +542,8 @@ class NATSSubscriberThread(threading.Thread):
                         self._handler(event)
                     except Exception as exc:
                         self._record_handler_error(exc)
-                        logger.exception(
-                            "Handler raised on subject %s (seq=%d)",
+                        logger.error(
+                            "Handler raised on subject %s (seq=%d, kind=handler_error)",
                             event.subject,
                             event.sequence,
                         )
@@ -508,7 +554,8 @@ class NATSSubscriberThread(threading.Thread):
                     # given message will fail again on redelivery, so re-queuing it
                     # would wedge the poll loop on a poison message forever. The
                     # failure is NOT lost — it is recorded in `last_error` and
-                    # surfaced via logger.exception above. Do NOT move this ack into
+                    # surfaced via the classified health/log diagnostics above. Do
+                    # NOT move this ack into
                     # the `else:` branch (that switches to at-least-once and
                     # reintroduces poison-message redelivery loops). (#1551)
                     await msg.ack()
@@ -529,8 +576,8 @@ class NATSSubscriberThread(threading.Thread):
             ``True`` if the thread joined cleanly within the timeout (or had
             already finished). ``False`` if the thread remains alive after the
             timeout; in that case the subscriber enters ``ERROR`` state and
-            exposes a :class:`TimeoutError` through ``last_error`` and
-            :meth:`health_dict`.
+            exposes the raw :class:`TimeoutError` through ``last_error`` and
+            the ``shutdown_timeout`` category through :meth:`health_dict`.
 
         """
         effective_timeout = self._join_timeout if timeout is None else timeout
@@ -543,7 +590,10 @@ class NATSSubscriberThread(threading.Thread):
                     "NATS subscriber thread did not stop within "
                     f"{effective_timeout:g}s — still running"
                 )
-                self._record_terminal_error(error)
-                logger.error("%s", error)
+                self._record_terminal_error(error, kind="shutdown_timeout")
+                logger.error(
+                    "NATS subscriber shutdown timed out after %gs (kind=shutdown_timeout)",
+                    effective_timeout,
+                )
                 return False
         return True
