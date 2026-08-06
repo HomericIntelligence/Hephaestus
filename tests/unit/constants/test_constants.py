@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -133,37 +134,11 @@ def test_read_timeout_env_reads_primary_env_per_call(
     assert constants.agent_git_timeout() == 42
 
 
-def test_read_timeout_env_supports_legacy_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Callers can preserve old phase-specific env names while using new defaults."""
-    monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "901")
-
-    assert (
-        constants.read_timeout_env(
-            "HEPH_AGENT_PLAN_TIMEOUT",
-            constants.AGENT_PLAN_TIMEOUT,
-            legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
-        )
-        == 901
-    )
-
-
-def test_read_timeout_env_prefers_primary_over_legacy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The new generic env name wins when both primary and legacy names are set."""
-    monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "301")
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "901")
-
-    assert (
-        constants.read_timeout_env(
-            "HEPH_AGENT_PLAN_TIMEOUT",
-            constants.AGENT_PLAN_TIMEOUT,
-            legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
-        )
-        == 301
+def test_read_timeout_env_has_no_legacy_names_parameter() -> None:
+    """The timeout helper exposes only one canonical environment-variable name."""
+    assert tuple(inspect.signature(constants.read_timeout_env).parameters) == (
+        "env_name",
+        "default",
     )
 
 
@@ -176,20 +151,3 @@ def test_read_timeout_env_falls_back_on_malformed_value(
     monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", bad_value)
 
     assert constants.read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", 77) == 77
-
-
-def test_read_timeout_env_falls_back_on_malformed_legacy_value(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A malformed legacy override falls back to the default rather than crashing."""
-    monkeypatch.delenv("HEPH_AGENT_PLAN_TIMEOUT", raising=False)
-    monkeypatch.setenv("HEPH_PLANNER_AGENT_TIMEOUT", "not-a-number")
-
-    assert (
-        constants.read_timeout_env(
-            "HEPH_AGENT_PLAN_TIMEOUT",
-            constants.AGENT_PLAN_TIMEOUT,
-            legacy_names=("HEPH_PLANNER_AGENT_TIMEOUT",),
-        )
-        == constants.AGENT_PLAN_TIMEOUT
-    )

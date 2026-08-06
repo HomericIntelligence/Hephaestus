@@ -1438,9 +1438,11 @@ are NOT retried.
  `ci_driver_claude_timeout()` /
  `learn_claude_timeout()` /
  [`...`](../hephaestus/automation/agent_config.py) are
- phase-specific CLI-time defaults; every per-phase timeout reads
- `HEPH_<PHASE>_AGENT_TIMEOUT` so operators can tune without code
- change.
+ phase-specific CLI-time defaults. Shared phase budgets accept only
+ `HEPH_AGENT_PLAN_TIMEOUT`, `HEPH_AGENT_REVIEW_TIMEOUT`,
+ `HEPH_AGENT_IMPL_TIMEOUT`, and `HEPH_AGENT_LEARN_TIMEOUT`; the outer planning
+ wrapper accepts `HEPH_PLAN_STAGE_TIMEOUT`. Deprecated phase-specific fallback
+ aliases are not consulted.
 
 ---
 
