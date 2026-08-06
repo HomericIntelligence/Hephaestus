@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import stat
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from hephaestus.ci import WorkflowValidationError, workflows as workflows_module
 from hephaestus.ci.workflows import (
+    _MAX_FILE_SIZE,
     Violation,
     _is_checkout_step,
     _is_local_reference_step,
@@ -245,10 +252,101 @@ jobs:
         wf = self._write_workflow(tmp_path / "ci.yml", "name: empty\n")
         assert validate_workflow(wf) == []
 
-    def test_large_file_skipped(self, tmp_path: Path) -> None:
+    def test_large_file_raises(self, tmp_path: Path) -> None:
         wf = tmp_path / "big.yml"
-        wf.write_bytes(b"x" * (1_048_576 + 1))
-        assert validate_workflow(wf) == []
+        wf.write_bytes(b"x" * (_MAX_FILE_SIZE + 1))
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(wf)
+
+        assert caught.value.errors[0].code == "oversized"
+
+
+class TestWorkflowToolErrors:
+    """Tests for direct validation failures that must not look clean."""
+
+    def test_missing_pyyaml_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        monkeypatch.setattr(workflows_module, "_yaml", None)
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "dependency_unavailable"
+
+    def test_file_stat_failure_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        real_stat = Path.stat
+
+        def fail_workflow_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == workflow:
+                raise PermissionError("denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fail_workflow_stat)
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "stat_error"
+
+    def test_read_failure_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        real_open = Path.open
+
+        def fail_workflow_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == workflow:
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_workflow_open)
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "read_error"
+
+    def test_decode_failure_raises(self, tmp_path: Path) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_bytes(b"name: \xff\n")
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "decode_error"
+
+    def test_malformed_yaml_raises(self, tmp_path: Path) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("jobs: [\n", encoding="utf-8")
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "yaml_parse"
+
+    def test_empty_document_raises(self, tmp_path: Path) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("", encoding="utf-8")
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "empty_document"
+
+    @pytest.mark.parametrize("contents", ["plain scalar\n", "- item\n"])
+    def test_non_mapping_document_raises(self, tmp_path: Path, contents: str) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text(contents, encoding="utf-8")
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            validate_workflow(workflow)
+
+        assert caught.value.errors[0].code == "invalid_document"
 
 
 class TestPiCliSetup:
@@ -299,10 +397,344 @@ class TestCollectWorkflowFiles:
         result = collect_workflow_files([str(f), str(f)])
         assert len(result) == 1
 
-    def test_missing_path_warns(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-        collect_workflow_files([str(tmp_path / "nonexistent.yml")])
+    def test_missing_path_raises(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nonexistent.yml"
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            collect_workflow_files([str(missing)])
+
+        assert caught.value.errors[0].code == "target_stat_error"
+        assert caught.value.errors[0].target == missing
+
+
+class TestCollectWorkflowFilesFailClosed:
+    """Tests for discovery failures that must stop validation."""
+
+    def test_directory_enumeration_failure_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_scandir = os.scandir
+
+        def fail_scandir(path: Any) -> Any:
+            if Path(path) == tmp_path:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            collect_workflow_files([str(tmp_path)])
+
+        assert caught.value.errors[0].code == "directory_read_error"
+
+    def test_unsupported_target_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "socket"
+        real_stat = Path.stat
+
+        def fake_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == target:
+                return SimpleNamespace(st_mode=stat.S_IFIFO)
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fake_stat)
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            collect_workflow_files([str(target)])
+
+        assert caught.value.errors[0].code == "unsupported_target"
+
+    def test_target_resolution_failure_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        real_resolve = Path.resolve
+
+        def fail_resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+            if path == workflow:
+                raise OSError("cannot resolve")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+        with pytest.raises(WorkflowValidationError) as caught:
+            collect_workflow_files([str(workflow)])
+
+        assert caught.value.errors[0].code == "target_resolve_error"
+
+
+class TestWorkflowPublicApiCompatibility:
+    """Successful public helpers retain their list-returning contracts."""
+
+    def test_reexported_helpers_keep_list_returns_for_valid_inputs(self, tmp_path: Path) -> None:
+        from hephaestus.ci import (
+            collect_workflow_files as exported_collect,
+            validate_workflow as exported_validate,
+        )
+
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+
+        assert exported_collect([str(workflow)]) == [workflow]
+        assert exported_validate(workflow) == []
+
+
+def _run_checkout_cli_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    paths: list[Path],
+    allow_empty: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    """Run the checkout validator with JSON output and decode its response."""
+    argv = ["hephaestus-validate-workflow-checkout", "--json"]
+    if allow_empty:
+        argv.append("--allow-empty")
+    argv.extend(str(path) for path in paths)
+    monkeypatch.setattr("sys.argv", argv)
+    exit_code = workflows_module.validate_workflow_checkout_main()
+    payload = json.loads(capsys.readouterr().out)
+    return exit_code, payload
+
+
+class TestCheckoutValidationToolErrorExitCodes:
+    """Every tool-error category produces a nonzero CLI result."""
+
+    def test_dependency_unavailable_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        monkeypatch.setattr(workflows_module, "_yaml", None)
+
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [workflow])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "dependency_unavailable"
+
+    def test_discovery_stat_failure_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [tmp_path / "missing.yml"])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "target_stat_error"
+
+    def test_workflow_stat_failure_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        real_stat = Path.stat
+
+        def fail_workflow_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == workflow:
+                raise PermissionError("denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fail_workflow_stat)
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [tmp_path])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "stat_error"
+
+    def test_unreadable_directory_returns_nonzero_with_allow_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        real_scandir = os.scandir
+
+        def fail_scandir(path: Any) -> Any:
+            if Path(path) == tmp_path:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+        exit_code, payload = _run_checkout_cli_json(
+            monkeypatch, capsys, [tmp_path], allow_empty=True
+        )
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "directory_read_error"
+
+    def test_unsupported_target_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "socket"
+        real_stat = Path.stat
+
+        def fake_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == target:
+                return SimpleNamespace(st_mode=stat.S_IFIFO)
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fake_stat)
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [target])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "unsupported_target"
+
+    def test_target_resolution_failure_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        real_resolve = Path.resolve
+
+        def fail_resolve(path: Path, *args: Any, **kwargs: Any) -> Path:
+            if path == workflow:
+                raise OSError("cannot resolve")
+            return real_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", fail_resolve)
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [workflow])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "target_resolve_error"
+
+    @pytest.mark.parametrize(
+        ("contents", "expected_code"),
+        [
+            pytest.param("x" * (_MAX_FILE_SIZE + 1), "oversized", id="oversized"),
+            pytest.param("jobs: [\n", "yaml_parse", id="yaml_parse"),
+            pytest.param("", "empty_document", id="empty_document"),
+            pytest.param("plain scalar\n", "invalid_document", id="scalar_root"),
+            pytest.param("- item\n", "invalid_document", id="list_root"),
+        ],
+    )
+    def test_document_validation_failures_return_nonzero(
+        self,
+        tmp_path: Path,
+        contents: str,
+        expected_code: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        if expected_code == "oversized":
+            workflow.write_bytes(contents.encode("utf-8"))
+        else:
+            workflow.write_text(contents, encoding="utf-8")
+
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [workflow])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == expected_code
+
+    def test_read_failure_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_text("name: CI\n", encoding="utf-8")
+        real_open = Path.open
+
+        def fail_workflow_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == workflow:
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_workflow_open)
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [workflow])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "read_error"
+
+    def test_decode_failure_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workflow = tmp_path / "ci.yml"
+        workflow.write_bytes(b"name: \xff\n")
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [workflow])
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "decode_error"
+
+
+class TestEmptyWorkflowInventory:
+    """Empty discovered inventories are policy failures unless opted out."""
+
+    def test_empty_inventory_fails_by_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [tmp_path])
+
+        assert exit_code == 1
+        assert payload["policy_violations"][0]["code"] == "empty_inventory"
+        assert payload["tool_error_count"] == 0
+
+    def test_allow_empty_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        exit_code, payload = _run_checkout_cli_json(
+            monkeypatch, capsys, [tmp_path], allow_empty=True
+        )
+
+        assert exit_code == 0
+        assert payload["policy_violation_count"] == 0
+        assert payload["tool_error_count"] == 0
+
+    def test_allow_empty_does_not_hide_missing_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        missing = tmp_path / "missing.yml"
+        exit_code, payload = _run_checkout_cli_json(
+            monkeypatch, capsys, [missing], allow_empty=True
+        )
+
+        assert exit_code == 1
+        assert payload["tool_errors"][0]["code"] == "target_stat_error"
+
+
+def _write_mixed_failures(tmp_path: Path) -> tuple[Path, Path]:
+    """Create one malformed workflow and one checkout-order violation."""
+    malformed = tmp_path / "malformed.yml"
+    malformed.write_text("jobs: [\n", encoding="utf-8")
+    violating = tmp_path / "violating.yml"
+    violating.write_text(
+        "jobs:\n  build:\n    steps:\n      - uses: ./.github/actions/setup\n",
+        encoding="utf-8",
+    )
+    return malformed, violating
+
+
+class TestCheckoutValidationOutput:
+    """Human and JSON output keep tool and policy failures distinct."""
+
+    def test_json_separates_categories_and_preserves_legacy_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        malformed, violating = _write_mixed_failures(tmp_path)
+        exit_code, payload = _run_checkout_cli_json(monkeypatch, capsys, [malformed, violating])
+
+        assert exit_code == 1
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 1
+        assert payload["files_checked"] == 2
+        assert payload["violation_count"] == 1
+        assert payload["policy_violation_count"] == 1
+        assert payload["tool_error_count"] == 1
+        assert payload["policy_violations"][0]["code"] == "checkout_order"
+        assert payload["tool_errors"][0]["code"] == "yaml_parse"
+
+    def test_human_output_labels_both_categories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        malformed, violating = _write_mixed_failures(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-validate-workflow-checkout",
+                str(malformed),
+                str(violating),
+            ],
+        )
+
+        assert workflows_module.validate_workflow_checkout_main() == 1
         captured = capsys.readouterr()
-        assert "WARNING" in captured.err
+        assert "TOOL ERROR [yaml_parse]" in captured.err
+        assert str(malformed) in captured.err
+        assert "POLICY VIOLATION [checkout_order]" in captured.out
+        assert str(violating) in captured.out
 
 
 class TestCLIEntryPoints:
