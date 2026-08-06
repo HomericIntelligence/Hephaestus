@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,28 @@ def test_threshold_is_strictly_greater_than_limit() -> None:
     assert check_threshold(121, 120) is True
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: format_summary_table(-1, 0, "passed"),
+        lambda: format_summary_table(0, -1, "passed"),
+        lambda: format_summary_table(0, 0, "unknown"),
+        lambda: check_threshold(-1, 120),
+        lambda: check_threshold(1, -1),
+    ],
+)
+def test_programmatic_metrics_reject_invalid_inputs(call: Callable[[], object]) -> None:
+    """Programmatic helpers reject values outside their metric domains."""
+    with pytest.raises(ValueError):
+        call()
+
+
+def test_zero_metric_boundaries_are_valid() -> None:
+    """Zero is valid for pre-commit durations, counts, and thresholds."""
+    assert "0s" in format_summary_table(0, 0, "failed")
+    assert check_threshold(0, 0) is False
+
+
 def test_warning_uses_github_actions_annotation(capsys: pytest.CaptureFixture[str]) -> None:
     """A slow run emits an annotation consumable by GitHub Actions."""
     emit_warning("slow hooks")
@@ -49,6 +72,22 @@ def test_benchmark_cli_reports_json(capsys: pytest.CaptureFixture[str]) -> None:
     """The command exposes a machine-readable timing result."""
     assert bench_precommit_main(["--elapsed", "45", "--files", "3", "--json"]) == 0
     assert '"over_threshold": false' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--elapsed", "-1"],
+        ["--elapsed", "1", "--files", "-1"],
+        ["--elapsed", "1", "--threshold", "-1"],
+        ["--elapsed", "1", "--status", "unknown"],
+    ],
+)
+def test_benchmark_cli_rejects_invalid_inputs_with_usage_error(argv: list[str]) -> None:
+    """Invalid CLI metric values use argparse's exit-2 usage error."""
+    with pytest.raises(SystemExit) as exc_info:
+        bench_precommit_main(argv)
+    assert exc_info.value.code == 2
 
 
 def test_mypy_hook_checks_the_configured_source_tree() -> None:

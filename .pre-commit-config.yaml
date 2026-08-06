@@ -224,12 +224,12 @@ repos:
     hooks:
       - id: hephaestus-check-workflow-inventory
         name: hephaestus check workflow inventory
-        description: Ensure .github/workflows/README.md documents every .github/workflows/*.yml file
+        description: Ensure .github/workflows/README.md documents every .yml and .yaml workflow
         entry: uv run hephaestus-check-workflow-inventory
         language: system
         pass_filenames: false
         always_run: true
-        files: ^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$
+        files: ^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.ya?ml))$
 
   # Version single source of truth check
   - repo: local
