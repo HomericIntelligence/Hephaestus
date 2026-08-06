@@ -190,9 +190,9 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
                 connection_name=f"comments for PR review thread {thread_id}",
                 max_nodes=MAX_PR_REVIEW_THREAD_COMMENTS,
             )
+        except (_api.GitHubRateLimitError, _api.GitHubUnavailableError):
+            raise
         except RuntimeError as exc:
-            if isinstance(exc, _api.GitHubRateLimitError):
-                raise
             raise RuntimeError(
                 f"could not fetch all comments for PR review thread {thread_id}: {exc}"
             ) from exc
@@ -328,9 +328,9 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
                 fetch_thread_page,
                 connection_name=f"review threads for PR #{pr_number}",
             )
+        except (_api.GitHubRateLimitError, _api.GitHubUnavailableError):
+            raise
         except RuntimeError as exc:
-            if isinstance(exc, _api.GitHubRateLimitError):
-                raise
             raise RuntimeError("could not fetch all PR review threads") from exc
 
         thread_ids: list[str] = []

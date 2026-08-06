@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from hephaestus.automation.github_api import (
+    GitHubRateLimitError,
+    GitHubUnavailableError,
     _review_threads_for_review,
     gh_pr_list_unresolved_threads,
 )
@@ -437,6 +439,30 @@ class TestListUnresolvedThreadsParameterisation:
         with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
             gh_pr_list_unresolved_threads(42)
 
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            pytest.param(GitHubUnavailableError("breaker open"), id="unavailable"),
+            pytest.param(GitHubRateLimitError("rate limited", reset_epoch=123), id="rate-limit"),
+        ],
+    )
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.get_repo_info")
+    def test_preserves_provider_errors_from_thread_id_pagination(
+        self,
+        mock_repo_info: Any,
+        mock_gh_call: Any,
+        exception: RuntimeError,
+    ) -> None:
+        """Provider-domain errors must not be converted into pagination failures."""
+        mock_repo_info.return_value = ("owner", "repo")
+        mock_gh_call.side_effect = exception
+
+        with pytest.raises(type(exception)) as exc_info:
+            gh_pr_list_unresolved_threads(42)
+
+        assert exc_info.value is exception
+
     @patch("hephaestus.automation.github_api._gh_call")
     def test_complete_thread_snapshot_rejects_unstable_comment_pages(
         self, mock_gh_call: Any
@@ -526,6 +552,27 @@ class TestListUnresolvedThreadsParameterisation:
         )
         mock_gh_call.return_value = result
         assert _complete_thread_snapshot("owner", "repo", 42, "T1") is None
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            pytest.param(GitHubUnavailableError("breaker open"), id="unavailable"),
+            pytest.param(GitHubRateLimitError("rate limited", reset_epoch=123), id="rate-limit"),
+        ],
+    )
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_preserves_provider_errors_from_comment_pagination(
+        self,
+        mock_gh_call: Any,
+        exception: RuntimeError,
+    ) -> None:
+        """Provider-domain errors from comment pagination keep their original type."""
+        mock_gh_call.side_effect = exception
+
+        with pytest.raises(type(exception)) as exc_info:
+            _complete_thread_snapshot("owner", "repo", 42, "T1")
+
+        assert exc_info.value is exception
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
