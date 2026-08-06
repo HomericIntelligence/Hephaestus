@@ -35,6 +35,7 @@ from hephaestus.cli.utils import (
     format_output,
     resolve_repo_root,
 )
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
 
@@ -51,6 +52,9 @@ _VERSION_RE = re.compile(r"(?<!/)(?<!@)\bv?(\d+\.\d+\.\d+)\b")
 
 # Matches inline code spans so we skip versions inside backticks.
 _INLINE_CODE_RE = re.compile(r"``[^`]+``|`[^`]+`")
+_GIT_TAG_TIMEOUT_WARNING = (
+    "[hephaestus-version] WARNING: git tag lookup timed out; using installed package metadata"
+)
 
 
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
@@ -84,11 +88,24 @@ def _version_from_git_tag(repo_root: Path) -> str | None:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"],
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "describe",
+                "--tags",
+                "--abbrev=0",
+                "--match",
+                "v[0-9]*",
+            ],
             capture_output=True,
             text=True,
             check=False,
+            timeout=METADATA_TIMEOUT,
         )
+    except subprocess.TimeoutExpired:
+        print(_GIT_TAG_TIMEOUT_WARNING, file=sys.stderr)
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
