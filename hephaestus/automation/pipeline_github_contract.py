@@ -25,6 +25,9 @@ if TYPE_CHECKING:
         def _owner_name(self) -> tuple[str, str]:
             pass
 
+        def _viewer_login(self) -> str:
+            pass
+
         def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
             pass
 
