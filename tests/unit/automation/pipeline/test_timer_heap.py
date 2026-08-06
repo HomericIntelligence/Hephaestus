@@ -16,7 +16,6 @@ import pytest
 
 from hephaestus.automation.pipeline import coordinator as coordinator_mod, seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
-    _STEP_WATCHDOG_S,
     Coordinator,
     PipelineConfig,
 )
@@ -351,7 +350,33 @@ class TestRetryDelayConsumption:
 
 
 class TestStepWatchdog:
-    """WARN when a stage.step breaches the <~15s protocol contract."""
+    """WARN when a stage.step breaches the <~60s protocol contract."""
+
+    def test_watchdog_allows_step_at_sixty_seconds(
+        self,
+        clocked: tuple[Coordinator, FakeClock],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A 60-second step remains within the coordinator contract."""
+        coordinator, clock = clocked
+
+        class WithinContractStage:
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                clock.now += 60.0
+                return StageOutcome(Disposition.SKIP, "within_contract")
+
+            def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        coordinator.stages[StageName.PR_REVIEW] = WithinContractStage()
+
+        with caplog.at_level("WARNING"):
+            coordinator._run_item(_item(11))
+
+        assert not any("stage.step stalled" in record.message for record in caplog.records)
 
     def test_watchdog_warns_on_slow_step(
         self,
@@ -366,7 +391,7 @@ class TestStepWatchdog:
                 return None
 
             def step(self, item: WorkItem, ctx: Any) -> Any:
-                clock.now += _STEP_WATCHDOG_S + 3.0  # simulate a stalled step
+                clock.now += 60.1
                 return StageOutcome(Disposition.SKIP, "slow")
 
             def on_job_done(self, item: WorkItem, result: Any, ctx: Any) -> None:
