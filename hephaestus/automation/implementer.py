@@ -532,6 +532,7 @@ def main() -> int:
         dry_run=args.dry_run,
         agent=agent,
         no_advise=args.no_advise,
+        enable_learn=not args.no_learn,
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,

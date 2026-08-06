@@ -538,10 +538,10 @@ REPO → PLANNING → PLAN_REVIEW → IMPLEMENTATION → PR_REVIEW →
  MERGE_WAIT → FINISHED
 ```
 
-Declaration order matches
-[`PIPELINE_ORDER`](../hephaestus/automation/pipeline/routing.py) and the
-[`_DRAIN_ORDER`](../hephaestus/automation/pipeline/coordinator.py) reversed.
-DO NOT REORDER — the `PipelineScope` contiguity check indexes by position.
+[`ROUTES`](../hephaestus/automation/pipeline/routing.py) insertion order
+defines `PIPELINE_ORDER`; the coordinator initializes queues in that order and
+derives `_DRAIN_ORDER` by reversing it. `PipelineScope` uses the same derived
+order for contiguity and scoped-entry decisions.
 
 ### [§`Disposition`](../hephaestus/automation/pipeline/routing.py)
 
@@ -1187,39 +1187,25 @@ Architectural contract:
 
 ## 6. The ROUTES table — single source of truth
 
-[`ROUTES`](../hephaestus/automation/pipeline/routing.py) (and its mirror in
-[`docs/architecture.md`](architecture.md))
-is the **single source of truth** for next-stage targets and per-stage
-budgets. Every `routes.py` row and every doc row MUST agree.
+[`ROUTES`](../hephaestus/automation/pipeline/routing.py) is the sole executable
+authority for pipeline order, success targets, failure targets, and per-item
+budgets. Each `StageName` has one `Route`; table insertion order becomes
+`PIPELINE_ORDER`, and downstream-first draining reverses that derived order.
 
-| Stage | `next` (success) | Fail reasons → target | Budgets |
-|-------------------|------------------|-------------------------------------------------------------|----------------------------|
-| `repo` | `FINISHED` | `*` → `FINISHED` | `clone = 2` |
-| `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
-| `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
-| `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
-| `pr_review` | `MERGE_WAIT` | `agent_error` or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
-| `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
-| `finished` | `FINISHED` | — (terminal) | — |
+Routing tests parameterize structural checks directly from `ROUTES` and
+generate every contiguous `PipelineScope` from the derived order. They require
+complete `StageName` coverage, closed success/failure targets, terminal
+`FINISHED` behavior, and positive budgets. Adding or reordering a route
+therefore enters validation, scope handling, queue initialization, and drain
+ordering without updating another route list.
 
-Budget provenance (cross-check):
-
-- `plan_review_iter = 3`, `pr_review_iter = 3`, and `pr_review_hard = 6`
-  are defined in [`pipeline/routing.py`](../hephaestus/automation/pipeline/routing.py),
-  with the latter as the progress-aware extension cap.
-- `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
- `test_fix = 1`, `merge =
- DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
- [`loop_runner.py LoopConfig.drive_green_loops`](../hephaestus/automation/loop_runner.py).
-- `merge = 5` (CLI default for `--drive-green-loops`,
- [`DEFAULT_DRIVE_GREEN_LOOPS`](../hephaestus/automation/pipeline/routing.py))
- bounds queue `merge_wait` conditional requests and transport-ambiguity
- retries. Operational readiness waits use a separate 15-minute monotonic
- deadline keyed to the current reviewed-head proof.
-All per-item-lifetime counters live in
-[`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py);
-they are NEVER reset when an item re-enters a stage, so cross-stage
-regression cycles (e.g. pr_review → implementation) remain
+`budget_keys()` derives the counter vocabulary from `ROUTES`, and new
+`WorkItem` instances initialize those counters through `_default_attempts()`.
+The `merge` default uses `DEFAULT_DRIVE_GREEN_LOOPS`; callers may override
+declared budgets through `PipelineConfig.budget_overrides`. Counters remain
+per-item-lifetime and are never reset when an item re-enters a stage.
+All counters live in [`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py),
+so cross-stage regression cycles (e.g. pr_review → implementation) remain
 globally bounded.
 
 ---

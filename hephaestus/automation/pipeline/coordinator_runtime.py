@@ -60,7 +60,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         else:
             root = _effective_repo_root(self.config, repo)
             ctx = StageContext(
-                config=self._stage_config,
+                config=self.config,
                 org=self.config.org,
                 dry_run=self.config.dry_run,
                 github=(

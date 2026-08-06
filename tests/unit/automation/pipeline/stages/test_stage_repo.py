@@ -436,15 +436,10 @@ class TestDiscover:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unlinked PR pages are no-op work and must not delay source setup."""
-        config = type(
-            "Cfg",
-            (),
-            {
-                "drive_green_all": True,
-                "dry_run": False,
-            },
-        )()
-        ctx = make_ctx(config=config, paths=_RepoPaths(tmp_path))
+        ctx = make_ctx(
+            config_overrides={"drive_green_all": True},
+            paths=_RepoPaths(tmp_path),
+        )
         self._patch_discovery(
             monkeypatch,
             meta=[{"number": 1, "labels": [], "title": "covered"}],

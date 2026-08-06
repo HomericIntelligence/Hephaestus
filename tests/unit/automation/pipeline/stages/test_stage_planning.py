@@ -525,7 +525,6 @@ class TestPlanningStageStep:
         """ENTER advances to ADVISE_WAIT when advise is enabled."""
         stage = PlanningStage()
         ctx = make_ctx()
-        ctx.config.enable_advise = True
         item = make_work_item(issue=1, state="ENTER")
 
         result = stage.step(item, ctx)
@@ -536,8 +535,7 @@ class TestPlanningStageStep:
     def test_enter_skips_advise_when_disabled(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances straight to PLAN_WAIT when advise is disabled."""
         stage = PlanningStage()
-        ctx = make_ctx()
-        ctx.config.enable_advise = False
+        ctx = make_ctx(config_overrides={"no_advise": True})
         item = make_work_item(issue=2, state="ENTER")
 
         result = stage.step(item, ctx)
@@ -565,8 +563,7 @@ class TestPlanningStageStep:
     ) -> None:
         """Codex advise turns must receive a runtime read-only sandbox."""
         stage = PlanningStage()
-        ctx = make_ctx()
-        ctx.config.agent = "codex"
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=3, state="ADVISE_WAIT")
 
         result = stage.step(item, ctx)
@@ -585,8 +582,7 @@ class TestPlanningStageStep:
     ) -> None:
         """The planning job's read-only contract reaches the Codex runtime."""
         stage = PlanningStage()
-        ctx = make_ctx()
-        ctx.config.agent = "codex"
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=3, state="ADVISE_WAIT")
         request = stage.step(item, ctx)
 
@@ -654,22 +650,13 @@ class TestPlanningStageStep:
     ) -> None:
         """Provider selection is distinct from the persisted planner session role."""
         stage = PlanningStage()
-        config = type(
-            "Cfg",
-            (),
-            {
-                "enable_advise": True,
-                "enable_learn": True,
-                "force": False,
+        ctx = make_ctx(
+            config_overrides={
                 "agent": "codex",
                 "model": "gpt-default",
                 "planner_model": "gpt-plan",
-                "reviewer_model": "",
-                "implementer_model": "",
-                "dry_run": False,
-            },
-        )()
-        ctx = make_ctx(config=config)
+            }
+        )
         item = make_work_item(issue=9, state="PLAN_WAIT")
 
         result = stage.step(item, ctx)

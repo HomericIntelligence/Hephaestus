@@ -211,18 +211,9 @@ _DEFAULT_EVENT_LOG_CAPACITY = 1_024
 _DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
 _SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 
-#: Downstream-first drain order: finish work before admitting new (epic
-#: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
-#: finished sink drains first of all so results are recorded promptly).
-_DRAIN_ORDER: tuple[StageName, ...] = (
-    StageName.FINISHED,
-    StageName.MERGE_WAIT,
-    StageName.PR_REVIEW,
-    StageName.IMPLEMENTATION,
-    StageName.PLAN_REVIEW,
-    StageName.PLANNING,
-    StageName.REPO,
-)
+#: Downstream-first drain order generated from the authoritative pipeline
+#: order; the finished sink drains first so results are recorded promptly.
+_DRAIN_ORDER: tuple[StageName, ...] = tuple(reversed(PIPELINE_ORDER))
 
 # An explicit issue can classify into any of these queues.  The source cursor
 # classifies only when every possible destination can accept one item, so the
@@ -277,7 +268,7 @@ def _json_safe(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Configuration for the pipeline coordinator (built by ``loop_runner``)."""
+    """Configuration shared by the coordinator and every pipeline stage."""
 
     org: str
     repos: list[str]
@@ -304,6 +295,7 @@ class PipelineConfig:
     implementer_reasoning_effort: str = ""
     gh_extra_path_root: Path | None = None  # Explicit CLI bin/gh root; never env-derived.
     no_advise: bool = False
+    enable_learn: bool = True
     nitpick: bool = False
     drive_green_all: bool = False
     include_bot_prs: bool = True
@@ -349,35 +341,15 @@ class PipelineConfig:
     # PLANNING instead of being classified past the scope (and thus skipped).
     force: bool = False
 
+    @property
+    def enable_advise(self) -> bool:
+        """Return the positive stage-facing form of ``no_advise``."""
+        return not self.no_advise
+
 
 def _work_window(config: PipelineConfig) -> int:
     """Return the global bound for all nonterminal pipeline work."""
     return max(1, config.parallel_repos * config.max_workers)
-
-
-@dataclass
-class _StageRunConfig:
-    """PlannerOptions-like config injected as ``StageContext.config``."""
-
-    enable_advise: bool = True
-    enable_learn: bool = True
-    enable_follow_up: bool = True
-    run_pre_pr_tests: bool = False
-    force: bool = False
-    agent: str = "claude"
-    model: str = ""
-    planner_model: str = ""
-    reviewer_model: str = ""
-    implementer_model: str = ""
-    planner_reasoning_effort: str = ""
-    reviewer_reasoning_effort: str = ""
-    implementer_reasoning_effort: str = ""
-    dry_run: bool = False
-    nitpick: bool = False
-    drive_green_all: bool = False
-    include_bot_prs: bool = True
-    include_all_authors: bool = False
-    pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
 
 
 @dataclass
@@ -490,7 +462,7 @@ __all__ = [
     'RunStats', 'Stage', 'StageContext', 'StageEvent', 'StageGitHub', 'StageName', 'StageOutcome',
     'StageQueue', 'StageQueueLease', 'StageStepResult', 'TemplateNotFound', 'TerminalSummary',
     'WorkItem', '_ActiveRepoIssueSource', '_DirectIssueSource', '_DirectPrSource', '_Paths',
-    '_PendingHandoff', '_RepoEntrySource', '_StageRunConfig', '_admission', '_budget_lookup',
+    '_PendingHandoff', '_RepoEntrySource', '_admission', '_budget_lookup',
     '_effective_repo_root', '_json_safe', '_preflight_prompt_catalog', '_seeding', '_work_window',
     'annotations', 'dataclass', 'deque', 'encode_stage_event', 'field', 'heapq', 'is_epic',
     'is_full_commit_sha', 'is_inspection_only_detached_push_failure', 'json',

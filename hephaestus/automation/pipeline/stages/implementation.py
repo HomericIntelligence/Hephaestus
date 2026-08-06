@@ -761,13 +761,13 @@ class ImplementationStage(Stage):
             # on_job_done (doc: agent_error consumes the implement
             # budget); RETRY re-enters the stage for the next attempt.
             return StageOutcome(Disposition.RETRY, "agent_error")
-        if not getattr(ctx.config, "run_pre_pr_tests", False):
+        if not ctx.config.run_pre_pr_tests:
             return Continue(next_state=COMMIT_PUSH_WAIT)
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
         item.payload.pop("test_receipt", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
-        test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+        test_argv = ctx.config.pre_pr_test_argv
         item.payload["test_command"] = shlex.join(test_argv)
         test_job = BuildTestJob(
             repo=item.repo,

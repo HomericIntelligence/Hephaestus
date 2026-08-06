@@ -1,10 +1,8 @@
 """Declarative stage-routing table. Pure data, zero I/O (epic #1809).
 
-The ROUTES table below is the code form of the normative table in
-[`docs/architecture.md` §6](../docs/architecture.md#6-the-routes-table--single-source-of-truth)
-("The ROUTES table — single source of truth"). Any change here MUST be reflected
-there and vice versa;
-``tests/unit/automation/pipeline/test_routing.py`` pins every row.
+``ROUTES`` is the executable authority for stage order, success and failure
+targets, and per-item budgets. Documentation describes its schema, while
+tests generate structural and scoped-routing cases from the table.
 
 All budgets are per-item-lifetime counters (tracked in ``WorkItem.attempts``);
 they are never reset when an item re-enters a stage, so cross-stage
@@ -26,7 +24,8 @@ DEFAULT_DRIVE_GREEN_LOOPS = 5
 class StageName(StrEnum):
     """Pipeline stage identifiers.
 
-    Members are declared in pipeline order and MUST NOT be reordered.
+    ``ROUTES`` insertion order, not enum declaration order, defines pipeline
+    execution order.
     """
 
     REPO = "repo"
@@ -36,13 +35,6 @@ class StageName(StrEnum):
     PR_REVIEW = "pr_review"
     MERGE_WAIT = "merge_wait"
     FINISHED = "finished"
-
-
-#: Active loop order used for scope-contiguity validation. CI/CD intentionally
-#: has no pipeline stage: normal review may collect its evidence for a binary
-#: verdict, but the loop does not change CI/CD and it never independently
-#: authorizes an approval.
-PIPELINE_ORDER: tuple[StageName, ...] = tuple(StageName)
 
 
 class Disposition(StrEnum):
@@ -77,9 +69,8 @@ class Route:
     budgets: dict[str, int] = field(default_factory=dict)
 
 
-# The rows below transcribe docs/architecture.md §6 "ROUTES
-# table" exactly: named fail-route keys are the doc's reason vocabulary, "*"
-# is the doc's default target. Budget provenance:
+# Named fail-route keys are the stage reason vocabulary, "*" is the default
+# target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3, pr_review_hard=6
 #                                             <- architecture doc stage sections
 #   clone=2, plan=2, plan_cycles=2,
@@ -144,6 +135,11 @@ ROUTES: dict[StageName, Route] = {
     ),
     StageName.FINISHED: Route(next=StageName.FINISHED),
 }
+
+
+#: Active loop order derived from the authoritative routing table. CI/CD
+#: intentionally has no pipeline stage.
+PIPELINE_ORDER: tuple[StageName, ...] = tuple(ROUTES)
 
 
 def budget_keys() -> frozenset[str]:

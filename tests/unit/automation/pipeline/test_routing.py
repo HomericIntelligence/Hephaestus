@@ -13,6 +13,23 @@ from hephaestus.automation.pipeline import (
     StageName,
     StageOutcome,
 )
+from hephaestus.automation.pipeline.coordinator_types import _DRAIN_ORDER
+from hephaestus.automation.pipeline.routing import PIPELINE_ORDER
+
+_ROUTE_CASES = tuple(
+    pytest.param(stage, route, id=stage.value) for stage, route in ROUTES.items()
+)
+_NON_TERMINAL_ORDER = tuple(
+    stage for stage in PIPELINE_ORDER if stage is not StageName.FINISHED
+)
+_SCOPE_CASES = tuple(
+    pytest.param(
+        frozenset(_NON_TERMINAL_ORDER[start:stop]),
+        id=f"{start}:{stop}",
+    )
+    for start in range(len(_NON_TERMINAL_ORDER))
+    for stop in range(start + 1, len(_NON_TERMINAL_ORDER) + 1)
+)
 
 
 class TestStageName:
@@ -39,8 +56,8 @@ class TestStageName:
     def test_stage_name_docstring_warns_about_order(self) -> None:
         """StageName docstring must warn that declaration order is semantic."""
         assert StageName.__doc__ is not None
-        assert "pipeline order" in StageName.__doc__
-        assert "MUST NOT be reordered" in StageName.__doc__
+        assert "defines pipeline" in StageName.__doc__
+        assert "not enum declaration order" in StageName.__doc__
 
 
 class TestDisposition:
@@ -153,6 +170,42 @@ class TestROUTES:
         expected = set(StageName)
         assert stages == expected
 
+    @pytest.mark.parametrize(("stage", "route"), _ROUTE_CASES)
+    def test_route_entries_are_closed_and_valid(
+        self, stage: StageName, route: Route
+    ) -> None:
+        """Every table row has valid targets and a default failure route."""
+        assert route.next in ROUTES
+        assert set(route.fail_routes.values()) <= set(ROUTES)
+        assert all(name and limit > 0 for name, limit in route.budgets.items())
+        if stage is StageName.FINISHED:
+            assert route.next is StageName.FINISHED
+        else:
+            assert "*" in route.fail_routes
+
+    def test_routes_drive_pipeline_and_drain_order(self) -> None:
+        """Route insertion order drives both queue orders."""
+        assert set(ROUTES) == set(StageName)
+        assert tuple(ROUTES) == PIPELINE_ORDER
+        assert tuple(reversed(PIPELINE_ORDER)) == _DRAIN_ORDER
+
+    @pytest.mark.parametrize("stages", _SCOPE_CASES)
+    def test_route_order_drives_every_contiguous_scope(
+        self, stages: frozenset[StageName]
+    ) -> None:
+        """Every generated contiguous scope follows the route-derived order."""
+        trimmed = PipelineScope(stages).trimmed_routes()
+        expected_order = tuple(stage for stage in PIPELINE_ORDER if stage in stages)
+
+        assert tuple(trimmed) == expected_order
+        allowed = set(stages) | {StageName.FINISHED}
+        assert all(route.next in allowed for route in trimmed.values())
+        assert all(
+            target in allowed
+            for route in trimmed.values()
+            for target in route.fail_routes.values()
+        )
+
     def test_routes_structure(self) -> None:
         """Each ROUTES entry is a Route dataclass."""
         for _stage, route in ROUTES.items():
@@ -174,62 +227,6 @@ class TestROUTES:
         """FINISHED stage is terminal (routes to itself)."""
         route = ROUTES[StageName.FINISHED]
         assert route.next == StageName.FINISHED
-
-    def test_routes_match_single_pr_review_stage_contract(self) -> None:
-        """Pin the full stage table while the companion documentation lands separately."""
-        expected: dict[StageName, Route] = {
-            StageName.REPO: Route(
-                next=StageName.FINISHED,
-                fail_routes={"*": StageName.FINISHED},
-                budgets={"clone": 2},
-            ),
-            StageName.PLANNING: Route(
-                next=StageName.PLAN_REVIEW,
-                fail_routes={"*": StageName.FINISHED},
-                budgets={"plan": 2},
-            ),
-            StageName.PLAN_REVIEW: Route(
-                next=StageName.IMPLEMENTATION,
-                fail_routes={
-                    "nogo": StageName.PLANNING,
-                    "plan_cycles_exhausted": StageName.FINISHED,
-                    "*": StageName.PLANNING,
-                },
-                budgets={"plan_review_iter": 3, "plan_cycles": 2},
-            ),
-            StageName.IMPLEMENTATION: Route(
-                next=StageName.PR_REVIEW,
-                fail_routes={
-                    "plan_not_go": StageName.PLAN_REVIEW,
-                    "already_implementation_go_pr": StageName.MERGE_WAIT,
-                    "*": StageName.FINISHED,
-                },
-                budgets={"implement": 2, "test_fix": 1},
-            ),
-            StageName.PR_REVIEW: Route(
-                next=StageName.MERGE_WAIT,
-                fail_routes={
-                    "agent_error": StageName.IMPLEMENTATION,
-                    "implementation_remediation": StageName.IMPLEMENTATION,
-                    "exhaustion": StageName.FINISHED,
-                    "*": StageName.PR_REVIEW,
-                },
-                budgets={"pr_review_iter": 3, "pr_review_hard": 6},
-            ),
-            StageName.MERGE_WAIT: Route(
-                next=StageName.FINISHED,
-                fail_routes={
-                    "closed": StageName.FINISHED,
-                    "not_implementation_go": StageName.PR_REVIEW,
-                    "reviewed_head_missing": StageName.PR_REVIEW,
-                    "reviewed_head_drift": StageName.PR_REVIEW,
-                    "*": StageName.FINISHED,
-                },
-                budgets={"merge": routing.DEFAULT_DRIVE_GREEN_LOOPS},
-            ),
-            StageName.FINISHED: Route(next=StageName.FINISHED),
-        }
-        assert expected == ROUTES
 
     def test_pr_review_advances_directly_to_merge_wait(self) -> None:
         """The active loop has no CI/CD stage between review and merge wait."""
