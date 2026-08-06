@@ -188,10 +188,13 @@ def test_next_msg_called_with_bounded_timeout() -> None:
 
 def test_subscribe_loop_passes_tls_options_to_nats_connect() -> None:
     """TLS config is forwarded to nats-py's native connection options."""
+    configured_url = (
+        "tls://alice:credential-value@broker.example.com:4222/jetstream?token=query-value"
+    )
     thread = NATSSubscriberThread(
         config=NATSConfig(
             enabled=True,
-            url="tls://broker.example.com:4222",
+            url=configured_url,
             subjects=["hi.tasks.>"],
             tls=True,
             tls_hostname="broker.example.com",
@@ -209,7 +212,7 @@ def test_subscribe_loop_passes_tls_options_to_nats_connect() -> None:
 
     nats_module.connect.assert_awaited_once()
     args, kwargs = nats_module.connect.await_args
-    assert args == ("tls://broker.example.com:4222",)
+    assert args == (configured_url,)
     assert isinstance(kwargs["tls"], ssl.SSLContext)
     assert kwargs["tls_hostname"] == "broker.example.com"
     assert kwargs["tls_handshake_first"] is True
@@ -281,7 +284,9 @@ def test_malformed_payload_is_logged_acked_and_not_dispatched(
     nc.drain.assert_awaited_once()
 
 
-def test_ack_is_awaited_even_when_handler_raises() -> None:
+def test_ack_is_awaited_even_when_handler_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A raising handler must NOT block the ack — at-most-once by design (#1551).
 
     The message is acked unconditionally so a poison message cannot wedge the
@@ -289,7 +294,9 @@ def test_ack_is_awaited_even_when_handler_raises() -> None:
     ``last_error`` and the success counter (``_record_message`` /
     ``last_message_at``) is left untouched.
     """
-    boom = RuntimeError("handler exploded")
+    sensitive_text = "token=known-test-value"
+    boom = RuntimeError(f"handler exploded: {sensitive_text}")
+    caplog.set_level("ERROR", logger="hephaestus.nats.subscriber")
 
     def handler(_event: NATSEvent) -> None:
         raise boom
@@ -311,5 +318,8 @@ def test_ack_is_awaited_even_when_handler_raises() -> None:
 
     msg.ack.assert_awaited_once()  # acked despite the raise
     assert thread.last_error is boom  # failure surfaced, not swallowed
+    assert thread.health_dict()["last_error"] == "handler_error"
     assert thread.last_message_at is None  # success path NOT taken
+    assert "kind=handler_error" in caplog.text
+    assert sensitive_text not in caplog.text
     nc.drain.assert_awaited_once()  # clean drain on loop exit

@@ -73,12 +73,22 @@ authoritative upstream source can reconstruct and re-emit it.
 
 - A malformed UTF-8 or JSON payload is warning-logged, acknowledged, and never
   passed to the handler.
-- A handler exception is recorded in `last_error`, logged with its traceback,
-  and acknowledged without updating `last_message_at`.
+- A handler exception remains available through the in-process `last_error`
+  property and is acknowledged without updating `last_message_at`.
+- Health responses and logs expose only a bounded failure category such as
+  `handler_error` or `connection_error`; they never publish exception text or
+  tracebacks.
+- Diagnostic URLs retain the broker scheme, host, port, and path while removing
+  URL userinfo, the complete query string, and fragments. The original URL is
+  still used internally when connecting.
 
 Acknowledged failures are **not retained** by Hephaestus. There is no built-in
 dead-letter queue (DLQ), replay store, or operator replay command. Logs and
 `last_error` are observability signals, not durable storage.
+
+Logs and classified health fields are observability signals, not durable
+failure storage. Code that inspects the raw `last_error` object must not copy
+its text into externally visible diagnostics.
 
 Workflows requiring durable processing, audit trails, or operator-driven replay
 must not use this abstraction unchanged. They require a consumer that persists
