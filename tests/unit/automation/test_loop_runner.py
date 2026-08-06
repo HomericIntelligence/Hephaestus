@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -105,6 +106,29 @@ def test_parse_args_accepts_explicit_codex_agent() -> None:
     """Operators can still force Codex explicitly."""
     args = loop_runner._parse_args(["--agent", "codex"])
     assert args.agent == "codex"
+
+
+def test_parse_args_defaults_event_log_retention() -> None:
+    """Event-log retention defaults are conservative and explicit."""
+    args = loop_runner._parse_args([])
+    assert args.event_log_retention_days == 30
+    assert args.event_log_retention_count == 100
+
+
+def test_parse_args_accepts_zero_event_log_retention_limits() -> None:
+    """Operators can independently disable either retention dimension."""
+    args = loop_runner._parse_args(
+        ["--event-log-retention-days", "0", "--event-log-retention-count", "0"]
+    )
+    assert args.event_log_retention_days == 0
+    assert args.event_log_retention_count == 0
+
+
+@pytest.mark.parametrize("flag", ["--event-log-retention-days", "--event-log-retention-count"])
+def test_parse_args_rejects_negative_event_log_retention_limits(flag: str) -> None:
+    """Retention limits reject negative values at the CLI boundary."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args([flag, "-1"])
 
 
 def test_loop_help_documents_explicit_gh_root_override() -> None:
@@ -637,6 +661,7 @@ def _capture_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
 
     monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *a, **k: None)
+    monkeypatch.setattr(loop_runner, "event_log_lifecycle", lambda *a, **k: nullcontext())
     monkeypatch.setattr(coordinator_mod, "run_pipeline", _capture)
     main(argv)
     return captured["config"]
@@ -653,6 +678,7 @@ def _capture_main_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> ob
         return 0
 
     monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(loop_runner, "event_log_lifecycle", lambda *a, **k: nullcontext())
     monkeypatch.setattr(coordinator_mod, "run_pipeline", capture)
 
     assert main(argv) == 0

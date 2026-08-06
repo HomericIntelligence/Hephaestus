@@ -45,6 +45,11 @@ if TYPE_CHECKING:
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.automation.event_log_retention import (
+    DEFAULT_EVENT_LOG_RETENTION_COUNT,
+    DEFAULT_EVENT_LOG_RETENTION_DAYS,
+    event_log_lifecycle,
+)
 from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
     _detect_cwd_repo as _detect_cwd_repo,
@@ -111,6 +116,19 @@ def _parse_positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
     if number <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {number}")
+    return number
+
+
+def _parse_non_negative_int(value: str) -> int:
+    """Parse one non-negative integer for an optional retention limit."""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a non-negative integer, got {value!r}"
+        ) from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {number}")
     return number
 
 
@@ -271,6 +289,8 @@ class LoopConfig:
     # listener rather than selecting an ephemeral port, so the CLI remains
     # opt-in and operators know which port is exposed.
     metrics_port: int = 0
+    event_log_retention_days: int = DEFAULT_EVENT_LOG_RETENTION_DAYS
+    event_log_retention_count: int = DEFAULT_EVENT_LOG_RETENTION_COUNT
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +490,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Loopback-only port for the local Prometheus /metrics and /health server "
             "(0 disables it)."
+        ),
+    )
+    p.add_argument(
+        "--event-log-retention-days",
+        type=_parse_non_negative_int,
+        default=DEFAULT_EVENT_LOG_RETENTION_DAYS,
+        help=(
+            "Delete inactive pipeline event logs older than this many days; "
+            "0 disables age cleanup."
+        ),
+    )
+    p.add_argument(
+        "--event-log-retention-count",
+        type=_parse_non_negative_int,
+        default=DEFAULT_EVENT_LOG_RETENTION_COUNT,
+        help=(
+            "Retain at most this many pipeline event logs when inactive logs permit; "
+            "0 disables the count limit."
         ),
     )
     p.add_argument(
@@ -853,15 +891,20 @@ def _dispatch_pipeline(
         _preflight_token_scopes(cfg.org, repos[0])
     from hephaestus.automation.pipeline.coordinator import run_pipeline
 
-    return run_pipeline(
-        _build_pipeline_config(
-            args,
-            cfg,
-            org,
-            repos,
-            repo_source_factory=repo_source_factory,
-        )
+    config = _build_pipeline_config(
+        args,
+        cfg,
+        org,
+        repos,
+        repo_source_factory=repo_source_factory,
     )
+    with event_log_lifecycle(
+        config.event_log_path,
+        retention_days=cfg.event_log_retention_days,
+        retention_count=cfg.event_log_retention_count,
+        dry_run=cfg.dry_run,
+    ):
+        return run_pipeline(config)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -923,6 +966,8 @@ def main(argv: list[str] | None = None) -> int:
             args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
         ),
         metrics_port=args.metrics_port,
+        event_log_retention_days=args.event_log_retention_days,
+        event_log_retention_count=args.event_log_retention_count,
     )
 
     org_repo_source = (lambda: _iter_gh_repos(org)) if streaming_org_scope else None
