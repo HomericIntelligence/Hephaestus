@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scaffold a new hephaestus subpackage skeleton with matching test directory.
+"""Scaffold a minimal Hephaestus subpackage with a structural import test.
 
 Usage:
     hephaestus-scaffold-subpackage <name> [--with-cli] [--dry-run] [--json]
@@ -27,38 +27,20 @@ _PKG_INIT = '''\
 """{title} utilities for Hephaestus."""
 '''
 
-_PKG_MODULE = '''\
-"""{title} implementation module."""
-
-from __future__ import annotations
-
-
-def placeholder() -> None:
-    """Placeholder function — replace with real implementation.
-
-    Args: none
-
-    Returns:
-        None
-
-    """
-'''
-
 _TEST_INIT = ""
 
 _TEST_MODULE = '''\
-"""Tests for hephaestus.{name}.{name}."""
+"""Import contract for ``hephaestus.{name}``."""
 
 from __future__ import annotations
 
-from hephaestus.{name}.{name} import placeholder
+import importlib
 
 
-class TestPlaceholder:
-    """Smoke tests for the placeholder stub."""
-
-    def test_placeholder_returns_none(self) -> None:
-        assert placeholder() is None
+def test_package_is_importable() -> None:
+    """Verify the generated subpackage is importable by its public name."""
+    package = importlib.import_module("hephaestus.{name}")
+    assert package.__name__ == "hephaestus.{name}"
 '''
 
 _SCRIPT_SHIM = '''\
@@ -81,7 +63,6 @@ def _build_plan(name: str, root: Path, *, with_cli: bool) -> _Plan:
     title = name.replace("_", " ").title()
     files: list[tuple[Path, str]] = [
         (root / "hephaestus" / name / "__init__.py", _PKG_INIT.format(title=title)),
-        (root / "hephaestus" / name / f"{name}.py", _PKG_MODULE.format(title=title)),
         (root / "tests" / "unit" / name / "__init__.py", _TEST_INIT),
         (root / "tests" / "unit" / name / f"test_{name}.py", _TEST_MODULE.format(name=name)),
     ]
@@ -91,7 +72,10 @@ def _build_plan(name: str, root: Path, *, with_cli: bool) -> _Plan:
     hints: list[str] = [
         f"Next steps for '{name}':",
         f"  1. Add 'hephaestus/{name}/' to the directory tree in README.md",
-        f"  2. Implement hephaestus/{name}/{name}.py",
+        (
+            f"  2. Add implementation modules under hephaestus/{name}/ "
+            f"with behavior-focused tests under tests/unit/{name}/"
+        ),
         f"  3. Run: uv run pytest tests/unit/{name}/ -v",
     ]
     if with_cli:
@@ -129,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="hephaestus-scaffold-subpackage",
-        description="Scaffold a new hephaestus subpackage skeleton with matching test directory.",
+        description="Scaffold a minimal Hephaestus subpackage with a structural import test.",
     )
     parser.add_argument(
         "name",
