@@ -949,7 +949,7 @@ class CoordinatorRuntime(_CoordinatorHost):
     def _step_with_watchdog(
         self, stage: Stage, item: WorkItem, ctx: StageContext
     ) -> StageStepResult:
-        """Run one stage.step, warning when it breaches the <~15s contract."""
+        """Run one stage.step, warning when it breaches the <~60s contract."""
         t0 = time.monotonic()
         result = stage.step(item, ctx)
         elapsed = time.monotonic() - t0
