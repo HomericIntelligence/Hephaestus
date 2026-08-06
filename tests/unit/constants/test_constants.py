@@ -135,10 +135,12 @@ def test_read_timeout_env_reads_primary_env_per_call(
 
 
 def test_read_timeout_env_has_no_legacy_names_parameter() -> None:
-    """The timeout helper exposes only one canonical environment-variable name."""
+    """The timeout helper keeps one canonical name plus optional bounds."""
     assert tuple(inspect.signature(constants.read_timeout_env).parameters) == (
         "env_name",
         "default",
+        "minimum",
+        "maximum",
     )
 
 
@@ -151,3 +153,55 @@ def test_read_timeout_env_falls_back_on_malformed_value(
     monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", bad_value)
 
     assert constants.read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", 77) == 77
+@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
+def test_read_timeout_env_accepts_inclusive_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: int,
+) -> None:
+    """Validated timeout overrides accept both inclusive endpoints."""
+    monkeypatch.setenv("HEPH_TEST_TIMEOUT", raw)
+
+    assert (
+        constants.read_timeout_env(
+            "HEPH_TEST_TIMEOUT",
+            10,
+            minimum=1,
+            maximum=86_400,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "86401"])
+def test_read_timeout_env_rejects_out_of_range_values(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """Out-of-range timeout overrides use the supplied default."""
+    monkeypatch.setenv("HEPH_TEST_TIMEOUT", raw)
+
+    assert (
+        constants.read_timeout_env(
+            "HEPH_TEST_TIMEOUT",
+            10,
+            minimum=1,
+            maximum=86_400,
+        )
+        == 10
+    )
+
+
+def test_read_timeout_env_warning_does_not_echo_value(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Timeout warnings identify the variable without logging its raw value."""
+    hostile = "9" * 100_000
+    monkeypatch.setenv("HEPH_TEST_TIMEOUT", hostile)
+
+    with caplog.at_level("WARNING", logger="hephaestus.constants"):
+        assert constants.read_timeout_env("HEPH_TEST_TIMEOUT", 10) == 10
+
+    assert hostile not in caplog.text
+    assert "HEPH_TEST_TIMEOUT" in caplog.text

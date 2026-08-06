@@ -3,12 +3,23 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 
+from hephaestus.forensics import gdb_runner
 from hephaestus.forensics.gdb_runner import (
+    _EXECUTION_TIMEOUT_SECONDS,
+    _build_parser,
+    _run_bounded,
     _validate_gdb_cmd_prefix,
     build_gdb_script,
     main,
@@ -71,12 +82,12 @@ class TestBuildGdbScript:
     def test_intercepts_crash_signals(self) -> None:
         """The script installs handlers for the expected fatal signals."""
         script = build_gdb_script("a", "b", "c")
-        for signal in ("SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE"):
+        for signal_name in ("SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE"):
             # The template aligns the signal column with padding spaces, so
             # match the tokens individually rather than a fixed-spacing string.
-            assert f"handle {signal}" in script
+            assert f"handle {signal_name}" in script
             handle_line = next(
-                line for line in script.splitlines() if line.startswith(f"handle {signal}")
+                line for line in script.splitlines() if line.startswith(f"handle {signal_name}")
             )
             assert "stop" in handle_line
             assert "nopass" in handle_line
@@ -123,22 +134,21 @@ class TestGdbCmdPrefixParsing:
     @staticmethod
     def _capture_argv(monkeypatch) -> list[list[str]]:
         captured: list[list[str]] = []
+        process = MagicMock()
+        process.pid = 4242
+        process.wait.return_value = 0
 
-        def fake_run(argv, check=False):
+        def fake_popen(argv, *, start_new_session):
             captured.append(list(argv))
+            return process
 
-            class _R:
-                returncode = 0
-
-            return _R()
-
-        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.run", fake_run)
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.Popen", fake_popen)
         return captured
 
     def test_prefix_none_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
         captured = self._capture_argv(monkeypatch)
         run_under_gdb(str(tmp_path / "cores"), "sh", ["-c", "true"], gdb_cmd_prefix=None)
-        assert captured, "subprocess.run was not invoked"
+        assert captured, "subprocess.Popen was not invoked"
         assert captured[0][0] == "gdb"
 
     def test_prefix_empty_string_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
@@ -242,6 +252,188 @@ class TestMain:
         monkeypatch.setattr(gdb_runner, "run_under_gdb", lambda **kw: 42)
         rc = main([str(tmp_path), "sh"])
         assert rc == 42
+
+    @pytest.mark.parametrize("direct", [True, False])
+    def test_timeout_returns_124_at_each_execution_path(
+        self,
+        direct: bool,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys,
+        tmp_path: Path,
+    ) -> None:
+        """Both CLI execution paths return fixed timeout status output."""
+        hostile = "secret-" * 20_000
+        error = subprocess.TimeoutExpired(
+            [hostile],
+            7,
+            output=hostile,
+            stderr=hostile,
+        )
+        if direct:
+            monkeypatch.setenv("RUN_UNDER_GDB", "0")
+            monkeypatch.setattr(gdb_runner, "_run_bounded", Mock(side_effect=error))
+        else:
+            monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
+            monkeypatch.setattr(gdb_runner, "run_under_gdb", Mock(side_effect=error))
+
+        rc = main(["--json", "--timeout", "7", str(tmp_path / "cores"), "tool", hostile])
+
+        captured = capsys.readouterr()
+        assert rc == 124
+        assert captured.err == "[run-under-gdb] ERROR: command timed out\n"
+        assert json.loads(captured.out) == {
+            "status": "error",
+            "exit_code": 124,
+            "message": "command timed out",
+        }
+        assert hostile not in captured.out
+        assert hostile not in captured.err
+
+    def test_direct_bypass_succeeds_without_process_groups(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Direct execution preserves success when process groups are unavailable."""
+        process = MagicMock(pid=4242)
+        process.wait.return_value = 0
+        popen = Mock(return_value=process)
+        monkeypatch.setenv("RUN_UNDER_GDB", "0")
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
+        monkeypatch.setattr(gdb_runner.subprocess, "Popen", popen)
+
+        assert main(["--timeout", "7", "unused-cores", "tool"]) == 0
+        assert popen.call_args.kwargs["start_new_session"] is False
+        process.kill.assert_not_called()
+
+    def test_gdb_success_without_process_groups(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Gdb execution preserves success when process groups are unavailable."""
+        process = MagicMock(pid=4242)
+        process.wait.return_value = 0
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
+        monkeypatch.setattr(gdb_runner, "resolve_command", lambda _command: "/tool")
+        monkeypatch.setattr(gdb_runner.subprocess, "Popen", Mock(return_value=process))
+
+        assert run_under_gdb(str(tmp_path / "cores"), "tool", [], timeout=7) == 0
+        process.kill.assert_not_called()
+
+
+class TestBoundedProcess:
+    """Tests for process-group and direct-child timeout cleanup."""
+
+    def test_timeout_kills_and_reaps_process_group(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """POSIX timeout cleanup kills the process group and reaps the child."""
+        process = MagicMock(pid=4242)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["tool"], 7),
+            -signal.SIGKILL,
+        ]
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
+        monkeypatch.setattr(gdb_runner.subprocess, "Popen", Mock(return_value=process))
+        killpg = Mock()
+        monkeypatch.setattr(gdb_runner.os, "killpg", killpg)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_bounded(["tool"], 7)
+
+        killpg.assert_called_once_with(4242, signal.SIGKILL)
+        process.kill.assert_not_called()
+        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
+
+    def test_timeout_without_process_groups_kills_direct_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fallback cleanup kills and reaps only the direct child."""
+        process = MagicMock(pid=4242)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["tool"], 7),
+            -1,
+        ]
+        popen = Mock(return_value=process)
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
+        monkeypatch.setattr(gdb_runner.subprocess, "Popen", popen)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_bounded(["tool"], 7)
+
+        assert popen.call_args.kwargs["start_new_session"] is False
+        process.kill.assert_called_once()
+        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
+
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+    def test_timeout_kills_real_descendant(self, tmp_path: Path) -> None:
+        """A timed-out parent does not leave its process-group descendant alive."""
+        pid_file = tmp_path / "child.pid"
+        child_code = "import time; time.sleep(60)"
+        parent_code = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n"
+            "open(sys.argv[1], 'w').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_bounded(
+                [
+                    sys.executable,
+                    "-c",
+                    parent_code,
+                    str(pid_file),
+                    "parent",
+                    child_code,
+                ],
+                1,
+            )
+
+        deadline = time.monotonic() + 5
+        while not pid_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_file.is_file()
+        child_pid = int(pid_file.read_text())
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"descendant process {child_pid} survived timeout cleanup")
+
+
+class TestExecutionTimeoutParser:
+    """Tests for the bounded execution timeout CLI option."""
+
+    @pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
+    def test_accepts_inclusive_timeout_bounds(self, raw: str, expected: int) -> None:
+        """The parser accepts both inclusive timeout endpoints."""
+        args = _build_parser().parse_args(["--timeout", raw, "cores", "tool"])
+        assert args.timeout == expected
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "86401", "not-an-int"])
+    def test_rejects_invalid_timeout(self, raw: str) -> None:
+        """The parser rejects invalid timeout values."""
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(["--timeout", raw, "cores", "tool"])
+
+    def test_default_timeout_is_documented_value(self) -> None:
+        """The parser defaults to the documented two-hour limit."""
+        args = _build_parser().parse_args(["cores", "tool"])
+        assert args.timeout == _EXECUTION_TIMEOUT_SECONDS
+
+    def test_timeout_after_command_is_remainder(self) -> None:
+        """The remainder-consuming command position requires timeout first."""
+        args = _build_parser().parse_args(["cores", "tool", "--timeout", "7"])
+        assert args.timeout == _EXECUTION_TIMEOUT_SECONDS
+        assert args.command_args == ["--timeout", "7"]
 
 
 class TestValidateGdbCmdPrefix:
