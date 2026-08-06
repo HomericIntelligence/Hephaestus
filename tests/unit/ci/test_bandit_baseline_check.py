@@ -17,11 +17,12 @@ from hephaestus.ci.bandit_baseline_check import (
 def test_count_by_test_id_tallies_duplicate_low_results() -> None:
     """Duplicate LOW-severity findings are accumulated by test ID."""
     report = {
+        "errors": [],
         "results": [
             {"test_id": "B607", "issue_severity": "LOW"},
             {"test_id": "B607", "issue_severity": "LOW"},
             {"test_id": "B311", "issue_severity": "LOW"},
-        ]
+        ],
     }
     assert count_by_test_id(report) == {"B607": 2, "B311": 1}
 
@@ -29,18 +30,19 @@ def test_count_by_test_id_tallies_duplicate_low_results() -> None:
 def test_count_by_test_id_excludes_medium_and_high_severity() -> None:
     """Medium and high findings do not enter the LOW-only baseline."""
     report = {
+        "errors": [],
         "results": [
             {"test_id": "B607", "issue_severity": "LOW"},
             {"test_id": "B602", "issue_severity": "HIGH"},
             {"test_id": "B608", "issue_severity": "MEDIUM"},
-        ]
+        ],
     }
     assert count_by_test_id(report) == {"B607": 1}
 
 
 def test_count_by_test_id_empty_results() -> None:
     """Empty results tally to an empty dict."""
-    assert count_by_test_id({"results": []}) == {}
+    assert count_by_test_id({"errors": [], "results": []}) == {}
 
 
 def test_diff_flags_new_test_id() -> None:
@@ -82,10 +84,11 @@ def test_main_prints_regression_and_stale_sections(
     report_path.write_text(
         json.dumps(
             {
+                "errors": [],
                 "results": [
                     {"test_id": "B999", "issue_severity": "LOW"},
                     {"test_id": "B607", "issue_severity": "LOW"},
-                ]
+                ],
             }
         ),
         encoding="utf-8",
@@ -112,18 +115,46 @@ def test_main_prints_regression_and_stale_sections(
     "report",
     [
         {},
-        {"results": {}},
-        {"results": [None]},
-        {"results": [{"issue_severity": "LOW"}]},
-        {"results": [{"test_id": "B607"}]},
-        {"results": [{"test_id": "", "issue_severity": "LOW"}]},
-        {"results": [{"test_id": "B607", "issue_severity": ""}]},
+        {"errors": None, "results": []},
+        {"errors": {}, "results": []},
+        {"errors": [], "results": {}},
+        {"errors": [], "results": [None]},
+        {"errors": [], "results": [{"issue_severity": "LOW"}]},
+        {"errors": [], "results": [{"test_id": "B607"}]},
+        {"errors": [], "results": [{"test_id": "", "issue_severity": "LOW"}]},
+        {"errors": [], "results": [{"test_id": "B607", "issue_severity": ""}]},
     ],
 )
 def test_count_by_test_id_rejects_malformed_report(report: dict[str, object]) -> None:
     """Report structure and required finding fields are validated."""
     with pytest.raises(ValueError):
         count_by_test_id(report)
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {"results": []},
+        {"errors": None, "results": []},
+        {"errors": {}, "results": []},
+    ],
+)
+def test_main_returns_two_for_malformed_errors(
+    tmp_path: Path,
+    report: dict[str, object],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Missing or non-list Bandit errors are malformed CLI input."""
+    report_path = tmp_path / "report.json"
+    baseline_path = tmp_path / "baseline.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    baseline_path.write_text(
+        '{"generated_by": "issue #1", "severity": "LOW", "counts": {}}',
+        encoding="utf-8",
+    )
+
+    assert main([str(report_path), str(baseline_path)]) == 2
+    assert "Bandit report must define an 'errors' list" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -148,7 +179,7 @@ def test_baseline_counts_rejects_malformed_baseline(
     """Baseline metadata and positive integer counts are validated."""
     report_path = tmp_path / "report.json"
     baseline_path = tmp_path / "baseline.json"
-    report_path.write_text('{"results": []}', encoding="utf-8")
+    report_path.write_text('{"errors": [], "results": []}', encoding="utf-8")
     baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
 
     assert main([str(report_path), str(baseline_path)]) == 2
@@ -162,7 +193,10 @@ def test_main_rejects_duplicate_json_keys(
     """Duplicate JSON object keys are treated as malformed input."""
     report_path = tmp_path / "report.json"
     baseline_path = tmp_path / "baseline.json"
-    report_path.write_text('{"results": [], "results": []}', encoding="utf-8")
+    report_path.write_text(
+        '{"errors": [], "results": [], "results": []}',
+        encoding="utf-8",
+    )
     baseline_path.write_text(
         '{"generated_by": "issue #1", "severity": "LOW", "counts": {}}',
         encoding="utf-8",
@@ -178,7 +212,7 @@ def test_main_returns_two_for_missing_baseline(
 ) -> None:
     """An unreadable baseline is a malformed-input failure."""
     report_path = tmp_path / "report.json"
-    report_path.write_text('{"results": []}', encoding="utf-8")
+    report_path.write_text('{"errors": [], "results": []}', encoding="utf-8")
 
     assert main([str(report_path), str(tmp_path / "missing.json")]) == 2
     assert "invalid Bandit baseline input" in capsys.readouterr().err
@@ -188,7 +222,7 @@ def test_update_baseline_requires_review_reference(tmp_path: Path) -> None:
     """Baseline updates cannot run without a review reference."""
     report_path = tmp_path / "report.json"
     baseline_path = tmp_path / "baseline.json"
-    report_path.write_text('{"results": []}', encoding="utf-8")
+    report_path.write_text('{"errors": [], "results": []}', encoding="utf-8")
 
     with pytest.raises(SystemExit):
         main([str(report_path), str(baseline_path), "--update-baseline"])
@@ -199,7 +233,7 @@ def test_review_reference_requires_update_mode(tmp_path: Path) -> None:
     """A review reference cannot alter normal read-only comparison mode."""
     report_path = tmp_path / "report.json"
     baseline_path = tmp_path / "baseline.json"
-    report_path.write_text('{"results": []}', encoding="utf-8")
+    report_path.write_text('{"errors": [], "results": []}', encoding="utf-8")
     baseline_path.write_text(
         '{"generated_by": "issue #1", "severity": "LOW", "counts": {}}',
         encoding="utf-8",
@@ -223,11 +257,12 @@ def test_update_baseline_writes_canonical_counts(tmp_path: Path) -> None:
     report_path.write_text(
         json.dumps(
             {
+                "errors": [],
                 "results": [
                     {"test_id": "B607", "issue_severity": "LOW"},
                     {"test_id": "B311", "issue_severity": "LOW"},
                     {"test_id": "B607", "issue_severity": "LOW"},
-                ]
+                ],
             }
         ),
         encoding="utf-8",
@@ -251,3 +286,38 @@ def test_update_baseline_writes_canonical_counts(tmp_path: Path) -> None:
         "counts": {"B311": 1, "B607": 2},
     }
     assert main([str(report_path), str(baseline_path)]) == 0
+
+
+def test_update_baseline_rejects_report_errors_without_rewriting(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A partial Bandit report cannot replace the reviewed baseline."""
+    report_path = tmp_path / "report.json"
+    baseline_path = tmp_path / "baseline.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "errors": [{"filename": "unscannable.py", "reason": "parse failure"}],
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_baseline = '{"generated_by": "issue #1", "severity": "LOW", "counts": {"B607": 1}}\n'
+    baseline_path.write_text(original_baseline, encoding="utf-8")
+
+    assert (
+        main(
+            [
+                str(report_path),
+                str(baseline_path),
+                "--update-baseline",
+                "--review-reference",
+                "issue #2384",
+            ]
+        )
+        == 2
+    )
+    assert baseline_path.read_text(encoding="utf-8") == original_baseline
+    assert "Bandit report contains scan errors" in capsys.readouterr().err

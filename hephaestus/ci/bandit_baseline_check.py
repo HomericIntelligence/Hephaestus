@@ -44,6 +44,12 @@ def count_by_test_id(report: dict[str, Any]) -> dict[str, int]:
         ValueError: If the report or any finding has an invalid structure.
 
     """
+    errors = report.get("errors")
+    if not isinstance(errors, list):
+        raise ValueError("Bandit report must define an 'errors' list")
+    if errors:
+        raise ValueError("Bandit report contains scan errors")
+
     results = report.get("results")
     if not isinstance(results, list):
         raise ValueError("Bandit report must define a 'results' list")
