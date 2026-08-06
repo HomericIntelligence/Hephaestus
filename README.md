@@ -425,7 +425,7 @@ zero totals, and zero requested/processed counts.
 | `hephaestus-check-tier-labels` | Enforce tier label consistency across all project Markdown files |
 | `hephaestus-check-type-aliases` | Detect type alias shadowing patterns in Python code |
 | `hephaestus-check-unlinked-todo` | Enforce that every TODO/FIXME/HACK marker references a tracking issue |
-| `hephaestus-filter-audit` | Filter pip-audit JSON output to fail only on HIGH/CRITICAL severity vulnerabilities |
+| `hephaestus-filter-audit` | Validate pip-audit evidence and fail on HIGH, CRITICAL, or unscored advisories |
 | `hephaestus-mypy-each-file` | Run mypy on each file individually to avoid duplicate-module-name errors |
 | `hephaestus-validate-agents` | YAML frontmatter extraction and validation for agent markdown files |
 | `hephaestus-validate-links` | Markdown validation utilities for HomericIntelligence projects |

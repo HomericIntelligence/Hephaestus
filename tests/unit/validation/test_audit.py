@@ -4,6 +4,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from hephaestus.validation.audit import (
     extract_cvss_score,
     filter_audit_results,
@@ -162,7 +164,12 @@ class TestSeverityLabel:
 class TestFilterAuditResults:
     """Tests for filter_audit_results()."""
 
-    def _make_data(self, vulns: list[dict], name: str = "pkg", version: str = "1.0") -> dict:
+    def _make_data(
+        self,
+        vulns: list[dict[str, object]],
+        name: str = "pkg",
+        version: str = "1.0",
+    ) -> dict[str, object]:
         return {"dependencies": [{"name": name, "version": version, "vulns": vulns}]}
 
     def test_high_severity_blocks(self) -> None:
@@ -200,12 +207,59 @@ class TestFilterAuditResults:
         blocking, _suppressed = filter_audit_results(data, threshold=4.0)
         assert len(blocking) == 1
 
-    def test_no_score_is_suppressed(self) -> None:
-        """Vulnerabilities with no CVSS score are suppressed, not blocking."""
-        data = self._make_data([{"id": "CVE-4", "severity": []}])
-        blocking, suppressed = filter_audit_results(data)
-        assert len(blocking) == 0
-        assert len(suppressed) == 1
+    @pytest.mark.parametrize(
+        "vulnerability",
+        [
+            pytest.param({"id": "CVE-4"}, id="missing-severity"),
+            pytest.param({"id": "CVE-4", "severity": []}, id="empty-severity"),
+            pytest.param(
+                {"id": "CVE-4", "severity": [{"score": "unknown"}]},
+                id="unparseable-score",
+            ),
+        ],
+    )
+    def test_unknown_score_is_blocking(self, vulnerability: dict[str, object]) -> None:
+        """Structurally valid advisories without a parseable score block."""
+        blocking, suppressed = filter_audit_results(self._make_data([vulnerability]))
+        assert blocking == [("pkg", "1.0", "CVE-4", "UNKNOWN")]
+        assert suppressed == []
+
+    def test_ignored_unscored_id_is_skipped(self) -> None:
+        """Only the matching reviewed advisory ID bypasses an unscored finding."""
+        data = self._make_data([{"id": "CVE-4"}])
+        blocking, suppressed = filter_audit_results(
+            data,
+            ignore_ids=frozenset({"CVE-4"}),
+        )
+        assert blocking == []
+        assert suppressed == []
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param({"dependencies": [{}]}, id="empty-dependency"),
+            pytest.param(
+                {"dependencies": [{"name": "pkg", "version": "1.0"}]},
+                id="missing-vulns",
+            ),
+            pytest.param(
+                {
+                    "dependencies": [
+                        {
+                            "name": "pkg",
+                            "version": "1.0",
+                            "vulns": [{}],
+                        }
+                    ]
+                },
+                id="missing-vulnerability-id",
+            ),
+        ],
+    )
+    def test_invalid_nested_result_raises(self, data: object) -> None:
+        """Malformed nested scanner data cannot produce a clean verdict."""
+        with pytest.raises(ValueError, match=r"dependencies\[0\]"):
+            filter_audit_results(data)
 
     def test_cvss_vector_only_high_severity_blocks(self) -> None:
         """Vector-only HIGH/CRITICAL vulnerabilities are blocking."""
@@ -225,17 +279,142 @@ class TestFilterAuditResults:
 class TestMain:
     """Tests for main() CLI entry point."""
 
-    def test_no_json_input(self, monkeypatch) -> None:
-        """No JSON on stdin returns 0."""
-        monkeypatch.setattr("sys.argv", ["filter-audit"])
-        monkeypatch.setattr("sys.stdin", io.StringIO("No known vulnerabilities found"))
-        assert main() == 0
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            pytest.param("", id="empty"),
+            pytest.param("No known vulnerabilities found", id="non-json"),
+            pytest.param("{invalid json", id="malformed-json"),
+        ],
+    )
+    def test_invalid_scanner_output_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        raw: str,
+        json_mode: bool,
+    ) -> None:
+        """Missing or unparsable evidence exits nonzero in both output modes."""
+        argv = ["filter-audit", *(["--json"] if json_mode else [])]
+        monkeypatch.setattr("sys.argv", argv)
+        monkeypatch.setattr("sys.stdin", io.StringIO(raw))
 
-    def test_invalid_json(self, monkeypatch) -> None:
-        """Invalid JSON returns 1."""
-        monkeypatch.setattr("sys.argv", ["filter-audit"])
-        monkeypatch.setattr("sys.stdin", io.StringIO("{invalid json"))
         assert main() == 1
+        captured = capsys.readouterr()
+        if json_mode:
+            report = json.loads(captured.out)
+            assert report["status"] == "error"
+            assert report["exit_code"] == 1
+        else:
+            assert "invalid pip-audit evidence" in captured.err
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param(None, id="null"),
+            pytest.param("scanner output", id="string"),
+            pytest.param(1, id="number"),
+            pytest.param(True, id="boolean"),
+            pytest.param([], id="array"),
+            pytest.param({}, id="missing-dependencies"),
+            pytest.param({"dependencies": {}}, id="dependencies-not-list"),
+        ],
+    )
+    def test_invalid_top_level_shape_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        data: object,
+        json_mode: bool,
+    ) -> None:
+        """Only an object containing a dependencies list is accepted."""
+        argv = ["filter-audit", *(["--json"] if json_mode else [])]
+        monkeypatch.setattr("sys.argv", argv)
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        if json_mode:
+            report = json.loads(captured.out)
+            assert report["status"] == "error"
+            assert report["exit_code"] == 1
+        else:
+            assert "invalid pip-audit evidence" in captured.err
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param({"dependencies": [None]}, id="dependency-not-object"),
+            pytest.param({"dependencies": [{}]}, id="empty-dependency"),
+            pytest.param(
+                {"dependencies": [{"name": "pkg", "version": "1.0"}]},
+                id="missing-vulns",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "pkg", "skip_reason": "not auditable"}]},
+                id="skipped-dependency",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": {}}]},
+                id="vulns-not-list",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": [None]}]},
+                id="vulnerability-not-object",
+            ),
+            pytest.param(
+                {"dependencies": [{"name": "pkg", "version": "1.0", "vulns": [{}]}]},
+                id="missing-vulnerability-id",
+            ),
+            pytest.param(
+                {
+                    "dependencies": [
+                        {
+                            "name": "pkg",
+                            "version": "1.0",
+                            "vulns": [{"id": "CVE-1", "severity": {}}],
+                        }
+                    ]
+                },
+                id="severity-not-list",
+            ),
+            pytest.param(
+                {
+                    "dependencies": [
+                        {
+                            "name": "pkg",
+                            "version": "1.0",
+                            "vulns": [{"id": "CVE-1", "severity": [None]}],
+                        }
+                    ]
+                },
+                id="severity-entry-not-object",
+            ),
+        ],
+    )
+    def test_invalid_nested_shape_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        data: object,
+        json_mode: bool,
+    ) -> None:
+        """Every structurally invalid nested payload uses the shared error path."""
+        argv = ["filter-audit", *(["--json"] if json_mode else [])]
+        monkeypatch.setattr("sys.argv", argv)
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        if json_mode:
+            report = json.loads(captured.out)
+            assert report["status"] == "error"
+            assert report["exit_code"] == 1
+        else:
+            assert "invalid pip-audit evidence" in captured.err
 
     def test_clean_audit(self, monkeypatch) -> None:
         """Clean audit with no vulns returns 0."""
@@ -273,3 +452,40 @@ class TestMain:
         monkeypatch.setattr("sys.argv", ["filter-audit"])
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
         assert main() == 0
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    def test_unscored_vulnerability_blocks_in_all_output_modes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        json_mode: bool,
+    ) -> None:
+        """Human and JSON output expose the same blocking UNKNOWN verdict."""
+        data = {
+            "dependencies": [
+                {
+                    "name": "pkg",
+                    "version": "1.0",
+                    "vulns": [{"id": "CVE-UNKNOWN"}],
+                }
+            ]
+        }
+        argv = ["filter-audit", *(["--json"] if json_mode else [])]
+        monkeypatch.setattr("sys.argv", argv)
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        if json_mode:
+            report = json.loads(captured.out)
+            assert report["exit_code"] == 1
+            assert report["blocking"] == [
+                {
+                    "package": "pkg",
+                    "version": "1.0",
+                    "id": "CVE-UNKNOWN",
+                    "severity": "UNKNOWN",
+                }
+            ]
+        else:
+            assert "[UNKNOWN] pkg==1.0 CVE-UNKNOWN" in captured.out
