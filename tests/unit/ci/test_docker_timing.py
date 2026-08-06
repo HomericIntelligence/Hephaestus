@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import math
+from typing import cast
+
+import pytest
+
 from hephaestus.ci.docker_timing import (
     build_summary_table,
     compute_reduction,
@@ -32,11 +37,13 @@ class TestComputeReduction:
     def test_50_percent(self) -> None:
         assert compute_reduction(100, 50) == 50.0
 
-    def test_zero_cold_returns_zero(self) -> None:
-        assert compute_reduction(0, 10) == 0.0
-
-    def test_negative_cold_returns_zero(self) -> None:
-        assert compute_reduction(-5, 10) == 0.0
+    @pytest.mark.parametrize(
+        ("cold_seconds", "warm_seconds"),
+        [(0, 10), (-1, 10), (10, -1)],
+    )
+    def test_rejects_invalid_durations(self, cold_seconds: int, warm_seconds: int) -> None:
+        with pytest.raises(ValueError):
+            compute_reduction(cold_seconds, warm_seconds)
 
     def test_rounds_to_one_decimal(self) -> None:
         result = compute_reduction(300, 199)
@@ -44,6 +51,9 @@ class TestComputeReduction:
 
     def test_full_reduction(self) -> None:
         assert compute_reduction(100, 0) == 100.0
+
+    def test_slow_build_returns_negative_reduction(self) -> None:
+        assert compute_reduction(100, 120) == -20.0
 
     def test_no_reduction(self) -> None:
         assert compute_reduction(100, 100) == 0.0
@@ -80,3 +90,42 @@ class TestBuildSummaryTable:
         # reduction=20%, threshold=25% → FAIL
         table = build_summary_table(100, 80, 3, 20.0, acceptance_threshold=25.0)
         assert "FAIL" in table
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"cold_seconds": 0},
+            {"warm_seconds": -1},
+            {"cached_layers": -1},
+            {"reduction": math.inf},
+            {"reduction": math.nan},
+            {"reduction": -math.inf},
+            {"reduction": 100.1},
+            {"acceptance_threshold": -0.1},
+            {"acceptance_threshold": 100.1},
+            {"acceptance_threshold": math.nan},
+            {"acceptance_threshold": math.inf},
+            {"acceptance_threshold": -math.inf},
+        ],
+    )
+    def test_rejects_invalid_metric_inputs(self, overrides: dict[str, int | float]) -> None:
+        inputs: dict[str, int | float] = {
+            "cold_seconds": 100,
+            "warm_seconds": 80,
+            "cached_layers": 0,
+            "reduction": 20.0,
+            "acceptance_threshold": 0.0,
+        }
+        inputs.update(overrides)
+        with pytest.raises(ValueError):
+            build_summary_table(
+                cold_seconds=cast(int, inputs["cold_seconds"]),
+                warm_seconds=cast(int, inputs["warm_seconds"]),
+                cached_layers=cast(int, inputs["cached_layers"]),
+                reduction=cast(float, inputs["reduction"]),
+                acceptance_threshold=cast(float, inputs["acceptance_threshold"]),
+            )
+
+    def test_accepts_metric_boundaries(self) -> None:
+        table = build_summary_table(1, 0, 0, 100.0, acceptance_threshold=100.0)
+        assert "PASS" in table
