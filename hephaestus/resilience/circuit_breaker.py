@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -132,7 +133,27 @@ class CircuitBreaker:
                 breaker and can never clear an accumulating outage signal.
                 Defaults to ignoring nothing.
 
+        Raises:
+            ValueError: If a threshold, half-open capacity, or recovery timeout
+                is invalid.
+
         """
+        for parameter, value in (
+            ("failure_threshold", failure_threshold),
+            ("half_open_max_calls", half_open_max_calls),
+            ("success_threshold", success_threshold),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{parameter} must be a positive integer")
+
+        if (
+            isinstance(recovery_timeout, bool)
+            or not isinstance(recovery_timeout, (int, float))
+            or (isinstance(recovery_timeout, float) and not math.isfinite(recovery_timeout))
+            or recovery_timeout < 0
+        ):
+            raise ValueError("recovery_timeout must be a finite non-negative number")
+
         self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
@@ -337,6 +358,10 @@ def get_circuit_breaker(
 
     Returns:
         CircuitBreaker instance for the given name
+
+    Raises:
+        ValueError: If the configuration is invalid while creating a new named
+            breaker. Cached breakers retain their existing singleton semantics.
 
     """
     with _registry_lock:
