@@ -87,13 +87,13 @@ def _compute_backoff_delay(
         initial_delay: Initial delay in seconds before first retry.
         backoff_factor: Multiplier for delay between retries.
         max_delay: Optional hard cap on the sleep value. Applied *after* jitter
-            so the returned delay never exceeds max_delay (subject to the 0.1s
-            minimum floor below).
+            and again after the minimum-sleep floor so the returned delay never
+            exceeds max_delay.
         jitter: If True, perturb the delay by ±25 %.
 
     Returns:
-        Sleep duration in seconds (always >= 0.1, and <= max_delay when a cap
-        is set and max_delay >= 0.1).
+        Sleep duration in seconds (>= 0.1 when uncapped, and <= max_delay when
+        a cap is set).
 
     """
     delay: float = initial_delay * (backoff_factor**attempt)
@@ -106,7 +106,10 @@ def _compute_backoff_delay(
     # max_delay * 1.25 (see issue #1206).
     if max_delay is not None:
         delay = min(delay, max_delay)
-    return max(0.1, delay)
+    delay = max(0.1, delay)
+    if max_delay is not None:
+        delay = min(delay, max_delay)
+    return delay
 
 
 def retry_with_backoff(

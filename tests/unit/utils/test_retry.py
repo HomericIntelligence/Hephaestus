@@ -251,6 +251,30 @@ class TestRetryWithBackoff:
         for call in mock_sleep.call_args_list:
             assert call[0][0] <= 2.0
 
+    @patch("hephaestus.utils.retry.time.sleep")
+    def test_zero_max_delay_remains_hard_ceiling_during_retries(self, mock_sleep):
+        """max_delay=0.0 keeps retry sleeps at zero even on retrying calls."""
+        call_count = 0
+
+        def flaky():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise ValueError("fail")
+            return "ok"
+
+        decorated = retry_with_backoff(
+            max_retries=1,
+            initial_delay=1.0,
+            backoff_factor=2,
+            jitter=False,
+            max_delay=0.0,
+        )(flaky)
+
+        assert decorated() == "ok"
+        assert call_count == 2
+        mock_sleep.assert_called_once_with(0.0)
+
 
 class TestRetryOnNetworkError:
     """Tests for retry_on_network_error convenience decorator."""
