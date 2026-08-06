@@ -337,7 +337,7 @@ def enter_planning_transition() -> tuple[list[str], list[str]]:
     route). Re-entry must restore ``state:needs-plan`` AND remove the sibling
     rejection/terminal labels in ONE transition, or (a) the mutually-exclusive
     label invariant is transiently violated and (b) the labels-first
-    ``has_existing_plan`` gate stays False forever, so VERIFY can never ADVANCE
+    plan-discovery gate stays False forever, so VERIFY can never ADVANCE
     and the re-plan cycle deadlocks (#1857).
 
     Restores the documented state-machine edge

@@ -262,9 +262,12 @@ def _fetch_issue_comments_paginated(
                 f"Issue #{issue_number} comment journal exceeds "
                 f"{MAX_ISSUE_JOURNAL_COMMENTS} entries; manual recovery is required"
             )
-        for comment in page:
+        for index, comment in enumerate(page):
             if not isinstance(comment, dict):
-                continue
+                raise RuntimeError(
+                    f"Failed to fetch complete comment journal for #{issue_number}: "
+                    f"comment {index} was not an object"
+                )
             normalized = dict(comment)
             if normalized.get("databaseId") is None and normalized.get("id") is not None:
                 normalized["databaseId"] = normalized["id"]

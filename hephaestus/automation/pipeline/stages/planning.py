@@ -40,8 +40,10 @@ from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX
 from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
+    PlanDiscoveryStatus,
     current_revision_context,
     is_pending_review,
     journal_snapshot,
@@ -197,15 +199,14 @@ def _load_planning_journal(
 
 
 def _plan_is_ready_for_verify(
-    issue_number: int,
-    ctx: StageContext,
+    snapshot: JournalSnapshot,
     *,
     is_replan_entry: bool,
 ) -> bool:
     """Return whether restart may verify the canonical plan without another agent."""
     if is_replan_entry:
         return False
-    return ctx.github.has_existing_plan(issue_number)
+    return bool(snapshot.current_plan)
 
 
 def _write_planning_entry_labels(
@@ -360,23 +361,35 @@ def _publish_candidate_plan(
 def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     """Publish or recover the candidate plan, then authorize advancement by label."""
     assert item.issue is not None  # noqa: S101 - stage validates the issue
+    lookup = ctx.github.discover_plan(item.issue)
+    if lookup.status is PlanDiscoveryStatus.READ_ERROR:
+        return StageOutcome(
+            Disposition.RETRY,
+            f"plan discovery failed: {lookup.error}",
+        )
+
     plan_text = item.payload.get("plan_text")
     posted_plan = False
     if plan_text is not None:
         requires_revision = bool(item.payload.get("requires_plan_revision"))
-        has_existing_plan = ctx.github.has_existing_plan(item.issue)
-        if requires_revision or not has_existing_plan:
+        if requires_revision or lookup.status is PlanDiscoveryStatus.ABSENT:
             logger.info("planning:%d: publishing plan revision", item.issue)
-            publication_outcome = _publish_candidate_plan(
-                item,
-                ctx,
-                requires_revision=requires_revision,
-            )
+            try:
+                publication_outcome = _publish_candidate_plan(
+                    item,
+                    ctx,
+                    requires_revision=requires_revision,
+                )
+            except CommentJournalReadError as exc:
+                return StageOutcome(
+                    Disposition.RETRY,
+                    f"plan journal read failed: {exc}",
+                )
             if publication_outcome is not None:
                 return publication_outcome
             posted_plan = True
 
-    if posted_plan or ctx.github.has_existing_plan(item.issue):
+    if posted_plan or lookup.status is PlanDiscoveryStatus.FOUND:
         labels = _require_issue_labels_for_transition(item.issue, ctx)
         if STATE_PLAN_BLOCKED in labels:
             return StageOutcome(
@@ -422,7 +435,7 @@ class PlanningStage(Stage):
       ``PLAN_WAIT`` and RETRY within the ``plan`` budget, then FINISH_FAIL.
 
     on_enter idempotency guards (re-housed from ``Planner._pr_coverage_skip``
-    and ``Planner._has_existing_plan``, all ordered at-or-past checks):
+    and the planner's tri-state plan discovery, all ordered at-or-past checks):
 
     - ``state:skip`` -> SKIP (checked BEFORE plan-go; skip wins over
       everything, even a contradictory plan-go, logging a WARNing — #1835)
@@ -434,15 +447,15 @@ class PlanningStage(Stage):
       carrying ``state:plan-no-go`` (or a stale ``state:plan-go``) after a
       plan_review fail-back -> ONE atomic ``edit_labels`` swap adding
       ``state:needs-plan`` and removing both siblings, so the labels-first
-      ``has_existing_plan`` gate can pass once a fresh plan comment is posted
+      plan-discovery gate can pass once a fresh plan comment is posted
       and the mutually-exclusive-label invariant holds (#1857)
-    - plan comment already exists (``ctx.github.has_existing_plan``) ->
+    - plan comment already exists (``ctx.github.discover_plan`` returns FOUND) ->
       fast-forward ``item.state`` to VERIFY so a restart mid-stage never
       redoes advise + plan (the base-protocol idempotency promise); the
       ``is_plan_review_go`` label check above stays the primary gate.
     """
 
-    def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    def on_enter(self, item: WorkItem, ctx: StageContext) -> StageOutcome | None:  # noqa: C901
         """Refresh labels and perform idempotent fast-forward checks.
 
         Args:
@@ -503,15 +516,26 @@ class PlanningStage(Stage):
         # ADDS no-go, removing needs-plan/plan-go). A bare add of needs-plan
         # would leave state:plan-no-go in place — violating the
         # mutually-exclusive invariant AND keeping the labels-first
-        # has_existing_plan gate stuck-False so VERIFY can never ADVANCE
+        # plan-discovery gate stuck-False so VERIFY can never ADVANCE
         # (#1857). Swap atomically: add needs-plan, remove both siblings, in
         # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
-        (
-            comments,
-            _snapshot,
-            is_replan_entry,
-            revision_already_published,
-        ) = _load_planning_journal(item, ctx, labels)
+        try:
+            (
+                comments,
+                snapshot,
+                is_replan_entry,
+                revision_already_published,
+            ) = _load_planning_journal(item, ctx, labels)
+        except CommentJournalReadError as exc:
+            logger.warning(
+                "planning:%d: plan journal reconciliation read failed: %s",
+                item.issue,
+                exc,
+            )
+            return StageOutcome(
+                Disposition.RETRY,
+                f"plan journal read failed: {exc}",
+            )
         if is_replan_entry:
             item.payload["requires_plan_revision"] = True
         if not _write_planning_entry_labels(
@@ -530,14 +554,10 @@ class PlanningStage(Stage):
         if history:
             item.payload["issue_history"] = history
 
-        # Restart fast-forward: a plan comment already exists (real has-plan
-        # semantics via ctx.github), so re-entry must not redo advise + plan.
+        # Restart fast-forward: journal reconciliation already found a current
+        # plan, so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if _plan_is_ready_for_verify(
-            item.issue,
-            ctx,
-            is_replan_entry=is_replan_entry,
-        ):
+        if _plan_is_ready_for_verify(snapshot, is_replan_entry=is_replan_entry):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )

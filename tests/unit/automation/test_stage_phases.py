@@ -8,7 +8,6 @@ cross-phase dispatch contract that the pipeline stages rely on.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -23,6 +22,7 @@ from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advi
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
 from hephaestus.automation._stage_context import StageContext, StageMixin
+from hephaestus.automation.review_journal import PlanDiscoveryStatus
 
 
 def _make_ctx(tmp_path: Path, **option_overrides: Any) -> StageContext:
@@ -82,27 +82,33 @@ def test_stage_mixin_exposes_runner_and_impl(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_plan_phase_has_plan_true_on_plan_comment(tmp_path: Path) -> None:
-    """_has_plan returns True when a plan comment is present."""
+def test_plan_phase_discover_plan_found_on_plan_comment(tmp_path: Path) -> None:
+    """_discover_plan returns FOUND when an actor-owned plan is present."""
     phase = PlanPhase(_make_ctx(tmp_path))
-    fake = SimpleNamespace(
-        stdout=json.dumps({"comments": [{"body": "# Implementation Plan\n\nstep 1"}]})
-    )
     with (
-        mock.patch("hephaestus.automation._plan_phase.gh_call", return_value=fake),
         mock.patch(
-            "hephaestus.automation._plan_phase._comments_contain_plan", return_value=True
-        ) as mock_check,
+            "hephaestus.automation._plan_phase.fetch_issue_comments_metadata",
+            return_value=[
+                {"body": "# Implementation Plan\n\nstep 1", "user": {"login": "bot"}}
+            ],
+        ),
+        mock.patch("hephaestus.automation._plan_phase.gh_current_login", return_value="bot"),
     ):
-        assert phase._has_plan(7) is True
-    mock_check.assert_called_once()
+        result = phase._discover_plan(7)
+
+    assert result.status is PlanDiscoveryStatus.FOUND
 
 
-def test_plan_phase_has_plan_false_on_subprocess_error(tmp_path: Path) -> None:
-    """_has_plan swallows subprocess/JSON errors and returns False."""
+def test_plan_phase_read_failure_is_explicit(tmp_path: Path) -> None:
+    """_discover_plan reports API failures instead of inventing absence."""
     phase = PlanPhase(_make_ctx(tmp_path))
-    with mock.patch("hephaestus.automation._plan_phase.gh_call", side_effect=OSError("boom")):
-        assert phase._has_plan(7) is False
+    with mock.patch(
+        "hephaestus.automation._plan_phase.fetch_issue_comments_metadata",
+        side_effect=OSError("boom"),
+    ):
+        result = phase._discover_plan(7)
+
+    assert result.status is PlanDiscoveryStatus.READ_ERROR
 
 
 def test_phase_env_keeps_only_repo_root_pythonpath(

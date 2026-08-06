@@ -2,35 +2,17 @@
 # ruff: noqa: F403, F405
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
+from .review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    PlanDiscoveryResult,
+    discover_plan_from_comments,
+    normalize_issue_comments,
+)
 
 
 class PipelineGitHubQueries(_PipelineGitHubHost):
     """Own read-only issue, PR, plan, and review-state queries."""
-
-    def _comments_have_plan(self, comments: Any) -> bool:
-        """Return whether an actor-owned canonical plan artifact is present.
-
-        Comment markers locate data; they never establish state.  Requiring
-        GitHub's ownership proof prevents a foreign comment from impersonating
-        the pipeline's canonical plan and influencing stage orchestration.
-        """
-        if not isinstance(comments, list):
-            return False
-        for comment in comments:
-            if not isinstance(comment, dict):
-                continue
-            if not self._comment_owned_by_viewer(comment):
-                continue
-            body = comment.get("body")
-            if not isinstance(body, str):
-                continue
-            stripped = body.lstrip()
-            first_line = stripped.splitlines()[0] if stripped else ""
-            if first_line in {PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX}:
-                continue
-            if first_line in {PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER}:
-                return True
-        return False
 
     def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
         """Return open PRs on ``branch_name`` without altering auto-merge."""
@@ -292,27 +274,18 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         )
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
-        """Return structured issue comments in GitHub creation order."""
-        comments = self._repo_issue_comments(issue_number)
-        return [
-            IssueComment(
-                body=str(comment.get("body", "")),
-                author_login=str(
-                    (comment.get("user") or comment.get("author") or {}).get("login", "")
-                ),
-                author_association=str(
-                    comment.get("author_association") or comment.get("authorAssociation") or ""
-                ),
-                created_at=str(comment.get("created_at") or comment.get("createdAt") or ""),
-                updated_at=str(comment.get("updated_at") or comment.get("updatedAt") or ""),
-                viewer_did_author=self._comment_owned_by_viewer(comment),
-                database_id=(
-                    int(comment["databaseId"]) if comment.get("databaseId") is not None else None
-                ),
-                url=str(comment.get("html_url") or comment.get("url") or ""),
+        """Return a complete, ownership-verified issue-comment journal."""
+        try:
+            return normalize_issue_comments(
+                self._repo_issue_comments(issue_number),
+                viewer_login=self._viewer_login(),
             )
-            for comment in comments
-        ]
+        except CommentJournalReadError:
+            raise
+        except Exception as exc:
+            raise CommentJournalReadError(
+                f"failed to read issue #{issue_number} comments: {exc}"
+            ) from exc
 
     def ensure_blocked_audit(self, issue_number: int) -> None:
         """Repair an interrupted BLOCKED explanation without touching its label."""
@@ -418,25 +391,13 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             "pr_base_branch": base_branch,
         }
 
-    def has_existing_plan(self, issue_number: int) -> bool:
-        """Return whether the canonical plan artifact exists.
-
-        This is an artifact-presence query, not an approval gate. Plan approval
-        is read exclusively from GitHub labels by stage entry checks.
-        """
+    def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Discover the actor-owned canonical plan without inventing absence."""
         try:
-            result = (
-                self._gh(
-                    ["issue", "view", str(issue_number), "--json", "comments"],
-                    check=False,
-                )
-                if self._repo_slug is not None
-                else gh_call(["issue", "view", str(issue_number), "--json", "comments"])
-            )
-            data = json.loads(result.stdout or "{}")
-        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-            return False
-        return isinstance(data, dict) and self._comments_have_plan(data.get("comments"))
+            return discover_plan_from_comments(self.issue_comments(issue_number))
+        except CommentJournalReadError as exc:
+            logger.warning("Issue #%s: plan discovery failed: %s", issue_number, exc)
+            return PlanDiscoveryResult.read_error(exc)
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
         """Return the PR's head branch (``_review_utils.get_pr_head_branch``)."""

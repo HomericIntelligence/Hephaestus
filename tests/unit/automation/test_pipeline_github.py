@@ -30,9 +30,11 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
+    PlanDiscoveryStatus,
     render_current_plan,
     render_current_review,
 )
+from hephaestus.github.client import GitHubRateLimitError
 from hephaestus.utils.file_lock import LockUnavailableError
 
 _BATCH_NONCE = "b" * 32
@@ -2246,6 +2248,12 @@ class TestConditionalMerge:
                 )
             ),
         )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [{"body": f"{PLAN_COMMENT_MARKER}\nPlan", "user": {"login": "bot"}}],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
         result = adapter.merge_pr_if_head(7, "a" * 40)
 
@@ -2725,14 +2733,17 @@ class TestRepoScoping:
             adapter,
             "_repo_issue_comments",
             lambda issue: [
-                {"body": "plan", "databaseId": 1},
-                {"body": "review", "databaseId": 2},
+                {"body": "plan", "databaseId": 1, "user": {"login": "bot"}},
+                {"body": "review", "databaseId": 2, "user": {"login": "bot"}},
             ],
         )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
         assert adapter.issue_comments(7) == [
-            IssueComment(body="plan", database_id=1),
-            IssueComment(body="review", database_id=2),
+            IssueComment(body="plan", author_login="bot", viewer_did_author=True, database_id=1),
+            IssueComment(
+                body="review", author_login="bot", viewer_did_author=True, database_id=2
+            ),
         ]
 
     def test_issue_reads_include_repo_arg(
@@ -2847,58 +2858,38 @@ class TestRepoScoping:
     def test_plan_presence_does_not_backfill_from_review_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        calls: list[list[str]] = []
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
-            if argv[:2] == ["issue", "view"]:
-                payload = {
-                    "comments": [
-                        {
-                            "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-go",
-                            "viewerDidAuthor": True,
-                        }
-                    ],
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [
+                {
+                    "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-go",
+                    "user": {"login": "bot"},
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
-
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        assert not pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
-
-        assert calls == [
-            [
-                "issue",
-                "view",
-                "5",
-                "--json",
-                "comments",
-                "--repo",
-                "org/repo-a",
             ],
-        ]
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-    def test_repo_scoped_has_existing_plan_detects_plan_comment(
+        assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
+
+    def test_repo_scoped_discover_plan_detects_plan_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            if argv[:2] == ["issue", "view"]:
-                payload = {
-                    "labels": [],
-                    "comments": [
-                        {
-                            "body": f"{PLAN_COMMENT_MARKER}\n\nDo the thing.",
-                            "viewerDidAuthor": True,
-                        }
-                    ],
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [
+                {
+                    "body": f"{PLAN_COMMENT_MARKER}\n\nDo the thing.",
+                    "user": {"login": "bot"},
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
+            ],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+        assert adapter.discover_plan(5).status is PlanDiscoveryStatus.FOUND
 
     @pytest.mark.parametrize(
         "body",
@@ -2907,79 +2898,83 @@ class TestRepoScoping:
             f"{PLAN_CANONICAL_MARKER} appendix\n{PLAN_COMMENT_MARKER}\nNot canonical.",
         ],
     )
-    def test_repo_scoped_has_existing_plan_rejects_marker_prefixes(
+    def test_repo_scoped_discover_plan_rejects_marker_prefixes(
         self,
         body: str,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Only an exact first-line marker identifies a canonical plan."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [{"body": body, "user": {"login": "bot"}}],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            if argv[:2] == ["issue", "view"]:
-                return SimpleNamespace(
-                    stdout=json.dumps(
-                        {
-                            "comments": [
-                                {"body": body, "viewerDidAuthor": True},
-                            ],
-                        }
-                    )
-                )
-            return SimpleNamespace(stdout="")
+        assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
-
-        assert not pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
-
-    def test_repo_scoped_has_existing_plan_ignores_foreign_plan_marker(
+    def test_repo_scoped_discover_plan_ignores_foreign_plan_marker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Foreign marker text is inert and cannot impersonate the plan artifact."""
-
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            if argv[:2] == ["issue", "view"]:
-                payload = {
-                    "comments": [
-                        {
-                            "body": f"{PLAN_COMMENT_MARKER}\n\nSpoofed plan.",
-                            "viewerDidAuthor": False,
-                        }
-                    ],
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [
+                {
+                    "body": f"{PLAN_COMMENT_MARKER}\n\nSpoofed plan.",
+                    "user": {"login": "other"},
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
+            ],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
-        assert not pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
-
-    def test_repo_scoped_has_existing_plan_ignores_review_state_text(
+    def test_repo_scoped_discover_plan_ignores_review_state_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Artifact presence is independent from the authoritative state label."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [
+                {
+                    "body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan.",
+                    "user": {"login": "bot"},
+                },
+                {
+                    "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-no-go",
+                    "user": {"login": "bot"},
+                },
+            ],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-        def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
-            if argv[:2] == ["issue", "view"]:
-                payload = {
-                    "labels": [],
-                    "comments": [
-                        {
-                            "body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan.",
-                            "viewerDidAuthor": True,
-                        },
-                        {
-                            "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-no-go",
-                            "viewerDidAuthor": True,
-                        },
-                    ],
-                }
-                return SimpleNamespace(stdout=json.dumps(payload))
-            return SimpleNamespace(stdout="")
+        assert adapter.discover_plan(5).status is PlanDiscoveryStatus.FOUND
 
-        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+    @pytest.mark.parametrize(
+        "failure",
+        [RuntimeError("gh unavailable"), GitHubRateLimitError("rate limited", reset_epoch=123)],
+    )
+    def test_repo_scoped_discover_plan_maps_read_failure(
+        self,
+        failure: Exception,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Transport and rate-limit failures remain READ_ERROR outcomes."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter, "_repo_issue_comments", lambda issue: (_ for _ in ()).throw(failure)
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-        assert pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path).has_existing_plan(5)
+        assert adapter.discover_plan(5).status is PlanDiscoveryStatus.READ_ERROR
 
     def test_repo_scoped_pr_lookup_raises_on_gh_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4498,11 +4493,22 @@ class TestReadSurface:
                 )
             ),
         )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [
+                {
+                    "body": f"{PLAN_COMMENT_MARKER}\nPlan",
+                    "user": {"login": "bot"},
+                }
+            ],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
         assert adapter.find_merged_closing_pr(9) == 1
         assert adapter.find_pr_for_issue(9) == 2
         assert adapter.get_pr_head_branch(9) == "head"
-        assert adapter.has_existing_plan(9) is True
+        assert adapter.discover_plan(9).status is PlanDiscoveryStatus.FOUND
 
     def test_unscoped_pr_lookup_contains_every_same_head_pr(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
