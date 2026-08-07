@@ -298,7 +298,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         owner, name = self._owner_name()
         argv = ["api", "graphql", "-f", f"query={query}"]
         for key, value in {"owner": owner, "name": name, **fields}.items():
-            argv.extend(["-F", f"{key}={value}"])
+            argv.extend(["-F" if isinstance(value, int) else "-f", f"{key}={value}"])
         result = gh_call(argv)
         data = json.loads(result.stdout or "{}")
         if not isinstance(data, dict):
