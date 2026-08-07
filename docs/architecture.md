@@ -941,6 +941,15 @@ Architectural contract:
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
+- Before creating a direct-scope writer worktree, the coordinator atomically
+  reserves its absent remote branch at the already-resolved base SHA. That
+  metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot
+  turn worker ownership admission into source verification. This is the only
+  hook-bypassing push: it contains no implementation changes, retains the
+  empty `--force-with-lease` expectation for collision safety, and every later
+  implementation, remediation, rebase, release, and developer push continues
+  to run its configured hooks. Pre-commit hooks are unaffected because the
+  reservation creates no commit.
 - When parallel file-overlap serialization is enabled, normal-item dependency
   order remains authoritative while repeated overlap deferrals raise priority.
   Cross-repo same-number items are interleaved with normal items by that age

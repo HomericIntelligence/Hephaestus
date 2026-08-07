@@ -401,9 +401,10 @@ class TestPushBranch:
 class TestDirectScopeBranchReservation:
     """Atomic server-side ownership checks for direct-scope implementation branches."""
 
-    def test_reserve_requires_remote_branch_to_be_absent(
+    def test_reserve_requires_remote_branch_to_be_absent_and_bypasses_hooks(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
+        """The metadata-only ownership claim is the sole hook-bypassing push."""
         pin = "a" * 40
 
         reserve_remote_branch_if_absent("2452-auto-impl", pin, tmp_path, timeout=42)
@@ -412,6 +413,7 @@ class TestDirectScopeBranchReservation:
             [
                 "git",
                 "push",
+                "--no-verify",
                 "--force-with-lease=refs/heads/2452-auto-impl:",
                 "origin",
                 f"{pin}:refs/heads/2452-auto-impl",
@@ -487,6 +489,7 @@ class TestDirectScopeBranchReservation:
             "origin",
             "HEAD:refs/heads/2452-auto-impl",
         ]
+        assert "--no-verify" not in git_utils_mocks.run.call_args_list[1].args[0]
 
     def test_strict_publish_rejects_non_fast_forward_local_branch(
         self, git_utils_mocks: Any, tmp_path: Path
