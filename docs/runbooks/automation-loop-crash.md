@@ -83,6 +83,31 @@ The shared checkout is reset between turns, so any uncommitted in-flight edit
 from the crashed turn is discarded; this is by design. Issue work happens in
 `build/.worktrees/issue-<N>`, which is the recoverable worktree state.
 
+## Recovering staged issue waves
+
+For a staged rollout, the repository-local checkpoint is
+`build/.issue_implementer/issue-wave-checkpoint.json`. Run the selectors in
+order; the next invocation is blocked until the prior wave's exact issues have
+passing terminal outcomes and loop-owned normal merge receipts:
+
+```bash
+hephaestus-automation-loop --repos <REPO> --issue-limit 1
+hephaestus-automation-loop --repos <REPO> --issue-limit 2
+hephaestus-automation-loop --repos <REPO> --issue-limit 4
+hephaestus-automation-loop --repos <REPO> --issue-limit 8
+hephaestus-automation-loop --repos <REPO>  # final all-eligible wave or audit
+```
+
+Re-running the same selector resumes the stored identifiers. `--loops` cannot
+reseed a checkpointed source. A failed, unmerged, closed-without-merge,
+blocked, or externally changed item must be recovered before the next selector
+is accepted. Explicit `--issues` and `--prs` remain available for targeted
+recovery and do not convert their identifiers into counts. Once the final wave
+is verified, unbounded runs are audit-only; a bounded selector is rejected.
+
+Do not hand-edit the checkpoint. Use the existing state backup/restore process
+when the file is malformed or the repository checkout was restored.
+
 ## When `state:skip` applies
 
 `state:skip` is the only label that takes an issue out of the loop entirely. It

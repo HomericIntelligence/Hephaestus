@@ -220,6 +220,7 @@ class PipelineGitHubJobRunner:
             attempted: bool = False,
             fingerprint: tuple[str, ...] | None = None,
             can_retry: bool = False,
+            merge_sha: str | None = None,
         ) -> MergeWaitCycleCompleted:
             return MergeWaitCycleCompleted(
                 request=request,
@@ -227,6 +228,7 @@ class PipelineGitHubJobRunner:
                 attempted=attempted,
                 readiness_fingerprint=fingerprint,
                 retryable=can_retry,
+                merge_sha=merge_sha,
             )
 
         def terminal(state: object) -> str | None:
@@ -370,11 +372,25 @@ class PipelineGitHubJobRunner:
         if result.status == 200:
             if result.body is None or result.body.get("merged") is not True:
                 return complete("merge_not_merged", attempted=True)
+            merge_sha = result.body.get("sha")
+            if not (
+                isinstance(merge_sha, str)
+                and len(merge_sha) in (40, 64)
+                and all(character in "0123456789abcdef" for character in merge_sha)
+            ):
+                # Older GitHub-compatible transports omit the merge SHA. The
+                # non-wave path remains compatible; MergeWaitStage rejects
+                # this result when a durable wave receipt requires the proof.
+                merge_sha = None
             try:
                 final_state = github.gh_pr_state(request.pr_number)
             except Exception:
                 return complete("merge_reconciliation_unavailable", attempted=True)
-            return complete(terminal(final_state) or "merge_not_merged", attempted=True)
+            return complete(
+                terminal(final_state) or "merge_not_merged",
+                attempted=True,
+                merge_sha=merge_sha,
+            )
         if result.status == 409:
             admitted = admit()
             if isinstance(admitted, str):

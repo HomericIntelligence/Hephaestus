@@ -36,6 +36,15 @@ from pathlib import Path
 from typing import Any, TypeGuard
 
 from hephaestus.automation import loop_repo_manager as _repo_manager
+from hephaestus.automation.issue_waves import (
+    WAVE_LEASE_PAYLOAD,
+    IssueWaveError,
+    IssueWaveStore,
+    WaveAdmissionPlan,
+    WaveLease,
+    is_full_commit_sha as is_wave_commit_sha,
+)
+from hephaestus.automation.pipeline import seeding as _seeding
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -78,6 +87,10 @@ DIRECT_SCOPE_RESERVATION_COLLISION_KEY = "_direct_scope_reservation_collision"
 # uses this receipt to compare-and-delete the now-detached local branch only
 # after removing its worktree.
 DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY = "_direct_scope_local_branch_cleanup"
+SYNCED_MAIN_SHA_KEY = "_synced_default_branch_sha"
+WAVE_PLAN_KEY = "_issue_wave_admission_plan"
+WAVE_ANCESTRY_VERIFIED_KEY = "_issue_wave_ancestry_verified"
+WAVE_ANCESTRY_ERROR_KEY = "_issue_wave_ancestry_error"
 
 
 def is_full_commit_sha(value: object) -> TypeGuard[str]:
@@ -123,6 +136,8 @@ class RepoIssueSource:
     metadata: Iterator[dict[str, Any]]
     pending: dict[str, Any] | None = None
     seeded_count: int = 0
+    wave_lease: WaveLease | None = None
+    one_pass: bool = False
 
 
 class RepoStage(Stage):
@@ -161,16 +176,26 @@ class RepoStage(Stage):
         if item.state == "CLONE_WAIT":
             return self._clone_or_skip(item, ctx)
 
+        if item.state == "WAVE_ADMIT":
+            return self._wave_admit(item, ctx)
+
+        if item.state == "WAVE_ADMIT_AFTER_VERIFY":
+            return self._wave_admit_after_verify(item, ctx)
+
         if item.state == "LABELS":
-            ctx.github.ensure_state_labels()
+            # Direct recovery validates its active-wave membership in the
+            # coordinator before this state is allowed to mutate labels.
             if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
                 return StageOutcome(
                     Disposition.FINISH_PASS,
                     note="direct scope checkout synchronized",
                 )
+            ctx.github.ensure_state_labels()
             return Continue(next_state="DISCOVER")
 
         if item.state == "DISCOVER":
+            if "_repo_issue_source" in item.payload:
+                return Continue(next_state="SOURCE")
             return self._discover(item, ctx)
 
         if item.state == "SOURCE":
@@ -180,6 +205,192 @@ class RepoStage(Stage):
             return Continue(next_state="SOURCE")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
+
+    def _wave_store(self, item: WorkItem, ctx: StageContext) -> IssueWaveStore:
+        """Build the repository-scoped checkpoint accessor."""
+        return IssueWaveStore(Path(str(ctx.paths.repo_root)), ctx.org, item.repo)
+
+    @staticmethod
+    def _wave_metadata(issue_numbers: tuple[int, ...]) -> Iterator[dict[str, Any]]:
+        """Yield the exact sealed identifiers without re-discovering GitHub."""
+        for number in issue_numbers:
+            yield {"number": number, "labels": [], "title": ""}
+
+    def _wave_admit(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Read the checkpoint and, when required, request ancestry proof."""
+        if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+            return Continue(next_state="LABELS")
+        main_sha = item.payload.get(SYNCED_MAIN_SHA_KEY)
+        requested = getattr(ctx.config, "issue_limit", None)
+        repo_root = Path(str(ctx.paths.repo_root))
+        if (
+            ctx.dry_run
+            and not is_wave_commit_sha(main_sha)
+            and requested is None
+            and not repo_root.is_dir()
+        ):
+            # A preview without a materialized checkout cannot inspect a
+            # repository checkpoint. Preserve ordinary dry-run behavior, but
+            # fail closed when the operator explicitly requested a wave.
+            return Continue(next_state="LABELS")
+        try:
+            store = self._wave_store(item, ctx)
+            if ctx.dry_run and not is_wave_commit_sha(main_sha):
+                # A dry-run has no truthful checkout SHA.  It may preserve the
+                # ordinary absent-checkpoint behavior, but cannot bypass an
+                # existing staged rollout.
+                if store.load() is not None:
+                    raise IssueWaveError(
+                        "dry-run cannot verify an issue-wave checkpoint without synchronized main"
+                    )
+                return Continue(next_state="LABELS")
+            plan = store.plan_admission(str(main_sha or ""), requested)
+        except IssueWaveError as exc:
+            return StageOutcome(Disposition.FINISH_FAIL, note=str(exc))
+        item.payload[WAVE_PLAN_KEY] = plan
+        if plan.mode == "ordinary":
+            return Continue(next_state="LABELS")
+        if plan.requires_ancestry:
+            if ctx.dry_run:
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    note="[dry-run] would verify prior issue-wave ancestry before advancing",
+                )
+            item.payload["_issue_wave_ancestry_job"] = True
+            return JobRequest(
+                job=GitJob(
+                    repo=item.repo,
+                    op="verify_issue_wave_ancestry",
+                    timeout_s=GIT_JOB_TIMEOUT_S,
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "main_sha": str(main_sha),
+                        "ancestor_shas": plan.ancestor_shas,
+                    },
+                    descr=f"verify issue-wave ancestry for {ctx.org}/{item.repo}",
+                ),
+                on_done_state="WAVE_ADMIT_AFTER_VERIFY",
+            )
+        return self._wave_admit_after_verify(item, ctx)
+
+    def _wave_admit_after_verify(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
+        """Validate prior-wave facts and seal or resume the exact source."""
+        plan = item.payload.get(WAVE_PLAN_KEY)
+        if not isinstance(plan, WaveAdmissionPlan):
+            return StageOutcome(Disposition.FINISH_FAIL, note="issue-wave admission plan missing")
+        error = item.payload.pop(WAVE_ANCESTRY_ERROR_KEY, None)
+        if error:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                note=str(error or "issue-wave ancestry verification failed"),
+            )
+        ancestry_verified = bool(item.payload.pop(WAVE_ANCESTRY_VERIFIED_KEY, False))
+        if plan.requires_ancestry and not ancestry_verified:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                note="issue-wave ancestry verification proof is missing",
+            )
+        main_sha = str(item.payload.get(SYNCED_MAIN_SHA_KEY) or plan.current_main_sha)
+        try:
+            store = self._wave_store(item, ctx)
+            if plan.mode == "audit":
+                if plan.lease is None or plan.checkpoint is None:
+                    raise IssueWaveError("completed issue-wave audit lease is missing")
+                record = plan.checkpoint.current_wave
+                facts = {
+                    number: _seeding.seed_issue_from_github(number, ctx.github)
+                    for number in record.issue_numbers
+                }
+                store.validate_prior_wave_facts(plan.lease, facts)
+                if plan.requires_ancestry:
+                    store.verify_prior_wave(
+                        self._require_lease(plan),
+                        current_main_sha=main_sha,
+                        ancestry_verified=True,
+                        facts_by_issue=facts,
+                    )
+                if plan.checkpoint.status == "active":
+                    store.complete_rollout(plan.lease, current_main_sha=main_sha)
+                return StageOutcome(Disposition.FINISH_PASS, note=plan.diagnostic or "audit-only")
+            if plan.mode == "resume":
+                lease = self._require_lease(plan)
+                if plan.requires_ancestry:
+                    if plan.checkpoint is None:
+                        raise IssueWaveError("resumed issue-wave checkpoint is missing")
+                    receipt_numbers = tuple(
+                        receipt.issue_number
+                        for receipt in plan.checkpoint.current_wave.merge_receipts
+                    )
+                    facts = {
+                        number: _seeding.seed_issue_from_github(number, ctx.github)
+                        for number in receipt_numbers
+                    }
+                    store.validate_active_wave_facts(lease, facts)
+            else:
+                prior = plan.checkpoint.current_wave if plan.checkpoint is not None else None
+                if prior is not None:
+                    facts = {
+                        number: _seeding.seed_issue_from_github(number, ctx.github)
+                        for number in prior.issue_numbers
+                    }
+                    store.validate_prior_wave_facts(prior.lease(ctx.org, item.repo), facts)
+                    if plan.requires_ancestry:
+                        store.verify_prior_wave(
+                            prior.lease(ctx.org, item.repo),
+                            current_main_sha=main_sha,
+                            ancestry_verified=True,
+                            facts_by_issue=facts,
+                        )
+                selected = self._select_wave_issues(item, ctx, plan.requested_limit)
+                if ctx.dry_run:
+                    lease = WaveLease(
+                        org=ctx.org,
+                        repo=item.repo,
+                        wave_index=plan.wave_index or 0,
+                        limit=plan.requested_limit,
+                        issue_numbers=selected,
+                        base_main_sha=main_sha,
+                        nonce=f"dryrun-{item.repo}-{plan.wave_index or 0}",
+                    )
+                else:
+                    lease = store.seal_selection(plan, selected)
+            item.payload[WAVE_LEASE_PAYLOAD] = lease
+            item.payload["_repo_issue_source"] = RepoIssueSource(
+                metadata=self._wave_metadata(lease.issue_numbers),
+                wave_lease=lease,
+                one_pass=True,
+            )
+            return Continue(next_state="LABELS")
+        except IssueWaveError as exc:
+            return StageOutcome(Disposition.FINISH_FAIL, note=str(exc))
+        except Exception as exc:
+            logger.warning("repo:%s: issue-wave admission failed: %s", item.repo, exc)
+            return StageOutcome(Disposition.FINISH_FAIL, note=f"issue-wave admission failed: {exc}")
+
+    @staticmethod
+    def _require_lease(plan: WaveAdmissionPlan) -> WaveLease:
+        """Return a plan lease or raise a precise internal admission error."""
+        if plan.lease is None:
+            raise IssueWaveError("issue-wave admission lease missing")
+        return plan.lease
+
+    def _select_wave_issues(
+        self, item: WorkItem, ctx: StageContext, limit: int | None
+    ) -> tuple[int, ...]:
+        """Select the first eligible open issues in the repository's source order."""
+        selected: list[int] = []
+        for metadata in _repo_manager._iter_open_issue_meta(ctx.org, item.repo):
+            number = int(metadata["number"])
+            facts = _seeding.seed_issue_from_github(number, ctx.github)
+            entry = _seeding.seed_entry_from_facts(facts)
+            if facts.issue_is_closed or entry.stage is None or entry.stage is StageName.FINISHED:
+                continue
+            selected.append(number)
+            if limit is not None and len(selected) >= limit:
+                break
+        return tuple(selected)
 
     def _clone_or_skip(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Prepare a checkout by cloning or safely synchronizing it."""
@@ -200,15 +411,21 @@ class RepoStage(Stage):
             )
 
         if item.payload.pop("checkout_verified", False):
-            return Continue(next_state="LABELS")
+            return Continue(
+                next_state="WAVE_ADMIT" if hasattr(ctx.config, "issue_limit") else "LABELS"
+            )
 
         dest = _repo_checkout_path(item, ctx)
         if ctx.dry_run:
             if dest.exists():
                 logger.info("[dry-run] would synchronize %s/%s at %s", ctx.org, item.repo, dest)
-                return Continue(next_state="LABELS")
+                return Continue(
+                    next_state="WAVE_ADMIT" if hasattr(ctx.config, "issue_limit") else "LABELS"
+                )
             logger.info("[dry-run] would clone %s/%s to %s", ctx.org, item.repo, dest)
-            return Continue(next_state="LABELS")
+            return Continue(
+                next_state="WAVE_ADMIT" if hasattr(ctx.config, "issue_limit") else "LABELS"
+            )
 
         if item.payload.pop("checkout_cloned", False) or dest.exists():
             item.payload["checkout_op"] = "sync_checkout"
@@ -259,6 +476,14 @@ class RepoStage(Stage):
             ctx: Stage context.
 
         """
+        if item.payload.pop("_issue_wave_ancestry_job", False):
+            if result.ok and isinstance(result.value, dict):
+                item.payload[WAVE_ANCESTRY_VERIFIED_KEY] = True
+            else:
+                item.payload[WAVE_ANCESTRY_ERROR_KEY] = (
+                    result.error or "issue-wave ancestry verification failed"
+                )
+            return
         if item.state != "CLONE_WAIT":
             return
         if result.ok:
@@ -267,15 +492,26 @@ class RepoStage(Stage):
                 item.payload["checkout_cloned"] = True
                 logger.info("repo:%s: clone completed; verifying checkout", item.repo)
             elif operation == "sync_checkout":
-                if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
-                    if not is_full_commit_sha(result.value):
-                        item.attempts["clone"] = item.attempts.get("clone", 0) + 1
-                        item.payload["clone_failed"] = True
-                        logger.warning(
-                            "repo:%s: direct scope sync returned no validated default-branch SHA",
-                            item.repo,
-                        )
+                if not is_full_commit_sha(result.value):
+                    # Lightweight isolated stage fixtures predate the
+                    # synchronized-main contract and do not materialize a
+                    # checkout. Preserve their characterization behavior;
+                    # real coordinator contexts always provide a checkout.
+                    if (
+                        not hasattr(ctx.config, "issue_limit")
+                        or not Path(str(ctx.paths.repo_root)).is_dir()
+                    ):
+                        item.payload["checkout_verified"] = True
                         return
+                    item.attempts["clone"] = item.attempts.get("clone", 0) + 1
+                    item.payload["clone_failed"] = True
+                    logger.warning(
+                        "repo:%s: sync returned no validated default-branch SHA",
+                        item.repo,
+                    )
+                    return
+                item.payload[SYNCED_MAIN_SHA_KEY] = result.value
+                if item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
                     item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = result.value
                 item.payload["checkout_verified"] = True
                 logger.info("repo:%s: checkout preparation completed", item.repo)

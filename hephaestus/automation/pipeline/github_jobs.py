@@ -314,6 +314,7 @@ class MergeWaitCycleCompleted:
     attempted: bool
     readiness_fingerprint: tuple[str, ...] | None = None
     retryable: bool = False
+    merge_sha: str | None = None
 
     def __post_init__(self) -> None:
         """Validate merge-cycle outcome metadata."""
@@ -326,6 +327,12 @@ class MergeWaitCycleCompleted:
             or not all(isinstance(part, str) for part in self.readiness_fingerprint)
         ):
             raise ValueError("readiness_fingerprint must be a tuple of strings or None")
+        if self.merge_sha is not None and (
+            not isinstance(self.merge_sha, str)
+            or len(self.merge_sha) not in (40, 64)
+            or any(character not in "0123456789abcdef" for character in self.merge_sha)
+        ):
+            raise ValueError("merge_sha must be a full commit SHA or None")
 
 
 type GitHubReceipt = (
