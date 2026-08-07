@@ -43,6 +43,13 @@ through installed `hephaestus-*` console scripts.
 - **`shell/lib/install_helpers.sh`** — Sourceable helper library (colors,
   counters, check helpers) shared by the installer scripts.
 
+### Local CI
+
+- **`run_ci_local.sh`** — Run the locally executable CI checks or a named
+  subset. Project-toolchain commands use the Podman/Docker image built with
+  `just ci-build`; the full route also requires host `just`, `shellcheck`, and
+  `bats`, matching their GitHub Actions jobs.
+
 ### Disaster recovery
 
 - **`backup_state.py`** — Backup, restore, and verify tier-3 operational
