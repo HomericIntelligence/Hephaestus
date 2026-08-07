@@ -144,61 +144,6 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
     run_git(cmd, cwd=cwd, dry_run=dry_run)
 
 
-def checks_success_and_log(commit: Any) -> tuple[bool | None, list[Any]]:
-    """Check if commit has successful CI/CD checks.
-
-    Args:
-        commit: GitHub commit object
-
-    Returns:
-        Tuple of (success status, checks list) or (None, []) if no check runs present
-
-    """
-    try:
-        checks = list(commit.get_check_runs())
-    except Exception as e:  # broad catch intentional: git remote detection can fail in many ways
-        logger.error("Error getting check runs: %s", e)
-        return None, []
-
-    bad = {"failure", "timed_out", "cancelled", "action_required"}
-    any_success = False
-
-    if checks:
-        for cr in checks:
-            logger.info("    - %s: status=%s, conclusion=%s", cr.name, cr.status, cr.conclusion)
-            if cr.status != "completed":
-                return False, checks
-            if cr.conclusion in bad:
-                return False, checks
-            if cr.conclusion == "success":
-                any_success = True
-        return any_success, checks
-
-    return None, []
-
-
-def legacy_status_and_log(commit: Any) -> str:
-    """Get legacy commit status and log contexts via logger.info.
-
-    Args:
-        commit: GitHub commit object
-
-    Returns:
-        Combined status state
-
-    """
-    try:
-        combined = commit.get_combined_status()
-        for ctx in combined.statuses:
-            logger.info(
-                "    - %s: state=%s, description=%s", ctx.context, ctx.state, ctx.description
-            )
-        return combined.state or "unknown"
-    except Exception as e:  # broad catch retained for legacy object-style helper compatibility
-        logger.error("Error getting combined status: %s", e)
-        return "unknown"
-
-
 def local_branch_exists(branch_name: str) -> bool:
     """Check if a local branch exists.
 
@@ -322,8 +267,8 @@ def _list_open_prs(repo_name: str) -> list[dict[str, Any]]:
 _CHECK_BAD_BUCKETS = {"fail", "cancel"}
 
 
-def _checks_success_and_log(repo_name: str, pr_number: int) -> bool | None:
-    """Return PR checks success, false, or ``None`` when no checks exist."""
+def _checks_pass_and_log(repo_name: str, pr_number: int) -> bool:
+    """Return whether current GitHub check-run evidence permits a merge."""
     try:
         checks = _gh_json(
             [
@@ -338,53 +283,40 @@ def _checks_success_and_log(repo_name: str, pr_number: int) -> bool | None:
         )
     except subprocess.CalledProcessError as exc:
         blob = (exc.stderr or "") + (exc.stdout or "")
-        if "no checks reported" in blob:
-            return None
-        logger.error("Error getting check runs for PR #%d: %s", pr_number, blob.strip() or exc)
-        return None
+        if "no checks reported" in blob.lower():
+            logger.error("No check runs reported for PR #%d; refusing merge", pr_number)
+        else:
+            logger.error(
+                "Error getting check runs for PR #%d: %s",
+                pr_number,
+                blob.strip() or exc,
+            )
+        return False
     except (RuntimeError, json.JSONDecodeError) as exc:
         logger.error("Error getting check runs for PR #%d: %s", pr_number, exc)
-        return None
+        return False
 
-    if not isinstance(checks, list) or not checks:
-        return None
+    if not isinstance(checks, list):
+        logger.error("Invalid check-run response for PR #%d; refusing merge", pr_number)
+        return False
+    if not checks:
+        logger.error("No check runs reported for PR #%d; refusing merge", pr_number)
+        return False
 
     any_success = False
     for check in checks:
         if not isinstance(check, dict):
-            continue
+            logger.error("Invalid check-run entry for PR #%d; refusing merge", pr_number)
+            return False
         name = check.get("name", "")
         state = check.get("state", "")
         bucket = str(check.get("bucket", "")).lower()
         logger.info("    - %s: state=%s, bucket=%s", name, state, bucket)
-        if bucket in _CHECK_BAD_BUCKETS:
-            return False
-        if bucket == "pending":
+        if bucket in _CHECK_BAD_BUCKETS or bucket == "pending":
             return False
         if bucket == "pass":
             any_success = True
     return any_success
-
-
-def _legacy_status_and_log(repo_name: str, head_sha: str) -> str:
-    """Return combined legacy commit status for ``head_sha``."""
-    try:
-        payload = _gh_json(["api", f"/repos/{repo_name}/commits/{head_sha}/status"])
-    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
-        logger.error("Error getting combined status: %s", exc)
-        return "unknown"
-    if not isinstance(payload, dict):
-        return "unknown"
-    for ctx in payload.get("statuses") or []:
-        if not isinstance(ctx, dict):
-            continue
-        logger.info(
-            "    - %s: state=%s, description=%s",
-            ctx.get("context", ""),
-            ctx.get("state", ""),
-            ctx.get("description", ""),
-        )
-    return str(payload.get("state") or "unknown")
 
 
 # GitHub returns HTTP 405 with this message from the direct merge API when the
@@ -517,16 +449,6 @@ def _list_open_prs_for_cli(repo_name: str) -> list[dict[str, Any]] | None:
         return None
 
 
-def _checks_pass_or_legacy(repo_name: str, pr_number: int, head_sha: str) -> bool:
-    logger.info("  Checks API results:")
-    success = _checks_success_and_log(repo_name, pr_number)
-    if success is not None:
-        return success
-
-    logger.info("  No check runs found; falling back to legacy status contexts:")
-    return _legacy_status_and_log(repo_name, head_sha) == "success"
-
-
 def _attempt_pr_merge(
     repo_name: str,
     pr_number: int,
@@ -564,7 +486,8 @@ def _process_pr(
         )
 
     logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
-    success = _checks_pass_or_legacy(repo_name, pr_number, head_sha)
+    logger.info("  Checks API results:")
+    success = _checks_pass_and_log(repo_name, pr_number)
 
     if push_all:
         logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)
