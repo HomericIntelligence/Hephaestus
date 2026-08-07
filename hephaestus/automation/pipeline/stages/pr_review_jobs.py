@@ -10,6 +10,7 @@ from ..github_jobs import (
     ReconcilePrReviewRequest,
     ReplyHandoffAttempted,
 )
+from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -600,6 +601,11 @@ class PrReviewJobs(_PrReviewHost):
             "argv": list(verification.argv) if verification is not None else [],
             "path": ((verification.changed_path or "") if verification is not None else ""),
             "head_sha": str(item.payload.get("reviewed_pr_head_sha") or ""),
+            "failure_kind": (
+                str(receipt.get("failure_kind") or "unknown")
+                if isinstance(receipt, dict)
+                else "unknown"
+            ),
             "error": reason[:HOST_VERIFICATION_DIAGNOSTIC_MAX],
             "stdout_tail": (
                 str(receipt.get("stdout_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
@@ -620,6 +626,15 @@ class PrReviewJobs(_PrReviewHost):
             return self._cleanup_review_worktree_then(
                 item,
                 StageOutcome(Disposition.FINISH_FAIL, "reviewed_head_drift"),
+            )
+
+        pr_number = cast(int, item.pr)  # _write_no_go rejected a missing PR above.
+        if not publish_host_verification_failure(
+            ctx.github, pr_number, verification, diagnostic, logger
+        ):
+            return self._cleanup_review_worktree_then(
+                item,
+                StageOutcome(Disposition.FINISH_FAIL, "host_verification_comment_failed"),
             )
 
         # Only a confirmed fixed-tool validation failure may be repaired by
