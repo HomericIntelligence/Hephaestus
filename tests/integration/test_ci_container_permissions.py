@@ -31,8 +31,10 @@ def _local_ci_image_is_available() -> bool:
     not _local_ci_image_is_available(),
     reason="requires Docker with a locally built hephaestus-ci:local image",
 )
-def test_arbitrary_docker_uid_can_sync_uv_and_write_bind_artifact(tmp_path: Path) -> None:
-    """An arbitrary host UID can refresh uv and create a bind-mounted artifact."""
+def test_arbitrary_docker_uid_uses_baked_uv_and_writes_bind_artifact(
+    tmp_path: Path,
+) -> None:
+    """An arbitrary host UID can run uv and create a bind-mounted artifact."""
     assert DOCKER is not None
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir(mode=0o777)
@@ -48,7 +50,9 @@ def test_arbitrary_docker_uid_can_sync_uv_and_write_bind_artifact(tmp_path: Path
             "--env",
             "HOME=/tmp",
             "--env",
-            "UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv",
+            "UV_NO_SYNC=1",
+            "--env",
+            "PYTHONPATH=/workspace",
             "--tmpfs",
             "/tmp:rw,size=4g,mode=1777",
             "--volume",
@@ -60,7 +64,8 @@ def test_arbitrary_docker_uid_can_sync_uv_and_write_bind_artifact(tmp_path: Path
             CI_IMAGE,
             "bash",
             "-ceu",
-            "uv run --locked python -c 'import hephaestus' && touch /artifacts/created",
+            "test ! -w /opt/hephaestus-venv && "
+            "uv run python -c 'import hephaestus' && touch /artifacts/created",
         ],
         text=True,
         capture_output=True,

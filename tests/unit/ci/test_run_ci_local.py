@@ -183,7 +183,7 @@ def test_subset_success_message_names_only_the_requested_subset(tmp_path: Path) 
 
 
 def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> None:
-    """Docker fallback gives an arbitrary UID a writable uv environment."""
+    """Docker uses its baked environment without syncing as an arbitrary UID."""
     result, log = _run_runner(
         tmp_path,
         "unit",
@@ -195,4 +195,6 @@ def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "--user 23456:23457" in log
     assert "--env HOME=/tmp" in log
-    assert "--env UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv" in log
+    assert "--env UV_NO_SYNC=1" in log
+    assert "--env PYTHONPATH=/workspace" in log
+    assert "UV_PROJECT_ENVIRONMENT" not in log

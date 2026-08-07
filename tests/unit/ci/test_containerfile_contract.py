@@ -15,18 +15,32 @@ def test_debian_packages_use_one_immutable_snapshot() -> None:
 
     snapshot = re.search(r"^ARG DEBIAN_SNAPSHOT=(\d{8}T\d{6}Z)$", source, re.MULTILINE)
     assert snapshot is not None
-    assert "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/" in source
-    assert "snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/" in source
+    repository_lines = [
+        line.strip().strip('" \\')
+        for line in source.splitlines()
+        if line.strip().startswith('"deb ')
+    ]
+    assert repository_lines == [
+        "deb [check-valid-until=no] "
+        "http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ "
+        "${VERSION_CODENAME} main",
+        "deb [check-valid-until=no] "
+        "http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ "
+        "${VERSION_CODENAME}-security main",
+    ]
     assert source.count("[check-valid-until=no]") == 2
     assert "rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*" in source
+    assert "deb.debian.org" not in source
 
     # A single digest-pinned Python root configures APT before every stage that
     # installs OS packages; no stage may fall back to the base image's mutable
-    # deb.debian.org sources or upgrade against whatever repository is current.
+    # repositories or upgrade against whatever repository is current.
     assert source.count("FROM python:3.13-slim@sha256:") == 1
     assert source.count("FROM python-snapshot") == 3
-    assert "apt-get upgrade" not in source
-    assert "deb.debian.org" not in source
+    apt_stages = [stage for stage in re.split(r"(?m)(?=^FROM )", source) if "apt-get" in stage]
+    assert len(apt_stages) == 3
+    assert all(stage.startswith("FROM python-snapshot") for stage in apt_stages)
+    assert re.search(r"\bapt-get\b[^&;\n]*\b(?:dist-)?upgrade\b", source) is None
 
 
 def test_node_runtime_source_is_digest_pinned() -> None:
@@ -40,11 +54,11 @@ def test_node_runtime_source_is_digest_pinned() -> None:
     )
 
 
-def test_baked_environment_is_writable_by_runtime_uid() -> None:
-    """Docker's host UID must be able to let uv refresh the baked environment."""
+def test_baked_environment_is_not_made_world_writable() -> None:
+    """Docker must not require weakening the baked environment's permissions."""
     source = CONTAINERFILE.read_text(encoding="utf-8")
 
-    assert "chmod -R a+rwX /opt/hephaestus-venv" in source
+    assert "chmod -R a+rwX /opt/hephaestus-venv" not in source
 
 
 def test_runtime_tools_follow_the_requested_build_architecture() -> None:

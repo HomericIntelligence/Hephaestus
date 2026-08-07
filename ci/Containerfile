@@ -186,12 +186,10 @@ RUN groupadd -r ci && useradd -r -g ci -u 1000 -m -s /bin/bash ci
 RUN cp -r /root/.cache/pre-commit /home/ci/.cache/ 2>/dev/null || true && \
     chown -R ci:ci /home/ci/.cache
 
-# Make the baked venv writable in each container's private image layer. Podman
-# maps the ci user through keep-id, while Docker runs as the invoking host UID,
-# which may be any numeric ID. uv must be able to refresh the editable install
-# for /workspace under either engine without changing bind-mounted ownership.
-RUN chown -R ci:ci /opt/hephaestus-venv && \
-    chmod -R a+rwX /opt/hephaestus-venv
+# Podman maps the ci user through keep-id and may refresh the editable install.
+# Docker's arbitrary host UID uses the baked environment without syncing and
+# imports project code from /workspace; the environment need not be world-writable.
+RUN chown -R ci:ci /opt/hephaestus-venv
 
 # Working directory is the mounted repo root at runtime
 WORKDIR /workspace

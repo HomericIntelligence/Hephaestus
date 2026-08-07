@@ -117,12 +117,11 @@ run_in_container() {
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
     else
-        # Docker gives each invocation a private writable image layer. The
-        # image makes this baked environment writable by arbitrary UIDs so uv
-        # can refresh the editable install while bind-mounted artifacts remain
-        # owned by the invoking host user.
+        # Docker runs as the invoking host UID so bind-mounted artifacts retain
+        # host ownership. Arbitrary UIDs cannot update the ci-owned baked venv,
+        # so keep it read-only and import project code from the mounted checkout.
         engine_flags+=(--user "$(id -u):$(id -g)" --env HOME=/tmp \
-            --env UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv)
+            --env UV_NO_SYNC=1 --env PYTHONPATH=/workspace)
     fi
 
     "${CONTAINER_ENGINE}" run --rm \
