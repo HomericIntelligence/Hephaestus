@@ -97,10 +97,6 @@ _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
 )
 HOST_VERIFICATION_TIMEOUT_S = 300
 HOST_VERIFICATION_DIAGNOSTIC_MAX = 4_000
-# Temporary operator-approved escape hatch for Linux runners until #2701 adds
-# the Pyxis/Enroot verifier.  It is deliberately narrower than generic runner
-# failures: sandbox, source-integrity, and test errors remain blocking.
-TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR = "unsupported_host_verification_boundary"
 
 _DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", flags=re.MULTILINE)
 
@@ -212,52 +208,11 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
     )
 
 
-def _host_verification_receipt_matches(
-    receipt: object, spec: _HostVerificationSpec, reviewed_head: str
-) -> bool:
-    """Return whether *receipt* was captured for this immutable head and command."""
-    if isinstance(receipt, dict) and receipt.get("bypassed") is True:
-        return bool(
-            receipt.get("head_sha") == reviewed_head
-            and receipt.get("argv") == list(spec.argv)
-            and receipt.get("ok") is False
-            and receipt.get("error") == TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR
-            and isinstance(receipt.get("stdout_tail"), str)
-            and isinstance(receipt.get("stderr_tail"), str)
-        )
-    return bool(
-        isinstance(receipt, dict)
-        and receipt.get("head_sha") == reviewed_head
-        and receipt.get("argv") == list(spec.argv)
-        and receipt.get("immutable_source") is True
-        and isinstance(receipt.get("ok"), bool)
-        and isinstance(receipt.get("stdout_tail"), str)
-        and isinstance(receipt.get("stderr_tail"), str)
-    )
-
-
-def _host_verification_receipts_match(
-    receipts: object,
-    specs: tuple[_HostVerificationSpec, ...],
-    reviewed_head: str,
-) -> bool:
-    """Return whether every required fixed check has an exact-head receipt."""
-    return bool(
-        isinstance(receipts, list)
-        and len(receipts) == len(specs)
-        and all(
-            _host_verification_receipt_matches(receipt, spec, reviewed_head)
-            for receipt, spec in zip(receipts, specs, strict=True)
-        )
-    )
-
-
 # fmt: off
 __all__ = [
     'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S', '_DIFF_GIT_HEADER_RE',
     '_NONHERMETIC_HOST_UNIT_TEST_PATHS', '_PATH_HOST_VERIFICATION_SPECS',
     '_PYTHON_HOST_VERIFICATION_SPECS', '_PYTHON_VALIDATION_CONFIG_PATHS', '_HostVerificationSpec',
-    '_changed_new_side_paths', '_changed_unit_pytest_argv', '_host_verification_receipt_matches',
-    '_host_verification_receipts_match', '_host_verification_specs', 'annotations', 'dataclass',
-    're']
+    '_changed_new_side_paths', '_changed_unit_pytest_argv', '_host_verification_specs',
+    'annotations', 'dataclass', 're']
 # fmt: on

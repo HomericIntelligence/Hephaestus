@@ -165,15 +165,55 @@ from .base import (
 from .pr_review_verification import (
     HOST_VERIFICATION_DIAGNOSTIC_MAX,
     HOST_VERIFICATION_TIMEOUT_S,
-    TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR,
-    _host_verification_receipt_matches,
-    _host_verification_receipts_match,
     _host_verification_specs,
     _HostVerificationSpec,
 )
 from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
+
+TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR = "unsupported_host_verification_boundary"
+
+
+def _host_verification_receipt_matches(
+    receipt: object, spec: _HostVerificationSpec, reviewed_head: str
+) -> bool:
+    """Return whether *receipt* was captured for this immutable head and command."""
+    if isinstance(receipt, dict) and receipt.get("bypassed") is True:
+        return bool(
+            receipt.get("head_sha") == reviewed_head
+            and receipt.get("argv") == list(spec.argv)
+            and receipt.get("ok") is False
+            and receipt.get("error") == TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR
+            and isinstance(receipt.get("stdout_tail"), str)
+            and isinstance(receipt.get("stderr_tail"), str)
+        )
+    return bool(
+        isinstance(receipt, dict)
+        and receipt.get("head_sha") == reviewed_head
+        and receipt.get("argv") == list(spec.argv)
+        and receipt.get("immutable_source") is True
+        and isinstance(receipt.get("ok"), bool)
+        and isinstance(receipt.get("stdout_tail"), str)
+        and isinstance(receipt.get("stderr_tail"), str)
+    )
+
+
+def _host_verification_receipts_match(
+    receipts: object,
+    specs: tuple[_HostVerificationSpec, ...],
+    reviewed_head: str,
+) -> bool:
+    """Return whether every required fixed check has an exact-head receipt."""
+    return bool(
+        isinstance(receipts, list)
+        and len(receipts) == len(specs)
+        and all(
+            _host_verification_receipt_matches(receipt, spec, reviewed_head)
+            for receipt, spec in zip(receipts, specs, strict=True)
+        )
+    )
+
 
 # Compatibility aliases for callers that used the former stage-local helpers.
 # The shared reply-handoff module is the sole implementation.
