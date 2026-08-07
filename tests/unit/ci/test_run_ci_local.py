@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "scripts" / "run_ci_local.sh"
 
@@ -44,14 +46,33 @@ def _fake_engine(tmp_path: Path, *, failing_command: str = "") -> tuple[Path, Pa
 
 
 def _run_runner(
-    tmp_path: Path, subset: str, *, engine_name: str = "podman", failing_command: str = ""
+    tmp_path: Path,
+    subset: str,
+    *,
+    engine_name: str = "podman",
+    failing_command: str = "",
+    host_uid: int | None = None,
+    host_gid: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine, log = _fake_engine(tmp_path, failing_command=failing_command)
     if engine_name != "podman":
         docker = engine.with_name(engine_name)
         engine.rename(docker)
-        engine = docker
+    if host_uid is not None and host_gid is not None:
+        fake_id = tmp_path / "id"
+        fake_id.write_text(
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'[[ "$1" == "-u" ]] && printf "%s\\n" "{host_uid}" && exit 0\n'
+                f'[[ "$1" == "-g" ]] && printf "%s\\n" "{host_gid}" && exit 0\n'
+                'printf "unsupported id argument: %s\\n" "$1" >&2\n'
+                "exit 2\n"
+            ),
+            encoding="utf-8",
+        )
+        fake_id.chmod(0o755)
     environment = os.environ | {
         "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
@@ -68,12 +89,22 @@ def _run_runner(
     return result, log.read_text(encoding="utf-8")
 
 
-def test_lint_failure_makes_the_runner_fail(tmp_path: Path) -> None:
-    """A failing first command in a multi-command check must not be masked."""
-    result, _log = _run_runner(tmp_path, "lint", failing_command="uv run pre-commit")
+@pytest.mark.parametrize(
+    ("failing_command", "failed_step"),
+    [
+        ("uv run pre-commit", "lint"),
+        ("hephaestus.scripts_lib.check_version_single_source", "version"),
+    ],
+)
+def test_all_preserves_failure_from_multi_command_check(
+    tmp_path: Path, failing_command: str, failed_step: str
+) -> None:
+    """The all target must aggregate an inner failure and continue later gates."""
+    result, log = _run_runner(tmp_path, "all", failing_command=failing_command)
 
     assert result.returncode != 0
-    assert "Failed: lint" in result.stderr
+    assert f"Failed: {failed_step}" in result.stderr
+    assert "detect --source=. --verbose --exit-code=1" in log
 
 
 def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
@@ -92,9 +123,24 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         assert command in log
 
 
-def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> None:
-    """Docker fallback must not run bind-mounted checks as image-owned UID 1000."""
-    result, log = _run_runner(tmp_path, "unit", engine_name="docker")
+def test_integration_requires_installed_cli_entry_points(tmp_path: Path) -> None:
+    """The integration lane must fail rather than skip when a CLI is absent."""
+    result, log = _run_runner(tmp_path, "integration")
 
     assert result.returncode == 0, result.stderr
-    assert f"--user {os.getuid()}:{os.getgid()}" in log
+    assert "HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration" in log
+
+
+def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> None:
+    """Docker fallback must not run bind-mounted checks as image-owned UID 1000."""
+    result, log = _run_runner(
+        tmp_path,
+        "unit",
+        engine_name="docker",
+        host_uid=23456,
+        host_gid=23457,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--user 23456:23457" in log
+    assert "--env HOME=/tmp" in log

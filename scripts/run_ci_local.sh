@@ -136,7 +136,7 @@ run_in_container() {
 run_lint() {
     log_step "Lint (pre-commit + doc-link validation)"
     run_in_container uv run pre-commit run --all-files --show-diff-on-failure || return 1
-    run_in_container uv run hephaestus-validate-links docs --repo-root .
+    run_in_container uv run hephaestus-validate-links docs --repo-root . || return 1
 }
 
 run_unit() {
@@ -197,7 +197,7 @@ run_schema() {
 run_version() {
     log_step "Version single-source-of-truth + uv.lock check"
     run_in_container uv run python -m hephaestus.scripts_lib.check_version_single_source || return 1
-    run_in_container uv lock --check
+    run_in_container uv lock --check || return 1
 }
 
 run_license() {
@@ -266,7 +266,10 @@ FAILED=()
 run_step() {
     local name="$1"
     local fn="$2"
-    if ! "${fn}"; then
+    local status=0
+
+    "${fn}" || status=$?
+    if [ "${status}" -ne 0 ]; then
         FAILED+=("${name}")
         log_error "${name} FAILED"
     fi
