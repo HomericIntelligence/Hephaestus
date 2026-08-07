@@ -67,6 +67,20 @@ _NONHERMETIC_HOST_UNIT_TEST_PATHS = frozenset(
 # diff header, never from reviewer or GitHub prose.
 _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
+        changed_path="docs/MIGRATION.md",
+        argv=(
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            "tests/unit/docs/test_version_currency.py",
+            "-q",
+            "--tb=short",
+        ),
+        descr="review_migration_version_currency",
+    ),
+    _HostVerificationSpec(
         changed_path="tests/unit/automation/pipeline/test_worker_pool.py",
         argv=(
             "uv",
@@ -155,10 +169,13 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
     if not isinstance(pr_diff, str):
         return ()
     changed_paths = {match.group(2) for match in _DIFF_GIT_HEADER_RE.finditer(pr_diff)}
+    path_triggered_specs = tuple(
+        spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths
+    )
     if not any(
         path.endswith(".py") or path in _PYTHON_VALIDATION_CONFIG_PATHS for path in changed_paths
     ):
-        return ()
+        return path_triggered_specs
     changed_new_side_paths = _changed_new_side_paths(pr_diff)
     changed_unit_paths = tuple(
         sorted(
@@ -204,7 +221,7 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
     return (
         *_PYTHON_HOST_VERIFICATION_SPECS,
         *changed_unit_tests,
-        *(spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths),
+        *path_triggered_specs,
     )
 
 
