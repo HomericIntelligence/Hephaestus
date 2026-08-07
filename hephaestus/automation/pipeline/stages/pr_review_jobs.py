@@ -195,7 +195,7 @@ class PrReviewJobs(_PrReviewHost):
         return Continue(next_state=REVIEW_WAIT)
 
     def _adopt_direct_pr_worktree(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Create a synchronized isolated checkout for an existing PR."""
+        """Create an isolated checkout for the checkout-bound PR review barrier."""
         if item.pr is None:  # guarded by step(); keeps type narrowing local
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         branch = ctx.github.get_pr_head_branch(item.pr) or item.branch
@@ -220,7 +220,9 @@ class PrReviewJobs(_PrReviewHost):
             # A detached reviewer checkout cannot reuse the writer's branch
             # checkout.
             "isolated": True,
-            "sync_to_remote": True,
+            # The checkout barrier below is the sole authority allowed to
+            # materialize remote PR state and bind it to the GitHub snapshot.
+            "sync_to_remote": False,
             "pr_number": item.pr,
             "repo_root": str(ctx.paths.repo_root),
         }
@@ -239,7 +241,7 @@ class PrReviewJobs(_PrReviewHost):
         return JobRequest(job, on_done_state=ADOPT_WORKTREE_WAIT)
 
     def _adopt_worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Advance only from a clean, synchronized direct-PR checkout."""
+        """Advance only from a detached direct-PR checkout for later binding."""
         del ctx
         if item.payload.pop("direct_pr_worktree_error", None):
             self._restore_writer_worktree(item)
@@ -264,6 +266,7 @@ class PrReviewJobs(_PrReviewHost):
         if review_context is None:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_context_unavailable")
         expected_head = str(review_context.get("pr_head_sha") or "")
+        expected_base = str(review_context.get("pr_base_sha") or "")
         if not expected_head:
             return StageOutcome(Disposition.FINISH_FAIL, "pr_review_head_unavailable")
         base_branch = str(review_context.get("pr_base_branch") or "main")
@@ -278,6 +281,7 @@ class PrReviewJobs(_PrReviewHost):
                 "worktree_path": str(_worktree_path(item, ctx)),
                 "branch": item.branch,
                 "expected_head_sha": expected_head,
+                "expected_base_sha": expected_base,
                 "base_branch": base_branch,
                 "pr_number": item.pr,
             },
