@@ -474,8 +474,14 @@ pre-commit install
 # Run hooks manually on all files
 pre-commit run --all-files
 
-# NEVER skip hooks with --no-verify
+# NEVER skip hooks with --no-verify in developer commands
 ```
+
+The sole automation exception is the metadata-only remote branch reservation
+in `reserve_remote_branch_if_absent()`. It uses `git push --no-verify` to claim
+an absent branch at an already-resolved base SHA before any agent changes
+exist. The subsequent implementation push and every developer push still run
+their configured hooks; no commit command bypasses hooks.
 
 ## Troubleshooting
 
