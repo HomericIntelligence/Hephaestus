@@ -1,9 +1,7 @@
 # Migration Guide
 
-> **Release status:** The latest released version is **0.10.2** (tag-driven
-> via hatch-vcs). **1.0 has not been released yet** — the section below is
-> forthcoming 1.0 migration guidance. The package remains on the 0.x release
-> line until a signed `v1.0.0` tag is published.
+> **Release status:** **0.10.3 is the pending release; it is not released until the signed `v0.10.3` tag is published.** After that tag is published, the latest released version is **0.10.3**
+> (tag-driven via hatch-vcs). **1.0 has not been released yet** — the section below is forthcoming 1.0 migration guidance. The package remains on the 0.x release line until a signed `v1.0.0` tag is published.
 
 ## Current main (unreleased; post-v0.10.2)
 
