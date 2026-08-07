@@ -16,6 +16,13 @@ from hephaestus.observability.metrics import MetricsRegistry
 
 logger = logging.getLogger(__name__)
 
+_HEALTH_STATUS_CODES: dict[str, HTTPStatus] = {
+    "ok": HTTPStatus.OK,
+    "degraded": HTTPStatus.SERVICE_UNAVAILABLE,
+    "stopping": HTTPStatus.SERVICE_UNAVAILABLE,
+    "error": HTTPStatus.SERVICE_UNAVAILABLE,
+}
+
 
 def _validate_loopback_host(host: str) -> None:
     """Reject hostnames and non-loopback addresses without a DNS lookup."""
@@ -137,6 +144,14 @@ class MetricsHTTPServer:
                         payload = (
                             {"status": "ok"} if health_provider is None else dict(health_provider())
                         )
+                        status = payload.get("status")
+                        response_status = (
+                            _HEALTH_STATUS_CODES.get(status) if isinstance(status, str) else None
+                        )
+                        if response_status is None:
+                            logger.error("metrics health provider returned an invalid status")
+                            payload = {"status": "error"}
+                            response_status = HTTPStatus.SERVICE_UNAVAILABLE
                         body = json.dumps(payload, sort_keys=True).encode()
                     except Exception:
                         logger.exception("metrics health provider failed")
@@ -146,7 +161,7 @@ class MetricsHTTPServer:
                             "application/json",
                         )
                         return
-                    self._write(HTTPStatus.OK, body, "application/json")
+                    self._write(response_status, body, "application/json")
                     return
                 self._write(HTTPStatus.NOT_FOUND, b'{"status": "not_found"}', "application/json")
 
