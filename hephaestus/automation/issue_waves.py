@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
@@ -355,10 +355,10 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             raise IssueWaveValidationError("checkpoint outcomes and receipts must be lists")
         outcomes = tuple(
             WaveIssueOutcome(
-                issue_number=item.get("issue_number"),
-                passed=item.get("passed"),
-                reason=item.get("reason"),
-                pr_number=item.get("pr_number"),
+                issue_number=cast(int, item.get("issue_number")),
+                passed=cast(bool, item.get("passed")),
+                reason=cast(str, item.get("reason")),
+                pr_number=cast(int | None, item.get("pr_number")),
             )
             for item in outcomes_raw
             if isinstance(item, dict)
@@ -367,10 +367,10 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             raise IssueWaveValidationError("checkpoint outcome must be an object")
         receipts = tuple(
             WaveMergeReceipt(
-                issue_number=item.get("issue_number"),
-                pr_number=item.get("pr_number"),
-                reviewed_head_sha=item.get("reviewed_head_sha"),
-                merge_sha=item.get("merge_sha"),
+                issue_number=cast(int, item.get("issue_number")),
+                pr_number=cast(int, item.get("pr_number")),
+                reviewed_head_sha=cast(str, item.get("reviewed_head_sha")),
+                merge_sha=cast(str, item.get("merge_sha")),
             )
             for item in receipts_raw
             if isinstance(item, dict)
@@ -379,21 +379,21 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             raise IssueWaveValidationError("checkpoint merge receipt must be an object")
         waves.append(
             WaveRecord(
-                wave_index=value.get("wave_index"),
+                wave_index=cast(int, value.get("wave_index")),
                 limit=value.get("limit"),
                 issue_numbers=tuple(value.get("issue_numbers", ())),
-                base_main_sha=value.get("base_main_sha"),
-                lease_nonce=value.get("lease_nonce"),
+                base_main_sha=cast(str, value.get("base_main_sha")),
+                lease_nonce=cast(str, value.get("lease_nonce")),
                 outcomes=outcomes,
                 merge_receipts=receipts,
                 verified_main_sha=value.get("verified_main_sha"),
             )
         )
     return WaveCheckpoint(
-        org=raw.get("org"),
-        repo=raw.get("repo"),
-        generation=raw.get("generation"),
-        status=raw.get("status"),
+        org=cast(str, raw.get("org")),
+        repo=cast(str, raw.get("repo")),
+        generation=cast(int, raw.get("generation")),
+        status=cast(Literal["active", "completed"], raw.get("status")),
         waves=tuple(waves),
         completed_main_sha=raw.get("completed_main_sha"),
     )

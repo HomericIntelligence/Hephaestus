@@ -22,15 +22,7 @@ class SourceCoordinator(_CoordinatorHost):
     _repo_entry_source: _RepoEntrySource | None
 
     def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
-        """Retire setup work and enroll its cursor in the bounded fair registry.
-
-        A repository cursor is not a pipeline work item: it carries no global
-        permit and no REPO-stage lease once checkout/setup finishes.  Keeping
-        those owners would both count as an extra live object and let the
-        first repository hold the REPO queue while its entire issue backlog
-        drains.  The registry holds at most C cursor objects and drains them
-        in FIFO rotation instead.
-        """
+        """Retire setup work and enroll its cursor in the bounded FIFO registry."""
         if len(self._repo_issue_sources) >= _work_window(self.config):
             return False
 
@@ -46,13 +38,7 @@ class SourceCoordinator(_CoordinatorHost):
         return True
 
     def _repo_source_slots_used(self) -> int:
-        """Return active cursors plus every live REPO setup reservation.
-
-        A repository setup item becomes a detached cursor after ``SOURCE``.
-        Reserve that future cursor slot from its first queue admission through
-        terminalization so a later setup item cannot strand at ``SOURCE``
-        merely because earlier setups filled the registry first.
-        """
+        """Count active cursors and live REPO setup reservations."""
         candidates: dict[int, WorkItem] = {}
         for queue in self.queues.values():
             for item in queue.snapshot():
@@ -150,10 +136,20 @@ class SourceCoordinator(_CoordinatorHost):
                 if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
                     ctx.github.ensure_blocked_audit(number)
                 entry = _seeding.seed_entry_from_facts(facts)
-                entry = wave_entry_from_facts(source.wave_lease, facts, entry, repo_root=Path(str(ctx.paths.repo_root)), org=ctx.org, repo=repo) if source.wave_lease is not None else entry  # noqa: E501
-                scope_stages = self.config.scope.stages if self.config.scope is not None else None
+                if source.wave_lease is not None:
+                    entry = wave_entry_from_facts(
+                        source.wave_lease,
+                        facts,
+                        entry,
+                        repo_root=Path(str(ctx.paths.repo_root)),
+                        org=ctx.org,
+                        repo=repo,
+                    )
+                scope = self.config.scope
+                scope_stages = scope.stages if scope is not None else None
                 if source.wave_lease is None or entry.stage is not StageName.FINISHED:
-                    stage, reason, passed = self._scope_seed_decision(number, entry.stage, entry.reason, scope_stages)  # noqa: E501
+                    decide = self._scope_seed_decision
+                    stage, reason, passed = decide(number, entry.stage, entry.reason, scope_stages)
                     entry = replace(entry, stage=stage, reason=reason, passed=passed)
             except Exception as exc:
                 logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)

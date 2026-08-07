@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -110,6 +111,7 @@ def test_checkpoint_rejects_symlinked_state_file(tmp_path: Path) -> None:
 
 def test_wave_value_objects_fail_closed_on_invalid_data() -> None:
     """The durable schema rejects malformed identities before persistence."""
+    invalid_boolean: Any = 1
     with pytest.raises(IssueWaveValidationError):
         WaveLease("", "repo", 0, 1, (1,), BASE, "nonce")
     with pytest.raises(IssueWaveValidationError):
@@ -133,7 +135,7 @@ def test_wave_value_objects_fail_closed_on_invalid_data() -> None:
     with pytest.raises(IssueWaveValidationError):
         WaveIssueOutcome(0, True, "done")
     with pytest.raises(IssueWaveValidationError):
-        WaveIssueOutcome(1, 1, "done")
+        WaveIssueOutcome(1, invalid_boolean, "done")
     with pytest.raises(IssueWaveValidationError):
         WaveIssueOutcome(1, True, "")
     with pytest.raises(IssueWaveValidationError):
@@ -142,6 +144,7 @@ def test_wave_value_objects_fail_closed_on_invalid_data() -> None:
 
 def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
     """Selections, receipts, generations, and completion pins cannot drift."""
+    invalid_status: Any = "unknown"
     outcome = WaveIssueOutcome(1, True, "done")
     receipt = WaveMergeReceipt(1, 2, HEAD, MERGE)
     with pytest.raises(IssueWaveValidationError):
@@ -156,7 +159,7 @@ def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
     with pytest.raises(IssueWaveValidationError):
         WaveCheckpoint("org", "repo", 0, "active", (record,))
     with pytest.raises(IssueWaveValidationError):
-        WaveCheckpoint("org", "repo", 1, "unknown", (record,))
+        WaveCheckpoint("org", "repo", 1, invalid_status, (record,))
     with pytest.raises(IssueWaveValidationError):
         WaveCheckpoint("org", "repo", 1, "active", ())
     with pytest.raises(IssueWaveValidationError):

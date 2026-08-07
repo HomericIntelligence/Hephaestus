@@ -223,7 +223,12 @@ class RepoStage(Stage):
         main_sha = item.payload.get(SYNCED_MAIN_SHA_KEY)
         requested = getattr(ctx.config, "issue_limit", None)
         repo_root = Path(str(ctx.paths.repo_root))
-        if ctx.dry_run and not is_wave_commit_sha(main_sha) and requested is None and not repo_root.is_dir():  # noqa: E501
+        if (
+            ctx.dry_run
+            and not is_wave_commit_sha(main_sha)
+            and requested is None
+            and not repo_root.is_dir()
+        ):
             # A preview without a materialized checkout cannot inspect a
             # repository checkpoint. Preserve ordinary dry-run behavior, but
             # fail closed when the operator explicitly requested a wave.
