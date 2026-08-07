@@ -12,10 +12,8 @@ from hephaestus.github.pr_merge import (
     _enqueue_pr,
     _is_merge_queue_error,
     _merge_pr,
-    checks_success_and_log,
     detect_repo_from_remote,
     handle_merge_result,
-    legacy_status_and_log,
     local_branch_exists,
     run_git_cmd,
     try_push_head_branch,
@@ -144,138 +142,6 @@ class TestRunGitCmd:
         mock_logger.info.assert_called_once_with("$ %s", "git status")
 
 
-class TestChecksSuccessAndPrint:
-    """Tests for checks_success_and_log."""
-
-    def _make_check_run(self, name: str, status: str, conclusion: str | None) -> MagicMock:
-        cr = MagicMock()
-        cr.name = name
-        cr.status = status
-        cr.conclusion = conclusion
-        return cr
-
-    def test_all_success_returns_true(self) -> None:
-        """Returns (True, checks) when all check runs succeed."""
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            self._make_check_run("test", "completed", "success"),
-            self._make_check_run("lint", "completed", "success"),
-        ]
-        success, checks = checks_success_and_log(commit)
-        assert success is True
-        assert len(checks) == 2
-
-    def test_failure_conclusion_returns_false(self) -> None:
-        """Returns (False, checks) when any check has a bad conclusion."""
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            self._make_check_run("test", "completed", "success"),
-            self._make_check_run("ci", "completed", "failure"),
-        ]
-        success, _checks = checks_success_and_log(commit)
-        assert success is False
-
-    def test_in_progress_check_returns_false(self) -> None:
-        """Returns (False, checks) when a check is not completed."""
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            self._make_check_run("test", "in_progress", None),
-        ]
-        success, _checks = checks_success_and_log(commit)
-        assert success is False
-
-    def test_no_checks_returns_none(self) -> None:
-        """Returns (None, []) when there are no check runs."""
-        commit = MagicMock()
-        commit.get_check_runs.return_value = []
-        success, checks = checks_success_and_log(commit)
-        assert success is None
-        assert checks == []
-
-    def test_exception_returns_none(self) -> None:
-        """Returns (None, []) when get_check_runs raises."""
-        commit = MagicMock()
-        commit.get_check_runs.side_effect = Exception("API error")
-        success, checks = checks_success_and_log(commit)
-        assert success is None
-        assert checks == []
-
-    def test_skipped_conclusion_not_treated_as_bad(self) -> None:
-        """'skipped' conclusion does not block success."""
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            self._make_check_run("test", "completed", "success"),
-            self._make_check_run("optional", "completed", "skipped"),
-        ]
-        success, _ = checks_success_and_log(commit)
-        # 'skipped' is not in the bad set, and 'success' was seen, so True
-        assert success is True
-
-    def test_all_skipped_no_success_returns_false(self) -> None:
-        """Returns False when all checks are 'skipped' (no success seen)."""
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [
-            self._make_check_run("optional", "completed", "skipped"),
-        ]
-        success, _ = checks_success_and_log(commit)
-        assert success is False
-
-
-class TestLegacyStatusAndPrint:
-    """Tests for legacy_status_and_log."""
-
-    def test_returns_state_on_success(self) -> None:
-        """Returns 'success' when combined status is success."""
-        commit = MagicMock()
-        combined = MagicMock()
-        combined.state = "success"
-        combined.statuses = []
-        commit.get_combined_status.return_value = combined
-        result = legacy_status_and_log(commit)
-        assert result == "success"
-
-    def test_returns_failure_state(self) -> None:
-        """Returns 'failure' when combined status is failure."""
-        commit = MagicMock()
-        combined = MagicMock()
-        combined.state = "failure"
-        combined.statuses = []
-        commit.get_combined_status.return_value = combined
-        result = legacy_status_and_log(commit)
-        assert result == "failure"
-
-    def test_returns_unknown_on_exception(self) -> None:
-        """Returns 'unknown' when get_combined_status raises."""
-        commit = MagicMock()
-        commit.get_combined_status.side_effect = Exception("API error")
-        result = legacy_status_and_log(commit)
-        assert result == "unknown"
-
-    def test_returns_unknown_when_state_is_none(self) -> None:
-        """Returns 'unknown' when combined state is None."""
-        commit = MagicMock()
-        combined = MagicMock()
-        combined.state = None
-        combined.statuses = []
-        commit.get_combined_status.return_value = combined
-        result = legacy_status_and_log(commit)
-        assert result == "unknown"
-
-    def test_logs_each_status_context(self) -> None:
-        """Iterates over statuses and logs each context."""
-        commit = MagicMock()
-        combined = MagicMock()
-        combined.state = "pending"
-        ctx = MagicMock()
-        ctx.context = "ci/test"
-        ctx.state = "pending"
-        ctx.description = "running"
-        combined.statuses = [ctx]
-        commit.get_combined_status.return_value = combined
-        result = legacy_status_and_log(commit)
-        assert result == "pending"
-
-
 class TestLocalBranchExists:
     """Tests for local_branch_exists."""
 
@@ -368,7 +234,7 @@ class TestProcessPr:
         pushes: list[tuple[str, bool]] = []
         merges: list[tuple[str, int, str, str, bool]] = []
 
-        monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", lambda *args: True)
+        monkeypatch.setattr(pr_merge_module, "_checks_pass_and_log", lambda *args: True)
         monkeypatch.setattr(
             pr_merge_module,
             "try_push_head_branch",
@@ -404,7 +270,7 @@ class TestProcessPr:
         """PRs without a head SHA skip check and merge work."""
         check = MagicMock()
         merge = MagicMock()
-        monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", check)
+        monkeypatch.setattr(pr_merge_module, "_checks_pass_and_log", check)
         monkeypatch.setattr(pr_merge_module, "_attempt_pr_merge", merge)
 
         outcome = pr_merge_module._process_pr(
@@ -446,7 +312,7 @@ class TestProcessPr:
             events.append("merge")
             return pr_merge_module._PrMergeOutcome(1, pr_merge_module._MergeStatus.MERGED, "merged")
 
-        monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", checks)
+        monkeypatch.setattr(pr_merge_module, "_checks_pass_and_log", checks)
         monkeypatch.setattr(pr_merge_module, "try_push_head_branch", push)
         monkeypatch.setattr(pr_merge_module, "_attempt_pr_merge", merge)
 
@@ -501,7 +367,7 @@ class TestMergeBatchOutcomes:
         assert pr_merge_module._merge_exit_code(outcomes, requested=2) == 1
 
     def test_all_eligible_prs_in_dry_run_are_skipped_and_exit_zero(self, monkeypatch) -> None:
-        monkeypatch.setattr(pr_merge_module, "_checks_pass_or_legacy", lambda *_args: True)
+        monkeypatch.setattr(pr_merge_module, "_checks_pass_and_log", lambda *_args: True)
         merge = MagicMock()
         monkeypatch.setattr(pr_merge_module, "_merge_pr", merge)
 
@@ -642,13 +508,63 @@ class TestMain:
         assert len(mock_gh_call.call_args_list) == 3
         mock_push.assert_not_called()
 
+    def test_no_check_runs_block_merge_even_when_legacy_status_would_succeed(
+        self,
+        monkeypatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Missing current checks cannot be authorized by a legacy success."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            calls.append(args)
+            if args[:2] == ["repo", "view"]:
+                return _gh_result({"nameWithOwner": "owner/repo"})
+            if args[:2] == ["pr", "list"]:
+                return _gh_result(
+                    [
+                        {
+                            "number": 1,
+                            "headRefName": "feature",
+                            "headRefOid": "abc123",
+                            "baseRefName": "main",
+                        }
+                    ]
+                )
+            if args[:2] == ["pr", "checks"]:
+                raise subprocess.CalledProcessError(
+                    1,
+                    args,
+                    stderr="no checks reported on branch",
+                )
+            if args == ["api", "/repos/owner/repo/commits/abc123/status"]:
+                return _gh_result({"state": "success", "statuses": []})
+            if args[:3] == ["api", "-X", "PUT"]:
+                return _gh_result({"merged": True, "sha": "def456", "message": "ok"})
+            raise AssertionError(f"Unexpected gh call: {args}")
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+        monkeypatch.setattr(pr_merge_module, "run_git_cmd", MagicMock())
+        monkeypatch.setattr(pr_merge_module, "try_push_head_branch", MagicMock())
+        monkeypatch.setattr(pr_merge_module, "detect_repo_from_remote", lambda: "owner/repo")
+        monkeypatch.setattr("sys.argv", ["prog"])
+
+        assert pr_merge_module.main() == 1
+        assert ["api", "/repos/owner/repo/commits/abc123/status"] not in calls
+        assert not any(args[:3] == ["api", "-X", "PUT"] for args in calls)
+        assert "No check runs reported for PR #1; refusing merge" in caplog.text
+
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     @patch("hephaestus.github.pr_merge.gh_call")
-    def test_falls_back_to_legacy_status_when_no_check_runs(
-        self, mock_gh_call, _mock_git, _mock_push
+    def test_check_run_error_blocks_merge_and_logs_error(
+        self,
+        mock_gh_call,
+        _mock_git,
+        mock_push,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """main() uses legacy status when no check runs found."""
+        """An error querying current checks blocks the merge."""
         mock_gh_call.side_effect = [
             _gh_result({"nameWithOwner": "owner/repo"}),
             _gh_result(
@@ -661,26 +577,19 @@ class TestMain:
                     }
                 ]
             ),
-            subprocess.CalledProcessError(
-                1, ["gh", "pr", "checks"], stderr="no checks reported on branch"
-            ),
-            _gh_result({"state": "success", "statuses": []}),
-            _gh_result({"merged": True, "sha": "def456", "message": "ok"}),
+            RuntimeError("checks unavailable"),
         ]
-        with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
+
+        with patch(
+            "hephaestus.github.pr_merge.detect_repo_from_remote",
+            return_value="owner/repo",
+        ):
             with patch("sys.argv", ["prog"]):
-                from hephaestus.github.pr_merge import main
+                assert pr_merge_module.main() == 1
 
-                assert main() == 0
-
-        legacy_status_args = mock_gh_call.call_args_list[3].args[0]
-        assert legacy_status_args == ["api", "/repos/owner/repo/commits/abc123/status"]
-        assert mock_gh_call.call_args_list[-1].args[0][:4] == [
-            "api",
-            "-X",
-            "PUT",
-            "/repos/owner/repo/pulls/1/merge",
-        ]
+        assert mock_gh_call.call_count == 3
+        mock_push.assert_not_called()
+        assert "Error getting check runs for PR #1: checks unavailable" in caplog.text
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
