@@ -4568,6 +4568,7 @@ class TestReadSurface:
                             "title": "docs(policy): current metadata",
                             "body": "Closes #1899\n",
                             "headRefOid": "a" * 40,
+                            "baseRefOid": "b" * 40,
                             "baseRefName": "main",
                         }
                     )
@@ -4584,6 +4585,7 @@ class TestReadSurface:
             "pr_title": "docs(policy): current metadata",
             "pr_description": "Closes #1899\n",
             "pr_head_sha": "a" * 40,
+            "pr_base_sha": "b" * 40,
             "pr_base_branch": "main",
         }
         assert calls == [
@@ -4592,7 +4594,7 @@ class TestReadSurface:
                 "view",
                 "1984",
                 "--json",
-                "title,body,headRefOid,baseRefName",
+                "title,body,headRefOid,baseRefOid,baseRefName",
                 "--repo",
                 "org/repo-a",
             ],
@@ -4612,6 +4614,7 @@ class TestReadSurface:
                         "title": "current title",
                         "body": "Closes #1899",
                         "headRefOid": "a" * 40,
+                        "baseRefOid": "b" * 40,
                         "baseRefName": "main",
                     }
                 )

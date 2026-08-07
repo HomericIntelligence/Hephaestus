@@ -711,6 +711,7 @@ class TestPrReviewStageStep:
                 "pr_diff": "diff --git a/a.py b/a.py\n+new\n",
                 "pr_description": "Closes #1",
                 "pr_head_sha": "a" * 40,
+                "pr_base_sha": "b" * 40,
                 "pr_base_branch": "main",
             }
         )
@@ -729,6 +730,7 @@ class TestPrReviewStageStep:
             "worktree_path": "/tmp/repo/review-worktree",
             "branch": "review-branch",
             "expected_head_sha": "a" * 40,
+            "expected_base_sha": "b" * 40,
             "base_branch": "main",
             "pr_number": 1001,
         }
@@ -981,7 +983,7 @@ class TestPrReviewStageStep:
             "branch_name": "review-pr",
             "refresh_base": False,
             "isolated": True,
-            "sync_to_remote": True,
+            "sync_to_remote": False,
             "pr_number": 1001,
             "repo_root": str(ctx.paths.repo_root),
         }

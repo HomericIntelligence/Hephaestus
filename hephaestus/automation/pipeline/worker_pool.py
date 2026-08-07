@@ -2645,12 +2645,19 @@ class WorkerPool:
         worktree = Path(str(job.kwargs.get("worktree_path") or ""))
         branch = str(job.kwargs.get("branch") or "")
         expected_head = str(job.kwargs.get("expected_head_sha") or "")
+        expected_base = str(job.kwargs.get("expected_base_sha") or "")
         base_branch = str(job.kwargs.get("base_branch") or "main")
         pr_number = job.kwargs.get("pr_number")
-        if not worktree.is_dir() or not branch or not expected_head or not base_branch:
+        if (
+            not worktree.is_dir()
+            or not branch
+            or not _is_full_commit_sha(expected_head)
+            or not _is_full_commit_sha(expected_base)
+            or not base_branch
+        ):
             return JobResult(
                 ok=False,
-                error="review checkout requires worktree, branch, base branch, and head",
+                error="review checkout requires worktree, branch, exact base/head, and base branch",
             )
         if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
             return JobResult(ok=True, value={"ready": False, "reason": "dirty"})
@@ -2676,12 +2683,14 @@ class WorkerPool:
             timeout=job.timeout_s,
         )
         base = git_utils.run(
-            ["git", "rev-parse", f"origin/{base_branch}"],
+            ["git", "rev-parse", "FETCH_HEAD"],
             cwd=worktree,
             timeout=job.timeout_s,
         ).stdout.strip()
-        if not base:
+        if not _is_full_commit_sha(base):
             return JobResult(ok=False, error="review checkout base ref unavailable")
+        if base != expected_base:
+            return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,
