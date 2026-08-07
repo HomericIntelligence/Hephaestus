@@ -8,10 +8,8 @@ import pytest
 
 from hephaestus.github import pr_merge as pr_merge_module
 from hephaestus.github.pr_merge import (
-    checks_success_and_log,
     detect_repo_from_remote,
     handle_merge_result,
-    legacy_status_and_log,
     local_branch_exists,
     run_git_cmd,
     try_push_head_branch,
@@ -107,84 +105,6 @@ class TestRunGitCmd:
         """Non-dry-run execution is delegated to the shared git helper."""
         run_git_cmd(["git", "status"], dry_run=False)
         mock_run.assert_called_once_with(["git", "status"], cwd=None, dry_run=False)
-
-
-class TestChecksSuccessAndPrint:
-    """Tests for checks_success_and_log."""
-
-    def test_all_checks_successful(self):
-        """Returns True when all checks succeed."""
-        mock_commit = MagicMock()
-        check1 = MagicMock(name="check1", status="completed", conclusion="success")
-        check1.name = "test"
-        mock_commit.get_check_runs.return_value = [check1]
-
-        success, checks = checks_success_and_log(mock_commit)
-        assert success is True
-        assert len(checks) == 1
-
-    def test_check_with_failure_conclusion(self):
-        """Returns False when a check has 'failure' conclusion."""
-        mock_commit = MagicMock()
-        check1 = MagicMock(status="completed", conclusion="failure")
-        check1.name = "test"
-        mock_commit.get_check_runs.return_value = [check1]
-
-        success, _ = checks_success_and_log(mock_commit)
-        assert success is False
-
-    def test_check_not_completed(self):
-        """Returns False when a check is not yet completed."""
-        mock_commit = MagicMock()
-        check1 = MagicMock(status="in_progress", conclusion=None)
-        check1.name = "test"
-        mock_commit.get_check_runs.return_value = [check1]
-
-        success, _ = checks_success_and_log(mock_commit)
-        assert success is False
-
-    def test_no_checks_returns_none(self):
-        """Returns (None, []) when there are no check runs."""
-        mock_commit = MagicMock()
-        mock_commit.get_check_runs.return_value = []
-
-        success, checks = checks_success_and_log(mock_commit)
-        assert success is None
-        assert checks == []
-
-    def test_check_run_exception_returns_none(self):
-        """Returns (None, []) when get_check_runs raises."""
-        mock_commit = MagicMock()
-        mock_commit.get_check_runs.side_effect = Exception("API error")
-
-        success, checks = checks_success_and_log(mock_commit)
-        assert success is None
-        assert checks == []
-
-
-class TestLegacyStatusAndPrint:
-    """Tests for legacy_status_and_log."""
-
-    def test_returns_state_string(self):
-        """Returns the combined status state."""
-        mock_commit = MagicMock()
-        mock_commit.get_combined_status.return_value = MagicMock(statuses=[], state="success")
-        result = legacy_status_and_log(mock_commit)
-        assert result == "success"
-
-    def test_returns_unknown_on_exception(self):
-        """Returns 'unknown' when API raises an exception."""
-        mock_commit = MagicMock()
-        mock_commit.get_combined_status.side_effect = Exception("API error")
-        result = legacy_status_and_log(mock_commit)
-        assert result == "unknown"
-
-    def test_returns_unknown_when_state_is_none(self):
-        """Returns 'unknown' when state is None."""
-        mock_commit = MagicMock()
-        mock_commit.get_combined_status.return_value = MagicMock(statuses=[], state=None)
-        result = legacy_status_and_log(mock_commit)
-        assert result == "unknown"
 
 
 class TestHandleMergeResult:
