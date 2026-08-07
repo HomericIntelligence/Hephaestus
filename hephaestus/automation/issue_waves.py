@@ -588,11 +588,17 @@ class IssueWaveStore:
             )
 
         if requested_limit == current.limit:
-            resume_requires_ancestry = current_main_sha != current.base_main_sha
-            if resume_requires_ancestry and not current.merge_receipts and not current.complete:
+            main_advanced = current_main_sha != current.base_main_sha
+            partial_receipt_resume = bool(current.merge_receipts) and not current.complete
+            if main_advanced and not current.merge_receipts and not current.complete:
                 raise IssueWaveBlockedError(
                     "active issue wave advanced without a recorded loop-owned merge receipt"
                 )
+            # A partial receipt is authorization to retry the sealed remainder,
+            # but only after the host revalidates both Git ancestry and fresh
+            # GitHub merge facts.  Revalidate even when a stale local main still
+            # equals the wave base; the receipt's merge SHA must be on main.
+            resume_requires_ancestry = main_advanced or partial_receipt_resume
             if current.complete and current.passed and current.limit is None:
                 return WaveAdmissionPlan(
                     "audit",

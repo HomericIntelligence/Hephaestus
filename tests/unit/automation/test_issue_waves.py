@@ -79,6 +79,10 @@ def test_partial_two_issue_wave_resumes_after_first_merge_advances_main(
         merge_sha=NEXT_MERGE,
     )
 
+    stale_main_resume = store.plan_admission(NEXT_BASE, 2)
+    assert stale_main_resume.requires_ancestry
+    assert stale_main_resume.ancestor_shas == (NEXT_BASE, NEXT_MERGE)
+
     resumed = IssueWaveStore(tmp_path, "acme", "hephaestus").plan_admission(NEXT_MERGE, 2)
 
     assert resumed.mode == "resume"
@@ -125,6 +129,14 @@ def test_partial_two_issue_wave_resumes_after_first_merge_advances_main(
 
     assert isinstance(continued, Continue)
     assert continued.next_state == "LABELS"
+
+    missing_proof = resume_item()
+    missing_proof.payload.pop(WAVE_ANCESTRY_VERIFIED_KEY)
+    result = RepoStage().step(missing_proof, ctx)
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.FINISH_FAIL
+    assert "ancestry verification proof is missing" in result.note
 
     facts_by_issue[19] = SimpleNamespace(**{**vars(merged_facts), "pr_is_merged": False})
     result = RepoStage().step(resume_item(), ctx)
