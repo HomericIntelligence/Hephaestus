@@ -12,9 +12,12 @@ metric catalog, alert ownership, or SLOs.
 
 The metric and alert names below are drift-guarded against the code by
 `tests/unit/docs/test_observability_doc.py`: every `hephaestus_*` metric emitted
-by `hephaestus/automation/pipeline/coordinator.py` and every alert rule defined
-in `hephaestus/observability/alerts.py` must appear here, so this catalog cannot
-silently fall out of sync with what the pipeline actually exposes.
+by `hephaestus/automation/pipeline/coordinator_runtime.py` or
+`hephaestus/observability/metrics.py` and every alert rule defined in
+`hephaestus/observability/alerts.py` must appear here, so this catalog cannot
+silently fall out of sync with what the pipeline actually exposes. The same
+guard checks the documented finite domains and caps against the runtime policy
+constants.
 
 ## Enabling monitoring
 
@@ -53,19 +56,30 @@ threshold defaults to `3`, matching the coordinator's own
 
 All metrics are namespaced `hephaestus_`. Gauges reflect the latest tick's
 value; counters accumulate over the coordinator process lifetime. Source column
-points at the emission chokepoint in `coordinator.py`.
+points at the emission chokepoint in `coordinator_runtime.py`.
 
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `hephaestus_pipeline_queue_depth` | gauge | `stage` | Queued work items waiting in each stage queue. |
-| `hephaestus_pipeline_inflight_jobs` | gauge | — | Jobs currently owned by the worker pool. |
-| `hephaestus_pipeline_inflight_per_repo` | gauge | `repo` | In-flight jobs partitioned by repository. |
-| `hephaestus_pipeline_loops_total` | gauge | — | Reseed passes run by this coordinator process. |
-| `hephaestus_pipeline_stalled_ticks` | gauge | — | Consecutive drain ticks without pipeline progress. |
-| `hephaestus_circuit_breaker_state` | gauge | `name`, `state` | Circuit-breaker lifecycle state (the active state has value `1`, others `0`). |
-| `hephaestus_pipeline_alert_active` | gauge | `name` | Whether a named alert condition is currently active (`1`) or resolved (`0`). |
-| `hephaestus_pipeline_jobs_total` | counter | `stage`, `outcome` | Completed jobs by stage and outcome (`ok`, `failed`, `interrupted`). |
-| `hephaestus_pipeline_agent_job_seconds_total` | counter | — | Cumulative agent-job wall-clock seconds (negative durations clamped to `0`). |
+| Metric | Type | Labels and allowed values | Series cap | Meaning |
+| --- | --- | --- | ---: | --- |
+| `hephaestus_pipeline_queue_depth` | gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `finished` | 7 | Queued work items waiting in each stage queue. |
+| `hephaestus_pipeline_inflight_jobs` | gauge | — | 1 | Jobs currently owned by the worker pool. |
+| `hephaestus_pipeline_inflight_per_repo` | gauge | `repo`: open repository names | 100 | In-flight jobs partitioned by repository. |
+| `hephaestus_pipeline_loops_total` | gauge | — | 1 | Reseed passes run by this coordinator process. |
+| `hephaestus_pipeline_stalled_ticks` | gauge | — | 1 | Consecutive drain ticks without pipeline progress. |
+| `hephaestus_circuit_breaker_state` | gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | Circuit-breaker lifecycle state (the active state has value `1`, others `0`). |
+| `hephaestus_pipeline_alert_active` | gauge | `name`: `circuit_breaker_open`, `queue_depth_exceeds`, `pipeline_stalled` | 3 | Whether a named alert condition is currently active (`1`) or resolved (`0`). |
+| `hephaestus_pipeline_jobs_total` | counter | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `finished`; `outcome`: `ok`, `failed`, `interrupted` | 21 | Completed jobs by stage and outcome. |
+| `hephaestus_pipeline_agent_job_seconds_total` | counter | — | 1 | Cumulative agent-job wall-clock seconds (negative durations clamped to `0`). |
+| `hephaestus_metrics_series_overflow_total` | counter | `family`: overflowing registered metric-family name | one per overflowing family | New metric-series updates discarded after a family cap. |
+
+Every metric family has a cap. The registry default is 100 series, while
+pipeline families above use the smaller explicit caps shown here. An admitted
+label tuple remains updateable; a new tuple after the cap is dropped without
+evicting an existing tuple or failing its producer. The overflow counter is
+absent until the first rejected update, then exposes one series per overflowing
+family. Independently of tuple cardinality, each label value is limited to
+1,024 bytes after Prometheus escaping and UTF-8 encoding. Oversized values are
+rejected before either a finite allowed-value domain or a metric sample can
+retain them. Low-cardinality families retain their existing exposition format.
 
 ## Alerts
 

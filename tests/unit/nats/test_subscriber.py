@@ -105,6 +105,10 @@ class TestNATSSubscriberThread:
         assert 'hephaestus_nats_subscriber_errors_total{kind="connection"} 1' in rendered
         assert 'hephaestus_nats_subscriber_errors_total{kind="handler"} 1' in rendered
         assert 'hephaestus_nats_subscriber_errors_total{kind="decode"} 1' in rendered
+        with pytest.raises(ValueError, match="not allowed"):
+            registry.counter("hephaestus_nats_subscriber_errors_total").inc(
+                labels={"kind": "adversarial"}
+            )
 
 
 class TestSubscriberStateEnum:

@@ -81,6 +81,20 @@ def test_coordinator_bounds_diagnostics_and_keeps_full_terminal_aggregates(
     assert coordinator._exit_code() == 1
 
 
+def test_coordinator_metric_policy_rejects_unknown_stage(tmp_path: Path) -> None:
+    """The coordinator's queue-depth family rejects undeclared stages."""
+    coordinator = _coordinator(tmp_path)
+    coordinator._emit_observability_tick()
+    registry = coordinator._metrics_registry
+    assert registry is not None
+
+    with pytest.raises(ValueError, match="not allowed"):
+        registry.gauge("hephaestus_pipeline_queue_depth").set(
+            1,
+            labels={"stage": "adversarial"},
+        )
+
+
 class _TerminalStage:
     """Return one terminal outcome per re-seeded planning item."""
 
