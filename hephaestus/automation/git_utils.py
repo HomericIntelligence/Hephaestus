@@ -329,12 +329,21 @@ def reserve_remote_branch_if_absent(
     begin writing its deterministic implementation branch.  An empty
     ``--force-with-lease`` expectation makes the receive-pack reject a branch
     that appeared after the caller's local inspection.
+
+    This metadata-only push is the sole automation push that uses
+    ``--no-verify``.  It publishes an already-resolved base commit, not agent
+    changes, so running a repository pre-push suite cannot validate anything
+    new and can make branch claiming depend on ambient checkout artifacts.  The
+    later implementation push does not use this exception and remains subject
+    to every configured hook.  Git pre-commit hooks are unaffected because
+    this function creates no commit.
     """
     try:
         run(
             [
                 "git",
                 "push",
+                "--no-verify",
                 f"--force-with-lease=refs/heads/{branch_name}:",
                 "origin",
                 f"{base_sha}:refs/heads/{branch_name}",
