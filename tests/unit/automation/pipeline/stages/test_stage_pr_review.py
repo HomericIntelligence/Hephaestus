@@ -2088,10 +2088,30 @@ class TestPrReviewStageStep:
             "argv": list(request.job.argv),
             "path": "tests/performance/test_worker_pool_load.py",
             "head_sha": "a" * 40,
+            "failure_kind": "test",
             "error": "rc=1",
             "stdout_tail": "",
             "stderr_tail": "1 failed in 0.44s",
         }
+        comments = [
+            comment.body if isinstance(comment, IssueComment) else comment
+            for comment in ctx.github.comments[1001]
+        ]
+        assert len(comments) == 1
+        comment = comments[0]
+        assert comment.startswith("<!-- hephaestus-host-verification-failure:")
+        assert "a" * 40 in comment
+        assert "tests/performance/test_worker_pool_load.py" in comment
+        assert "uv run pytest" in comment
+        assert "**Failure classification**\n\n    test" in comment
+        assert "1 failed in 0.44s" in comment
+
+        assert stage.step(item, ctx) == Continue(next_state="ADDRESS_WAIT")
+        repeated_comments = [
+            entry.body if isinstance(entry, IssueComment) else entry
+            for entry in ctx.github.comments[1001]
+        ]
+        assert repeated_comments == comments
         assert "review_audit_failure" not in item.payload
 
     def test_timed_out_host_verification_writes_no_go_and_routes_to_address(
@@ -2185,6 +2205,49 @@ class TestPrReviewStageStep:
             "unsupported_host_verification_boundary"
         )
         assert "review_audit_failure" not in item.payload
+
+    def test_host_failure_comment_error_preserves_no_go_and_fails_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A missing diagnostic comment cannot silently enter remediation."""
+
+        class CommentFailureGitHub(FakeStageGitHub):
+            def upsert_issue_comment(self, *_args: Any, **_kwargs: Any) -> None:
+                raise RuntimeError("comment unavailable")
+
+        github = CommentFailureGitHub()
+        stage = PrReviewStage()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "diff --git a/hephaestus/example.py b/hephaestus/example.py\n",
+            }
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        item.state = request.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rc=1",
+                stdout_tail="failure",
+                value={
+                    "head_sha": "a" * 40,
+                    "immutable_source": True,
+                    "failure_kind": "validation",
+                },
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "host_verification_comment_failed"
+        )
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_forged_diff_content_cannot_trigger_host_verification(
         self, make_ctx: Any, make_work_item: Any
