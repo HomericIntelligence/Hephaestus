@@ -966,6 +966,13 @@ rather than running PR code outside that boundary. A Linux or Windows backend
 must be added as a separately reviewed isolation implementation; there is no
 unsandboxed fallback.
 
+Every host-verification failure also upserts an automation-owned diagnostic on
+the pull request after the exact-head NOGO label is read back. The comment is
+keyed by reviewed head and fixed verification ID, so an identical retry updates
+instead of spamming the PR. It records the command, affected path, failure
+classification, and bounded output tails; it is informational and never grants
+implementation authorization.
+
 #### Boundary diagram
 
 ```mermaid
@@ -998,8 +1005,8 @@ stateDiagram-v2
     Checkout --> Validate: comment-validation entry and clean snapshot matches H
     Checkout --> HostVerification: clean checkout matches snapshot head and fixed check is required
     HostVerification --> Review: immutable snapshot verification passed
-    HostVerification --> Implementation: confirmed test failure, after durable no-go and checkout cleanup
-    HostVerification --> Failed: boundary/setup failure, after checkout cleanup
+    HostVerification --> Implementation: confirmed test failure, after durable no-go, diagnostic, and checkout cleanup
+    HostVerification --> Failed: boundary/setup failure, after durable no-go diagnostic and checkout cleanup
     Checkout --> Review: clean checkout matches snapshot head, no fixed check required
     Checkout --> Failed: checkout or head drift; cleanup then a later loop gets a new snapshot
     Review --> Validate: review produced
@@ -1626,7 +1633,7 @@ collaborators have one-way dependencies and own explicit responsibilities:
 |---|---|---|
 | [`pipeline/coordinator.py`](../hephaestus/automation/pipeline/coordinator.py) | `coordinator_contract.py`, `coordinator_types.py`, `coordinator_runtime.py`, `coordinator_sources.py`, `coordinator_dispatch.py` | static host contract; configuration/types; event-loop runtime; source cursors; implementation admission |
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
-| [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification; jobs/worktrees; GO/NO-GO gate |
+| [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification and diagnostics; jobs/worktrees; GO/NO-GO gate |
 | [`ci_fix_orchestrator.py`](../hephaestus/automation/ci_fix_orchestrator.py) | `ci_fix_contract.py`, [`ci_fix_sessions.py`](../hephaestus/automation/ci_fix_sessions.py), [`ci_fix_push_guard.py`](../hephaestus/automation/ci_fix_push_guard.py) | static host contract; provider/session lifecycle; head/test/metadata/push safety |
 
 The source budgets are executable in
