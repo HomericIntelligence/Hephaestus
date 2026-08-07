@@ -23,12 +23,22 @@ from hephaestus.automation.issue_waves import (
     wave_entry_from_facts,
 )
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import SeedEntry
+from hephaestus.automation.pipeline.stages.base import Continue, StageOutcome
+from hephaestus.automation.pipeline.stages.repo import (
+    SYNCED_MAIN_SHA_KEY,
+    WAVE_ANCESTRY_VERIFIED_KEY,
+    WAVE_PLAN_KEY,
+    RepoStage,
+)
+from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 
 BASE = "a" * 40
 HEAD = "b" * 40
 MERGE = "c" * 40
+NEXT_BASE = "d" * 40
+NEXT_MERGE = "e" * 40
 
 
 def test_wave_selection_reopens_and_preserves_order(tmp_path: Path) -> None:
@@ -41,6 +51,87 @@ def test_wave_selection_reopens_and_preserves_order(tmp_path: Path) -> None:
     resumed = reopened.plan_admission(BASE, 1)
     assert resumed.mode == "resume"
     assert resumed.lease == lease
+
+
+def test_partial_two_issue_wave_resumes_after_first_merge_advances_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash after one merge retains the sealed remainder behind fresh checks."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    first = store.seal_selection(store.plan_admission(BASE, 1), [7])
+    store.record_merge_receipt(
+        first,
+        issue_number=7,
+        pr_number=17,
+        reviewed_head_sha=HEAD,
+        merge_sha=NEXT_BASE,
+    )
+    store.record_terminal_outcome(first, issue_number=7, passed=True, reason="merged", pr_number=17)
+    store.verify_prior_wave(first, current_main_sha=NEXT_BASE, ancestry_verified=True)
+
+    second = store.seal_selection(store.plan_admission(NEXT_BASE, 2), [19, 20])
+    store.record_merge_receipt(
+        second,
+        issue_number=19,
+        pr_number=29,
+        reviewed_head_sha=HEAD,
+        merge_sha=NEXT_MERGE,
+    )
+
+    resumed = IssueWaveStore(tmp_path, "acme", "hephaestus").plan_admission(NEXT_MERGE, 2)
+
+    assert resumed.mode == "resume"
+    assert resumed.lease == second
+    assert resumed.requires_ancestry
+    assert resumed.ancestor_shas == (NEXT_BASE, NEXT_MERGE)
+
+    merged_facts = SimpleNamespace(
+        number=19,
+        labels=set(),
+        is_epic=False,
+        pr_number=29,
+        pr_is_merged=True,
+        issue_is_closed=False,
+    )
+    facts_by_issue = {19: merged_facts}
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.stages.repo._seeding.seed_issue_from_github",
+        lambda number, github: facts_by_issue[number],
+    )
+
+    def resume_item() -> WorkItem:
+        return WorkItem(
+            repo="hephaestus",
+            kind=ItemKind.REPO,
+            stage=StageName.REPO,
+            state="WAVE_ADMIT_AFTER_VERIFY",
+            payload={
+                WAVE_PLAN_KEY: resumed,
+                WAVE_ANCESTRY_VERIFIED_KEY: True,
+                SYNCED_MAIN_SHA_KEY: NEXT_MERGE,
+            },
+        )
+
+    ctx: Any = SimpleNamespace(
+        config=SimpleNamespace(issue_limit=2),
+        org="acme",
+        dry_run=False,
+        github=object(),
+        paths=SimpleNamespace(repo_root=tmp_path),
+    )
+
+    continued = RepoStage().step(resume_item(), ctx)
+
+    assert isinstance(continued, Continue)
+    assert continued.next_state == "LABELS"
+
+    facts_by_issue[19] = SimpleNamespace(**{**vars(merged_facts), "pr_is_merged": False})
+    result = RepoStage().step(resume_item(), ctx)
+
+    assert isinstance(result, StageOutcome)
+    assert result.disposition is Disposition.FINISH_FAIL
+    assert "recorded merged PR" in result.note
 
 
 def test_wave_limits_progress_and_require_receipts(tmp_path: Path) -> None:

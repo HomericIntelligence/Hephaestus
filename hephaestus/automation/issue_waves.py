@@ -20,6 +20,7 @@ from typing import Any, Literal, cast
 
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
@@ -587,9 +588,10 @@ class IssueWaveStore:
             )
 
         if requested_limit == current.limit:
-            if current_main_sha != current.base_main_sha and not current.complete:
+            resume_requires_ancestry = current_main_sha != current.base_main_sha
+            if resume_requires_ancestry and not current.merge_receipts and not current.complete:
                 raise IssueWaveBlockedError(
-                    "active issue wave is bound to a different synchronized main revision"
+                    "active issue wave advanced without a recorded loop-owned merge receipt"
                 )
             if current.complete and current.passed and current.limit is None:
                 return WaveAdmissionPlan(
@@ -611,6 +613,8 @@ class IssueWaveStore:
                 expected_generation=checkpoint.generation,
                 wave_index=current.wave_index,
                 lease=lease,
+                requires_ancestry=resume_requires_ancestry,
+                ancestor_shas=(self._ancestry_shas(current) if resume_requires_ancestry else ()),
                 checkpoint=checkpoint,
                 diagnostic="resuming the immutable selected issue identifiers",
             )
@@ -830,6 +834,47 @@ class IssueWaveStore:
             )
             return lease
 
+    @staticmethod
+    def _validate_receipt_facts(
+        record: WaveRecord,
+        facts_by_issue: Mapping[int, Any],
+    ) -> None:
+        """Require every durable receipt to match fresh GitHub merge facts."""
+        for receipt in record.merge_receipts:
+            facts = facts_by_issue.get(receipt.issue_number)
+            if facts is None:
+                raise IssueWaveBlockedError(
+                    f"issue #{receipt.issue_number} lacks fresh merge facts"
+                )
+            labels = set(getattr(facts, "labels", set()))
+            if (
+                bool(getattr(facts, "is_epic", False))
+                or "state:skip" in labels
+                or "state:plan-blocked" in labels
+            ):
+                raise IssueWaveBlockedError(
+                    f"issue #{receipt.issue_number} has an external skip/block override"
+                )
+            if getattr(facts, "pr_number", None) != receipt.pr_number or not bool(
+                getattr(facts, "pr_is_merged", False)
+            ):
+                raise IssueWaveBlockedError(
+                    f"issue #{receipt.issue_number} no longer matches its recorded merged PR"
+                )
+
+    def validate_active_wave_facts(
+        self,
+        lease: WaveLease,
+        facts_by_issue: Mapping[int, Any],
+    ) -> None:
+        """Reconcile an active wave's receipts without requiring completion."""
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveBlockedError("active-wave checkpoint disappeared")
+            record = self._current_record(checkpoint, lease)
+            self._validate_receipt_facts(record, facts_by_issue)
+
     def validate_prior_wave_facts(
         self,
         lease: WaveLease,
@@ -846,7 +891,6 @@ class IssueWaveStore:
                     raise IssueWaveBlockedError(
                         f"issue #{outcome.issue_number} failed in prior wave: {outcome.reason}"
                     )
-                facts = facts_by_issue.get(outcome.issue_number)
                 receipt = next(
                     (
                         item
@@ -855,25 +899,11 @@ class IssueWaveStore:
                     ),
                     None,
                 )
-                if facts is None or receipt is None:
+                if receipt is None:
                     raise IssueWaveBlockedError(
                         f"issue #{outcome.issue_number} lacks a complete loop-owned merge receipt"
                     )
-                labels = set(getattr(facts, "labels", set()))
-                if (
-                    bool(getattr(facts, "is_epic", False))
-                    or "state:skip" in labels
-                    or "state:plan-blocked" in labels
-                ):
-                    raise IssueWaveBlockedError(
-                        f"issue #{outcome.issue_number} has an external skip/block override"
-                    )
-                if getattr(facts, "pr_number", None) != receipt.pr_number or not bool(
-                    getattr(facts, "pr_is_merged", False)
-                ):
-                    raise IssueWaveBlockedError(
-                        f"issue #{outcome.issue_number} no longer matches its recorded merged PR"
-                    )
+            self._validate_receipt_facts(record, facts_by_issue)
 
     def verify_prior_wave(
         self,
@@ -985,12 +1015,11 @@ class IssueWaveStore:
 def wave_entry_from_facts(
     lease: WaveLease,
     facts: Any,
-    entry: Any,
-    *,
+    entry: SeedEntry,
     repo_root: Path,
     org: str,
     repo: str,
-) -> Any:
+) -> SeedEntry:
     """Turn post-seal issue drift into a terminal item without GitHub writes."""
     if facts.number not in lease.issue_numbers:
         return replace(

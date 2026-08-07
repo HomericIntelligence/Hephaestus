@@ -286,6 +286,12 @@ class RepoStage(Stage):
                 Disposition.FINISH_FAIL,
                 note=str(error or "issue-wave ancestry verification failed"),
             )
+        ancestry_verified = bool(item.payload.pop(WAVE_ANCESTRY_VERIFIED_KEY, False))
+        if plan.requires_ancestry and not ancestry_verified:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                note="issue-wave ancestry verification proof is missing",
+            )
         main_sha = str(item.payload.get(SYNCED_MAIN_SHA_KEY) or plan.current_main_sha)
         try:
             store = self._wave_store(item, ctx)
@@ -310,6 +316,18 @@ class RepoStage(Stage):
                 return StageOutcome(Disposition.FINISH_PASS, note=plan.diagnostic or "audit-only")
             if plan.mode == "resume":
                 lease = self._require_lease(plan)
+                if plan.requires_ancestry:
+                    if plan.checkpoint is None:
+                        raise IssueWaveError("resumed issue-wave checkpoint is missing")
+                    receipt_numbers = tuple(
+                        receipt.issue_number
+                        for receipt in plan.checkpoint.current_wave.merge_receipts
+                    )
+                    facts = {
+                        number: _seeding.seed_issue_from_github(number, ctx.github)
+                        for number in receipt_numbers
+                    }
+                    store.validate_active_wave_facts(lease, facts)
             else:
                 prior = plan.checkpoint.current_wave if plan.checkpoint is not None else None
                 if prior is not None:

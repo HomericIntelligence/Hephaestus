@@ -483,13 +483,12 @@ class SourceCoordinator(_CoordinatorHost):
         overlap_enabled: bool,
     ) -> tuple[WorkItem | None, bool]:
         """Classify one source issue and snapshot its overlap reservation."""
-        entry = self._seed_direct_issue_entry(source.repo, issue)
+        entry = self._seed_direct_issue_entry(source.repo, issue, source.wave_lease)
         if entry.stage is None:
             if entry.skip_tag_obligation is not None:
                 self.github.skip_epics({entry.skip_tag_obligation.issue: []})
             logger.info("seed excluded: %s", entry.reason)
             return None, False
-
         item = self._entry_to_item(entry, source.repo)
         if source.wave_lease is not None:
             item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
@@ -715,14 +714,20 @@ class SourceCoordinator(_CoordinatorHost):
         entries.extend(self._seed_direct_pr_scope(repo))
         return entries
 
-    def _seed_direct_issue_entry(self, repo: str, issue: int) -> _seeding.SeedEntry:
-        """Classify one direct issue through its target repository accessor."""
+    def _seed_direct_issue_entry(
+        self, repo: str, issue: int, wave_lease: WaveLease | None = None
+    ) -> _seeding.SeedEntry:
         github = self._ctx_for_repo(repo).github if repo else self.github
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
         facts = _seeding.seed_issue_from_github(issue, github)
+        entry = _seeding.seed_entry_from_facts(facts)
+        if wave_lease is not None:
+            ctx = self._ctx_for_repo(repo)
+            return wave_entry_from_facts(
+                wave_lease, facts, entry, Path(str(ctx.paths.repo_root)), ctx.org, repo
+            )
         if STATE_PLAN_BLOCKED in facts.labels:
             github.ensure_blocked_audit(issue)
-        entry = _seeding.seed_entry_from_facts(facts)
         stage, reason, passed = self._scope_seed_decision(
             issue, entry.stage, entry.reason, scope_stages
         )
