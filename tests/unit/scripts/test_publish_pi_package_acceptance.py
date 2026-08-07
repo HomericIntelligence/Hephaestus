@@ -74,7 +74,7 @@ def _write_inputs(
         },
     }
     catalog.write_text(json.dumps(document), encoding="utf-8")
-    publisher.CATALOG_PATH = catalog
+    publisher.__dict__["CATALOG_PATH"] = catalog
     evidence_document = {
         "schema_version": 1,
         "catalog_sha256": collector.catalog_digest(catalog),

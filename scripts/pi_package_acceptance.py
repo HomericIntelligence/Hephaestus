@@ -44,7 +44,6 @@ FORBIDDEN_MANIFEST_FIELDS = frozenset(
     {"dependencies", "optionalDependencies", "peerDependencies", "scripts"}
 )
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
-_CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
 _ALLOWED_CHILD_ENV = (
     "COMSPEC",
     "HOME",
@@ -610,8 +609,10 @@ def render_issue_comment(evidence: dict[str, Any]) -> str:
             f"- Discovered commands: {', '.join(f'`{command}`' for command in commands)}",
             f"- Archive SHA-256: `{archive.get('sha256')}` ({archive.get('members')} members)",
             "",
-            "This comment was generated from observed collector results; "
-            "the JSON evidence remains untracked.",
+            (
+                "This comment was generated from observed collector results; "
+                + "the JSON evidence remains untracked."
+            ),
             "",
         ]
     )
