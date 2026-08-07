@@ -22,11 +22,15 @@ def test_debian_packages_use_one_immutable_snapshot() -> None:
     ]
     assert repository_lines == [
         "deb [check-valid-until=no] "
-        "http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ "
-        "${VERSION_CODENAME} main",
-        "deb [check-valid-until=no] "
-        "http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ "
-        "${VERSION_CODENAME}-security main",
+        + "http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ "
+        + "${VERSION_CODENAME} main",
+        "".join(
+            (
+                "deb [check-valid-until=no] ",
+                "http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ ",
+                "${VERSION_CODENAME}-security main",
+            )
+        ),
     ]
     assert source.count("[check-valid-until=no]") == 2
     assert "rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*" in source

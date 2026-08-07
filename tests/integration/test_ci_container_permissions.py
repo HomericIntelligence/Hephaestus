@@ -64,8 +64,12 @@ def test_arbitrary_docker_uid_uses_baked_uv_and_writes_bind_artifact(
             CI_IMAGE,
             "bash",
             "-ceu",
-            "test ! -w /opt/hephaestus-venv && "
-            "uv run python -c 'import hephaestus' && touch /artifacts/created",
+            " ".join(
+                (
+                    "test ! -w /opt/hephaestus-venv &&",
+                    "uv run python -c 'import hephaestus' && touch /artifacts/created",
+                )
+            ),
         ],
         text=True,
         capture_output=True,
