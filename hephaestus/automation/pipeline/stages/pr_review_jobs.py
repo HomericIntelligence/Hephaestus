@@ -568,7 +568,7 @@ class PrReviewJobs(_PrReviewHost):
                     verification,
                     str(receipt.get("error") or "host_verification_receipt_invalid"),
                 )
-            if receipt["ok"]:
+            if receipt["ok"] or receipt.get("bypassed") is True:
                 continue
             return self._handle_host_verification_failure(
                 item,
@@ -980,6 +980,7 @@ class PrReviewJobs(_PrReviewHost):
                     else "runner"
                 ),
                 "ok": result.ok,
+                "bypassed": result.error == TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR,
                 "error": result.error or "",
                 "stdout_tail": result.stdout_tail,
                 "stderr_tail": result.stderr_tail,
