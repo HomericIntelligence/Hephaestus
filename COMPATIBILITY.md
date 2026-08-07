@@ -254,7 +254,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 
 | Symbol | Added | Notes |
 |--------|-------|-------|
-| `Colors` | 0.1.0 | ANSI color constants for terminal output |
+| `Colors` | 0.1.0 | ANSI styles; automatic precedence is thread-local `enable()`/`disable()` → non-empty `NO_COLOR` → non-empty `FORCE_COLOR`/non-zero `CLICOLOR_FORCE` → `CLICOLOR=0` → stdout TTY detection. `auto()` restores automatic policy for the calling thread; callers must retain non-color status text or symbols. |
 | `CommandRegistry` | 0.1.0 | Registry type for CLI subcommands |
 | `COMMAND_REGISTRY` | 0.1.0 | Default shared `CommandRegistry` instance |
 | `DRY_RUN_HELP_CAVEAT` | 0.9.0 | Standard help text appended for dry-run flags |
