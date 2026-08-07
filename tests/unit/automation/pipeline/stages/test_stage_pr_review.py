@@ -1900,6 +1900,9 @@ class TestPrReviewStageStep:
             "stdout_tail": result.stdout_tail,
         }
         assert stage_module._host_verification_receipt_matches(receipt, spec, expected_head)
+        assert not stage_module._host_verification_receipt_matches(
+            {**receipt, "ok": False}, spec, expected_head
+        )
         assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
@@ -1948,6 +1951,72 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert result.job.descr == "review_python_ruff_check"
+
+    def test_migration_docs_change_runs_version_currency_host_verification(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """MIGRATION.md release claims receive an exact-head docs guard receipt."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/docs/MIGRATION.md b/docs/MIGRATION.md\n"
+                    "--- a/docs/MIGRATION.md\n"
+                    "+++ b/docs/MIGRATION.md\n"
+                    "@@ -1,4 +1,4 @@\n"
+                    "-old release text\n"
+                    "+new release text\n"
+                ),
+            }
+        )
+
+        request = stage.step(item, ctx)
+
+        expected_argv = (
+            "uv",
+            "run",
+            "pytest",
+            "-o",
+            "addopts=",
+            "tests/unit/docs/test_version_currency.py",
+            "-q",
+            "--tb=short",
+        )
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, BuildTestJob)
+        assert request.job.argv == expected_argv
+        assert request.job.descr == "review_migration_version_currency"
+        assert request.job.expected_head_sha == "a" * 40
+        assert request.job.immutable_source is True
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "head_sha": "a" * 40,
+                    "immutable_source": True,
+                    "failure_kind": "none",
+                },
+                stdout_tail="1 passed in 0.1s",
+            ),
+            ctx,
+        )
+        item.state = request.on_done_state
+        review = stage.step(item, ctx)
+
+        receipt = item.payload["host_verification_receipts"][0]
+        assert receipt["argv"] == list(expected_argv)
+        assert receipt["head_sha"] == "a" * 40
+        assert receipt["ok"] is True
+        assert receipt["immutable_source"] is True
+        assert isinstance(review, JobRequest)
+        assert isinstance(review.job, AgentJob)
+        assert json.loads(review.job.prompt_kwargs["host_verifications_json"]) == [receipt]
 
     def test_integration_changes_do_not_add_a_nonhermetic_host_suite(
         self, make_ctx: Any, make_work_item: Any

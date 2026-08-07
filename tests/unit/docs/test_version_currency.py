@@ -12,6 +12,7 @@ a guard that silently skips is not a guard.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,16 +33,18 @@ def test_migration_md_version_does_not_trail_latest_git_tag() -> None:
     if canonical is None:
         # No vX.Y.Z tag resolvable — almost always a shallow/tagless checkout
         # (e.g. a CI job whose actions/checkout lacks fetch-depth:0 + fetch-tags).
-        # The drift guard can't run without the tag, so skip rather than fail: a
-        # missing-tags ENVIRONMENT is not a doc defect. The required workflows
-        # that gate releases fetch tags, so the guard still runs there.
-        pytest.skip(
-            "Could not resolve the latest vX.Y.Z git tag (tagless/shallow "
-            "checkout); doc-version drift cannot be checked in this environment."
+        # The drift guard cannot validate the release declaration without tags,
+        # so fail loudly rather than recording a green-but-skipped receipt.
+        pytest.fail(
+            "No vX.Y.Z git tag reachable. CI checkout must be deep + tagged: "
+            "run `git fetch --tags` locally; in the workflow set "
+            "`fetch-depth: 0` and `fetch-tags: true` on actions/checkout."
         )
-        return  # unreachable (pytest.skip raises); narrows canonical to str for mypy
+        return  # unreachable (pytest.fail raises); narrows canonical to str for mypy
 
     text = MIGRATION_MD.read_text(encoding="utf-8")
+    # WARNING: this regex is coupled to MIGRATION.md's exact release-status
+    # wording. If that sentence changes, update this pattern in lockstep.
     match = _LATEST_RE.search(text)
     assert match is not None, (
         "MIGRATION.md no longer contains a 'latest released version is **X.Y.Z**' "
@@ -57,3 +60,13 @@ def test_migration_md_version_does_not_trail_latest_git_tag() -> None:
         f"tag v{canonical} has shipped. The doc version is stale -- bump the "
         f"'latest released version is **X.Y.Z**' line in docs/MIGRATION.md to {canonical}."
     )
+
+
+def test_migration_md_version_guard_fails_when_git_tags_are_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail loudly when tags are unavailable instead of recording a skipped guard."""
+    monkeypatch.setattr(sys.modules[__name__], "_version_from_git_tag", lambda _root: None)
+
+    with pytest.raises(pytest.fail.Exception, match=r"No vX\.Y\.Z git tag reachable"):
+        test_migration_md_version_does_not_trail_latest_git_tag()
