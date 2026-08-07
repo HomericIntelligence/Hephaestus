@@ -27,8 +27,15 @@ def test_bandit_configuration_excludes_generated_and_test_paths() -> None:
     assert {"tests", "build", ".venv"}.issubset(excluded)
 
 
-def test_precommit_uses_uv_bandit() -> None:
-    """The local enforcement path invokes the project-managed Bandit."""
+def test_required_workflow_and_precommit_use_uv_bandit() -> None:
+    """Both required enforcement paths invoke the project-managed Bandit."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/_required.yml").read_text())
+    sast = workflow["jobs"]["security-sast-scan"]
+    run_step = next(
+        step for step in sast["steps"] if step.get("name") == "Run bandit (SAST, in container)"
+    )
+    assert "uv run bandit" in run_step["run"]
+    assert "podman run" in run_step["run"]
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text())
     hook = next(
         hook
