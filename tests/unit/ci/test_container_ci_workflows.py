@@ -11,10 +11,20 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _workflow_step(workflow_name: str, job_name: str, step_name: str) -> str:
+def _workflow_step_definition(
+    workflow_name: str, job_name: str, step_name: str
+) -> dict[str, object]:
+    """Return a named workflow step definition."""
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / workflow_name).read_text())
     job = workflow["jobs"][job_name]
     step = next(item for item in job["steps"] if item.get("name") == step_name)
+    assert isinstance(step, dict)
+    return step
+
+
+def _workflow_step(workflow_name: str, job_name: str, step_name: str) -> str:
+    """Return the shell source from a named workflow step."""
+    step = _workflow_step_definition(workflow_name, job_name, step_name)
     run = step["run"]
     assert isinstance(run, str)
     return run
@@ -49,8 +59,8 @@ def test_build_smoke_step_is_valid_bash() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_schema_step_passes_workflow_files_into_the_container(tmp_path: Path) -> None:
-    """Schema validation must provide the in-container checker with workflow inputs."""
+def test_schema_step_builds_workflow_file_array_inside_container(tmp_path: Path) -> None:
+    """Schema validation must declare and consume its inputs in the container shell."""
     tools = tmp_path / "tools"
     tools.mkdir()
     _write_executable(
@@ -78,6 +88,12 @@ def test_schema_step_passes_workflow_files_into_the_container(tmp_path: Path) ->
         "_required.yml", "schema-validation", "Validate GitHub workflow schemas (in container)"
     )
 
+    container_marker = "bash -ceu '"
+    host_command, container_command = step.split(container_marker, maxsplit=1)
+    assert "wf_files" not in host_command
+    assert "mapfile -t wf_files" in container_command
+    assert '"${wf_files[@]}"' in container_command
+
     result = _run_step(tmp_path, step, {"PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"})
 
     assert result.returncode == 0, result.stderr
@@ -92,8 +108,9 @@ def test_scheduled_zizmor_step_forwards_its_token_to_the_container(tmp_path: Pat
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "forwarded=false\n"
-        'for argument in "$@"; do\n'
-        '  [[ "$argument" == GH_TOKEN ]] && forwarded=true\n'
+        'args=("$@")\n'
+        "for ((index = 0; index < ${#args[@]} - 1; index++)); do\n"
+        '  [[ "${args[index]}" == -e && "${args[index + 1]}" == GH_TOKEN ]] && forwarded=true\n'
         "done\n"
         'if "$forwarded"; then\n'
         "  exec uv run zizmor\n"
@@ -105,11 +122,14 @@ def test_scheduled_zizmor_step_forwards_its_token_to_the_container(tmp_path: Pat
         tools / "uv",
         '#!/usr/bin/env bash\nset -euo pipefail\n[[ "${GH_TOKEN:-}" == test-token ]]\n',
     )
-    step = _workflow_step(
+    step_definition = _workflow_step_definition(
         "security.yml",
         "workflow-scan",
         "Run zizmor (workflow SAST with online audits, in container)",
     )
+    assert step_definition["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    step = step_definition["run"]
+    assert isinstance(step, str)
 
     result = _run_step(
         tmp_path,

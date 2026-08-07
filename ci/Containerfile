@@ -24,8 +24,23 @@
 # (0.11.21 does not exist there), so we pin the release tarball instead.
 # ============================================================================
 ARG TARGETARCH
+ARG DEBIAN_SNAPSHOT=20260701T000000Z
 
-FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS uv
+# All Python stages inherit immutable Debian package indexes. The base image is
+# digest-pinned, and the dated snapshot fixes both package candidates and their
+# signed artifacts so rebuilding does not resolve today's Debian repository.
+FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS python-snapshot
+
+ARG DEBIAN_SNAPSHOT
+
+RUN . /etc/os-release \
+    && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
+    && printf '%s\n' \
+        "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ ${VERSION_CODENAME} main" \
+        "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ ${VERSION_CODENAME}-security main" \
+        > /etc/apt/sources.list.d/debian-snapshot.list
+
+FROM python-snapshot AS uv
 
 ARG TARGETARCH
 
@@ -56,7 +71,7 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2 && \
 # ============================================================================
 # Stage 1: Builder — install uv and the locked project environment
 # ============================================================================
-FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91 AS builder
+FROM python-snapshot AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -70,9 +85,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
     PATH="/opt/hephaestus-venv/bin:$PATH"
 
-# Install build dependencies + git (required by pre-commit hooks)
-# apt-get upgrade picks up any security patches released after the base image was pinned
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+# Install build dependencies + git (required by pre-commit hooks) from the
+# immutable Debian snapshot configured by python-snapshot.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
@@ -113,7 +128,7 @@ RUN uv run pre-commit install-hooks && \
 # ============================================================================
 # Stage 2: Runtime — minimal image without build tools
 # ============================================================================
-FROM python:3.13-slim@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91
+FROM python-snapshot
 
 ARG TARGETARCH
 
@@ -129,9 +144,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
     PATH="/opt/hephaestus-venv/bin:$PATH"
 
-# Runtime-only system packages (no build tools)
-# apt-get upgrade picks up any security patches released after the base image was pinned
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+# Runtime-only system packages (no build tools), resolved from the same
+# immutable snapshot as the builder stage.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
@@ -171,10 +186,12 @@ RUN groupadd -r ci && useradd -r -g ci -u 1000 -m -s /bin/bash ci
 RUN cp -r /root/.cache/pre-commit /home/ci/.cache/ 2>/dev/null || true && \
     chown -R ci:ci /home/ci/.cache
 
-# Make the baked venv writable by the ci user: when the repo is bind-mounted at
-# /workspace, uv detects the project path changed and re-points the editable
-# install at the mounted source, so scripts and tests exercise the working tree.
-RUN chown -R ci:ci /opt/hephaestus-venv
+# Make the baked venv writable in each container's private image layer. Podman
+# maps the ci user through keep-id, while Docker runs as the invoking host UID,
+# which may be any numeric ID. uv must be able to refresh the editable install
+# for /workspace under either engine without changing bind-mounted ownership.
+RUN chown -R ci:ci /opt/hephaestus-venv && \
+    chmod -R a+rwX /opt/hephaestus-venv
 
 # Working directory is the mounted repo root at runtime
 WORKDIR /workspace

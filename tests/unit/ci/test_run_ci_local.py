@@ -12,14 +12,23 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "scripts" / "run_ci_local.sh"
 
 
-def _fake_engine(tmp_path: Path, *, failing_command: str = "") -> tuple[Path, Path]:
+def _fake_engine(
+    tmp_path: Path, *, failing_command: str = "", license_violation: bool = False
+) -> tuple[Path, Path]:
     """Create a controlled container-engine boundary that records invocations."""
-    engine = tmp_path / "podman"
+    engine_path = tmp_path / "podman"
     log = tmp_path / "engine.log"
     failure_clause = (
         f'  [[ "$*" == *{failing_command!r}* ]] && exit 37\n' if failing_command else ""
     )
-    engine.write_text(
+    license_violation_clause = (
+        '  [[ "$FAKE_LICENSE_VIOLATION" == "1" && "$*" == *'
+        '"env GITHUB_EVENT_NAME=pull_request uv run python '
+        'scripts/check_license_compatibility.py"* ]] && exit 1\n'
+        if license_violation
+        else ""
+    )
+    engine_path.write_text(
         (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
@@ -27,11 +36,15 @@ def _fake_engine(tmp_path: Path, *, failing_command: str = "") -> tuple[Path, Pa
             'if [[ "$1" == "images" ]]; then exit 0; fi\n'
             'if [[ "$1" == "run" ]]; then\n'
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
-            '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n' + failure_clause + "fi\n" + "exit 0\n"
+            '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
+            + failure_clause
+            + license_violation_clause
+            + "fi\n"
+            + "exit 0\n"
         ),
         encoding="utf-8",
     )
-    engine.chmod(0o755)
+    engine_path.chmod(0o755)
     for command in ("just", "shellcheck", "bats"):
         executable = tmp_path / command
         executable.write_text(
@@ -42,7 +55,7 @@ def _fake_engine(tmp_path: Path, *, failing_command: str = "") -> tuple[Path, Pa
             encoding="utf-8",
         )
         executable.chmod(0o755)
-    return engine, log
+    return engine_path, log
 
 
 def _run_runner(
@@ -51,14 +64,19 @@ def _run_runner(
     *,
     engine_name: str = "podman",
     failing_command: str = "",
+    license_violation: bool = False,
     host_uid: int | None = None,
     host_gid: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
-    engine, log = _fake_engine(tmp_path, failing_command=failing_command)
+    engine_path, log = _fake_engine(
+        tmp_path,
+        failing_command=failing_command,
+        license_violation=license_violation,
+    )
     if engine_name != "podman":
-        docker = engine.with_name(engine_name)
-        engine.rename(docker)
+        docker = engine_path.with_name(engine_name)
+        engine_path.rename(docker)
     if host_uid is not None and host_gid is not None:
         fake_id = tmp_path / "id"
         fake_id.write_text(
@@ -76,6 +94,7 @@ def _run_runner(
     environment = os.environ | {
         "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
+        "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(
@@ -112,6 +131,7 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
     result, log = _run_runner(tmp_path, "all")
 
     assert result.returncode == 0, result.stderr
+    assert "All locally executable CI checks passed." in result.stdout
     for command in (
         "bash scripts/check-symlinks.sh",
         "just --evaluate",
@@ -119,8 +139,30 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "bats --recursive tests/shell",
         "detect --source=. --verbose --exit-code=1",
         "HEPHAESTUS_REQUIRE_CLI=1",
+        "env GITHUB_EVENT_NAME=pull_request uv run python scripts/check_license_compatibility.py",
     ):
         assert command in log
+
+
+def test_all_fails_for_an_injected_license_violation(tmp_path: Path) -> None:
+    """The all target must preserve a blocking PR-mode license failure."""
+    result, log = _run_runner(tmp_path, "all", license_violation=True)
+
+    assert result.returncode != 0
+    assert "Failed: license" in result.stderr
+    assert (
+        "env GITHUB_EVENT_NAME=pull_request uv run python "
+        "scripts/check_license_compatibility.py" in log
+    )
+
+
+def test_explicit_license_mode_remains_advisory(tmp_path: Path) -> None:
+    """The standalone license subset retains the scanner's normal invocation."""
+    result, log = _run_runner(tmp_path, "license")
+
+    assert result.returncode == 0, result.stderr
+    assert "uv run python scripts/check_license_compatibility.py" in log
+    assert "GITHUB_EVENT_NAME=pull_request" not in log
 
 
 def test_integration_requires_installed_cli_entry_points(tmp_path: Path) -> None:
@@ -131,8 +173,17 @@ def test_integration_requires_installed_cli_entry_points(tmp_path: Path) -> None
     assert "HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration" in log
 
 
+def test_subset_success_message_names_only_the_requested_subset(tmp_path: Path) -> None:
+    """A successful subset must not claim that every local CI check ran."""
+    result, _ = _run_runner(tmp_path, "integration")
+
+    assert result.returncode == 0, result.stderr
+    assert "Local CI subset 'integration' passed." in result.stdout
+    assert "All local CI checks passed." not in result.stdout
+
+
 def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> None:
-    """Docker fallback must not run bind-mounted checks as image-owned UID 1000."""
+    """Docker fallback gives an arbitrary UID a writable uv environment."""
     result, log = _run_runner(
         tmp_path,
         "unit",
@@ -144,3 +195,4 @@ def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "--user 23456:23457" in log
     assert "--env HOME=/tmp" in log
+    assert "--env UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv" in log

@@ -117,7 +117,12 @@ run_in_container() {
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
     else
-        engine_flags+=(--user "$(id -u):$(id -g)" --env HOME=/tmp)
+        # Docker gives each invocation a private writable image layer. The
+        # image makes this baked environment writable by arbitrary UIDs so uv
+        # can refresh the editable install while bind-mounted artifacts remain
+        # owned by the invoking host user.
+        engine_flags+=(--user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --env UV_PROJECT_ENVIRONMENT=/opt/hephaestus-venv)
     fi
 
     "${CONTAINER_ENGINE}" run --rm \
@@ -203,6 +208,12 @@ run_version() {
 run_license() {
     log_step "License compatibility scan"
     run_in_container uv run python scripts/check_license_compatibility.py
+}
+
+run_license_blocking() {
+    log_step "License compatibility scan (blocking PR mode)"
+    run_in_container env GITHUB_EVENT_NAME=pull_request \
+        uv run python scripts/check_license_compatibility.py
 }
 
 run_symlinks() {
@@ -341,7 +352,7 @@ case "${SUBSET}" in
         run_step "workflow-scan" run_workflow_scan
         run_step "schema" run_schema
         run_step "version" run_version
-        run_step "license" run_license
+        run_step "license" run_license_blocking
         run_step "symlinks" run_symlinks
         run_step "justfile" run_justfile
         run_step "shellcheck" run_shellcheck
@@ -357,7 +368,11 @@ esac
 
 echo ""
 if [ "${#FAILED[@]}" -eq 0 ]; then
-    log_info "All local CI checks passed."
+    if [ "${SUBSET}" = "all" ]; then
+        log_info "All locally executable CI checks passed."
+    else
+        log_info "Local CI subset '${SUBSET}' passed."
+    fi
 else
     log_error "Failed: ${FAILED[*]}"
     exit 1
