@@ -563,6 +563,16 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Repos processed in parallel per loop iteration (default: 1)",
         ),
         _action_spec(
+            ("--issue-limit",),
+            "issue_limit",
+            "_StoreAction",
+            None,
+            help_text=(
+                "Run the next checkpointed issue wave with at most N eligible issues. "
+                "The staged rollout advances 1, 2, 4, 8, then all eligible issues."
+            ),
+        ),
+        _action_spec(
             ("--phases",),
             "phases",
             "_StoreAction",

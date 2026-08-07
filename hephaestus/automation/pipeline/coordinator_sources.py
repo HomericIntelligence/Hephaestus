@@ -22,19 +22,12 @@ class SourceCoordinator(_CoordinatorHost):
     _repo_entry_source: _RepoEntrySource | None
 
     def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
-        """Retire setup work and enroll its cursor in the bounded fair registry.
-
-        A repository cursor is not a pipeline work item: it carries no global
-        permit and no REPO-stage lease once checkout/setup finishes.  Keeping
-        those owners would both count as an extra live object and let the
-        first repository hold the REPO queue while its entire issue backlog
-        drains.  The registry holds at most C cursor objects and drains them
-        in FIFO rotation instead.
-        """
+        """Retire setup work and enroll its cursor in the bounded FIFO registry."""
         if len(self._repo_issue_sources) >= _work_window(self.config):
             return False
 
         item.payload.pop("_repo_issue_source", None)
+        self._wave_mode_active |= source.wave_lease is not None
         self._repo_issue_sources.append(_ActiveRepoIssueSource(repo=item.repo, source=source))
         self._release_source_lease(item)
         self._release_work_permit(item)
@@ -45,13 +38,7 @@ class SourceCoordinator(_CoordinatorHost):
         return True
 
     def _repo_source_slots_used(self) -> int:
-        """Return active cursors plus every live REPO setup reservation.
-
-        A repository setup item becomes a detached cursor after ``SOURCE``.
-        Reserve that future cursor slot from its first queue admission through
-        terminalization so a later setup item cannot strand at ``SOURCE``
-        merely because earlier setups filled the registry first.
-        """
+        """Count active cursors and live REPO setup reservations."""
         candidates: dict[int, WorkItem] = {}
         for queue in self.queues.values():
             for item in queue.snapshot():
@@ -123,7 +110,7 @@ class SourceCoordinator(_CoordinatorHost):
                 return False
             # Metadata epics need no expensive issue fetch.  The durable
             # label write is completed before source consumption advances.
-            if is_epic(labels, title):
+            if source.wave_lease is None and is_epic(labels, title):
                 try:
                     ctx.github.skip_epics({number: labels})
                 except Exception as exc:
@@ -146,14 +133,24 @@ class SourceCoordinator(_CoordinatorHost):
 
             try:
                 facts = _seeding.seed_issue_from_github(number, ctx.github)
-                if STATE_PLAN_BLOCKED in facts.labels:
+                if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
                     ctx.github.ensure_blocked_audit(number)
                 entry = _seeding.seed_entry_from_facts(facts)
-                scope_stages = self.config.scope.stages if self.config.scope is not None else None
-                stage, reason, passed = self._scope_seed_decision(
-                    number, entry.stage, entry.reason, scope_stages
-                )
-                entry = replace(entry, stage=stage, reason=reason, passed=passed)
+                if source.wave_lease is not None:
+                    entry = wave_entry_from_facts(
+                        source.wave_lease,
+                        facts,
+                        entry,
+                        repo_root=Path(str(ctx.paths.repo_root)),
+                        org=ctx.org,
+                        repo=repo,
+                    )
+                scope = self.config.scope
+                scope_stages = scope.stages if scope is not None else None
+                if source.wave_lease is None or entry.stage is not StageName.FINISHED:
+                    decide = self._scope_seed_decision
+                    stage, reason, passed = decide(number, entry.stage, entry.reason, scope_stages)
+                    entry = replace(entry, stage=stage, reason=reason, passed=passed)
             except Exception as exc:
                 logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
                 self._record_repo_source_failure(repo, f"discovery failed: {exc}")
@@ -161,7 +158,7 @@ class SourceCoordinator(_CoordinatorHost):
 
             if entry.stage is None:
                 try:
-                    if entry.skip_tag_obligation is not None:
+                    if source.wave_lease is None and entry.skip_tag_obligation is not None:
                         ctx.github.skip_epics({entry.skip_tag_obligation.issue: []})
                 except Exception as exc:
                     logger.warning(
@@ -178,6 +175,8 @@ class SourceCoordinator(_CoordinatorHost):
                 return True
 
             new_item = self._entry_to_item(entry, repo)
+            if source.wave_lease is not None:
+                new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
             if new_item.stage is StageName.FINISHED and new_item.result is None:
                 new_item.result = ItemResult(
                     passed=entry.passed,
@@ -455,6 +454,7 @@ class SourceCoordinator(_CoordinatorHost):
             issues=deque(open_issues),
             base_sha=base_sha,
             run_nonce=uuid.uuid4().hex,
+            wave_lease=self._direct_wave_lease,
         )
 
     def _begin_direct_pr_source(self, repo: str, base_sha: str) -> None:
@@ -465,6 +465,7 @@ class SourceCoordinator(_CoordinatorHost):
                 repo=repo,
                 prs=iter(self.config.prs),
                 base_sha=base_sha,
+                wave_lease=self._direct_wave_lease,
             )
 
     def _direct_issue_queues_can_accept(self) -> bool:
@@ -482,14 +483,15 @@ class SourceCoordinator(_CoordinatorHost):
         overlap_enabled: bool,
     ) -> tuple[WorkItem | None, bool]:
         """Classify one source issue and snapshot its overlap reservation."""
-        entry = self._seed_direct_issue_entry(source.repo, issue)
+        entry = self._seed_direct_issue_entry(source.repo, issue, source.wave_lease)
         if entry.stage is None:
             if entry.skip_tag_obligation is not None:
                 self.github.skip_epics({entry.skip_tag_obligation.issue: []})
             logger.info("seed excluded: %s", entry.reason)
             return None, False
-
         item = self._entry_to_item(entry, source.repo)
+        if source.wave_lease is not None:
+            item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
         if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
             repo = (self.config.org, item.repo)
             planned = _admission._fetch_planned_files(issue, repo=repo)
@@ -553,11 +555,6 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             if item is None:
                 continue
-            # ``_direct_issue_queues_can_accept`` covers every possible
-            # classifier result and the coordinator-wide permit budget. This
-            # source owns the coordinator thread, so a failed lifecycle push
-            # can only be an idempotent duplicate; it never represents
-            # saturation or a completion/shutdown fault.
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
                 # Let the implementation drain establish ownership before a
@@ -604,6 +601,8 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
 
             item = self._entry_to_item(entry, source.repo)
+            if source.wave_lease is not None:
+                item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
             if is_full_commit_sha(source.base_sha):
                 item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = source.base_sha
             if item.stage not in (StageName.REPO, StageName.FINISHED):
@@ -715,14 +714,20 @@ class SourceCoordinator(_CoordinatorHost):
         entries.extend(self._seed_direct_pr_scope(repo))
         return entries
 
-    def _seed_direct_issue_entry(self, repo: str, issue: int) -> _seeding.SeedEntry:
-        """Classify one direct issue through its target repository accessor."""
+    def _seed_direct_issue_entry(
+        self, repo: str, issue: int, wave_lease: WaveLease | None = None
+    ) -> _seeding.SeedEntry:
         github = self._ctx_for_repo(repo).github if repo else self.github
         scope_stages = self.config.scope.stages if self.config.scope is not None else None
         facts = _seeding.seed_issue_from_github(issue, github)
+        entry = _seeding.seed_entry_from_facts(facts)
+        if wave_lease is not None:
+            ctx = self._ctx_for_repo(repo)
+            return wave_entry_from_facts(
+                wave_lease, facts, entry, Path(str(ctx.paths.repo_root)), ctx.org, repo
+            )
         if STATE_PLAN_BLOCKED in facts.labels:
             github.ensure_blocked_audit(issue)
-        entry = _seeding.seed_entry_from_facts(facts)
         stage, reason, passed = self._scope_seed_decision(
             issue, entry.stage, entry.reason, scope_stages
         )
@@ -926,6 +931,9 @@ class SourceCoordinator(_CoordinatorHost):
         """
         if self.config.issues or self.config.prs:
             logger.info("explicit issue/PR selection drained; skipping discovery re-seed")
+            return False
+        if self._wave_mode_active:
+            logger.info("checkpointed issue wave drained; suppressing --loops reseed")
             return False
         if self._loops_run >= self.config.loops:
             logger.info("loop budget exhausted (%d/%d)", self._loops_run, self.config.loops)

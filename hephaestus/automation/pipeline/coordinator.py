@@ -134,6 +134,8 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
         self._direct_pr_source: _DirectPrSource | None = None
+        self._direct_wave_lease: WaveLease | None = None
+        self._wave_mode_active = False
         self._direct_scope_bootstrap_pending = False
         self._repo_entry_source: _RepoEntrySource | None = None
         self._repo_issue_sources: deque[_ActiveRepoIssueSource] = deque()
@@ -226,6 +228,7 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
             include_all_authors=config.include_all_authors,
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
+            issue_limit=config.issue_limit,
         )
         # A context contains a GitHub accessor and path configuration but no
         # mutable item state.  At most C items can be live, so an LRU of C is

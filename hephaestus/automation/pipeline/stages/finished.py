@@ -22,10 +22,17 @@ when the sink emits its final outcome).
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from hephaestus.automation.direct_review_recovery import (
     is_inspection_only_detached_push_failure,
     list_direct_review_recovery_paths,
+)
+from hephaestus.automation.issue_waves import (
+    WAVE_LEASE_PAYLOAD,
+    IssueWaveError,
+    IssueWaveStore,
+    WaveLease,
 )
 from hephaestus.automation.pipeline.work_item import ItemResult, PreservedWorktree
 
@@ -116,6 +123,44 @@ class FinishedStage(Stage):
                 item.result = ItemResult(
                     passed=False, reason="internal: no result recorded", final_stage=item.stage
                 )
+            lease = item.payload.get(WAVE_LEASE_PAYLOAD)
+            if (
+                isinstance(lease, WaveLease)
+                and item.issue is not None
+                and not item.payload.get("_wave_outcome_recorded", False)
+            ):
+                try:
+                    IssueWaveStore(
+                        Path(str(ctx.paths.repo_root)), ctx.org, item.repo
+                    ).record_terminal_outcome(
+                        lease,
+                        issue_number=item.issue,
+                        passed=item.result.passed,
+                        reason=item.result.reason,
+                        pr_number=item.pr,
+                    )
+                except IssueWaveError as exc:
+                    # The checkpoint is authoritative for wave advancement.
+                    # Convert a successful-looking item to a failure and make
+                    # one best-effort failed write before preserving its tree.
+                    item.result = ItemResult(
+                        passed=False,
+                        reason=f"wave checkpoint write failed: {exc}",
+                        final_stage=item.stage,
+                    )
+                    try:
+                        IssueWaveStore(
+                            Path(str(ctx.paths.repo_root)), ctx.org, item.repo
+                        ).record_terminal_outcome(
+                            lease,
+                            issue_number=item.issue,
+                            passed=False,
+                            reason=item.result.reason,
+                            pr_number=item.pr,
+                        )
+                    except IssueWaveError:
+                        logger.exception("finished:%s: failed to persist wave failure", item.issue)
+                item.payload["_wave_outcome_recorded"] = True
             if not item.payload.get("_recorded", False):
                 self._ledger.append(item.result)
                 item.payload["_recorded"] = True

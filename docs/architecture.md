@@ -53,8 +53,11 @@ Optimization"), file paths are repo-relative.
 ### Goals
 
 - **Single durable journal.** GitHub labels, comments, PR state and
- `ArmingStateStore` records are the only
- crash-resistant truth. Stages may not persist any other state. Restart =
+ `ArmingStateStore` records are the normal crash-resistant truth. The one
+ explicit exception is the repository-scoped issue-wave checkpoint, which
+ records only immutable selected issue identifiers, terminal outcomes, merge
+ receipts, and verified main revisions. Stages may not persist any other
+ state. Restart =
 re-run: queue reconstruction reads the journal
 ([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
 [`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
@@ -346,6 +349,12 @@ Intake is also source-driven rather than an eager list of classified products:
   the linked issue's classification. An orphan PR has no issue requirements
   and remains outside this source; an explicit `--prs` scope can select one
   for fail-closed direct evaluation, but cannot supply missing requirements.
+- A checkpointed `--issue-limit` run admits wave selection after synchronized
+  checkout and before label setup. It seals the first eligible 1, 2, 4, 8, or
+  all issue identifiers and drains that source once; `--loops` cannot reseed it.
+  Later waves require fresh facts, loop-owned merge receipts, and read-only Git
+  ancestry against the synchronized main revision. A completed rollout is
+  audit-only; explicit `--issues`/`--prs` remain identifier-based recovery.
 
 The implementation is in
 [`Coordinator._drain_direct_issue_source`](../hephaestus/automation/pipeline/coordinator.py),
@@ -1489,7 +1498,9 @@ value takes precedence over the selected model alias's `model_reasoning_effort`
 default; `default` deliberately omits the setting so the alias keeps its
 established baseline. These flags are applied only to the Codex provider
 and never modify Claude or Pi model IDs (#2287).
-The default pipeline accepts `--loops`, `--parallel-repos`,
+The default pipeline accepts `--loops`, `--parallel-repos`, and the staged
+`--issue-limit` selector, which advances 1 → 2 → 4 → 8 → all only after the
+repository checkpoint verifies the previous wave. It also accepts
 `--max-workers` and per-agent `--agent` plus per-phase reasoning
 controls:
 

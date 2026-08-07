@@ -1149,8 +1149,40 @@ class CoordinatorRuntime(_CoordinatorHost):
             # while real runs still fail closed without the proof.
             base_sha = ""
         try:
+            repo_root = Path(str(self._ctx_for_repo(item.repo).paths.repo_root))
+            if not repo_root.is_dir():
+                # Test-only/fake worker paths do not represent a reusable
+                # checkout. Preserve legacy explicit recovery semantics there;
+                # production sync always materializes the repository first.
+                self._direct_wave_lease = None
+                self._ctx_for_repo(item.repo).github.ensure_state_labels()
+                self._begin_direct_pr_source(item.repo, base_sha)
+                self._begin_direct_issue_source(item.repo, base_sha)
+                raise StopIteration
+            store = IssueWaveStore(repo_root, self.config.org, item.repo)
+            checkpoint = store.load()
+            if checkpoint is not None and checkpoint.status == "active":
+                linked_issues = set(self.config.issues)
+                for pr_number in self.config.prs:
+                    issue_number = self._ctx_for_repo(item.repo).github.find_issue_for_pr(pr_number)
+                    if issue_number is None:
+                        raise IssueWaveError(f"PR #{pr_number} has no linked wave issue")
+                    linked_issues.add(issue_number)
+                self._direct_wave_lease = store.bind_recovery_scope(
+                    issue_numbers=linked_issues,
+                    current_main_sha=base_sha,
+                )
+            else:
+                self._direct_wave_lease = None
+            if self._direct_wave_lease is not None:
+                self._wave_mode_active = True
+            # This is intentionally after recovery membership validation: an
+            # invalid direct scope must not create or mutate state labels.
+            self._ctx_for_repo(item.repo).github.ensure_state_labels()
             self._begin_direct_pr_source(item.repo, base_sha)
             self._begin_direct_issue_source(item.repo, base_sha)
+        except StopIteration:
+            pass
         except Exception as exc:
             self._direct_scope_bootstrap_pending = False
             logger.warning(

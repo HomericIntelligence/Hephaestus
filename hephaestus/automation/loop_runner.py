@@ -271,6 +271,9 @@ class LoopConfig:
     # listener rather than selecting an ephemeral port, so the CLI remains
     # opt-in and operators know which port is exposed.
     metrics_port: int = 0
+    # The optional staged issue-wave selector. Explicit issue/PR lists remain
+    # identifier scopes and are rejected together with this value at parsing.
+    issue_limit: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +296,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         verbose_help="Enable DEBUG logging",
     )
-    p.add_argument("--loops", type=int, default=5, help="Number of loop iterations (default: 5)")
+    p.add_argument(
+        "--loops",
+        type=_parse_positive_int,
+        default=5,
+        help="Number of loop iterations (default: 5)",
+    )
     p.add_argument(
         "--drive-green-loops",
         type=_parse_positive_int,
@@ -306,9 +314,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--parallel-repos",
-        type=int,
+        type=_parse_positive_int,
         default=1,
         help="Repos processed in parallel per loop iteration (default: 1)",
+    )
+    p.add_argument(
+        "--issue-limit",
+        type=_parse_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Run the next checkpointed issue wave with at most N eligible issues. "
+            "The staged rollout advances 1, 2, 4, 8, then all eligible issues."
+        ),
     )
     p.add_argument(
         "--phases",
@@ -486,7 +504,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments for the loop runner."""
-    return _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.issue_limit is not None and (args.issues is not None or args.prs is not None):
+        parser.error("--issue-limit cannot be combined with --issues or --prs")
+    return args
 
 
 def _validate_phases(phases_csv: str) -> tuple[str, ...]:
@@ -726,6 +748,7 @@ def _build_pipeline_config(
         repo_source_factory=repo_source_factory,
         issues=cfg.issues,
         prs=cfg.prs,
+        issue_limit=cfg.issue_limit,
         loops=cfg.loops,
         max_workers=cfg.max_workers,
         parallel_repos=cfg.parallel_repos,
@@ -899,6 +922,7 @@ def main(argv: list[str] | None = None) -> int:
         agent=agent,
         issues=args.issues or [],
         prs=args.prs or [],
+        issue_limit=args.issue_limit,
         dry_run=args.dry_run,
         no_advise=args.no_advise,
         nitpick=args.nitpick,
