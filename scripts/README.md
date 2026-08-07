@@ -45,8 +45,10 @@ through installed `hephaestus-*` console scripts.
 
 ### Local CI
 
-- **`run_ci_local.sh`** — Run the CI checks or a named subset in the local
-  Podman/Docker image built with `just ci-build`.
+- **`run_ci_local.sh`** — Run the locally executable CI checks or a named
+  subset. Project-toolchain commands use the Podman/Docker image built with
+  `just ci-build`; the full route also requires host `just`, `shellcheck`, and
+  `bats`, matching their GitHub Actions jobs.
 
 ### Disaster recovery
 

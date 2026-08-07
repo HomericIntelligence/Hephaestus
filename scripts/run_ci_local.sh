@@ -1,11 +1,11 @@
 #!/bin/bash
-# Run the Hephaestus CI suite locally inside a container.
+# Run the locally executable Hephaestus CI checks.
 #
-# Mirrors what GitHub Actions runs, using the same CI container image.
+# Project toolchain commands use the same CI container image as GitHub Actions.
 # Supports both Podman (rootless, no SU — preferred) and Docker.
 #
 # Usage:
-#   ./scripts/run_ci_local.sh              # Run all CI checks
+#   ./scripts/run_ci_local.sh              # Run all local CI checks
 #   ./scripts/run_ci_local.sh lint         # pre-commit + doc-link validation
 #   ./scripts/run_ci_local.sh unit         # unit tests + structure/coverage checks
 #   ./scripts/run_ci_local.sh integration  # integration tests
@@ -17,6 +17,11 @@
 #   ./scripts/run_ci_local.sh schema       # workflow YAML schema validation
 #   ./scripts/run_ci_local.sh version      # version-single-source + uv.lock check
 #   ./scripts/run_ci_local.sh license      # license compatibility scan
+#   ./scripts/run_ci_local.sh symlinks     # repository symlink validation
+#   ./scripts/run_ci_local.sh justfile     # justfile evaluation and recipe listing
+#   ./scripts/run_ci_local.sh shellcheck   # shell static analysis
+#   ./scripts/run_ci_local.sh shell-tests  # Bats shell test suite
+#   ./scripts/run_ci_local.sh secrets      # Gitleaks repository scan
 #
 # Container engine: auto-detected (podman first, docker fallback).
 # Override: CONTAINER_ENGINE=docker ./scripts/run_ci_local.sh
@@ -34,6 +39,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SUBSET="${1:-all}"
 
 LOCAL_IMAGE="hephaestus-ci:local"
+GITLEAKS_IMAGE="ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -109,7 +115,9 @@ run_in_container() {
     local engine_flags=()
 
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
-        engine_flags+=(--userns=keep-id:uid=1000,gid=1000)
+        engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
+    else
+        engine_flags+=(--user "$(id -u):$(id -g)" --env HOME=/tmp)
     fi
 
     "${CONTAINER_ENGINE}" run --rm \
@@ -127,7 +135,7 @@ run_in_container() {
 
 run_lint() {
     log_step "Lint (pre-commit + doc-link validation)"
-    run_in_container uv run pre-commit run --all-files --show-diff-on-failure
+    run_in_container uv run pre-commit run --all-files --show-diff-on-failure || return 1
     run_in_container uv run hephaestus-validate-links docs --repo-root .
 }
 
@@ -142,11 +150,13 @@ run_unit() {
 
 run_integration() {
     log_step "Integration tests"
-    run_in_container uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
+    run_in_container bash -c '\
+        HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"'
 }
 
 run_cli() {
     log_step "Installed-CLI entry-point tests"
+    # shellcheck disable=SC2016 # $PWD and WHEEL expand in the container shell.
     run_in_container bash -c '\
         uv build --wheel && \
         uv venv build/cli-venv && \
@@ -186,13 +196,65 @@ run_schema() {
 
 run_version() {
     log_step "Version single-source-of-truth + uv.lock check"
-    run_in_container uv run python -m hephaestus.scripts_lib.check_version_single_source
+    run_in_container uv run python -m hephaestus.scripts_lib.check_version_single_source || return 1
     run_in_container uv lock --check
 }
 
 run_license() {
     log_step "License compatibility scan"
     run_in_container uv run python scripts/check_license_compatibility.py
+}
+
+run_symlinks() {
+    log_step "Repository symlink validation"
+    run_in_container bash scripts/check-symlinks.sh
+}
+
+run_justfile() {
+    log_step "Justfile evaluation"
+    command -v just >/dev/null || {
+        log_error "just is required for the justfile check"
+        return 1
+    }
+    just --evaluate >/dev/null || return 1
+    just --list >/dev/null
+}
+
+run_shellcheck() {
+    log_step "ShellCheck"
+    command -v shellcheck >/dev/null || {
+        log_error "shellcheck is required for shell static analysis"
+        return 1
+    }
+    shopt -s nullglob globstar
+    local files=(scripts/**/*.sh scripts/**/*.sbatch)
+    if [ "${#files[@]}" -eq 0 ]; then
+        log_info "No shell scripts found — nothing to lint."
+        return 0
+    fi
+    shellcheck --severity=error "${files[@]}"
+}
+
+run_shell_tests() {
+    log_step "Bats shell tests"
+    command -v bats >/dev/null || {
+        log_error "bats is required for shell tests"
+        return 1
+    }
+    bats --recursive tests/shell
+}
+
+run_secrets() {
+    log_step "Gitleaks repository scan"
+    local args=(detect --source=. --verbose --exit-code=1)
+    if [ -f .gitleaks.toml ]; then
+        args+=(--config=.gitleaks.toml)
+    fi
+    "${CONTAINER_ENGINE}" run --rm \
+        --volume "${PROJECT_ROOT}:/repo:Z" \
+        --workdir /repo \
+        "${GITLEAKS_IMAGE}" \
+        "${args[@]}"
 }
 
 # ============================================================================
@@ -250,6 +312,21 @@ case "${SUBSET}" in
     license)
         run_step "license" run_license
         ;;
+    symlinks)
+        run_step "symlinks" run_symlinks
+        ;;
+    justfile)
+        run_step "justfile" run_justfile
+        ;;
+    shellcheck)
+        run_step "shellcheck" run_shellcheck
+        ;;
+    shell-tests)
+        run_step "shell-tests" run_shell_tests
+        ;;
+    secrets)
+        run_step "secrets" run_secrets
+        ;;
     all)
         run_step "lint" run_lint
         run_step "unit" run_unit
@@ -262,17 +339,22 @@ case "${SUBSET}" in
         run_step "schema" run_schema
         run_step "version" run_version
         run_step "license" run_license
+        run_step "symlinks" run_symlinks
+        run_step "justfile" run_justfile
+        run_step "shellcheck" run_shellcheck
+        run_step "shell-tests" run_shell_tests
+        run_step "secrets" run_secrets
         ;;
     *)
         log_error "Unknown subset: ${SUBSET}"
-        log_error "Valid values: all, lint, unit, integration, cli, build, audit, sast, workflow-scan, schema, version, license"
+        log_error "Valid values: all, lint, unit, integration, cli, build, audit, sast, workflow-scan, schema, version, license, symlinks, justfile, shellcheck, shell-tests, secrets"
         exit 1
         ;;
 esac
 
 echo ""
 if [ "${#FAILED[@]}" -eq 0 ]; then
-    log_info "All CI checks passed."
+    log_info "All local CI checks passed."
 else
     log_error "Failed: ${FAILED[*]}"
     exit 1

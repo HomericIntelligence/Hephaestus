@@ -722,8 +722,8 @@ jobs:
             hephaestus-ci:local bash -c '
             uv venv /tmp/hephaestus-wheel-smoke
             uv pip install --python /tmp/hephaestus-wheel-smoke/bin/python dist/homericintelligence_hephaestus-*.whl --force-reinstall
-            /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print(\'Package version:\', hephaestus.__version__)"
-            /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print(\'OK\')"
+            /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print(\"Package version:\", hephaestus.__version__)"
+            /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print(\"OK\")"
           '
 
   security-dependency-scan:
@@ -934,13 +934,13 @@ jobs:
           # Use check-jsonschema's bundled `vendor.github-workflows` schema so
           # the job is network-free and fail-fast. No schemastore.org probe and
           # no advisory `::warning::` outage fallback (Bucket F anti-pattern).
-          mapfile -t wf_files < <(find .github/workflows -name "*.yml")
-          if [ "${#wf_files[@]}" -eq 0 ]; then
-            echo "No workflow files to validate"
-            exit 0
-          fi
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
-            hephaestus-ci:local bash -c '
+            hephaestus-ci:local bash -ceu '
+            mapfile -t wf_files < <(find .github/workflows -name "*.yml")
+            if [ "${#wf_files[@]}" -eq 0 ]; then
+              echo "No workflow files to validate"
+              exit 0
+            fi
             uvx check-jsonschema \
               --builtin-schema vendor.github-workflows \
               "${wf_files[@]}"

@@ -152,7 +152,7 @@ jobs:
         id: zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-        run: podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 hephaestus-ci:local uv run zizmor --min-severity medium .github/workflows/
+        run: podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 -e GH_TOKEN hephaestus-ci:local uv run zizmor --min-severity medium .github/workflows/
 
       - name: Post zizmor summary
         if: always()

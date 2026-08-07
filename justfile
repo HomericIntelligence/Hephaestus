@@ -132,11 +132,12 @@ ci-cli:
 ci-build-package:
     ./scripts/run_ci_local.sh build
 
-# Run CI security scans (audit, sast, workflow-scan) in container
+# Run CI security scans (audit, sast, workflow-scan, secrets)
 ci-security:
     ./scripts/run_ci_local.sh audit
     ./scripts/run_ci_local.sh sast
     ./scripts/run_ci_local.sh workflow-scan
+    ./scripts/run_ci_local.sh secrets
 
 # Run CI schema/version/license checks in container
 ci-consistency:
@@ -144,6 +145,6 @@ ci-consistency:
     ./scripts/run_ci_local.sh version
     ./scripts/run_ci_local.sh license
 
-# Run all CI checks in container
+# Run all locally executable CI checks
 ci-all:
     ./scripts/run_ci_local.sh all
