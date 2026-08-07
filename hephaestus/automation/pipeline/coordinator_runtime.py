@@ -1,6 +1,7 @@
 import sys
 from typing import Any, cast
 
+from . import coordinator_observability as _observability
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
 
@@ -112,51 +113,19 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _record_event(self, event: str, *fields: Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
-        self.event_log.append((event, *fields))
-        if self._event_log_disabled:
-            return
-        path = self.config.event_log_path
-        if path is None:
-            return
-        record = {
-            "ts": time.time(),
-            "event": event,
-            "fields": [_json_safe(field) for field in fields],
-        }
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, sort_keys=True) + "\n")
-        except OSError as exc:
-            logger.warning("failed to write pipeline event log %s: %s", path, exc)
-            self._event_log_disabled = True
+        _observability.record_event(self, event, *fields, now_fn=time.time, logger=logger)
 
     def _observability_snapshot(self) -> dict[str, Any]:
         """Read the coordinator lifecycle values that observability exposes."""
-        circuit_breakers: dict[str, dict[str, Any]] = {}
-        provider = self.config.circuit_breaker_snapshot_provider
-        if provider is not None:
-            try:
-                circuit_breakers = provider()
-            except Exception:
-                # Observability must not terminate a production automation
-                # loop if an optional diagnostic provider is broken.
-                logger.exception("circuit-breaker snapshot provider failed")
-
-        return {
-            "queue_depths": {name.value: len(queue) for name, queue in self.queues.items()},
-            "inflight_per_repo": dict(self.inflight_per_repo),
-            "inflight_jobs": len(self.in_flight),
-            "circuit_breakers": circuit_breakers,
-            "loops_run": self._loops_run,
-            "stalled_ticks": self._stalled_ticks,
-        }
+        return _observability.observability_snapshot(self, logger=logger)
 
     def _health_snapshot(self) -> dict[str, Any]:
-        """Return the local server's JSON health response without external I/O."""
-        snapshot = self._observability_snapshot()
-        snapshot["status"] = "stopping" if self.shutdown.is_set() else "ok"
-        return snapshot
+        """Return the local server's JSON readiness response without external I/O."""
+        return _observability.health_snapshot(
+            self,
+            logger=logger,
+            stalled_ticks_threshold=_compat("_STALL_TICKS_BEFORE_FORCE"),
+        )
 
     def _emit_observability_tick(self) -> None:
         """Update live gauges and durably record alert state transitions."""
