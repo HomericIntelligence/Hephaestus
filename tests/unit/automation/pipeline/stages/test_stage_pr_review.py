@@ -1445,6 +1445,7 @@ class TestPrReviewStageStep:
             assert request.job.immutable_source is True
             receipt = {
                 "argv": list(argv),
+                "bypassed": False,
                 "error": "",
                 "failure_kind": "none",
                 "head_sha": "a" * 40,
@@ -2173,10 +2174,10 @@ class TestPrReviewStageStep:
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
 
-    def test_boundary_failure_writes_no_go_and_finishes_without_eval_retry(
+    def test_unsupported_host_boundary_is_explicitly_bypassed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An unavailable sandbox is durable operator remediation, not code work."""
+        """Only the temporary unsupported-platform condition may bypass review checks."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2199,14 +2200,14 @@ class TestPrReviewStageStep:
             ctx,
         )
 
-        assert stage.step(item, ctx) == StageOutcome(
-            Disposition.FINISH_FAIL, "host_verification_failed"
-        )
-        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
-        assert item.payload["host_verification_failure"]["error"] == (
-            "unsupported_host_verification_boundary"
-        )
-        assert "review_audit_failure" not in item.payload
+        next_request = stage.step(item, ctx)
+
+        assert isinstance(next_request, JobRequest)
+        assert next_request.on_done_state == HOST_VERIFICATION_WAIT
+        receipt = item.payload["host_verification_receipts"][0]
+        assert receipt["bypassed"] is True
+        assert receipt["error"] == "unsupported_host_verification_boundary"
+        assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
 
     def test_host_failure_comment_error_preserves_no_go_and_fails_closed(
         self, make_ctx: Any, make_work_item: Any
