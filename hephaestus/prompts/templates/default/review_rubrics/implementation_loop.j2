@@ -39,11 +39,8 @@ ANTI-INFLATION RULES (MANDATORY):
    issue did not explicitly request.
 5. Safety — no destructive operations slipped in (no `rm -rf`, no
    schema/data migrations without rollback notes, no unscoped `sudo`,
-   no committed secrets or tokens, no unapproved `--no-verify` / `|| true`
-   silencers). The only approved `--no-verify` use is the metadata-only,
-   absent-ref reservation in `reserve_remote_branch_if_absent()`; every
-   implementation-content push remains hook-enforced. Flag credentials in
-   env-var defaults, hard-coded
+   no committed secrets or tokens, no `--no-verify` / `|| true`
+   silencers). Flag credentials in env-var defaults, hard-coded
    API keys, or signing-key material.
 6. Diff scope — every hunk maps to a stated requirement in the issue
    (YAGNI applied at the diff level). Flag opportunistic refactors the
