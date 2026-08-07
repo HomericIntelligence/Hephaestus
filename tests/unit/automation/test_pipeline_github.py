@@ -3292,9 +3292,57 @@ class TestRepoScoping:
         assert [thread["id"] for thread in threads] == ["T1", "T2"]
 
         assert calls[0][:2] == ["api", "graphql"]
-        assert "-F" in calls[0]
-        assert "owner=org" in calls[0]
-        assert "name=repo-a" in calls[0]
+        assert calls[0][calls[0].index("owner=org") - 1] == "-f"
+        assert calls[0][calls[0].index("name=repo-a") - 1] == "-f"
+        assert calls[0][calls[0].index("number=7") - 1] == "-F"
+
+    @pytest.mark.parametrize("body", ["@/etc/passwd", "@relative-secret"])
+    def test_graphql_thread_reply_body_uses_raw_field(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        body: str,
+    ) -> None:
+        """A leading @ in an agent reply remains text, never a gh file reference."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+                )
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        assert adapter._add_thread_reply("T1", body) == "C1"
+
+        argv = calls[0]
+        body_index = argv.index(f"body={body}")
+        assert argv[body_index - 1] == "-f"
+        assert ["-F", f"body={body}"] != argv[body_index - 1 : body_index + 1]
+
+    def test_graphql_preserves_typed_integer_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GraphQL Int variables retain gh's typed-field encoding."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps({"data": {}}))
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        adapter._graphql("query($number:Int!){node{id}}", number=7)
+
+        argv = calls[0]
+        assert argv[argv.index("owner=org") - 1] == "-f"
+        assert argv[argv.index("name=repo-a") - 1] == "-f"
+        assert argv[argv.index("number=7") - 1] == "-F"
 
     @pytest.mark.parametrize(
         "review_threads",
