@@ -113,6 +113,11 @@ class SubscriberState(enum.Enum):
     ERROR = "error"
 
 
+_NATS_ERROR_KIND_LABELS = frozenset({"connection", "terminal", "handler", "decode"})
+_NATS_SUBSCRIBER_STATE_LABELS = frozenset(state.value for state in SubscriberState)
+_NATS_BREAKER_STATE_LABELS = frozenset(state.value for state in CircuitBreakerState)
+
+
 class NATSSubscriberThread(threading.Thread):
     """Daemon thread that subscribes to NATS JetStream and dispatches events.
 
@@ -324,6 +329,8 @@ class NATSSubscriberThread(threading.Thread):
             registry.counter(
                 "hephaestus_nats_subscriber_messages_total",
                 "NATS messages dispatched successfully by this subscriber.",
+                allowed_labels={},
+                series_cap=1,
             ).inc()
         self._emit_metrics()
 
@@ -347,6 +354,8 @@ class NATSSubscriberThread(threading.Thread):
             registry.counter(
                 "hephaestus_nats_subscriber_errors_total",
                 "NATS subscriber errors by bounded lifecycle kind.",
+                allowed_labels={"kind": _NATS_ERROR_KIND_LABELS},
+                series_cap=len(_NATS_ERROR_KIND_LABELS),
             ).inc(labels={"kind": kind})
 
     def _emit_metrics(self) -> None:
@@ -360,6 +369,8 @@ class NATSSubscriberThread(threading.Thread):
         state_gauge = registry.gauge(
             "hephaestus_nats_subscriber_state",
             "NATS subscriber lifecycle state (one active state has value 1).",
+            allowed_labels={"state": _NATS_SUBSCRIBER_STATE_LABELS},
+            series_cap=len(_NATS_SUBSCRIBER_STATE_LABELS),
         )
         for subscriber_state in SubscriberState:
             state_gauge.set(
@@ -369,6 +380,8 @@ class NATSSubscriberThread(threading.Thread):
         breaker_gauge = registry.gauge(
             "hephaestus_nats_subscriber_circuit_breaker_state",
             "NATS subscriber circuit-breaker state (one active state has value 1).",
+            allowed_labels={"state": _NATS_BREAKER_STATE_LABELS},
+            series_cap=len(_NATS_BREAKER_STATE_LABELS),
         )
         for breaker_state_candidate in CircuitBreakerState:
             breaker_gauge.set(
@@ -378,6 +391,8 @@ class NATSSubscriberThread(threading.Thread):
         registry.gauge(
             "hephaestus_nats_subscriber_last_message_timestamp_seconds",
             "Unix timestamp of the last successfully dispatched NATS message (zero if none).",
+            allowed_labels={},
+            series_cap=1,
         ).set(last_message_at or 0.0)
 
     # ------------------------------------------------------------------
