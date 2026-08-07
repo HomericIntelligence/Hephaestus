@@ -43,6 +43,7 @@ def record_event(
 def observability_snapshot(coordinator: Any, *, logger: logging.Logger) -> dict[str, Any]:
     """Read the coordinator lifecycle values exposed to observability."""
     circuit_breakers: dict[str, dict[str, Any]] = {}
+    snapshot_errors: list[str] = []
     provider = coordinator.config.circuit_breaker_snapshot_provider
     if provider is not None:
         try:
@@ -51,8 +52,9 @@ def observability_snapshot(coordinator: Any, *, logger: logging.Logger) -> dict[
             # Observability must not terminate a production automation loop if
             # an optional diagnostic provider is broken.
             logger.exception("circuit-breaker snapshot provider failed")
+            snapshot_errors.append("circuit_breaker_snapshot_provider_failed")
 
-    return {
+    snapshot = {
         "queue_depths": {name.value: len(queue) for name, queue in coordinator.queues.items()},
         "inflight_per_repo": dict(coordinator.inflight_per_repo),
         "inflight_jobs": len(coordinator.in_flight),
@@ -60,6 +62,9 @@ def observability_snapshot(coordinator: Any, *, logger: logging.Logger) -> dict[
         "loops_run": coordinator._loops_run,
         "stalled_ticks": coordinator._stalled_ticks,
     }
+    if snapshot_errors:
+        snapshot["snapshot_errors"] = snapshot_errors
+    return snapshot
 
 
 def health_snapshot(
@@ -77,6 +82,8 @@ def health_snapshot(
     )
     if coordinator.shutdown.is_set():
         status = "stopping"
+    elif snapshot.get("snapshot_errors"):
+        status = "error"
     elif active_alerts:
         status = "degraded"
     else:

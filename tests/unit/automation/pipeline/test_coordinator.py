@@ -225,6 +225,35 @@ class TestCoordinatorHealth:
         coordinator.queues[StageName.PLANNING].pop()
         assert coordinator._health_snapshot()["status"] == "ok"
 
+    def test_health_snapshot_reports_snapshot_provider_failure_as_error(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A broken breaker provider is logged but cannot make readiness pass."""
+
+        def failing_provider() -> dict[str, dict[str, Any]]:
+            raise RuntimeError("secret breaker failure")
+
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                circuit_breaker_snapshot_provider=failing_provider,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        with caplog.at_level(logging.ERROR):
+            snapshot = coordinator._health_snapshot()
+
+        assert snapshot["status"] == "error"
+        assert snapshot["circuit_breakers"] == {}
+        assert snapshot["snapshot_errors"] == ["circuit_breaker_snapshot_provider_failed"]
+        assert "secret breaker failure" not in json.dumps(snapshot)
+        assert "circuit-breaker snapshot provider failed" in caplog.text
+
 
 def test_github_receipt_applies_before_on_done_state_and_routing(
     tmp_path: Path,
