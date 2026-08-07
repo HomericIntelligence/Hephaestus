@@ -45,7 +45,7 @@ def host_verification_failure_comment(
         "### Host verification failed",
         "",
         "[auto-msg] The fixed host-verification command failed before source review. "
-        "The PR remains `state:implementation-no-go`.",
+        + "The PR remains `state:implementation-no-go`.",
         "",
         "**Reviewed head**",
         "",
