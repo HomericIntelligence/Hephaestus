@@ -1900,6 +1900,9 @@ class TestPrReviewStageStep:
             "stdout_tail": result.stdout_tail,
         }
         assert stage_module._host_verification_receipt_matches(receipt, spec, expected_head)
+        assert not stage_module._host_verification_receipt_matches(
+            {**receipt, "ok": False}, spec, expected_head
+        )
         assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(

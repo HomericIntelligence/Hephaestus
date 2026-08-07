@@ -178,7 +178,7 @@ TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR = "unsupported_host_verification_bounda
 def _host_verification_receipt_matches(
     receipt: object, spec: _HostVerificationSpec, reviewed_head: str
 ) -> bool:
-    """Return whether *receipt* was captured for this immutable head and command."""
+    """Return whether *receipt* proves this immutable head and command passed."""
     if isinstance(receipt, dict) and receipt.get("bypassed") is True:
         return bool(
             receipt.get("head_sha") == reviewed_head
@@ -193,7 +193,7 @@ def _host_verification_receipt_matches(
         and receipt.get("head_sha") == reviewed_head
         and receipt.get("argv") == list(spec.argv)
         and receipt.get("immutable_source") is True
-        and isinstance(receipt.get("ok"), bool)
+        and receipt.get("ok") is True
         and isinstance(receipt.get("stdout_tail"), str)
         and isinstance(receipt.get("stderr_tail"), str)
     )
@@ -204,7 +204,7 @@ def _host_verification_receipts_match(
     specs: tuple[_HostVerificationSpec, ...],
     reviewed_head: str,
 ) -> bool:
-    """Return whether every required fixed check has an exact-head receipt."""
+    """Return whether every required fixed check has a successful exact-head receipt."""
     return bool(
         isinstance(receipts, list)
         and len(receipts) == len(specs)
