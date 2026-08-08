@@ -49,10 +49,15 @@ from .models import PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
 from .protocol import PLAN_REVIEW_CANONICAL_MARKER
 from .review_journal import (
+    CommentJournalReadError,
     IssueComment,
+    PlanDiscoveryResult,
+    PlanDiscoveryStatus,
     blocked_audit_recovery_body,
     comment_revision,
+    discover_plan_from_comments,
     is_plan_comment,
+    normalize_issue_comments,
     parse_plan_review_state,
     render_current_review,
 )
@@ -115,7 +120,7 @@ class PlanReviewer:
         # Per-instance cache for ``_fetch_issue_comments`` (#A3-009, #560).
         # Initialised here rather than lazily so mypy sees the type and the
         # ThreadPoolExecutor invariant is unambiguous.
-        self._comments_cache: dict[int, list[dict[str, Any]]] = {}
+        self._comments_cache: dict[int, list[IssueComment]] = {}
 
     def run(self) -> dict[int, WorkerResult]:
         """Run the plan reviewer on all issues.
@@ -169,7 +174,7 @@ class PlanReviewer:
         self._print_summary(results)
         return results
 
-    def _review_issue(self, issue_number: int, slot_id: int) -> WorkerResult:
+    def _review_issue(self, issue_number: int, slot_id: int) -> WorkerResult:  # noqa: C901
         """Review the plan for a single issue.
 
         Args:
@@ -223,14 +228,27 @@ class PlanReviewer:
                         issue_number=issue_number, success=True, already_reviewed=True
                     )
 
-                # Skip if no plan exists
-                plan_text = self._get_latest_plan(issue_number)
-                if plan_text is None:
+                plan_lookup = self._get_latest_plan(issue_number)
+                if plan_lookup.status is PlanDiscoveryStatus.READ_ERROR:
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=False,
+                        error=f"Failed to discover plan: {plan_lookup.error}",
+                    )
+                if plan_lookup.status is PlanDiscoveryStatus.ABSENT:
                     logger.info(
                         "Issue %s: no plan comment found, skipping", issue_ref(issue_number)
                     )
                     return WorkerResult(
                         issue_number=issue_number, success=True, already_reviewed=True
+                    )
+
+                plan_text = plan_lookup.plan_text
+                if plan_text is None:
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=False,
+                        error="plan discovery returned FOUND without plan text",
                     )
 
                 # Fetch issue details for context
@@ -289,7 +307,7 @@ class PlanReviewer:
                     error=str(e)[:80],
                 )
 
-    def _fetch_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
+    def _fetch_issue_comments(self, issue_number: int) -> list[IssueComment]:
         """Fetch the complete bounded issue journal, caching it per instance.
 
         Both ``_latest_review_is_final`` and ``_get_latest_plan`` call this
@@ -300,32 +318,34 @@ class PlanReviewer:
             issue_number: GitHub issue number.
 
         Returns:
-            Chronological comment dictionaries with normalized ownership.
+            Chronological comments with validated author metadata and derived
+            ownership.
 
         Raises:
-            RuntimeError: GitHub cannot provide the complete bounded journal or
+            CommentJournalReadError: GitHub cannot provide a complete journal or
                 the authenticated actor identity cannot be established.
 
         """
         if issue_number in self._comments_cache:
             return self._comments_cache[issue_number]
 
-        comments = fetch_issue_comments_metadata(issue_number)
-        viewer_login = (gh_current_login() or "").lower()
-        if not viewer_login:
-            raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
-        for comment in comments:
-            if "viewerDidAuthor" in comment:
-                continue
-            author = comment.get("user") or comment.get("author") or {}
-            login = author.get("login") if isinstance(author, dict) else ""
-            comment["viewerDidAuthor"] = bool(login) and str(login).lower() == viewer_login
+        try:
+            comments = normalize_issue_comments(
+                fetch_issue_comments_metadata(issue_number),
+                viewer_login=gh_current_login() or "",
+            )
+        except CommentJournalReadError:
+            raise
+        except Exception as exc:
+            raise CommentJournalReadError(
+                f"failed to read issue #{issue_number} comments: {exc}"
+            ) from exc
 
         self._comments_cache[issue_number] = comments
         return comments
 
-    def _get_latest_plan(self, issue_number: int) -> str | None:
-        """Return the body of the last comment that is the PLAN.
+    def _get_latest_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Return the tri-state result for the latest actor-owned plan.
 
         Uses :meth:`_fetch_issue_comments` so the API call is shared with
         :meth:`_latest_review_is_final`.
@@ -342,41 +362,17 @@ class PlanReviewer:
             issue_number: GitHub issue number.
 
         Returns:
-            Plan comment body text, or None if no plan comment is found.
+            ``FOUND``, ``ABSENT``, or ``READ_ERROR`` for the complete journal.
 
         """
-        comments = self._fetch_issue_comments(issue_number)
-
-        # Walk in reverse to find the *last* genuine plan comment.
-        for comment in reversed(comments):
-            if not bool(comment.get("viewerDidAuthor")):
-                continue
-            body: str = comment.get("body", "")
-            stripped = body.lstrip()
-            if stripped.startswith(_REVIEW_PREFIX):
-                continue  # never treat a review comment as the plan
-            # Match the single canonical marker ONLY at the start of the body
-            # (anchored), never as a free substring.
-            if is_plan_comment(stripped):
-                logger.debug("Found plan comment for issue #%s", issue_number)
-                return body
-
-        return None
+        try:
+            return discover_plan_from_comments(self._fetch_issue_comments(issue_number))
+        except CommentJournalReadError as exc:
+            return PlanDiscoveryResult.read_error(exc)
 
     def _ensure_blocked_audit(self, issue_number: int) -> None:
         """Repair an interrupted BLOCKED explanation without invoking an agent."""
-        comments = [
-            IssueComment(
-                body=str(comment.get("body", "")),
-                author_login=str(
-                    (comment.get("user") or comment.get("author") or {}).get("login", "")
-                ),
-                viewer_did_author=bool(comment.get("viewerDidAuthor")),
-                created_at=str(comment.get("createdAt") or comment.get("created_at") or ""),
-                updated_at=str(comment.get("updatedAt") or comment.get("updated_at") or ""),
-            )
-            for comment in self._fetch_issue_comments(issue_number)
-        ]
+        comments = self._fetch_issue_comments(issue_number)
         body = blocked_audit_recovery_body(comments)
         if body is None:
             return
@@ -592,11 +588,10 @@ class PlanReviewer:
             raise RuntimeError(f"contradictory plan-state labels: {sorted(active_states)}")
         revision = 1
         for comment in reversed(self._fetch_issue_comments(issue_number)):
-            if not bool(comment.get("viewerDidAuthor")):
+            if not comment.viewer_did_author:
                 continue
-            body = str(comment.get("body", ""))
-            if is_plan_comment(body):
-                revision = comment_revision(body) or 1
+            if is_plan_comment(comment.body):
+                revision = comment_revision(comment.body) or 1
                 break
         comment_body = render_current_review(review_text, revision=revision)
         label_to_add, labels_to_remove = apply_plan_state(state)

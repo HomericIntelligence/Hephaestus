@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import hephaestus.automation.github_api as github_api_mod
+import hephaestus.automation.pipeline_github as pg
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName
@@ -694,6 +696,70 @@ class TestPlanningStageStep:
         assert result.disposition == Disposition.ADVANCE
         assert github.mutation_log == []  # existing plan: no duplicate upsert
 
+    def test_on_enter_journal_read_error_retries_without_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Reconciliation failure retries before labels or journal writes."""
+        github = FakeStageGitHub(labels=[], journal_read_error="rate limited")
+        item = make_work_item(issue=11, state="ENTER")
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(
+            Disposition.RETRY,
+            "plan journal read failed: rate limited",
+        )
+        assert item.state == "ENTER"
+        assert item.attempts.get("plan", 0) == 0
+        assert github.labels[11] == set()
+        assert github.mutation_log == []
+
+    def test_verify_read_error_does_not_publish_or_spend_absence_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An uncertain plan lookup stays in VERIFY without side effects."""
+        github = FakeStageGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            plan_read_error="malformed comment body",
+        )
+        item = make_work_item(issue=12, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nCandidate"
+
+        outcome = PlanningStage().step(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(
+            Disposition.RETRY,
+            "plan discovery failed: malformed comment body",
+        )
+        assert item.state == "VERIFY"
+        assert item.attempts.get("plan", 0) == 0
+        assert github.mutation_log == []
+
+    def test_production_adapter_malformed_comment_retries_without_mutation(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed REST comments cannot be treated as an absent plan."""
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            lambda issue: [{"body": None, "user": {"login": "bot"}}],
+        )
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        item = make_work_item(issue=14, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nCandidate"
+
+        outcome = PlanningStage().step(item, make_ctx(github=adapter))
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert item.state == "VERIFY"
+        assert item.attempts.get("plan", 0) == 0
+
     def test_verify_posts_plan_comment_then_advances(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -726,13 +792,8 @@ class TestPlanningStageStep:
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A just-written revised plan is valid even before a new review exists."""
-
-        class StaleNoGoGitHub(FakeStageGitHub):
-            def has_existing_plan(self, issue_number: int) -> bool:
-                return False
-
         stage = PlanningStage()
-        github = StaleNoGoGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=24, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nRevised plan."
@@ -948,7 +1009,7 @@ class TestPlanningStageStep:
     def test_verify_posts_exactly_once_on_reentry(self, make_ctx: Any, make_work_item: Any) -> None:
         """Re-entering VERIFY never double-posts.
 
-        The upsert is guarded by has_existing_plan (idempotent on re-entry).
+        The upsert is guarded by tri-state plan discovery (idempotent on re-entry).
         """
         stage = PlanningStage()
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)

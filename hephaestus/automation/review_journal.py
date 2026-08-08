@@ -11,8 +11,9 @@ from __future__ import annotations
 import difflib
 import hashlib
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final
 
 from hephaestus.automation.protocol import (
@@ -43,6 +44,10 @@ _NEW_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:new-plan -->"
 _TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
+class CommentJournalReadError(RuntimeError):
+    """A complete, ownership-verifiable GitHub comment read failed."""
+
+
 @dataclass(frozen=True)
 class IssueComment:
     """Issue comment metadata required for ownership and feedback decisions."""
@@ -65,6 +70,38 @@ class IssueComment:
             and self.author_association.upper() in _TRUSTED_ASSOCIATIONS
             and not login.endswith("[bot]")
         )
+
+
+class PlanDiscoveryStatus(StrEnum):
+    """Outcome of discovering an actor-owned canonical plan."""
+
+    FOUND = "found"
+    ABSENT = "absent"
+    READ_ERROR = "read_error"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanDiscoveryResult:
+    """Plan-discovery outcome and its optional payload or diagnostic."""
+
+    status: PlanDiscoveryStatus
+    plan_text: str | None = None
+    error: str | None = None
+
+    @classmethod
+    def found(cls, plan_text: str) -> PlanDiscoveryResult:
+        """Create a successful result containing the canonical plan text."""
+        return cls(PlanDiscoveryStatus.FOUND, plan_text=plan_text)
+
+    @classmethod
+    def absent(cls) -> PlanDiscoveryResult:
+        """Create a successful result proving no actor-owned plan exists."""
+        return cls(PlanDiscoveryStatus.ABSENT)
+
+    @classmethod
+    def read_error(cls, error: object) -> PlanDiscoveryResult:
+        """Create a result describing an incomplete or invalid journal read."""
+        return cls(PlanDiscoveryStatus.READ_ERROR, error=str(error))
 
 
 @dataclass(frozen=True)
@@ -102,7 +139,8 @@ def comment_body(comment: IssueComment | str) -> str:
 def is_plan_comment(body: str) -> bool:
     """Recognize current and legacy canonical plan comments."""
     stripped = body.lstrip()
-    return stripped.startswith(PLAN_CANONICAL_MARKER) or stripped.startswith(PLAN_COMMENT_MARKER)
+    first_line = stripped.splitlines()[0].strip() if stripped else ""
+    return first_line in {PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER}
 
 
 def is_plan_review_comment(body: str) -> bool:
@@ -111,6 +149,91 @@ def is_plan_review_comment(body: str) -> bool:
     return stripped.startswith(PLAN_REVIEW_CANONICAL_MARKER) or stripped.startswith(
         PLAN_REVIEW_PREFIX
     )
+
+
+def normalize_issue_comments(
+    comments: Sequence[object],
+    *,
+    viewer_login: str,
+) -> list[IssueComment]:
+    """Validate REST comments and derive ownership from authenticated identity.
+
+    A plan lookup may report ``ABSENT`` only after every comment in the
+    complete journal has been validated.  In particular, ownership is derived
+    from the authenticated viewer login and the comment's author metadata;
+    caller-provided ownership flags are intentionally ignored.
+
+    Args:
+        comments: Raw REST comment payloads in chronological order.
+        viewer_login: Login returned by the authenticated GitHub session.
+
+    Returns:
+        Structured comments with derived ownership metadata.
+
+    Raises:
+        CommentJournalReadError: If the viewer identity or any comment payload
+            is missing required fields or has an invalid shape.
+
+    """
+    actor = viewer_login.strip()
+    if not actor:
+        raise CommentJournalReadError(
+            "cannot verify GitHub comment ownership: viewer login unavailable"
+        )
+
+    normalized: list[IssueComment] = []
+    for index, raw in enumerate(comments):
+        if not isinstance(raw, Mapping):
+            raise CommentJournalReadError(f"comment {index} was not an object")
+
+        body = raw.get("body")
+        author = raw.get("user") or raw.get("author")
+        login = author.get("login") if isinstance(author, Mapping) else None
+        if not isinstance(body, str):
+            raise CommentJournalReadError(f"comment {index} body was not a string")
+        if not isinstance(login, str) or not login.strip():
+            raise CommentJournalReadError(f"comment {index} author login was unavailable")
+
+        database_id: int | None = None
+        raw_database_id = raw.get("databaseId")
+        if raw_database_id is None:
+            raw_database_id = raw.get("id")
+        if raw_database_id is not None:
+            try:
+                database_id = int(raw_database_id)
+            except (TypeError, ValueError) as exc:
+                raise CommentJournalReadError(f"comment {index} database id was invalid") from exc
+
+        normalized.append(
+            IssueComment(
+                body=body,
+                author_login=login,
+                author_association=str(
+                    raw.get("author_association") or raw.get("authorAssociation") or ""
+                ),
+                created_at=str(raw.get("created_at") or raw.get("createdAt") or ""),
+                updated_at=str(raw.get("updated_at") or raw.get("updatedAt") or ""),
+                viewer_did_author=login.casefold() == actor.casefold(),
+                database_id=database_id,
+                url=str(raw.get("html_url") or raw.get("url") or ""),
+            )
+        )
+    return normalized
+
+
+def discover_plan_from_comments(
+    comments: Sequence[IssueComment],
+) -> PlanDiscoveryResult:
+    """Select the latest actor-owned plan from a validated complete journal."""
+    for comment in reversed(comments):
+        if not comment.viewer_did_author:
+            continue
+        body = comment.body.lstrip()
+        if is_plan_review_comment(body):
+            continue
+        if is_plan_comment(body):
+            return PlanDiscoveryResult.found(comment.body)
+    return PlanDiscoveryResult.absent()
 
 
 def is_journal_comment(body: str) -> bool:
