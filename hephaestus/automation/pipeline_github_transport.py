@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
 
-from hephaestus.automation import github_api, pr_manager
+import hephaestus.automation.github_api as github_api
 from hephaestus.automation._review_utils import (
     close_issue_as_covered,
     ensure_state_dir,
@@ -395,6 +395,6 @@ __all__ = [
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
     'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
-    'os', 'pr_manager', 'quote', 'rate_budget_ok', 'rate_limit_remaining', 're',
+    'os', 'quote', 'rate_budget_ok', 'rate_limit_remaining', 're',
     'read_timeout_env', 'scope_retraction_marker', 'subprocess', 'sys', 'time']
 # fmt: on

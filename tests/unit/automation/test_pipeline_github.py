@@ -1,7 +1,7 @@
 """PipelineGitHub adapter tests: mapping + dry-run log-and-skip (#1817).
 
 The adapter is the ONE place coordinator-neutral mutator names map onto the
-real ``github_api`` / ``pr_manager`` / ``_review_utils`` helpers, and the
+real ``github_api`` / ``_review_utils`` helpers, and the
 place the ``StageGitHub`` protocol's dry-run contract is honored.
 """
 
@@ -20,7 +20,7 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
-import hephaestus.automation.pr_manager as pr_manager_mod
+import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
@@ -32,6 +32,11 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     render_current_plan,
     render_current_review,
+)
+from hephaestus.automation.state_labels import (
+    ALL_IMPLEMENTATION_STATE_LABELS,
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
 )
 from hephaestus.utils.file_lock import LockUnavailableError
 
@@ -2415,14 +2420,12 @@ _MUTATOR_CASES = [
     ("add_labels", (5, ["x"]), "github_api", "gh_issue_add_labels"),
     ("remove_labels", (5, ["x"]), "github_api", "gh_issue_remove_labels"),
     ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
-    ("mark_pr_implementation_go", (7,), "pr_manager", "mark_pr_implementation_go"),
-    ("mark_pr_implementation_no_go", (7,), "pr_manager", "mark_pr_implementation_no_go"),
     ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
 ]
 
 
-_OWNERS = {"github_api": github_api_mod, "pr_manager": pr_manager_mod}
+_OWNERS = {"github_api": github_api_mod}
 
 
 def _patch_target(monkeypatch: pytest.MonkeyPatch, owner: str, name: str) -> MagicMock:
@@ -2448,14 +2451,6 @@ class TestMutatorMapping:
         name: str,
     ) -> None:
         mock = _patch_target(monkeypatch, owner, name)
-        if method == "mark_pr_implementation_go":
-            monkeypatch.setattr(
-                adapter, "pr_has_implementation_state_label", lambda _pr: (True, False)
-            )
-        elif method == "mark_pr_implementation_no_go":
-            monkeypatch.setattr(
-                adapter, "pr_has_implementation_state_label", lambda _pr: (False, True)
-            )
 
         getattr(adapter, method)(*args)
 
@@ -2713,6 +2708,183 @@ class TestMutatorMapping:
 
         post.assert_not_called()
         delete.assert_not_called()
+
+
+def test_mark_go_uses_adapter_labels_and_readback(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GO transitions use the adapter-owned label primitives for every scope."""
+    add = MagicMock()
+    remove = MagicMock()
+    monkeypatch.setattr(adapter, "_add_labels", add)
+    monkeypatch.setattr(adapter, "_remove_labels", remove)
+    monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (True, False))
+
+    adapter.mark_pr_implementation_go(7)
+
+    add.assert_called_once_with(7, [STATE_IMPLEMENTATION_GO])
+    remove.assert_called_once_with(7, [STATE_IMPLEMENTATION_NO_GO])
+
+
+def test_mark_no_go_uses_adapter_labels_and_readback(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NO-GO transitions use the adapter-owned label primitives for every scope."""
+    add = MagicMock()
+    remove = MagicMock()
+    monkeypatch.setattr(adapter, "_add_labels", add)
+    monkeypatch.setattr(adapter, "_remove_labels", remove)
+    monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: (False, True))
+
+    adapter.mark_pr_implementation_no_go(7)
+
+    add.assert_called_once_with(7, [STATE_IMPLEMENTATION_NO_GO])
+    remove.assert_called_once_with(7, [STATE_IMPLEMENTATION_GO])
+
+
+def test_unscoped_mark_go_uses_transport_without_repo_selector(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unscoped implementation labels use transport commands without ``--repo``."""
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        if argv[:2] == ["pr", "view"]:
+            return SimpleNamespace(
+                stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_GO}]})
+            )
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(adapter, "_label_names", lambda: set(ALL_IMPLEMENTATION_STATE_LABELS))
+    monkeypatch.setattr(transport_mod, "gh_call", fake_gh_call)
+
+    adapter.mark_pr_implementation_go(7)
+
+    assert calls == [
+        (["issue", "edit", "7", "--add-label", STATE_IMPLEMENTATION_GO], {}),
+        (["issue", "edit", "7", "--remove-label", STATE_IMPLEMENTATION_NO_GO], {}),
+        (["pr", "view", "7", "--json", "labels"], {"check": False}),
+    ]
+
+
+def test_scoped_mark_no_go_appends_repo_selector(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same state transition remains explicitly repository scoped."""
+    adapter.repo = "repo-a"
+    calls: list[list[str]] = []
+
+    def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        calls.append(argv)
+        if argv[:2] == ["pr", "view"]:
+            return SimpleNamespace(
+                stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_NO_GO}]})
+            )
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(adapter, "_label_names", lambda: set(ALL_IMPLEMENTATION_STATE_LABELS))
+    monkeypatch.setattr(transport_mod, "gh_call", fake_gh_call)
+
+    adapter.mark_pr_implementation_no_go(7)
+
+    assert calls == [
+        [
+            "issue",
+            "edit",
+            "7",
+            "--add-label",
+            STATE_IMPLEMENTATION_NO_GO,
+            "--repo",
+            "org/repo-a",
+        ],
+        [
+            "issue",
+            "edit",
+            "7",
+            "--remove-label",
+            STATE_IMPLEMENTATION_GO,
+            "--repo",
+            "org/repo-a",
+        ],
+        ["pr", "view", "7", "--json", "labels", "--repo", "org/repo-a"],
+    ]
+
+
+def test_unscoped_label_read_transport_error_fails_closed(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat unscoped transport failures as an absence of valid state."""
+    monkeypatch.setattr(
+        transport_mod, "gh_call", MagicMock(side_effect=RuntimeError("gh unavailable"))
+    )
+
+    assert adapter.pr_has_implementation_state_label(7) == (False, False)
+
+
+@pytest.mark.parametrize("stdout", ["not-json", "[]", "{}"])  # malformed or non-object payloads
+def test_unscoped_label_read_malformed_response_fails_closed(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+) -> None:
+    """Treat malformed label payloads as an absence of valid state."""
+    call_mock = MagicMock(return_value=SimpleNamespace(stdout=stdout))
+    monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
+    assert adapter.pr_has_implementation_state_label(7) == (False, False)
+    call_mock.assert_called_once_with(["pr", "view", "7", "--json", "labels"], check=False)
+
+
+@pytest.mark.parametrize("state", [(False, False), (True, True)])
+def test_mark_go_rejects_nonexclusive_readback(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    state: tuple[bool, bool],
+) -> None:
+    """Reject GO readbacks that are missing or share the NO-GO label."""
+    monkeypatch.setattr(adapter, "_add_labels", MagicMock())
+    monkeypatch.setattr(adapter, "_remove_labels", MagicMock())
+    monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: state)
+
+    with pytest.raises(RuntimeError, match="implementation-go label read-back failed"):
+        adapter.mark_pr_implementation_go(7)
+
+
+@pytest.mark.parametrize("state", [(True, True), (False, False)])
+def test_mark_no_go_rejects_nonexclusive_readback(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    state: tuple[bool, bool],
+) -> None:
+    """Reject NO-GO readbacks that retain GO or omit NO-GO."""
+    monkeypatch.setattr(adapter, "_add_labels", MagicMock())
+    monkeypatch.setattr(adapter, "_remove_labels", MagicMock())
+    monkeypatch.setattr(adapter, "pr_has_implementation_state_label", lambda _pr: state)
+
+    with pytest.raises(RuntimeError, match="implementation-no-go label read-back failed"):
+        adapter.mark_pr_implementation_no_go(7)
+
+
+def test_dry_run_state_transitions_do_not_reach_transport(
+    dry_adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run state transitions issue no GitHub transport calls."""
+    call_mock = MagicMock()
+    monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+    monkeypatch.setattr(dry_adapter, "_add_labels", MagicMock())
+    monkeypatch.setattr(dry_adapter, "_remove_labels", MagicMock())
+
+    dry_adapter.mark_pr_implementation_go(7)
+
+    call_mock.assert_not_called()
 
 
 class TestRepoScoping:
@@ -4679,13 +4851,21 @@ class TestReadSurface:
         assert "pr_diff" not in context
         assert all(argv[:2] != ["pr", "diff"] for argv in calls)
 
-    def test_pr_manager_implementation_label_read(
+    def test_unscoped_implementation_label_read_uses_adapter_transport(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            pr_manager_mod, "pr_has_implementation_state_label", lambda n: (True, False)
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                stdout=json.dumps({"labels": [{"name": STATE_IMPLEMENTATION_GO}]})
+            )
         )
+        monkeypatch.setattr(transport_mod, "gh_call", call_mock)
+
         assert adapter.pr_has_implementation_state_label(7) == (True, False)
+        call_mock.assert_called_once_with(
+            ["pr", "view", "7", "--json", "labels"],
+            check=False,
+        )
 
 
 class TestGhPrState:

@@ -13,17 +13,8 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
+import hephaestus.automation.git_runtime as _git_runtime
 from hephaestus.constants import agent_git_timeout
-
-# ``get_repo_root`` is re-exported (not redefined) so that the single canonical
-# implementation in ``hephaestus.utils.helpers`` is used everywhere, while
-# ``hephaestus.automation.git_utils.get_repo_root`` remains a stable, patchable
-# import path for the automation package and its tests. The ``X as X`` form
-# marks it an explicit re-export so mypy does not flag ``attr-defined`` at the
-# 13 import sites under --no-implicit-reexport.
-from hephaestus.utils.cache import ThreadSafeCache
-from hephaestus.utils.git import run_git as _shared_run_git
-from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
 from hephaestus.utils.retry import retry_with_backoff
 
 from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_impl_branch_name
@@ -31,6 +22,16 @@ from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_i
 logger = logging.getLogger(__name__)
 
 COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s --allow-empty"
+
+# Keep the historical patchable/public names while making their compatibility
+# re-export role explicit to static analyzers and type checkers.
+clear_repo_caches = _git_runtime.clear_repo_caches
+get_repo_info = _git_runtime.get_repo_info
+get_repo_root = _git_runtime.get_repo_root
+get_repo_slug = _git_runtime.get_repo_slug
+issue_ref = _git_runtime.issue_ref
+pr_ref = _git_runtime.pr_ref
+run = _git_runtime.run
 
 
 class DetachedHeadPushError(RuntimeError):
@@ -61,173 +62,6 @@ class DirectBranchReservationCollisionError(RuntimeError):
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
-
-
-def run(
-    cmd: list[str],
-    cwd: Path | None = None,
-    capture_output: bool = True,
-    check: bool = True,
-    timeout: int | None = None,
-    log_errors: bool = True,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess command with consistent error handling.
-
-    Args:
-        cmd: Command and arguments as list
-        cwd: Working directory (defaults to current)
-        capture_output: Whether to capture stdout/stderr
-        check: Whether to raise on non-zero exit
-        timeout: Optional timeout in seconds
-        log_errors: If False, suppress ERROR logging on failure. Use when
-            the caller expects and handles the failure itself.
-        env: Optional environment dict to pass to subprocess.run().
-            If provided, replaces the current process environment.
-
-    Returns:
-        CompletedProcess instance
-
-    Raises:
-        subprocess.CalledProcessError: If check=True and command fails
-        subprocess.TimeoutExpired: If timeout is exceeded
-
-    """
-    # Command elements may contain repository URLs or credential-helper
-    # configuration.  Keep a stable lifecycle trace without serializing any
-    # value derived from the command into application logs.
-    logger.debug("Running subprocess")
-    try:
-        if cmd and cmd[0] == "git":
-            return _shared_run_git(
-                cmd,
-                cwd=cwd,
-                timeout=timeout,
-                check=check,
-                log_on_error=False,
-                env=env,
-                retries=0,
-            )
-        return run_subprocess(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            timeout=timeout,
-            check=check,
-            log_on_error=False,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        if log_errors:
-            logger.error("Subprocess timed out")
-        raise
-    except subprocess.CalledProcessError as error:
-        if log_errors:
-            logger.error("Subprocess failed with exit code %s", error.returncode)
-        raise
-
-
-_repo_info_cache: ThreadSafeCache[Path | None, tuple[str, str]] = ThreadSafeCache()
-
-
-def get_repo_info(repo_root: Path | None = None) -> tuple[str, str]:
-    """Get repository owner and name from git remote.
-
-    Args:
-        repo_root: Repository root (defaults to auto-detect)
-
-    Returns:
-        Tuple of (owner, repo_name)
-
-    Raises:
-        RuntimeError: If unable to determine repo info
-
-    """
-    if repo_root is None:
-        repo_root = get_repo_root()
-
-    key = repo_root.resolve() if repo_root is not None else None
-
-    def _compute() -> tuple[str, str]:
-        try:
-            result = run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo_root,
-                capture_output=True,
-                check=True,
-            )
-            remote_url = result.stdout.strip()
-
-            # Parse various git URL formats
-            # SSH: git@github.com:owner/repo.git
-            # HTTPS: https://github.com/owner/repo.git
-            if "@" in remote_url and ":" in remote_url:
-                # SSH format
-                parts = remote_url.split(":")[-1].replace(".git", "").split("/")
-                owner, repo = parts[-2], parts[-1]
-            elif remote_url.startswith("https://"):
-                # HTTPS format
-                parts = remote_url.replace(".git", "").split("/")
-                owner, repo = parts[-2], parts[-1]
-            else:
-                raise RuntimeError(f"Unable to parse git remote URL: {remote_url}")
-
-            logger.debug("Detected repo: %s/%s", owner, repo)
-            return owner, repo
-
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to get git remote URL: {e}") from e
-
-    return _repo_info_cache.get_or_compute(key, _compute)
-
-
-# Keyed by the *resolved* repo_root path so a process that iterates multiple
-# repositories (the automation loop, the myrmidon swarm) gets the right slug
-# per repo instead of the first-cached one for all of them. The ``None`` key
-# holds the result of the auto-detect branch.
-_repo_slug_cache: ThreadSafeCache[Path | None, str] = ThreadSafeCache()
-
-
-def get_repo_slug(repo_root: Path | None = None) -> str:
-    """Return the short repo name for log/status prefixes (e.g. ``AchaeanFleet``).
-
-    Cached per ``repo_root`` for the lifetime of the process so hot log
-    paths do not re-invoke ``git remote`` on every call. Falls back to
-    ``"repo"`` if the remote URL cannot be parsed so callers can always
-    interpolate the result into status strings without exception handling.
-
-    Args:
-        repo_root: Repository root (defaults to auto-detect)
-
-    Returns:
-        Short repository name (no owner prefix), or ``"repo"`` on failure.
-
-    """
-    key = repo_root.resolve() if repo_root is not None else None
-
-    def _compute() -> str:
-        try:
-            _, repo = get_repo_info(repo_root)
-        except (RuntimeError, subprocess.CalledProcessError):
-            return "repo"
-        return repo
-
-    return _repo_slug_cache.get_or_compute(key, _compute)
-
-
-def clear_repo_caches() -> None:
-    """Clear both repo info and slug caches. For test isolation and long-lived processes."""
-    _repo_info_cache.clear()
-    _repo_slug_cache.clear()
-
-
-def issue_ref(issue_number: int | str) -> str:
-    """Return a ``<repo>#<number>`` reference string for logs and status lines."""
-    return f"{get_repo_slug()}#{issue_number}"
-
-
-def pr_ref(pr_number: int | str) -> str:
-    """Return a ``<repo>#<number>`` reference string for PRs (same format as issues)."""
-    return f"{get_repo_slug()}#{pr_number}"
 
 
 def issue_auto_impl_branch_name(issue_number: int | str) -> str:
@@ -273,6 +107,9 @@ def commit_if_changes(
         return False
 
     try:
+        # Import on demand to keep the product-layer commit implementation out
+        # of the neutral Git utility import path without hidden registration
+        # state or an import-order dependency.
         from .pr_manager import commit_changes
 
         commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}

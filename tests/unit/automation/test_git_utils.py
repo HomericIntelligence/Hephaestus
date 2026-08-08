@@ -1,6 +1,6 @@
 """Tests for git utility functions."""
 
-import logging
+import inspect
 import subprocess
 import sys
 from collections.abc import Generator
@@ -10,6 +10,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import hephaestus.automation.git_runtime as git_runtime
+from hephaestus.automation import git_utils
 from hephaestus.automation.git_utils import (
     DetachedHeadPushError,
     DetachedHeadPushRemoteHeadChangedError,
@@ -24,8 +26,6 @@ from hephaestus.automation.git_utils import (
     delete_reserved_branch_if_unchanged,
     ensure_branch_commit_metadata,
     get_current_branch,
-    get_repo_info,
-    get_repo_root,
     is_clean_working_tree,
     issue_auto_impl_branch_name,
     push_branch,
@@ -34,10 +34,30 @@ from hephaestus.automation.git_utils import (
     push_head_to_branch,
     rebase_worktree_onto,
     reserve_remote_branch_if_absent,
-    run,
     safe_git_fetch,
     sync_worktree_to_remote_branch,
 )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "run",
+        "get_repo_root",
+        "get_repo_info",
+        "get_repo_slug",
+        "clear_repo_caches",
+        "issue_ref",
+        "pr_ref",
+    ],
+)
+def test_git_runtime_helpers_remain_public_reexports(name: str) -> None:
+    """The historical git_utils names retain identity and signatures."""
+    compatibility_value = getattr(git_utils, name)
+    runtime_value = getattr(git_runtime, name)
+
+    assert compatibility_value is runtime_value
+    assert inspect.signature(compatibility_value) == inspect.signature(runtime_value)
 
 
 @pytest.fixture(autouse=True)
@@ -46,218 +66,6 @@ def _clear_caches() -> Generator[None]:
     clear_repo_caches()
     yield
     clear_repo_caches()
-
-
-@pytest.mark.requires_posix
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="TestRun shells out to echo/false/ls; POSIX coreutils not guaranteed on win32 (#742)",
-)
-class TestRun:
-    """Tests for run function."""
-
-    def test_successful_command(self) -> None:
-        """Test running a successful command."""
-        result = run(["echo", "hello"], check=True, capture_output=True)
-
-        assert result.returncode == 0
-        assert "hello" in result.stdout
-
-    def test_command_debug_log_does_not_disclose_arguments(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Command diagnostics do not log even a sensitive executable value."""
-        sensitive_argument = "do-not-log-this-command-argument"
-        completed = subprocess.CompletedProcess([sensitive_argument], 0, stdout="", stderr="")
-        with (
-            caplog.at_level(logging.DEBUG, logger="hephaestus.automation.git_utils"),
-            patch("hephaestus.automation.git_utils.run_subprocess", return_value=completed),
-        ):
-            result = run([sensitive_argument])
-
-        assert result is completed
-        assert "Running subprocess" in caplog.messages
-        assert sensitive_argument not in caplog.text
-
-    def test_failed_command_log_does_not_disclose_arguments(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Failure logs use the same redacted command summary as debug logs."""
-        sensitive_argument = "do-not-log-this-failed-command-argument"
-        failure = subprocess.CalledProcessError(
-            1,
-            [sensitive_argument],
-            stderr=sensitive_argument,
-        )
-        with (
-            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_utils"),
-            patch("hephaestus.automation.git_utils.run_subprocess", side_effect=failure),
-            pytest.raises(subprocess.CalledProcessError),
-        ):
-            run([sensitive_argument])
-
-        assert "Subprocess failed with exit code 1" in caplog.messages
-        assert sensitive_argument not in caplog.text
-
-    def test_timed_out_command_log_does_not_disclose_arguments(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Timeout logs do not disclose a sensitive executable value."""
-        sensitive_argument = "do-not-log-this-timed-out-command-argument"
-        timeout = subprocess.TimeoutExpired([sensitive_argument], 60)
-        with (
-            caplog.at_level(logging.ERROR, logger="hephaestus.automation.git_utils"),
-            patch("hephaestus.automation.git_utils.run_subprocess", side_effect=timeout),
-            pytest.raises(subprocess.TimeoutExpired),
-        ):
-            run([sensitive_argument], timeout=60)
-
-        assert "Subprocess timed out" in caplog.messages
-        assert sensitive_argument not in caplog.text
-
-    def test_failed_command_with_check(self) -> None:
-        """Test running a failed command with check=True."""
-        with pytest.raises(subprocess.CalledProcessError):
-            run(["false"], check=True)
-
-    def test_failed_command_without_check(self) -> None:
-        """Test running a failed command with check=False."""
-        result = run(["false"], check=False)
-        assert result.returncode != 0
-
-    def test_with_cwd(self, tmp_path: Any) -> None:
-        """Test running command with custom working directory."""
-        test_file = tmp_path / "test.txt"
-        test_file.write_text("content")
-
-        result = run(["ls", "test.txt"], cwd=tmp_path, capture_output=True)
-
-        assert result.returncode == 0
-        assert "test.txt" in result.stdout
-
-    def test_git_command_delegates_to_shared_git_helper(self) -> None:
-        """Automation keeps its run seam while sharing git subprocess execution."""
-        completed = subprocess.CompletedProcess(["git"], 0, stdout="", stderr="")
-        with patch(
-            "hephaestus.automation.git_utils._shared_run_git", return_value=completed
-        ) as mock_run:
-            result = run(
-                ["git", "status"],
-                cwd=Path("/repo"),
-                check=False,
-                timeout=42,
-                log_errors=False,
-            )
-
-        assert result is completed
-        mock_run.assert_called_once_with(
-            ["git", "status"],
-            cwd=Path("/repo"),
-            timeout=42,
-            check=False,
-            log_on_error=False,
-            env=None,
-            retries=0,
-        )
-
-
-class TestGetRepoRoot:
-    """Tests for get_repo_root function."""
-
-    @patch("hephaestus.utils.helpers.Path.cwd")
-    def test_successful_detection(self, mock_cwd: Any, tmp_path: Any) -> None:
-        """Test successful repository root detection via the canonical resolver."""
-        repo = tmp_path / "repo"
-        (repo / ".git").mkdir(parents=True)
-        sub = repo / "src" / "pkg"
-        sub.mkdir(parents=True)
-        mock_cwd.return_value = sub
-
-        root = get_repo_root()
-
-        assert root == repo
-
-    def test_returns_path(self, tmp_path: Any) -> None:
-        """Test that get_repo_root returns a Path object."""
-        root = get_repo_root(tmp_path)
-        assert isinstance(root, Path)
-
-
-class TestGetRepoInfo:
-    """Tests for get_repo_info function."""
-
-    def test_ssh_url_format(self, git_utils_mocks: Any) -> None:
-        """Test parsing SSH URL format."""
-        git_utils_mocks.repo_root.return_value = Path("/home/user/repo")
-        mock_result = Mock()
-        mock_result.stdout = "git@github.com:owner/repo.git\n"
-        git_utils_mocks.run.return_value = mock_result
-
-        owner, repo = get_repo_info()
-
-        assert owner == "owner"
-        assert repo == "repo"
-
-    def test_https_url_format(self, git_utils_mocks: Any) -> None:
-        """Test parsing HTTPS URL format."""
-        git_utils_mocks.repo_root.return_value = Path("/home/user/repo")
-        mock_result = Mock()
-        mock_result.stdout = "https://github.com/owner/repo.git\n"
-        git_utils_mocks.run.return_value = mock_result
-
-        owner, repo = get_repo_info()
-
-        assert owner == "owner"
-        assert repo == "repo"
-
-    def test_invalid_url_format(self, git_utils_mocks: Any) -> None:
-        """Test handling invalid URL format."""
-        git_utils_mocks.repo_root.return_value = Path("/home/user/repo")
-        mock_result = Mock()
-        mock_result.stdout = "invalid-url\n"
-        git_utils_mocks.run.return_value = mock_result
-
-        with pytest.raises(RuntimeError, match="Unable to parse git remote URL"):
-            get_repo_info()
-
-    def test_result_caching_prevents_repeated_run_calls(self, git_utils_mocks: Any) -> None:
-        """Test that repeated get_repo_info calls use cached result."""
-        repo_root = Path("/home/user/repo")
-        git_utils_mocks.repo_root.return_value = repo_root
-        mock_result = Mock()
-        mock_result.stdout = "git@github.com:owner/repo.git\n"
-        git_utils_mocks.run.return_value = mock_result
-
-        # First call should invoke run() and cache the result
-        owner1, repo1 = get_repo_info(repo_root)
-        assert owner1 == "owner"
-        assert repo1 == "repo"
-        assert git_utils_mocks.run.call_count == 1
-
-        # Second call with same repo_root should return cached result without calling run()
-        owner2, repo2 = get_repo_info(repo_root)
-        assert owner2 == "owner"
-        assert repo2 == "repo"
-        assert git_utils_mocks.run.call_count == 1  # Should not increase
-
-    def test_clear_repo_caches_forces_re_detection(self, git_utils_mocks: Any) -> None:
-        """Test that clear_repo_caches forces re-detection on next call."""
-        repo_root = Path("/home/user/repo")
-        git_utils_mocks.repo_root.return_value = repo_root
-        mock_result = Mock()
-        mock_result.stdout = "git@github.com:owner/repo.git\n"
-        git_utils_mocks.run.return_value = mock_result
-
-        # First call caches the result
-        get_repo_info(repo_root)
-        assert git_utils_mocks.run.call_count == 1
-
-        # Clear caches
-        clear_repo_caches()
-
-        # Next call should invoke run() again
-        get_repo_info(repo_root)
-        assert git_utils_mocks.run.call_count == 2
 
 
 class TestIssueAutoImplBranchName:
@@ -272,6 +80,54 @@ class TestIssueAutoImplBranchName:
 
 class TestCommitIfChanges:
     """Tests for commit_if_changes."""
+
+    def test_dirty_tree_imports_real_commit_helper_on_demand(self) -> None:
+        """A cold git-utils import loads the real commit module only on use."""
+        code = r"""
+import builtins
+import sys
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import hephaestus.automation.git_utils as git_utils
+
+if "hephaestus.automation.pr_manager" in sys.modules:
+    raise SystemExit("pr_manager was imported before commit_if_changes")
+
+calls = []
+def fake_commit_changes(*args, **kwargs):
+    calls.append((args, kwargs))
+
+real_import = builtins.__import__
+def import_hook(name, globals=None, locals=None, fromlist=(), level=0):
+    module = real_import(name, globals, locals, fromlist, level)
+    if (
+        level == 1
+        and name == "pr_manager"
+        and globals is not None
+        and globals.get("__package__") == "hephaestus.automation"
+    ):
+        module.commit_changes = fake_commit_changes
+        assert "hephaestus.automation.pr_manager" in sys.modules
+    return module
+
+builtins.__import__ = import_hook
+try:
+    with patch.object(git_utils, "run", return_value=Mock(stdout=" M fixed.py\n")):
+        assert git_utils.commit_if_changes(123, Path("/tmp/worktree"), "codex") is True
+finally:
+    builtins.__import__ = real_import
+
+assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None})]
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_commits_with_selected_agent(

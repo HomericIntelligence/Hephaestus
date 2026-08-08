@@ -92,6 +92,8 @@ from typing import Any
 
 from jinja2 import TemplateNotFound
 
+import hephaestus.automation.pipeline.admission as _admission
+import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.direct_review_recovery import (
     is_inspection_only_detached_push_failure,
     list_direct_review_recovery_paths,
@@ -104,7 +106,6 @@ from hephaestus.automation.issue_waves import (
     wave_entry_from_facts,
 )
 from hephaestus.automation.models import IssueInfo
-from hephaestus.automation.pipeline import admission as _admission, seeding as _seeding
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
