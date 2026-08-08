@@ -7,13 +7,15 @@ git tags, not a file. Tests inject a canonical version by monkeypatching
 ``_version_from_git_tag`` rather than writing a static ``[project].version``.
 """
 
+import json
+
 import pytest
 
 import hephaestus.version.consistency as consistency
+from hephaestus.version import bump_version, check_version_consistency
 from hephaestus.version.consistency import (
-    bump_version,
     check_package_version_consistency,
-    check_version_consistency,
+    preview_version,
 )
 
 # ---------------------------------------------------------------------------
@@ -36,35 +38,79 @@ def set_canonical(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_check_version_consistency_resolves_canonical_version(tmp_path, set_canonical):
-    """Pass when the git-derived canonical version can be resolved."""
-    set_canonical("1.2.3")
-    assert check_version_consistency(tmp_path) == 0
+def test_check_requested_version_requires_exact_requested_versions(tmp_path, monkeypatch):
+    """Pass when both independent version sources exactly match the request."""
+    monkeypatch.setattr(consistency, "_version_from_git_tag", lambda _root: "1.2.3")
+    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "1.2.3")
+
+    assert consistency._verify_requested_version(tmp_path, "1.2.3") == 0
 
 
-def test_check_version_consistency_verbose(tmp_path, set_canonical, capsys):
-    """Verbose mode prints versions even when consistent."""
-    set_canonical("0.5.0")
-    result = check_version_consistency(tmp_path, verbose=True)
+@pytest.mark.parametrize(
+    ("canonical", "installed"),
+    [
+        ("1.2.2", "1.2.3"),
+        ("1.2.3", "1.2.2"),
+        ("1.2.3", "1.2.3.dev1"),
+        (None, "1.2.3"),
+        ("1.2.3", None),
+    ],
+)
+def test_check_requested_version_rejects_source_mismatch(
+    tmp_path, monkeypatch, canonical, installed
+):
+    """Reject stale, missing, or development-version sources."""
+    monkeypatch.setattr(consistency, "_version_from_git_tag", lambda _root: canonical)
+    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: installed)
+
+    assert consistency._verify_requested_version(tmp_path, "1.2.3") == 1
+
+
+def test_check_requested_version_rejects_invalid_requested_version(tmp_path, capsys):
+    """Reject requests that are not exact three-part semantic versions."""
+    assert consistency._verify_requested_version(tmp_path, "1.2") == 1
+    assert "Invalid version format" in capsys.readouterr().err
+
+
+def test_check_requested_version_verbose(tmp_path, monkeypatch, capsys):
+    """Verbose mode prints both exact sources when they match."""
+    monkeypatch.setattr(consistency, "_version_from_git_tag", lambda _root: "0.5.0")
+    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "0.5.0")
+
+    result = consistency._verify_requested_version(tmp_path, "0.5.0", verbose=True)
     assert result == 0
     out = capsys.readouterr().out
-    assert "0.5.0" in out
+    assert "Canonical tag version: 0.5.0" in out
+    assert "Installed distribution version: 0.5.0" in out
 
 
-def test_check_version_consistency_no_canonical_source(tmp_path, monkeypatch):
-    """Exit 1 when no canonical version can be determined (no tag, not installed)."""
+def test_check_requested_version_no_matching_sources(tmp_path, monkeypatch):
+    """Return failure when neither source matches the requested version."""
     monkeypatch.setattr(consistency, "_version_from_git_tag", lambda _root: None)
     monkeypatch.setattr(consistency, "_version_from_metadata", lambda: None)
-    with pytest.raises(SystemExit) as exc_info:
-        check_version_consistency(tmp_path)
-    assert exc_info.value.code == 1
+
+    assert consistency._verify_requested_version(tmp_path, "1.2.3") == 1
 
 
-def test_canonical_falls_back_to_metadata(tmp_path, monkeypatch):
-    """When no git tag exists, the canonical version falls back to dist metadata."""
+def test_check_version_consistency_preserves_legacy_signature(tmp_path, set_canonical, capsys):
+    """The exported status check accepts both historical calling forms."""
+    set_canonical("1.2.3")
+
+    assert check_version_consistency(tmp_path) == 0
+    assert capsys.readouterr().out == ""
+
+    assert check_version_consistency(tmp_path, True) == 0
+    assert "Canonical version (git tag): 1.2.3" in capsys.readouterr().out
+
+
+def test_canonical_requires_git_tag(tmp_path, monkeypatch):
+    """Installed metadata cannot replace the authoritative Git tag."""
     monkeypatch.setattr(consistency, "_version_from_git_tag", lambda _root: None)
     monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "7.8.9")
-    assert consistency._get_canonical_version(tmp_path) == "7.8.9"
+
+    with pytest.raises(SystemExit) as exc_info:
+        consistency._get_canonical_version(tmp_path)
+    assert exc_info.value.code == 1
 
 
 # ---------------------------------------------------------------------------
@@ -149,76 +195,62 @@ def test_check_package_consistency_scan_skills_ignores_code_blocks(tmp_path, set
 # ---------------------------------------------------------------------------
 
 
-def test_bump_version_patch(tmp_path, set_canonical):
-    """Patch bump computes the next patch version."""
+@pytest.mark.parametrize(
+    ("part", "expected"),
+    [("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")],
+)
+def test_public_bump_version_computes_without_mutation(tmp_path, set_canonical, part, expected):
+    """The exported legacy wrapper returns success without changing files."""
     set_canonical("1.2.3")
-    result = bump_version(tmp_path, "patch", verbose=False)
-    assert result == 0
-    assert "1.2.4" in (tmp_path / "VERSION").read_text()
+
+    assert preview_version(tmp_path, part) == expected
+    assert bump_version(tmp_path, part, dry_run=True) == 0
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_bump_version_minor(tmp_path, set_canonical):
-    """Minor bump increments minor and resets patch to 0."""
+def test_bump_version_preserves_secondary_version_files(tmp_path, set_canonical):
+    """A preview leaves legacy version files byte-for-byte unchanged."""
     set_canonical("1.2.3")
-    result = bump_version(tmp_path, "minor", verbose=False)
-    assert result == 0
-    assert "1.3.0" in (tmp_path / "VERSION").read_text()
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+    pyproject = tmp_path / "pyproject.toml"
+    version_file.write_text("legacy\n")
+    init_file.write_text('__version__ = "legacy"\n')
+    pyproject.write_text('[project]\nversion = "legacy"\n')
+    before = {path: path.read_bytes() for path in (version_file, init_file, pyproject)}
+
+    assert preview_version(tmp_path, "minor") == "1.3.0"
+    assert bump_version(tmp_path, "minor") == 0
+    assert {path: path.read_bytes() for path in before} == before
 
 
-def test_bump_version_major(tmp_path, set_canonical):
-    """Major bump increments major and resets minor and patch to 0."""
-    set_canonical("1.2.3")
-    result = bump_version(tmp_path, "major", verbose=False)
-    assert result == 0
-    assert "2.0.0" in (tmp_path / "VERSION").read_text()
-
-
-def test_bump_version_dry_run(tmp_path, set_canonical):
-    """Dry run does not write a VERSION file."""
-    set_canonical("1.0.0")
-    result = bump_version(tmp_path, "patch", dry_run=True, verbose=False)
-    assert result == 0
-    assert not (tmp_path / "VERSION").exists()
-
-
-def test_bump_version_dry_run_output(tmp_path, set_canonical, capsys):
-    """Dry run prints the proposed version change."""
-    set_canonical("2.3.4")
-    bump_version(tmp_path, "minor", dry_run=True, verbose=False)
-    assert "2.4.0" in capsys.readouterr().out
-
-
-def test_bump_version_invalid_part(tmp_path, set_canonical, capsys):
-    """Invalid part argument returns exit code 1."""
-    set_canonical("1.0.0")
-    result = bump_version(tmp_path, "invalid", verbose=False)
-    assert result == 1
-    assert "invalid" in capsys.readouterr().err.lower()
-
-
-def test_bump_version_no_canonical_source(tmp_path, monkeypatch):
-    """No determinable canonical version causes SystemExit(1)."""
+def test_bump_version_failure_preserves_repository_files(tmp_path, monkeypatch):
+    """Failure to resolve the tag leaves existing repository files unchanged."""
+    sentinel = tmp_path / "VERSION"
+    sentinel.write_text("unchanged\n")
     monkeypatch.setattr(consistency, "_version_from_git_tag", lambda _root: None)
-    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: None)
-    with pytest.raises(SystemExit) as exc_info:
+
+    with pytest.raises(SystemExit):
         bump_version(tmp_path, "patch")
-    assert exc_info.value.code == 1
+
+    assert sentinel.read_text() == "unchanged\n"
+    assert list(tmp_path.iterdir()) == [sentinel]
+
+
+def test_bump_version_invalid_part(tmp_path, set_canonical):
+    """Invalid bump parts fail without changing repository state."""
+    set_canonical("1.0.0")
+
+    assert bump_version(tmp_path, "invalid") == 1
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_bump_version_verbose(tmp_path, set_canonical, capsys):
-    """Verbose mode prints the bump message."""
+    """Verbose mode reports the computed transition."""
     set_canonical("0.1.0")
-    bump_version(tmp_path, "patch", verbose=True)
-    assert "0.1.1" in capsys.readouterr().out
 
-
-def test_bump_version_next_steps_mention_git_tag(tmp_path, set_canonical, capsys):
-    """The post-bump guidance points at git tagging, not editing pyproject.toml."""
-    set_canonical("1.0.0")
-    bump_version(tmp_path, "patch", verbose=False)
-    out = capsys.readouterr().out
-    assert "git tag" in out
-    assert "v1.0.1" in out
+    assert bump_version(tmp_path, "patch", verbose=True) == 0
+    assert "Computed next version: 0.1.0 -> 0.1.1" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +263,47 @@ def test_check_version_consistency_main_pass(tmp_path, set_canonical, monkeypatc
     from hephaestus.version.consistency import check_version_consistency_main
 
     set_canonical("1.0.0")
+    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "1.0.0")
     monkeypatch.setattr(
         "sys.argv",
-        ["hephaestus-check-version-consistency", "--repo-root", str(tmp_path)],
+        [
+            "hephaestus-check-version-consistency",
+            "--repo-root",
+            str(tmp_path),
+            "--expected-version",
+            "1.0.0",
+        ],
     )
     assert check_version_consistency_main() == 0
+
+
+def test_check_version_consistency_main_json_reports_exact_sources(
+    tmp_path, set_canonical, monkeypatch, capsys
+):
+    """JSON consistency output includes both exact verification sources."""
+    from hephaestus.version.consistency import check_version_consistency_main
+
+    set_canonical("1.0.0")
+    monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "1.0.0")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hephaestus-check-version-consistency",
+            "--repo-root",
+            str(tmp_path),
+            "--expected-version",
+            "1.0.0",
+            "--json",
+        ],
+    )
+
+    assert check_version_consistency_main() == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "expected_version": "1.0.0",
+        "canonical_version": "1.0.0",
+        "installed_version": "1.0.0",
+        "consistent": True,
+    }
 
 
 def test_check_package_versions_main_pass(tmp_path, set_canonical, monkeypatch):
@@ -250,30 +318,35 @@ def test_check_package_versions_main_pass(tmp_path, set_canonical, monkeypatch):
     assert check_package_versions_main() == 0
 
 
-def test_bump_version_main_dry_run(tmp_path, set_canonical, monkeypatch, capsys):
-    """CLI --dry-run flag prints the proposed change without writing."""
+def test_bump_version_main_compute_only(tmp_path, set_canonical, monkeypatch, capsys):
+    """CLI prints the proposed change without writing repository files."""
     from hephaestus.version.consistency import bump_version_main
 
     set_canonical("3.0.0")
     monkeypatch.setattr(
         "sys.argv",
-        ["hephaestus-bump-version", "minor", "--repo-root", str(tmp_path), "--dry-run"],
+        ["hephaestus-bump-version", "minor", "--repo-root", str(tmp_path)],
     )
     result = bump_version_main()
     assert result == 0
-    assert "3.1.0" in capsys.readouterr().out
-    assert not (tmp_path / "VERSION").exists()
+    assert "Computed next version: 3.1.0" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_bump_version_main_patch(tmp_path, set_canonical, monkeypatch):
-    """CLI patch bump computes and records the next patch version."""
+def test_bump_version_main_json_reports_compute_only(tmp_path, set_canonical, monkeypatch, capsys):
+    """JSON output identifies the proposal and confirms no mutation occurred."""
     from hephaestus.version.consistency import bump_version_main
 
     set_canonical("0.5.2")
     monkeypatch.setattr(
         "sys.argv",
-        ["hephaestus-bump-version", "patch", "--repo-root", str(tmp_path)],
+        ["hephaestus-bump-version", "patch", "--repo-root", str(tmp_path), "--json"],
     )
-    result = bump_version_main()
-    assert result == 0
-    assert "0.5.3" in (tmp_path / "VERSION").read_text()
+    assert bump_version_main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "requested_version": "0.5.3",
+        "changed": False,
+        "authoritative_action": "Auto Tag Release workflow",
+    }
+    assert list(tmp_path.iterdir()) == []

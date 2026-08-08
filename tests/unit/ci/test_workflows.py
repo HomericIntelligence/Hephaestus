@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from hephaestus.ci import WorkflowValidationError, workflows as workflows_module
 from hephaestus.ci.workflows import (
@@ -372,6 +373,24 @@ def test_releasing_doc_has_stranded_tag_recovery_section() -> None:
     doc = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
     assert "### Dispatch failed after tag push" in doc
     assert "gh workflow run release.yml -f tag=vX.Y.Z" in doc
+
+
+def test_release_verifies_installed_wheel_before_publish() -> None:
+    """The release gate verifies the built wheel before publishing it."""
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["build-and-publish"]["steps"]
+    names = [step.get("name") for step in steps]
+
+    verify_index = names.index("Verify canonical and installed versions")
+    publish_index = names.index("Publish to PyPI")
+    assert verify_index < publish_index
+
+    command = steps[verify_index]["run"]
+    assert 'VERIFY_ENV="build/version-verify"' in command
+    assert "hephaestus-check-version-consistency" in command
+    assert "--expected-version" in command
 
 
 class TestCollectWorkflowFiles:
