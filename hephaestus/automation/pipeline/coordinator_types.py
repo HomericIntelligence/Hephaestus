@@ -164,6 +164,7 @@ from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
 
+
 #: Warn when any stage.step() call exceeds this duration (seconds) — the
 #: stage protocol promises short (<~60s) main-thread steps. 15s proved too
 #: tight in practice: routine repo-stage steps (clone + label reads over the

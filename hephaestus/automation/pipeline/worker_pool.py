@@ -1949,6 +1949,9 @@ class WorkerPool:
         elif job.op == "rebase":
             return self._git_rebase(job)
 
+        elif job.op == "continue_rebase":
+            return self._git_continue_rebase(job)
+
         elif job.op == "push":
             git_utils.push_current_branch_with_lease_on_divergence(
                 **job.kwargs,
@@ -2080,7 +2083,11 @@ class WorkerPool:
                 )
             if ancestry.returncode != 1:
                 return JobResult(ok=False, error="cannot determine writer base ancestry")
-        result = git_utils.rebase_worktree_onto(**kwargs, timeout=job.timeout_s)
+        result = git_utils.rebase_worktree_onto(
+            **kwargs,
+            preserve_conflicts=publish_rebased_head,
+            timeout=job.timeout_s,
+        )
         if not result:
             if not publish_rebased_head:
                 return JobResult(
@@ -2088,10 +2095,19 @@ class WorkerPool:
                     value=False,
                     error="mechanical rebase hit conflicts; aborted",
                 )
+            receipt = self._conflict_receipt(
+                cwd,
+                remote=remote,
+                base_branch=base_branch,
+                expected_remote_sha=expected_remote_sha,
+                timeout=job.timeout_s,
+            )
+            if isinstance(receipt, JobResult):
+                return receipt
             return JobResult(
                 ok=False,
-                value={"rebased": False},
-                error="mechanical rebase hit conflicts; aborted",
+                value=receipt,
+                error="mechanical rebase hit conflicts; resolution required",
             )
         if not publish_rebased_head:
             return JobResult(ok=True, value=True)
@@ -2109,6 +2125,262 @@ class WorkerPool:
             ok=True,
             value={"rebased": True, "published": True, "head_sha": source_sha},
         )
+
+    def _conflict_receipt(
+        self,
+        cwd: Path,
+        *,
+        remote: str,
+        base_branch: str,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> dict[str, object] | JobResult:
+        """Capture the immutable inputs and file snapshot of a paused rebase."""
+        try:
+            paths_result = git_utils.run(
+                ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
+                cwd=cwd,
+                timeout=timeout,
+            )
+            paths = tuple(path for path in paths_result.stdout.split("\0") if path)
+            if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
+                return JobResult(ok=False, error="paused rebase conflict paths invalid")
+            base_sha = git_utils.run(
+                ["git", "rev-parse", f"{remote}/{base_branch}"],
+                cwd=cwd,
+                timeout=timeout,
+            ).stdout.strip()
+            if not _is_full_commit_sha(base_sha):
+                return JobResult(ok=False, error="paused rebase base head invalid")
+            snapshot = {path: self._conflict_path_digest(cwd, path) for path in paths}
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            return JobResult(ok=False, error=f"cannot capture paused rebase: {exc}")
+        return {
+            "rebased": False,
+            "conflict_paths": paths,
+            "conflict_snapshot": snapshot,
+            "base_sha": base_sha,
+            "expected_remote_sha": expected_remote_sha,
+        }
+
+    @staticmethod
+    def _conflict_path_digest(cwd: Path, path: str) -> str:
+        """Return a stable digest for one host-validated conflict path."""
+        target = cwd / path
+        if not target.exists():
+            return "<absent>"
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+
+    def _git_continue_rebase(self, job: GitJob) -> JobResult:
+        """Validate edit-only conflict output, finish policy rebase, and lease-publish."""
+        parsed = self._parse_rebase_continuation(job)
+        if isinstance(parsed, JobResult):
+            return parsed
+        cwd, branch, remote, base_sha, expected_remote_sha, paths, snapshot = parsed
+        remote_head = self._read_remote_branch_head(
+            cwd, remote=remote, branch=branch, timeout=job.timeout_s
+        )
+        if isinstance(remote_head, JobResult):
+            return remote_head
+        if remote_head != expected_remote_sha:
+            return JobResult(
+                ok=False, error="remote writer head changed during conflict resolution"
+            )
+        edits = self._validate_rebase_conflict_edits(
+            cwd,
+            remote=remote,
+            paths=paths,
+            snapshot=snapshot,
+            base_sha=base_sha,
+            expected_remote_sha=expected_remote_sha,
+            timeout=job.timeout_s,
+        )
+        if edits is not None:
+            return edits
+        continued = self._continue_rebase_process(
+            cwd,
+            remote=remote,
+            base_sha=base_sha,
+            expected_remote_sha=expected_remote_sha,
+            paths=paths,
+            timeout=job.timeout_s,
+        )
+        if continued is not None:
+            return continued
+        metadata = self._verify_rebased_commit_metadata(
+            cwd, base_sha=base_sha, timeout=job.timeout_s
+        )
+        if metadata is not None:
+            return metadata
+        source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
+        if isinstance(source_sha, JobResult):
+            return source_sha
+        if source_sha == expected_remote_sha:
+            return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
+        git_utils.push_head_to_branch(
+            branch,
+            expected_remote_sha,
+            cwd,
+            source_sha=source_sha,
+            timeout=job.timeout_s,
+        )
+        return JobResult(
+            ok=True,
+            value={"rebased": True, "published": True, "head_sha": source_sha},
+        )
+
+    @staticmethod
+    def _parse_rebase_continuation(
+        job: GitJob,
+    ) -> tuple[Path, str, str, str, str, tuple[str, ...], dict[str, object]] | JobResult:
+        """Validate and normalize coordinator-owned continuation arguments."""
+        kwargs = job.kwargs
+        cwd = Path(str(kwargs.get("cwd") or ""))
+        branch = str(kwargs.get("branch") or "")
+        remote = str(kwargs.get("remote") or "origin")
+        base_sha = kwargs.get("base_sha")
+        expected_remote_sha = kwargs.get("expected_remote_sha")
+        raw_paths = kwargs.get("conflict_paths")
+        raw_snapshot = kwargs.get("conflict_snapshot")
+        if (
+            not cwd.is_dir()
+            or not branch
+            or not _is_full_commit_sha(base_sha)
+            or not _is_full_commit_sha(expected_remote_sha)
+            or not isinstance(raw_paths, (list, tuple))
+            or not raw_paths
+            or not isinstance(raw_snapshot, dict)
+        ):
+            return JobResult(ok=False, error="rebase continuation arguments invalid")
+        paths = tuple(str(path) for path in raw_paths)
+        if any(not is_safe_scope_retraction_path(path) for path in paths):
+            return JobResult(ok=False, error="rebase continuation paths invalid")
+        snapshot = {str(path): value for path, value in raw_snapshot.items()}
+        return cwd, branch, remote, base_sha, expected_remote_sha, paths, snapshot
+
+    def _validate_rebase_conflict_edits(
+        self,
+        cwd: Path,
+        *,
+        remote: str,
+        paths: tuple[str, ...],
+        snapshot: dict[str, object],
+        base_sha: str,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> JobResult | None:
+        """Reject out-of-band index edits, no-op agents, and residual markers."""
+        current_receipt = self._conflict_receipt(
+            cwd,
+            remote=remote,
+            base_branch="main",
+            expected_remote_sha=expected_remote_sha,
+            timeout=timeout,
+        )
+        if isinstance(current_receipt, JobResult):
+            return current_receipt
+        current_receipt["base_sha"] = base_sha
+        raw_current_paths = current_receipt.get("conflict_paths")
+        current_paths: tuple[str, ...] = (
+            tuple(str(path) for path in raw_current_paths)
+            if isinstance(raw_current_paths, (list, tuple))
+            else ()
+        )
+        if set(current_paths) != set(paths):
+            return JobResult(ok=False, error="conflict index was mutated outside host ownership")
+        current_snapshot = current_receipt.get("conflict_snapshot")
+        if not isinstance(current_snapshot, dict) or all(
+            current_snapshot.get(path) == snapshot.get(path) for path in paths
+        ):
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="rebase conflict resolution required: agent made no file changes",
+            )
+        marker = re.compile(rb"^(<<<<<<<|=======|>>>>>>>)", re.MULTILINE)
+        if any(
+            (cwd / path).is_file() and marker.search((cwd / path).read_bytes()) for path in paths
+        ):
+            return JobResult(
+                ok=False,
+                value=current_receipt,
+                error="rebase conflict resolution required: conflict markers remain",
+            )
+        return None
+
+    def _continue_rebase_process(
+        self,
+        cwd: Path,
+        *,
+        remote: str,
+        base_sha: str,
+        expected_remote_sha: str,
+        paths: tuple[str, ...],
+        timeout: int,
+    ) -> JobResult | None:
+        """Stage only validated conflicts and let Git continue the policy rebase."""
+        try:
+            git_utils.run(["git", "add", "--", *paths], cwd=cwd, timeout=timeout)
+            git_utils.run(
+                ["git", "diff", "--cached", "--check"],
+                cwd=cwd,
+                timeout=timeout,
+            )
+            env = _controlled_git_env()
+            env["GIT_EDITOR"] = "true"
+            git_utils.run(
+                ["git", "rebase", "--continue"],
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+            )
+        except subprocess.CalledProcessError:
+            next_receipt = self._conflict_receipt(
+                cwd,
+                remote=remote,
+                base_branch="main",
+                expected_remote_sha=expected_remote_sha,
+                timeout=timeout,
+            )
+            if isinstance(next_receipt, dict):
+                next_receipt["base_sha"] = base_sha
+                return JobResult(
+                    ok=False,
+                    value=next_receipt,
+                    error="rebase conflict resolution required: additional conflicts found",
+                )
+            return JobResult(ok=False, error="host could not continue rebase")
+        return None
+
+    @staticmethod
+    def _verify_rebased_commit_metadata(
+        cwd: Path, *, base_sha: str, timeout: int
+    ) -> JobResult | None:
+        """Prove captured-base ancestry plus signature and DCO metadata."""
+        ancestry = git_utils.run(
+            ["git", "merge-base", "--is-ancestor", str(base_sha), "HEAD"],
+            cwd=cwd,
+            check=False,
+            timeout=timeout,
+        )
+        if ancestry.returncode != 0:
+            return JobResult(ok=False, error="completed rebase lacks captured base ancestry")
+        commits = git_utils.run(
+            ["git", "rev-list", "--reverse", f"{base_sha}..HEAD"],
+            cwd=cwd,
+            timeout=timeout,
+        ).stdout.split()
+        if not commits:
+            return JobResult(ok=False, error="completed rebase produced no branch commits")
+        for commit in commits:
+            raw_commit = git_utils.run(
+                ["git", "cat-file", "-p", commit],
+                cwd=cwd,
+                timeout=timeout,
+            ).stdout
+            if "\ngpgsig " not in f"\n{raw_commit}" or "Signed-off-by:" not in raw_commit:
+                return JobResult(ok=False, error="completed rebase commit metadata invalid")
+        return None
 
     def _git_sync_checkout(self, job: GitJob) -> JobResult:
         """Validate and fast-forward a clean reusable checkout.
@@ -2682,15 +2954,17 @@ class WorkerPool:
             cwd=worktree,
             timeout=job.timeout_s,
         )
+        # The reviewer is bound to the branch point of the captured PR pair,
+        # not to the base branch's current HEAD. Fetching only makes the
+        # captured base object available; advancement of the branch is an
+        # implementation concern after review.
         base = git_utils.run(
-            ["git", "rev-parse", "FETCH_HEAD"],
+            ["git", "merge-base", expected_base, head],
             cwd=worktree,
             timeout=job.timeout_s,
         ).stdout.strip()
         if not _is_full_commit_sha(base):
-            return JobResult(ok=False, error="review checkout base ref unavailable")
-        if base != expected_base:
-            return JobResult(ok=True, value={"ready": False, "reason": "base_drift"})
+            return JobResult(ok=False, error="review checkout branch point unavailable")
         diff = git_utils.run(
             ["git", "diff", "--no-ext-diff", "--binary", f"{base}...{head}"],
             cwd=worktree,

@@ -27,6 +27,7 @@ GIT_OPS: frozenset[str] = frozenset(
         "verify_pr_review_checkout",
         "remove_worktree",
         "rebase",
+        "continue_rebase",
         "push",
         "commit_push",
         "release_branch_reservation",

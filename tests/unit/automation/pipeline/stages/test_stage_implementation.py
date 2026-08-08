@@ -391,6 +391,26 @@ class TestGate:
         assert item.pr == 1001
         assert item.branch == "1-real-branch"
 
+    def test_post_review_rebase_requirement_adopts_implementation_go_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Merge-wait can send a reviewed head to its implementer for rebasing."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            open_pr=1001, pr_impl_state=(True, False), pr_head_branch="1-real-branch"
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+        item.payload["post_review_rebase_required"] = True
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="WORKTREE_WAIT")
+        assert item.payload["existing_pr"] is True
+        item.state = "DIRTY_DECISION_WAIT"
+        item.payload["worktree_dirty"] = False
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_WAIT")
+
     def test_gate_existing_fork_with_impl_go_routes_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -643,29 +663,99 @@ class TestGate:
         stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
         assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
-    def test_rebase_conflict_warning_preserves_actionable_reason(
+    def test_rebase_conflict_uses_edit_only_agent_and_separate_budget(
         self,
         make_ctx: Any,
         make_work_item: Any,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The implementation warning explains that the rebase was aborted."""
+        """A paused rebase gets a bounded edit-only agent turn."""
         stage = ImplementationStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
         result = JobResult(
             ok=False,
-            value={"rebased": False},
-            error="mechanical rebase hit conflicts; aborted",
+            value={
+                "rebased": False,
+                "conflict_paths": ("hephaestus/example.py",),
+                "conflict_snapshot": {"hephaestus/example.py": "before"},
+                "base_sha": "b" * 40,
+                "expected_remote_sha": "a" * 40,
+            },
+            error="mechanical rebase hit conflicts; resolution required",
         )
 
         with caplog.at_level("WARNING", logger=implementation_module.__name__):
             stage.on_job_done(item, result, ctx)
 
-        assert item.payload["rebase_error"] is True
+        assert item.payload["rebase_conflict"] is True
+        assert item.payload["rebase_conflict_paths"] == ("hephaestus/example.py",)
         assert caplog.messages == [
-            "implementation:1: writer rebase failed: mechanical rebase hit conflicts; aborted"
+            "implementation:1: writer rebase paused for host-owned conflict resolution"
         ]
+
+        item.payload.update(
+            {
+                "issue_title": "Resolve schema validation",
+                "issue_body": "Keep the existing behavior.",
+            }
+        )
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
+        item.state = "REBASE_CONFLICT_WAIT"
+        item.attempts["implement"] = ctx.budget("implement")
+
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.prompt_kwargs["rebase_conflict"] is True
+        assert request.job.allowed_tools == "Read,Write,Edit,Glob,Grep"
+        assert request.on_done_state == "REBASE_CONTINUE_WAIT"
+        prompt = request.job.prompt_builder(**request.job.prompt_kwargs)
+        assert "Rebase Conflict Resolution Required" in prompt
+        assert "Do not run Git commands" in prompt
+        assert "hephaestus/example.py" in prompt
+
+    def test_rebase_conflict_attempts_are_bounded_independently(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Conflict retries terminate without consuming normal implementation turns."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("hephaestus/example.py",),
+            }
+        )
+        item.attempts["implement"] = ctx.budget("implement")
+        item.attempts["rebase_conflict"] = ctx.budget("rebase_conflict")
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "rebase_conflict_exhausted"
+        )
+
+    def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An agent exit alone cannot authorize or publish a rebased head."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONFLICT_WAIT")
+        item.payload.update(
+            {
+                "post_review_rebase_required": True,
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("hephaestus/example.py",),
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value="resolved"), ctx)
+
+        assert item.payload["rebase_conflict"] is True
+        assert item.payload["post_review_rebase_required"] is True
+        assert item.attempts["rebase_conflict"] == 1
 
 
 class TestImplementationStateSkipGate:
@@ -1018,6 +1108,27 @@ class TestWorktreeAndAdvise:
         )
 
         result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="DIRTY_DECISION_WAIT")
+        assert item.payload["worktree_dirty"] is False
+        assert "implementation_writer_restored" not in item.payload
+
+    def test_post_review_rebase_reuses_the_writer_stowed_for_read_only_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Merge-wait re-entry must reuse the same-run writer checkout."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="WORKTREE_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "post_review_rebase_required": True,
+                "implementation_writer_restored": True,
+            }
+        )
+
+        result = stage.step(item, make_ctx())
 
         assert result == Continue(next_state="DIRTY_DECISION_WAIT")
         assert item.payload["worktree_dirty"] is False

@@ -998,6 +998,7 @@ def rebase_worktree_onto(
     base_branch: str = "main",
     *,
     remote: str = "origin",
+    preserve_conflicts: bool = False,
     timeout: int | None = None,
 ) -> bool:
     """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
@@ -1015,8 +1016,10 @@ def rebase_worktree_onto(
     2. ``git rebase --force-rebase <remote>/<base_branch> --exec ...`` —
        replay the PR's commits on top of the latest base and run
        ``git commit --amend --no-edit -S -s`` after each replayed commit. On
-       conflict, ``git rebase --abort`` restores the pre-rebase HEAD so the
-       worktree is left clean for the agent path.
+       conflict, the default ``git rebase --abort`` restores the pre-rebase
+       HEAD. ``preserve_conflicts=True`` instead leaves the host-owned rebase
+       paused so an edit-only agent can change file contents before the host
+       validates and continues it.
 
     The caller is expected to push the rebased HEAD with
     :func:`push_current_branch_with_lease_on_divergence` (the rebase rewrites
@@ -1026,6 +1029,8 @@ def rebase_worktree_onto(
         cwd: Worktree path (already synced to the PR head).
         base_branch: Branch to rebase onto (default ``main``).
         remote: Remote name (default ``origin``).
+        preserve_conflicts: Leave a conflicted rebase paused for a later
+            host-owned continuation instead of aborting it.
         timeout: Optional timeout in seconds for each git command.
 
     Returns:
@@ -1047,15 +1052,16 @@ def rebase_worktree_onto(
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:
-        # Conflicts — abort so the worktree is restored to the PR head, then let
-        # the caller hand the real conflict to the agent. ``check=False`` because
-        # an abort that itself errors must not mask the conflict signal.
-        run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
+        if not preserve_conflicts:
+            # ``check=False`` because an abort error must not mask the original
+            # conflict signal.
+            run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
         logger.info(
-            "Rebase of worktree at %s onto %s/%s hit conflicts; aborted",
+            "Rebase of worktree at %s onto %s/%s hit conflicts; %s",
             cwd,
             remote,
             base_branch,
+            "preserved for host-owned resolution" if preserve_conflicts else "aborted",
         )
         return False
 

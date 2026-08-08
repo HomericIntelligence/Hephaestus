@@ -684,6 +684,34 @@ class TestQuiescence:
         assert any(reason.startswith("poisoned: boom") for reason in reasons)
         assert any(reason == "fine" for reason in reasons)
 
+    def test_duplicate_plan_owner_ejection_keeps_run_successful(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A benign duplicate-owner terminal result must not make the run exit 1."""
+        seed = [
+            SeedEntry(kind="issue", identifier=271, stage=StageName.PLANNING, reason="duplicate")
+        ]
+        coordinator, _, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            seed_entries=[seed],
+        )
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            StageOutcome(
+                Disposition.FINISH_PASS,
+                "plan is being worked by another pipeline item; ejected from queue",
+            )
+        )
+
+        assert coordinator.run() == 0
+        assert coordinator.ledger == [
+            ItemResult(
+                passed=True,
+                reason="plan is being worked by another pipeline item; ejected from queue",
+                final_stage=StageName.PLANNING,
+            )
+        ]
+
     def test_pr_review_adoption_records_completion_before_wait_state(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

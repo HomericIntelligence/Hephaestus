@@ -2371,13 +2371,13 @@ class TestGitOps:
         assert result.value == {"ready": False, "reason": "head_drift"}
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
 
-    def test_verify_pr_review_checkout_retries_when_remote_base_drifted(
+    def test_verify_pr_review_checkout_uses_original_branch_point_when_base_advances(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """A moved base ref cannot produce review evidence for the captured PR."""
+        """Review binds to the PR branch point instead of current base-branch HEAD."""
         job = GitJob(
             repo="test/repo",
             op="verify_pr_review_checkout",
@@ -2399,7 +2399,7 @@ class TestGitOps:
                 side_effect=[
                     MagicMock(stdout="a" * 40 + "\n"),
                     MagicMock(stdout=""),
-                    MagicMock(stdout="b" * 40 + "\n"),
+                    MagicMock(stdout="d" * 40 + "\n"),
                     MagicMock(stdout="checkout diff for stale base"),
                     MagicMock(stdout="stale.py\0"),
                 ],
@@ -2409,7 +2409,13 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        assert result.value == {"ready": False, "reason": "base_drift"}
+        assert result.value == {
+            "ready": True,
+            "head": "a" * 40,
+            "base": "d" * 40,
+            "diff": "checkout diff for stale base",
+            "changed_paths": ["stale.py"],
+        }
 
     def test_verify_pr_review_checkout_returns_diff_bound_to_verified_head(
         self,
@@ -2457,7 +2463,12 @@ class TestGitOps:
             "changed_paths": ["old.py", "new.py"],
         }
         mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
-        assert mock_run.call_args_list[2].args[0] == ["git", "rev-parse", "FETCH_HEAD"]
+        assert mock_run.call_args_list[2].args[0] == [
+            "git",
+            "merge-base",
+            "b" * 40,
+            "a" * 40,
+        ]
         assert mock_run.call_args_list[3].args[0] == [
             "git",
             "diff",
@@ -2703,6 +2714,7 @@ class TestGitOps:
         mock_rebase.assert_called_once_with(
             cwd=Path("/tmp/wt"),
             base_branch="main",
+            preserve_conflicts=False,
             timeout=60,
         )
         assert result.ok is rebase_clean
@@ -2734,17 +2746,162 @@ class TestGitOps:
                 return_value=False,
             ),
             patch(f"{_WP}.git_utils.run") as run,
+            patch.object(pool, "_conflict_receipt") as receipt,
         ):
             run.side_effect = [
                 MagicMock(returncode=0),
                 MagicMock(returncode=1),
             ]
+            receipt.return_value = {
+                "rebased": False,
+                "conflict_paths": ("x.py",),
+                "conflict_snapshot": {"x.py": "before"},
+                "base_sha": "b" * 40,
+                "expected_remote_sha": "a" * 40,
+            }
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is False
-        assert result.value == {"rebased": False}
-        assert result.error == "mechanical rebase hit conflicts; aborted"
+        assert result.value == receipt.return_value
+        assert result.error == "mechanical rebase hit conflicts; resolution required"
+
+    @staticmethod
+    def _continue_rebase_job(tmp_path: Path) -> GitJob:
+        return GitJob(
+            repo="test/repo",
+            op="continue_rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "remote": "origin",
+                "branch": "7-auto-impl",
+                "base_sha": "b" * 40,
+                "expected_remote_sha": "a" * 40,
+                "conflict_paths": ("x.py",),
+                "conflict_snapshot": {"x.py": "before"},
+            },
+        )
+
+    def test_continue_rebase_rejects_noop_agent(self, pool: WorkerPool, tmp_path: Path) -> None:
+        """An unchanged conflict snapshot cannot advance to Git continuation."""
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "before"},
+        }
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}.git_utils.run") as run,
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "rebase conflict resolution required: agent made no file changes"
+        run.assert_not_called()
+
+    def test_continue_rebase_rejects_unresolved_markers(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Edited content still carrying conflict markers remains paused."""
+        (tmp_path / "x.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> topic\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+        }
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "rebase conflict resolution required: conflict markers remain"
+
+    def test_continue_rebase_rejects_remote_head_drift(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The captured PR head is an exact publication lease, not a hint."""
+        job = self._continue_rebase_job(tmp_path)
+        with patch.object(pool, "_read_remote_branch_head", return_value="c" * 40):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "remote writer head changed during conflict resolution"
+
+    def test_continue_rebase_rejects_unsigned_or_non_dco_commit(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Host completion verifies every replayed commit's signature and DCO trailer."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+        }
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}.git_utils.run") as run,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout="c" * 40),
+                MagicMock(returncode=0, stdout="tree deadbeef\n\nmessage\n"),
+            ]
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "completed rebase commit metadata invalid"
+
+    def test_continue_rebase_signs_verifies_and_exact_lease_publishes(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A valid resolution advances only through the host's exact-head publication."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+        }
+        signed = (
+            "tree deadbeef\ngpgsig -----BEGIN SIGNATURE-----\n\nfix\n\n"
+            "Signed-off-by: Micah Villmow "
+            "<4211002+mvillmow@users.noreply.github.com>\n"
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run") as run,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout="c" * 40),
+                MagicMock(returncode=0, stdout=signed),
+            ]
+            result = pool._git_continue_rebase(job)
+
+        assert result == JobResult(
+            ok=True,
+            value={"rebased": True, "published": True, "head_sha": "d" * 40},
+        )
+        push.assert_called_once_with(
+            "7-auto-impl",
+            "a" * 40,
+            tmp_path,
+            source_sha="d" * 40,
+            timeout=60,
+        )
 
     def test_writer_rebase_keeps_exact_head_when_current_base_is_already_ancestor(
         self,

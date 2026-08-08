@@ -847,10 +847,13 @@ class TestPlanningStageStep:
         assert outcome.disposition == Disposition.ADVANCE
         assert "<!-- revision: 2 -->" in github.comments[270][0]
 
-    def test_review_text_cannot_authorize_revision_without_no_go_or_blocked_label(
-        self, make_ctx: Any, make_work_item: Any
+    def test_concurrent_revision_owner_ejects_item_without_poisoning_pipeline(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """A no-go-looking comment remains inert while the issue says needs-plan."""
+        """A lost plan-label race is reported as another item's work, not fatal."""
         stage = PlanningStage()
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=False)
         github.comments[271] = [
@@ -862,8 +865,16 @@ class TestPlanningStageStep:
         item.payload["plan_text"] = "Plan v2 with rollback"
         item.payload["requires_plan_revision"] = True
 
-        with pytest.raises(RuntimeError, match="label"):
-            stage.step(item, ctx)
+        with caplog.at_level("INFO"):
+            outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.FINISH_PASS,
+            "plan is being worked by another pipeline item; ejected from queue",
+        )
+        assert any(
+            "being worked by another pipeline item" in message for message in caplog.messages
+        )
 
     def test_replan_without_change_publishes_blocked_review_and_stops(
         self, make_ctx: Any, make_work_item: Any

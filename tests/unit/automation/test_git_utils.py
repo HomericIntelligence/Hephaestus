@@ -1204,6 +1204,31 @@ class TestRebaseWorktreeOnto:
         # The abort must be best-effort so it cannot mask the conflict signal.
         assert abort_kwargs.get("check") is False
 
+    def test_conflict_can_remain_paused_for_host_owned_resolution(
+        self, git_utils_mocks: Any
+    ) -> None:
+        """Writer rebases preserve conflict state only when explicitly requested."""
+        rebase_err = subprocess.CalledProcessError(1, ["git", "rebase"])
+        git_utils_mocks.run.side_effect = [
+            Mock(returncode=0),
+            Mock(returncode=0, stdout=""),
+            rebase_err,
+        ]
+
+        assert (
+            rebase_worktree_onto(
+                Path("/tmp/worktree-xyz"),
+                "main",
+                preserve_conflicts=True,
+            )
+            is False
+        )
+
+        assert all(
+            call.args[0] != ["git", "rebase", "--abort"]
+            for call in git_utils_mocks.run.call_args_list
+        )
+
     def test_removes_untracked_files_that_are_tracked_by_base_ref(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:

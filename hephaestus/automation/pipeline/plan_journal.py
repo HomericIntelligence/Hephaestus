@@ -62,6 +62,10 @@ class PlanJournalGitHub(Protocol):
         pass
 
 
+class PlanRevisionOwnershipError(RuntimeError):
+    """A different pipeline item owns the authoritative plan revision."""
+
+
 def _upsert_pending_review(
     issue_number: int,
     revision: int,
@@ -89,9 +93,9 @@ def _confirm_publication(
         or snapshot.current_review_revision != expected_revision
         or not is_pending_review(snapshot.current_review, revision=expected_revision)
     ):
-        raise RuntimeError(
+        raise PlanRevisionOwnershipError(
             f"concurrent plan journal write detected for revision {expected_revision}; "
-            "manual recovery is required"
+            "another pipeline item owns the published revision"
         )
 
 
@@ -278,7 +282,7 @@ def publish_plan_revision(
         if isinstance(label, (dict, str))
     }
     if not is_exclusive_plan_state(labels, STATE_PLAN_NO_GO):
-        raise RuntimeError(
+        raise PlanRevisionOwnershipError(
             f"cannot supersede plan revision {snapshot.revision} without an authoritative "
             f"exclusive {STATE_PLAN_NO_GO} label"
         )

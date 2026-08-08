@@ -61,7 +61,11 @@ from hephaestus.automation.state_labels import (
 )
 from hephaestus.prompts import PromptCatalog
 
-from ..plan_journal import publish_plan_revision, reconcile_plan_journal
+from ..plan_journal import (
+    PlanRevisionOwnershipError,
+    publish_plan_revision,
+    reconcile_plan_journal,
+)
 from .base import (
     AgentJob,
     Continue,
@@ -329,12 +333,17 @@ def _publish_candidate_plan(
             Disposition.BLOCKED,
             "plan was blocked externally while planning was in flight",
         )
-    publication = publish_plan_revision(
-        item.issue,
-        str(item.payload["plan_text"]),
-        ctx.github,
-        require_change=requires_revision,
-    )
+    try:
+        publication = publish_plan_revision(
+            item.issue,
+            str(item.payload["plan_text"]),
+            ctx.github,
+            require_change=requires_revision,
+        )
+    except PlanRevisionOwnershipError:
+        note = "plan is being worked by another pipeline item; ejected from queue"
+        logger.info("planning:%d: %s", item.issue, note)
+        return StageOutcome(Disposition.FINISH_PASS, note)
     item.payload["plan_text"] = publication.plan
     item.payload["plan_revision"] = publication.revision
     if publication.is_stuck:

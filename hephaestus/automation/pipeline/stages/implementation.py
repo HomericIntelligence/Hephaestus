@@ -8,13 +8,15 @@ ownership check) and
 binding contract):
 
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
-  ADVISE_WAIT -> IMPLEMENT_WAIT -> TEST_WAIT -> TESTFIX_WAIT ->
+  ADVISE_WAIT -> IMPLEMENT_WAIT -> REBASE_CONTINUE_WAIT / TEST_WAIT -> TESTFIX_WAIT ->
   COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
   WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
-- Budgets: ``implement`` = 2 (bounds implement attempts INCLUDING
+- Budgets: ``implement`` = 2 (bounds ordinary implement attempts INCLUDING
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
-  tests). Both read from ROUTES via ``ctx.budget``, never hardcoded here.
+  tests), ``rebase_conflict`` = 2 (bounds edit-only conflict-resolution
+  turns independently), and ``test_fix`` = 1. All read from ROUTES via
+  ``ctx.budget``, never hardcoded here.
 - GATE [M]: ``state:skip`` check first (operator-only, absolute — #1835);
   skips the item regardless of plan-go/implementation-go, before either the
   existing-PR fast path or the fresh-implement plan-go gate below. Then the
@@ -169,6 +171,8 @@ GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
 REBASE_WAIT = "REBASE_WAIT"
+REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
+REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
 ADOPTED = "ADOPTED"
 ADVISE_WAIT = "ADVISE_WAIT"
 IMPLEMENT_WAIT = "IMPLEMENT_WAIT"
@@ -186,6 +190,8 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
     REBASE_WAIT: "_rebase_wait",
+    REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
+    REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
     ADOPTED: "_adopted",
     ADVISE_WAIT: "_advise_wait",
     IMPLEMENT_WAIT: "_implement_wait",
@@ -276,6 +282,8 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
+    rebase_conflict: bool = False,
+    rebase_conflict_paths: tuple[str, ...] = (),
 ) -> str:
     """Compose the implementation prompt with the advise-findings block.
 
@@ -292,6 +300,9 @@ def build_implementation_prompt(
         branch_name: Feature branch the worktree is on.
         worktree_path: Worktree the implementer works in.
         advise_findings: Advise-step findings; empty string means no block.
+        rebase_conflict: Whether the host's mechanical rebase found conflicts
+            whose file contents the implementation agent must resolve.
+        rebase_conflict_paths: Host-validated paths the agent may edit.
 
     Returns:
         The full implementer prompt, with the findings block appended when
@@ -305,13 +316,20 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings:
+    if not advise_findings and not rebase_conflict:
         return prompt
     blocks: list[str] = [prompt]
     if advise_findings:
         blocks.append(
             PromptCatalog.current().render(
                 "implementation/advise_append.j2", advise_findings=advise_findings
+            )
+        )
+    if rebase_conflict:
+        blocks.append(
+            PromptCatalog.current().render(
+                "implementation/rebase_conflict_append.j2",
+                conflict_paths=rebase_conflict_paths,
             )
         )
     return "".join(blocks)
@@ -399,7 +417,10 @@ class ImplementationStage(Stage):
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
         if (
-            item.payload.get("implementation_remediation")
+            (
+                item.payload.get("implementation_remediation")
+                or item.payload.get("post_review_rebase_required")
+            )
             and item.payload.pop("implementation_writer_restored", False)
             and item.worktree
         ):
@@ -525,10 +546,12 @@ class ImplementationStage(Stage):
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
             return outcome
-        # An adopted PR is rebased by the implementation stage before every
-        # review.  This is deliberately not reviewer work: the reviewer owns
-        # only its detached snapshot and never changes a PR branch.
-        if item.payload.get("existing_pr_impl_go"):
+        # Reviewers never rebase. A reviewed head that merge-wait finds behind
+        # or conflicting returns here for implementation-owned rebasing, then
+        # passes through a fresh review of the rewritten head.
+        if item.payload.get("post_review_rebase_required"):
+            adopted_next = REBASE_WAIT
+        elif item.payload.get("existing_pr_impl_go"):
             adopted_next = ADOPTED
         else:
             adopted_next = REBASE_WAIT if item.payload.get("existing_pr") else ADVISE_WAIT
@@ -565,9 +588,13 @@ class ImplementationStage(Stage):
         """
         if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
+        if item.payload.get("rebase_conflict"):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
         if item.payload.pop("rebase_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_rebase_failed")
         if item.payload.pop("rebase_complete", None):
+            item.payload.pop("post_review_rebase_required", None)
+            item.payload.pop("rebase_conflict", None)
             return Continue(
                 next_state=(
                     IMPLEMENT_WAIT if item.payload.get("implementation_remediation") else ADOPTED
@@ -594,6 +621,41 @@ class ImplementationStage(Stage):
             descr="rebase_writer_before_review",
         )
         return JobRequest(job, on_done_state=REBASE_WAIT)
+
+    def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Let the host validate, complete, sign, and lease-publish a paused rebase."""
+        if item.payload.pop("rebase_error", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "implementation_rebase_failed")
+        if item.payload.pop("rebase_complete", None):
+            item.payload.pop("post_review_rebase_required", None)
+            item.payload.pop("rebase_conflict", None)
+            item.payload.pop("rebase_conflict_paths", None)
+            item.payload.pop("rebase_conflict_snapshot", None)
+            item.payload.pop("rebase_base_sha", None)
+            item.payload.pop("rebase_expected_remote_sha", None)
+            return Continue(next_state=ADOPTED)
+        if item.payload.pop("rebase_conflict_agent_error", None):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if not item.payload.pop("rebase_conflict_agent_complete", False):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
+        job = GitJob(
+            repo=item.repo,
+            op="continue_rebase",
+            timeout_s=GIT_JOB_TIMEOUT_S,
+            kwargs={
+                "cwd": _worktree_path(item, ctx),
+                "base_sha": item.payload.get("rebase_base_sha"),
+                "remote": "origin",
+                "branch": item.branch,
+                "expected_remote_sha": item.payload.get("rebase_expected_remote_sha"),
+                "conflict_paths": item.payload.get("rebase_conflict_paths"),
+                "conflict_snapshot": item.payload.get("rebase_conflict_snapshot"),
+            },
+            descr="complete_host_owned_rebase",
+        )
+        return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
 
     def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADOPTED advances to pr_review after the adopted worktree is ready."""
@@ -640,15 +702,9 @@ class ImplementationStage(Stage):
     def _implement_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """IMPLEMENT_WAIT submits the implementation job when budget remains."""
         issue = _issue_number(item)
-        budget = ctx.budget("implement")
-        if item.attempts.get("implement", 0) >= budget:
-            logger.error(
-                "implementation:%d: implement budget exhausted (%d/%d)",
-                issue,
-                item.attempts.get("implement", 0),
-                budget,
-            )
-            return StageOutcome(Disposition.FINISH_FAIL, "implement_exhausted")
+        exhausted = self._ordinary_implement_budget_outcome(item, ctx, issue)
+        if exhausted is not None:
+            return exhausted
         # Clear stale results at submission so a failed later attempt can
         # never replay an earlier attempt's output downstream.
         item.payload.pop("implement_error", None)
@@ -748,10 +804,62 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "rebase_conflict": bool(item.payload.get("rebase_conflict")),
+                "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
             descr="implement",
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
+
+    @staticmethod
+    def _ordinary_implement_budget_outcome(
+        item: WorkItem, ctx: StageContext, issue: int
+    ) -> StageOutcome | None:
+        """Return the ordinary implementation exhaustion outcome, if reached."""
+        budget = ctx.budget("implement")
+        attempts = item.attempts.get("implement", 0)
+        if attempts < budget:
+            return None
+        logger.error(
+            "implementation:%d: implement budget exhausted (%d/%d)",
+            issue,
+            attempts,
+            budget,
+        )
+        return StageOutcome(Disposition.FINISH_FAIL, "implement_exhausted")
+
+    def _rebase_conflict_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Build one separately-budgeted edit-only conflict-resolution turn."""
+        issue = _issue_number(item)
+        if not item.payload.get("rebase_conflict"):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_receipt_missing")
+        if item.attempts.get("rebase_conflict", 0) >= ctx.budget("rebase_conflict"):
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_conflict_exhausted")
+        logger.info("implementation:%d: requesting edit-only rebase resolution", issue)
+        job = AgentJob(
+            repo=item.repo,
+            issue=issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "implementer", implementer_model),
+            prompt_builder=build_implementation_prompt,
+            cwd=_worktree_path(item, ctx),
+            timeout_s=implementer_claude_timeout(),
+            allowed_tools="Read,Write,Edit,Glob,Grep",
+            session_agent=AGENT_IMPLEMENTER,
+            resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "branch_name": item.branch,
+                "worktree_path": item.worktree,
+                "advise_findings": "",
+                "rebase_conflict": True,
+                "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
+            },
+            descr="resolve_rebase_conflict",
+        )
+        return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
 
     def _test_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """TEST_WAIT either retries the implementer or runs the pre-PR tests."""
@@ -1004,9 +1112,29 @@ class ImplementationStage(Stage):
         if item.state == REBASE_WAIT:
             if result.ok:
                 item.payload["rebase_complete"] = True
+            elif result.error == "mechanical rebase hit conflicts; resolution required":
+                logger.warning(
+                    "implementation:%s: writer rebase paused for host-owned conflict resolution",
+                    item.issue,
+                )
+                self._record_rebase_conflict(item, result)
             else:
                 logger.warning(
                     "implementation:%s: writer rebase failed: %s", item.issue, result.error
+                )
+                item.payload["rebase_error"] = True
+            return
+
+        if item.state == REBASE_CONTINUE_WAIT:
+            if result.ok:
+                item.payload["rebase_complete"] = True
+            elif (result.error or "").startswith("rebase conflict resolution required"):
+                self._record_rebase_conflict(item, result)
+            else:
+                logger.warning(
+                    "implementation:%s: host rebase completion failed: %s",
+                    item.issue,
+                    result.error,
                 )
                 item.payload["rebase_error"] = True
             return
@@ -1018,6 +1146,10 @@ class ImplementationStage(Stage):
 
         if item.state == IMPLEMENT_WAIT:
             self._on_implement_done(item, result)
+            return
+
+        if item.state == REBASE_CONFLICT_WAIT:
+            self._on_rebase_conflict_agent_done(item, result)
             return
 
         if item.state == TEST_WAIT:
@@ -1274,11 +1406,46 @@ class ImplementationStage(Stage):
             logger.warning("implementation:%s: implement job failed: %s", item.issue, result.error)
             item.payload["implement_error"] = True
             return
+        item.payload.pop("post_review_rebase_required", None)
+        item.payload.pop("rebase_conflict", None)
         if result.value:
             if item.payload.get("implementation_remediation"):
                 item.payload["remediation_output"] = result.value
             else:
                 item.payload["implement_summary"] = str(result.value)
+
+    @staticmethod
+    def _on_rebase_conflict_agent_done(item: WorkItem, result: JobResult) -> None:
+        """Count one conflict-only turn without consuming implementation budget."""
+        item.attempts["rebase_conflict"] = item.attempts.get("rebase_conflict", 0) + 1
+        if result.ok:
+            item.payload["rebase_conflict_agent_complete"] = True
+        else:
+            item.payload["rebase_conflict_agent_error"] = True
+
+    @staticmethod
+    def _record_rebase_conflict(item: WorkItem, result: JobResult) -> None:
+        """Retain only a complete host-produced conflict receipt on the item."""
+        value = result.value if isinstance(result.value, dict) else {}
+        paths = value.get("conflict_paths")
+        snapshot = value.get("conflict_snapshot")
+        base_sha = value.get("base_sha")
+        expected_remote_sha = value.get("expected_remote_sha")
+        if (
+            not isinstance(paths, (list, tuple))
+            or not paths
+            or not all(isinstance(path, str) and path for path in paths)
+            or not isinstance(snapshot, dict)
+            or not is_full_commit_sha(base_sha)
+            or not is_full_commit_sha(expected_remote_sha)
+        ):
+            item.payload["rebase_error"] = True
+            return
+        item.payload["rebase_conflict"] = True
+        item.payload["rebase_conflict_paths"] = tuple(paths)
+        item.payload["rebase_conflict_snapshot"] = snapshot
+        item.payload["rebase_base_sha"] = base_sha
+        item.payload["rebase_expected_remote_sha"] = expected_remote_sha
 
     @staticmethod
     def _on_worktree_done(item: WorkItem, result: JobResult) -> None:
@@ -1496,6 +1663,8 @@ class ImplementationStage(Stage):
         """
         has_go, _has_no_go = pr_implementation_state
         if not has_go:
+            return None
+        if item.payload.get("post_review_rebase_required"):
             return None
         logger.info(
             "implementation:%d: PR #%d already implementation-go; routing to merge-wait",

@@ -204,7 +204,7 @@ class TestROUTES:
                     "already_implementation_go_pr": StageName.MERGE_WAIT,
                     "*": StageName.FINISHED,
                 },
-                budgets={"implement": 2, "test_fix": 1},
+                budgets={"implement": 2, "rebase_conflict": 2, "test_fix": 1},
             ),
             StageName.PR_REVIEW: Route(
                 next=StageName.MERGE_WAIT,
@@ -223,6 +223,8 @@ class TestROUTES:
                     "not_implementation_go": StageName.PR_REVIEW,
                     "reviewed_head_missing": StageName.PR_REVIEW,
                     "reviewed_head_drift": StageName.PR_REVIEW,
+                    "merge_conflicting": StageName.IMPLEMENTATION,
+                    "post_review_rebase_required": StageName.IMPLEMENTATION,
                     "*": StageName.FINISHED,
                 },
                 budgets={"merge": routing.DEFAULT_DRIVE_GREEN_LOOPS},
