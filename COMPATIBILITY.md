@@ -63,7 +63,7 @@ may change incompatibly in a minor release.
 The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
-Hephaestus installs 56 console scripts via `[project.scripts]` in
+Hephaestus installs 57 console scripts via `[project.scripts]` in
 `pyproject.toml`.
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -91,6 +91,7 @@ bypass a misfiring hook locally use
 | CLI | Tier | Notes |
 |-----|------|-------|
 | `hephaestus-automation-loop` | Provisional | Dispatches to `hephaestus.automation` (provisional subpackage) |
+| `hephaestus-install-pi-plugins` | Provisional | Installs and verifies the pinned Pi package/capability contract |
 | `hephaestus-plan-issues` | Provisional | Issue-planning stage of the automation pipeline |
 | `hephaestus-implement-issues` | Provisional | Issue-implementation stage |
 | `hephaestus-review-prs` | Provisional | PR-review stage |

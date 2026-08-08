@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 from hephaestus.github.client import gh_call
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-CATALOG_PATH = REPOSITORY_ROOT / "docs" / "athena-pi-package.json"
+CATALOG_PATH = REPOSITORY_ROOT / "hephaestus" / "agents" / "pi_package_catalog.json"
 ATHENA_REPOSITORY = "HomericIntelligence/Athena"
 HEPHAESTUS_REPOSITORY = "HomericIntelligence/Hephaestus"
 ATHENA_REMOTE = "https://github.com/HomericIntelligence/Athena.git"
@@ -190,12 +190,24 @@ def load_catalog(path: Path) -> PackageCatalog:
         raise ValueError(f"cannot load package catalog {path}: {exc}") from exc
     if root.get("schema_version") != 1:
         raise ValueError("catalog.schema_version must equal 1")
-    package_data = _require_object(root.get("package"), "catalog.package")
-    package = PackageIdentity(
-        source=_require_string(package_data, "source", "catalog.package"),
-        version=_require_string(package_data, "version", "catalog.package"),
-        ref=_require_string(package_data, "ref", "catalog.package"),
-    )
+    if "packages" in root:
+        packages_data = _require_object(root.get("packages"), "catalog.packages")
+        athena = _require_object(packages_data.get("athena"), "catalog.packages.athena")
+        package = PackageIdentity(
+            source=f"git:{_require_string(athena, 'repository', 'catalog.packages.athena')}",
+            version=_require_string(athena, "version", "catalog.packages.athena"),
+            ref=_require_string(athena, "commit", "catalog.packages.athena"),
+        )
+        if tuple(athena.get("commands", ())) != REQUIRED_COMMANDS:
+            raise ValueError("catalog Athena commands must preserve the accepted raw identifiers")
+    else:
+        # Temporary compatibility for pre-#2516 acceptance evidence fixtures.
+        package_data = _require_object(root.get("package"), "catalog.package")
+        package = PackageIdentity(
+            source=_require_string(package_data, "source", "catalog.package"),
+            version=_require_string(package_data, "version", "catalog.package"),
+            ref=_require_string(package_data, "ref", "catalog.package"),
+        )
     if package.source != "git:github.com/HomericIntelligence/Athena":
         raise ValueError("catalog package source must be the canonical Athena Git source")
     if package.version != "v0.4.0":
@@ -204,11 +216,35 @@ def load_catalog(path: Path) -> PackageCatalog:
         raise ValueError("catalog package ref must be a 40-character lowercase commit")
 
     compatibility_data = _require_object(root.get("compatibility"), "catalog.compatibility")
-    compatibility = Compatibility(
-        pi=_require_string(compatibility_data, "pi", "catalog.compatibility"),
-        delegation=_require_string(compatibility_data, "delegation", "catalog.compatibility"),
-        web_access=_require_string(compatibility_data, "web_access", "catalog.compatibility"),
-    )
+    if "packages" in root:
+        pi_data = _require_object(compatibility_data.get("pi"), "catalog.compatibility.pi")
+        packages_data = _require_object(root.get("packages"), "catalog.packages")
+        delegation = _require_object(
+            packages_data.get("pi-subagents"), "catalog.packages.pi-subagents"
+        )
+        web_access = _require_object(
+            packages_data.get("pi-web-access"), "catalog.packages.pi-web-access"
+        )
+        compatibility = Compatibility(
+            pi=(
+                f"{_require_string(pi_data, 'npm_name', 'catalog.compatibility.pi')}@"
+                f"{_require_string(pi_data, 'version', 'catalog.compatibility.pi')}"
+            ),
+            delegation=(
+                f"{_require_string(delegation, 'name', 'catalog.packages.pi-subagents')}@"
+                f"{_require_string(delegation, 'version', 'catalog.packages.pi-subagents')}"
+            ),
+            web_access=(
+                f"{_require_string(web_access, 'name', 'catalog.packages.pi-web-access')}@"
+                f"{_require_string(web_access, 'version', 'catalog.packages.pi-web-access')}"
+            ),
+        )
+    else:
+        compatibility = Compatibility(
+            pi=_require_string(compatibility_data, "pi", "catalog.compatibility"),
+            delegation=_require_string(compatibility_data, "delegation", "catalog.compatibility"),
+            web_access=_require_string(compatibility_data, "web_access", "catalog.compatibility"),
+        )
     expected_compatibility = Compatibility(
         pi="@earendil-works/pi-coding-agent@0.80.2",
         delegation="pi-subagents@0.37.2",

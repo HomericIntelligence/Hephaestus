@@ -72,6 +72,14 @@ def test_inventory_names_every_required_service() -> None:
     assert missing == [], f"docs/third-party-services.md missing service rows: {missing}"
 
 
+def test_npm_inventory_names_every_pi_artifact() -> None:
+    """The npm responsibility row covers the CLI and both companion packages."""
+    npm_row = next(row for row in _inventory_table_rows()[1:] if "npm" in row[0].lower())
+
+    for package in ("Pi CLI", "pi-subagents", "pi-web-access"):
+        assert package in " ".join(npm_row)
+
+
 def test_inventory_has_responsibility_and_status_columns() -> None:
     """The inventory table header must split responsibility and cite a status column."""
     header = _inventory_table_rows()[0]

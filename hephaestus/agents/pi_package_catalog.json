@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "compatibility": {
+    "pi": {
+      "npm_name": "@earendil-works/pi-coding-agent",
+      "version": "0.80.2"
+    }
+  },
+  "packages": {
+    "athena": {
+      "kind": "git",
+      "name": "@homericintelligence/athena",
+      "repository": "github.com/HomericIntelligence/Athena",
+      "commit": "496815b00f6fb4c8e97466489371b364d52588b5",
+      "version": "v0.4.0",
+      "commands": [
+        "skill:advise",
+        "skill:learn",
+        "skill:pr-review"
+      ]
+    },
+    "pi-subagents": {
+      "kind": "npm",
+      "name": "pi-subagents",
+      "version": "0.37.2",
+      "tools": [
+        "subagent"
+      ]
+    },
+    "pi-web-access": {
+      "kind": "npm",
+      "name": "pi-web-access",
+      "version": "0.15.0",
+      "tools": [
+        "web_search",
+        "source_check",
+        "fetch_content",
+        "get_search_content"
+      ]
+    }
+  },
+  "upstream": {
+    "issue": "https://github.com/HomericIntelligence/Athena/issues/61",
+    "pull_request": "https://github.com/HomericIntelligence/Athena/pull/62",
+    "release_tag": "v0.4.0",
+    "required_check": "package"
+  }
+}

@@ -100,6 +100,7 @@ default-groups = ["dev", "automation"]
 
 [project.scripts]
 hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
+hephaestus-install-pi-plugins = "hephaestus.agents.pi_plugins:main"
 hephaestus-plan-issues = "hephaestus.automation.planner:main"
 hephaestus-implement-issues = "hephaestus.automation.implementer:main"
 hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"

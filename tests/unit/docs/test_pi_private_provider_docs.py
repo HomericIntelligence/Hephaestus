@@ -9,7 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PI_DOC = REPO_ROOT / "docs" / "pi-private-provider.md"
 CONFIG_SUFFIXES = {".json", ".toml", ".yaml", ".yml", ".env", ".ini", ".cfg"}
-PUBLIC_PI_CATALOGS = {"docs/athena-pi-package.json"}
+PUBLIC_PI_CATALOGS = {"hephaestus/agents/pi_package_catalog.json"}
 
 
 def _is_pi_config_surface(path: str) -> bool:
@@ -46,3 +46,13 @@ def test_no_tracked_pi_provider_config_surfaces_exist() -> None:
     paths = [p.decode() for p in result.stdout.split(b"\0") if p]
 
     assert [p for p in paths if p not in PUBLIC_PI_CATALOGS and _is_pi_config_surface(p)] == []
+
+
+def test_pi_bootstrap_docs_preserve_the_later_admission_boundary() -> None:
+    """Operator setup is actionable without claiming normal Pi admission."""
+    text = PI_DOC.read_text(encoding="utf-8")
+
+    assert "hephaestus-install-pi-plugins" in text
+    assert "pi --version" in text
+    assert "--no-approve" in text
+    assert "#2518" in text

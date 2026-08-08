@@ -65,7 +65,9 @@ FROM node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0
 # Pre-install the Pi CLI here so the runtime stage can copy the whole /usr/local
 # prefix in one consistent tree (copying node/npm/npx individually breaks npm's
 # internal relative requires).
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2 && \
+COPY hephaestus/agents/pi_package_catalog.json /tmp/pi_package_catalog.json
+RUN pi_spec="$(node -e 'const p=require("/tmp/pi_package_catalog.json").compatibility.pi; process.stdout.write(`${p.npm_name}@${p.version}`)')" && \
+    npm install -g --ignore-scripts "$pi_spec" && \
     pi --version
 
 # ============================================================================
