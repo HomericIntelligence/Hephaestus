@@ -1020,7 +1020,10 @@ class ImplementationStage(Stage):
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
         if pending is None:
             pending = RecoverReplyJournalRequest(
-                issue_number=item.issue,
+                # Pull requests share the issue-comments REST channel. Keep
+                # this transient recovery record on the PR, never its linked
+                # issue, so the issue has only the canonical plan and review.
+                issue_number=item.pr,
                 pr_number=item.pr,
                 threads=FrozenJson.snapshot(snapshots),
             )
@@ -1062,13 +1065,13 @@ class ImplementationStage(Stage):
         pending = item.payload.get(_PENDING_GITHUB_REQUEST)
         if pending is None:
             pending = AppendReplyJournalRequest(
-                issue_number=item.issue,
+                issue_number=item.pr,
                 marker=marker,
                 body=body,
             )
             item.payload[_PENDING_GITHUB_REQUEST] = pending
         if not isinstance(pending, AppendReplyJournalRequest) or pending != (
-            AppendReplyJournalRequest(item.issue, marker, body)
+            AppendReplyJournalRequest(item.pr, marker, body)
         ):
             return StageOutcome(
                 Disposition.FINISH_FAIL,

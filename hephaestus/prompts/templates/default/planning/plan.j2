@@ -38,8 +38,8 @@ options.</approach>
 <files_to_create>Each new file with its path and what it contains. Write
 "_None._" when none.</files_to_create>
 <files_to_modify>Each existing file as `path/to/file.py`, the exact change,
-and a fenced code snippet of the new/changed code. Cite `file.py:line` when
-you know the line.</files_to_modify>
+and the intended behavior. Cite `file.py:line` when you know the line. Do not
+include patches, diff hunks, or source-code blocks.</files_to_modify>
 <implementation_order>A numbered sequence of concrete steps.</implementation_order>
 <verification>One runnable command per acceptance criterion in the issue, each
 labelled with the criterion it proves. Use the repo's real runner
@@ -54,21 +54,21 @@ file as evidence.</verification>
 <skills_used>Skills you invoked during planning AND any team knowledge-base
 skills from the Prior Learnings section above.</skills_used>
 <changes_from_review>ONLY when a prior `## 🔍 Plan Review` is in your context
-(you are revising). Enumerate each change and name the specific review finding
-it addresses. On the FIRST plan, omit this section or write
-`_N/A — initial plan_`.</changes_from_review>
+(you are revising). Keep one cumulative, high-level bullet list of the
+improvements made across the review cycle. Preserve useful bullets from the
+prior plan and fold new findings into thematic summaries. Do not quote the
+reviewer, enumerate raw findings, list changed lines, or include code/diffs.
+On the FIRST plan, omit this section or write `_N/A — initial plan_`.</changes_from_review>
 
 ---
 
-**GOOD example 1** (concrete file:line + fenced change + per-criterion check):
+**GOOD example 1** (concrete file:line + behavioral change + per-criterion check):
 
 ## Files to Modify
 ### `hephaestus/io/utils.py`
-Replace the bare `open()` at `hephaestus/io/utils.py:142` with an atomic write:
-```python
-with _body_file(body) as tmp:
-    os.replace(tmp, target)
-```
+Replace the direct write at `hephaestus/io/utils.py:142` with the repository's
+atomic temporary-file replacement helper so interrupted writes preserve the
+previous complete target.
 ## Verification
 ```bash
 uv run pytest tests/unit/io/test_utils.py -k atomic   # acceptance criterion 1: no partial writes
@@ -100,9 +100,10 @@ See the comment above for the complete plan and verification steps.
 - Include test file creation in the plan.
 - Consider dependencies and integration points.
 - Keep the plan focused on the issue requirements.
-- When re-planning, make the `## Changes from review` section concrete: every
-  prior review finding must map to either a change you made or an explicit
-  note on why it does not apply — do NOT merely acknowledge findings.
+- When re-planning, make `## Changes from Review` a concise cumulative summary
+  of the resulting improvements. Detailed findings belong only in the latest
+  canonical review comment.
+- Never include a unified diff, `diff --git` output, or a fenced `diff` block.
 
 **Format:**
 Output markdown only. Start with the `# Implementation Plan` heading, then the

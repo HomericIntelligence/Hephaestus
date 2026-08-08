@@ -247,7 +247,8 @@ def test_plan_reviews_avoid_duplicate_diffs_and_source_snippets() -> None:
 
     rendered_contracts = [" ".join(rendered.split()) for rendered in (plan, review, loop_review)]
 
-    assert "a fenced code snippet of the new/changed code" in rendered_contracts[0]
+    assert "Do not include patches, diff hunks, or source-code blocks" in rendered_contracts[0]
+    assert "one cumulative, high-level bullet list" in rendered_contracts[0]
     assert all(
         "Do not include diff hunks or patch blocks" in rendered
         for rendered in rendered_contracts[1:]

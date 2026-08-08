@@ -34,6 +34,9 @@ through installed `hephaestus-*` console scripts.
 
 - **`show_prompt.py`** — Display the automation-pipeline agent prompt for a
   given GitHub issue and stage (planning, implementation, pr-review, …).
+- **`compact_issue_timelines.py`** — Dry-run-first migration that reduces open
+  and closed issue timelines to the latest actor-owned plan and plan review.
+  See `../docs/runbooks/compact-issue-timelines.md`.
 
 ### Installation / environment
 

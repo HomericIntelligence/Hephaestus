@@ -4887,7 +4887,6 @@ class TestProgressAwareBudget:
             ("mark_pr_implementation_no_go", (1001,)),
             ("mark_pr_implementation_no_go", (1001,)),
             ("gh_issue_add_labels", (12, (STATE_SKIP,))),
-            ("gh_issue_upsert_comment", (12, "<!-- hephaestus-state-skip-reason -->")),
         ]
         assert item.payload["pr_review_round"] == 3
 
@@ -4921,9 +4920,8 @@ class TestProgressAwareBudget:
         assert item.payload["pr_review_round"] == 5
         assert item.attempts["pr_review_iter"] == 5  # lifetime audit trail
         assert item.attempts["pr_review_hard"] == 2  # extension rounds 4 and 5
-        assert github.mutation_log[-2:] == [
+        assert github.mutation_log[-1:] == [
             ("gh_issue_add_labels", (13, (STATE_SKIP,))),
-            ("gh_issue_upsert_comment", (13, "<!-- hephaestus-state-skip-reason -->")),
         ]
 
     def test_hard_cap_stops_even_with_progress(self, make_ctx: Any, make_work_item: Any) -> None:

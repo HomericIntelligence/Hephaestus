@@ -1,9 +1,8 @@
-"""Pure model and rendering helpers for the GitHub plan-review journal.
+"""Pure model and rendering helpers for canonical plan-review comments.
 
-GitHub comments are the durable audit log, while mutually-exclusive
-``state:*`` labels remain the authoritative pipeline state.  This module
-keeps those roles separate and centralizes the comment format so restart,
-prompt projection, and GitHub mutation code do not each invent parsers.
+The latest plan and latest review are the only automation comments retained on
+the linked issue, while mutually-exclusive ``state:*`` labels remain the
+authoritative pipeline state. Legacy history parsers remain for safe migration.
 """
 
 from __future__ import annotations
@@ -29,13 +28,20 @@ HISTORY_RE: Final[re.Pattern[str]] = re.compile(
     r"kind=(?P<kind>plan|review) -->"
 )
 REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\d+) -->")
+PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!-- prior-plan-fingerprints: (?P<fingerprints>[0-9a-f,]*) -->"
+)
+RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
+)
+MAX_PRIOR_PLAN_FINGERPRINTS: Final[int] = 16
 PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
     {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
 )
 
 #: Planning/review prompts receive the current plan and/or latest review in
 #: dedicated fields. Keep the restart-only current-revision context bounded
-#: so append-only superseded artifacts cannot compete with active feedback.
+#: so legacy superseded artifacts cannot compete with active feedback.
 MAX_CURRENT_REVISION_CONTEXT_CHARS: Final[int] = 12_000
 
 _OLD_PLAN_PAYLOAD = "<!-- hephaestus-plan-history:old-plan -->"
@@ -69,7 +75,7 @@ class IssueComment:
 
 @dataclass(frozen=True)
 class HistoryArtifact:
-    """One immutable superseded plan or review comment."""
+    """One legacy superseded plan or review comment awaiting compaction."""
 
     revision: int
     kind: str
@@ -78,13 +84,14 @@ class HistoryArtifact:
 
 @dataclass(frozen=True)
 class JournalSnapshot:
-    """Current canonical artifacts plus immutable history reconstructed from GitHub."""
+    """Current canonical artifacts plus any legacy history found on GitHub."""
 
     revision: int
     current_plan: str
     current_review: str
     current_review_revision: int | None
     history: tuple[HistoryArtifact, ...]
+    prior_plan_fingerprints: tuple[str, ...] = ()
 
 
 def as_issue_comment(comment: IssueComment | str) -> IssueComment:
@@ -141,11 +148,20 @@ def _without_revision_line(text: str) -> str:
     return stripped
 
 
+def _without_fingerprint_line(text: str) -> str:
+    stripped = text.lstrip()
+    first, separator, rest = stripped.partition("\n")
+    if PLAN_FINGERPRINTS_RE.fullmatch(first.strip()):
+        return rest if separator else ""
+    return stripped
+
+
 def extract_current_plan(body: str) -> str:
     """Return only the plan payload from a current or legacy plan comment."""
     text = _without_leading_line(body, PLAN_CANONICAL_MARKER)
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
-    return _without_revision_line(text).strip()
+    text = _without_revision_line(text)
+    return _without_fingerprint_line(text).strip()
 
 
 def extract_current_review(body: str) -> str:
@@ -155,12 +171,21 @@ def extract_current_review(body: str) -> str:
     return _without_revision_line(text).strip()
 
 
-def render_current_plan(plan: str, *, revision: int = 1) -> str:
+def render_current_plan(
+    plan: str,
+    *,
+    revision: int = 1,
+    prior_fingerprints: Sequence[str] = (),
+) -> str:
     """Render the editable current plan with an opaque canonical marker."""
     payload = extract_current_plan(plan)
+    fingerprints = tuple(dict.fromkeys(prior_fingerprints))[-MAX_PRIOR_PLAN_FINGERPRINTS:]
+    metadata = ""
+    if fingerprints:
+        metadata = f"\n<!-- prior-plan-fingerprints: {','.join(fingerprints)} -->"
     return (
         f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
-        f"<!-- revision: {revision} -->\n\n{payload}"
+        f"<!-- revision: {revision} -->{metadata}\n\n{payload}"
     )
 
 
@@ -248,13 +273,18 @@ def normalized_plan(plan: str) -> str:
     return "\n".join(line.rstrip() for line in extract_current_plan(plan).strip().splitlines())
 
 
+def contains_raw_patch(plan: str) -> bool:
+    """Return whether a proposed public plan embeds unified-diff material."""
+    return RAW_PATCH_RE.search(extract_current_plan(plan)) is not None
+
+
 def plan_fingerprint(plan: str) -> str:
     """Return a stable short fingerprint for a normalized plan."""
-    return hashlib.sha256(normalized_plan(plan).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(normalized_plan(plan).encode("utf-8")).hexdigest()
 
 
 def archive_plan_body(revision: int, old_plan: str, new_plan: str) -> str:
-    """Render append-only plan history, including the next plan for crash recovery."""
+    """Render the retired history format for migration compatibility tests."""
     old_payload = extract_current_plan(old_plan)
     new_payload = extract_current_plan(new_plan)
     diff = (
@@ -281,7 +311,7 @@ def archive_plan_body(revision: int, old_plan: str, new_plan: str) -> str:
 
 
 def archive_review_body(revision: int, review: str) -> str:
-    """Render the append-only review paired with a superseded plan."""
+    """Render the retired review-history format for migration compatibility."""
     marker = HISTORY_MARKER.format(revision=revision, kind="review")
     return (
         f"{marker}\n## Review of Previous Plan — Revision {revision}\n\n"
@@ -314,7 +344,7 @@ def _owned_comments(comments: Sequence[IssueComment | str]) -> list[IssueComment
 
 
 def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
-    """Reconstruct the current plan/review and ordered immutable history."""
+    """Reconstruct current plan/review and ordered legacy history."""
     owned = _owned_comments(comments)
     history: list[HistoryArtifact] = []
     history_bodies: dict[tuple[int, str], str] = {}
@@ -348,6 +378,12 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     explicit_revision = comment_revision(current_plan_body) if current_plan_body else None
     revision = explicit_revision or max(1, archived_max + 1)
     review_revision = comment_revision(current_review_body) if current_review_body else None
+    fingerprint_match = PLAN_FINGERPRINTS_RE.search(current_plan_body)
+    prior_fingerprints = (
+        tuple(value for value in fingerprint_match.group("fingerprints").split(",") if value)
+        if fingerprint_match
+        else ()
+    )
     if current_review_body and review_revision is None and archived_max == 0:
         review_revision = revision
     return JournalSnapshot(
@@ -356,6 +392,7 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
         current_review=(extract_current_review(current_review_body) if current_review_body else ""),
         current_review_revision=review_revision,
         history=tuple(sorted(history, key=lambda item: (item.revision, item.kind != "plan"))),
+        prior_plan_fingerprints=prior_fingerprints,
     )
 
 
@@ -381,9 +418,9 @@ def current_plan_context(
 ) -> str:
     """Return a bounded canonical-plan excerpt without superseded revisions.
 
-    The append-only journal remains the durable recovery and audit record.
-    This projection is only supplemental agent context for a resumed planner,
-    which already receives the immediate NOGO critique separately.
+    Bounded fingerprint metadata retains oscillation detection without exposing
+    superseded plans. This projection is supplemental context for a resumed
+    planner, which receives the latest canonical critique separately.
     """
     if max_chars <= 0:
         return ""
@@ -401,8 +438,8 @@ def current_revision_context(
 ) -> str:
     """Return bounded current plan context while preserving its paired review.
 
-    Superseded plan/review artifacts are deliberately excluded: they remain
-    durable on GitHub but can contain stale, mutually incompatible critique.
+    Superseded plan/review artifacts are deliberately excluded because they
+    contain stale, mutually incompatible critique and are removed by migration.
     When space is constrained, preserve the current review in full whenever
     possible and spend the remaining budget on a deterministic plan excerpt.
     """

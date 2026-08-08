@@ -234,9 +234,8 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         if matching:
             if any(str(comment.get("body", "")) != body for comment in matching):
                 raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
-            # Immutable history is append-only. Identical actor-owned copies
-            # can arise from a create race; tolerate them without rewriting or
-            # deleting the durable audit trail.
+            # This primitive still supports immutable non-issue artifacts.
+            # Identical actor-owned copies can arise from a create race.
             return
         self._post_issue_comment(issue_number, body)
         comments = self._repo_issue_comments(issue_number)
@@ -401,17 +400,6 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             for number, labels in epics_labels.items():
                 if STATE_SKIP not in labels:
                     self._add_labels(number, [STATE_SKIP])
-                    try:
-                        self.upsert_issue_comment(
-                            number,
-                            SKIP_REASON_MARKER,
-                            format_skip_reason_comment(
-                                "excluded from the planning loop as an epic/roadmap "
-                                "tracking issue (checklist of child work, not a code task)"
-                            ),
-                        )
-                    except Exception as exc:  # pragma: no cover - best-effort
-                        logger.warning("could not post skip-reason comment on #%s: %s", number, exc)
             return
         github_api.skip_epics(epics_labels)
 

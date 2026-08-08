@@ -1365,13 +1365,15 @@ class TestSkipEpics:
     def teardown_method(self) -> None:
         _github_api_module._label_cache.clear()
 
+    @patch("hephaestus.automation.github_api.gh_issue_upsert_comment")
     @patch("hephaestus.automation.github_api.gh_issue_add_labels")
-    def test_tags_unskipped_epics(self, mock_add: Any) -> None:
-        """Each epic without state:skip gets exactly one add-label call."""
+    def test_tags_unskipped_epics(self, mock_add: Any, mock_comment: Any) -> None:
+        """Epic classification is represented by a label, never an issue comment."""
         skip_epics({10: ["epic"], 11: ["roadmap", "bug"]})
         assert mock_add.call_count == 2
         mock_add.assert_any_call(10, ["state:skip"], repo=None)
         mock_add.assert_any_call(11, ["state:skip"], repo=None)
+        mock_comment.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_issue_add_labels")
     def test_skips_already_skipped_epic(self, mock_add: Any) -> None:
