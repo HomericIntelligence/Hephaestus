@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import queue
@@ -2756,6 +2757,8 @@ class TestGitOps:
                 "rebased": False,
                 "conflict_paths": ("x.py",),
                 "conflict_snapshot": {"x.py": "before"},
+                "conflict_index_snapshot": "1" * 64,
+                "paused_head_sha": "c" * 40,
                 "base_sha": "b" * 40,
                 "expected_remote_sha": "a" * 40,
             }
@@ -2765,6 +2768,37 @@ class TestGitOps:
         assert result.ok is False
         assert result.value == receipt.return_value
         assert result.error == "mechanical rebase hit conflicts; resolution required"
+
+    def test_conflict_receipt_binds_index_head_base_and_remote_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The host captures all immutable inputs before agent file editing."""
+        (tmp_path / "x.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> topic\n")
+        index_state = "100644 blob 1\tx.py\0100644 blob 2\tx.py\0"
+        with patch(f"{_WP}.git_utils.run") as run:
+            run.side_effect = [
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout=index_state),
+                MagicMock(returncode=0, stdout="c" * 40),
+                MagicMock(returncode=0, stdout="b" * 40),
+            ]
+
+            receipt = pool._conflict_receipt(
+                tmp_path,
+                remote="origin",
+                base_branch="main",
+                expected_remote_sha="a" * 40,
+                timeout=60,
+            )
+
+        assert isinstance(receipt, dict)
+        assert receipt["conflict_paths"] == ("x.py",)
+        assert (
+            receipt["conflict_index_snapshot"] == hashlib.sha256(index_state.encode()).hexdigest()
+        )
+        assert receipt["paused_head_sha"] == "c" * 40
+        assert receipt["base_sha"] == "b" * 40
+        assert receipt["expected_remote_sha"] == "a" * 40
 
     @staticmethod
     def _continue_rebase_job(tmp_path: Path) -> GitJob:
@@ -2780,6 +2814,8 @@ class TestGitOps:
                 "expected_remote_sha": "a" * 40,
                 "conflict_paths": ("x.py",),
                 "conflict_snapshot": {"x.py": "before"},
+                "conflict_index_snapshot": "1" * 64,
+                "paused_head_sha": "c" * 40,
             },
         )
 
@@ -2789,6 +2825,8 @@ class TestGitOps:
         receipt = {
             "conflict_paths": ("x.py",),
             "conflict_snapshot": {"x.py": "before"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -2810,6 +2848,8 @@ class TestGitOps:
         receipt = {
             "conflict_paths": ("x.py",),
             "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -2819,6 +2859,128 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.error == "rebase conflict resolution required: conflict markers remain"
+
+    def test_continue_rebase_rejects_edits_outside_conflict_paths(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The host rejects an agent turn that dirtied any non-conflict path."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0outside.py\0")
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="c" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch"),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "rebase conflict resolution changed paths outside host scope"
+
+    def test_continue_rebase_rejects_mutated_conflict_index(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Only the host may mutate the paused rebase index."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "2" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="c" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="x.py\0")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch"),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "conflict index was mutated outside host ownership"
+
+    def test_continue_rebase_rejects_changed_paused_head(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Agent file editing cannot move the host-owned paused rebase head."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "d" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="e" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="x.py\0")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(pool, "_read_publish_head", return_value="f" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch"),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "paused rebase head changed outside host ownership"
 
     def test_continue_rebase_rejects_remote_head_drift(
         self, pool: WorkerPool, tmp_path: Path
@@ -2831,15 +2993,17 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "remote writer head changed during conflict resolution"
 
-    def test_continue_rebase_rejects_unsigned_or_non_dco_commit(
+    def test_continue_rebase_rejects_missing_captured_base_ancestry(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """Host completion verifies every replayed commit's signature and DCO trailer."""
+        """A host-completed rebase must descend from its captured base head."""
         (tmp_path / "x.py").write_text("resolved\n")
         job = self._continue_rebase_job(tmp_path)
         receipt = {
             "conflict_paths": ("x.py",),
             "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
         }
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
@@ -2847,12 +3011,53 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=0, stdout=""),
+                MagicMock(returncode=1, stdout=""),
+            ]
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "completed rebase lacks captured base ancestry"
+
+    @pytest.mark.parametrize(
+        "raw_commit",
+        [
+            "tree deadbeef\n\nmessage\n\nSigned-off-by: Test User <test@example.com>\n",
+            "tree deadbeef\ngpgsig signature\n\nmessage\n",
+        ],
+    )
+    def test_continue_rebase_rejects_unsigned_or_non_dco_commit(
+        self, pool: WorkerPool, tmp_path: Path, raw_commit: str
+    ) -> None:
+        """Host completion verifies every replayed commit's signature and DCO trailer."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}.git_utils.run") as run,
+        ):
+            run.side_effect = [
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout="c" * 40),
-                MagicMock(returncode=0, stdout="tree deadbeef\n\nmessage\n"),
+                MagicMock(returncode=0, stdout=raw_commit),
             ]
             result = pool._git_continue_rebase(job)
 
@@ -2868,6 +3073,8 @@ class TestGitOps:
         receipt = {
             "conflict_paths": ("x.py",),
             "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
         }
         signed = (
             "tree deadbeef\ngpgsig -----BEGIN SIGNATURE-----\n\nfix\n\n"
@@ -2882,6 +3089,9 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout="x.py\0"),
+                MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),

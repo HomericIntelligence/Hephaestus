@@ -2145,6 +2145,21 @@ class WorkerPool:
             paths = tuple(path for path in paths_result.stdout.split("\0") if path)
             if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
                 return JobResult(ok=False, error="paused rebase conflict paths invalid")
+            index_result = git_utils.run(
+                ["git", "ls-files", "--unmerged", "-z", "--", *paths],
+                cwd=cwd,
+                timeout=timeout,
+            )
+            if not index_result.stdout:
+                return JobResult(ok=False, error="paused rebase conflict index invalid")
+            index_snapshot = hashlib.sha256(index_result.stdout.encode()).hexdigest()
+            paused_head_sha = git_utils.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=cwd,
+                timeout=timeout,
+            ).stdout.strip()
+            if not _is_full_commit_sha(paused_head_sha):
+                return JobResult(ok=False, error="paused rebase head invalid")
             base_sha = git_utils.run(
                 ["git", "rev-parse", f"{remote}/{base_branch}"],
                 cwd=cwd,
@@ -2159,6 +2174,8 @@ class WorkerPool:
             "rebased": False,
             "conflict_paths": paths,
             "conflict_snapshot": snapshot,
+            "conflict_index_snapshot": index_snapshot,
+            "paused_head_sha": paused_head_sha,
             "base_sha": base_sha,
             "expected_remote_sha": expected_remote_sha,
         }
@@ -2176,7 +2193,17 @@ class WorkerPool:
         parsed = self._parse_rebase_continuation(job)
         if isinstance(parsed, JobResult):
             return parsed
-        cwd, branch, remote, base_sha, expected_remote_sha, paths, snapshot = parsed
+        (
+            cwd,
+            branch,
+            remote,
+            base_sha,
+            expected_remote_sha,
+            paths,
+            snapshot,
+            index_snapshot,
+            paused_head_sha,
+        ) = parsed
         remote_head = self._read_remote_branch_head(
             cwd, remote=remote, branch=branch, timeout=job.timeout_s
         )
@@ -2191,6 +2218,8 @@ class WorkerPool:
             remote=remote,
             paths=paths,
             snapshot=snapshot,
+            index_snapshot=index_snapshot,
+            paused_head_sha=paused_head_sha,
             base_sha=base_sha,
             expected_remote_sha=expected_remote_sha,
             timeout=job.timeout_s,
@@ -2232,7 +2261,7 @@ class WorkerPool:
     @staticmethod
     def _parse_rebase_continuation(
         job: GitJob,
-    ) -> tuple[Path, str, str, str, str, tuple[str, ...], dict[str, object]] | JobResult:
+    ) -> tuple[Path, str, str, str, str, tuple[str, ...], dict[str, object], str, str] | JobResult:
         """Validate and normalize coordinator-owned continuation arguments."""
         kwargs = job.kwargs
         cwd = Path(str(kwargs.get("cwd") or ""))
@@ -2242,6 +2271,8 @@ class WorkerPool:
         expected_remote_sha = kwargs.get("expected_remote_sha")
         raw_paths = kwargs.get("conflict_paths")
         raw_snapshot = kwargs.get("conflict_snapshot")
+        index_snapshot = kwargs.get("conflict_index_snapshot")
+        paused_head_sha = kwargs.get("paused_head_sha")
         if (
             not cwd.is_dir()
             or not branch
@@ -2250,13 +2281,26 @@ class WorkerPool:
             or not isinstance(raw_paths, (list, tuple))
             or not raw_paths
             or not isinstance(raw_snapshot, dict)
+            or not isinstance(index_snapshot, str)
+            or re.fullmatch(r"[0-9a-f]{64}", index_snapshot) is None
+            or not _is_full_commit_sha(paused_head_sha)
         ):
             return JobResult(ok=False, error="rebase continuation arguments invalid")
         paths = tuple(str(path) for path in raw_paths)
         if any(not is_safe_scope_retraction_path(path) for path in paths):
             return JobResult(ok=False, error="rebase continuation paths invalid")
         snapshot = {str(path): value for path, value in raw_snapshot.items()}
-        return cwd, branch, remote, base_sha, expected_remote_sha, paths, snapshot
+        return (
+            cwd,
+            branch,
+            remote,
+            base_sha,
+            expected_remote_sha,
+            paths,
+            snapshot,
+            index_snapshot,
+            paused_head_sha,
+        )
 
     def _validate_rebase_conflict_edits(
         self,
@@ -2265,6 +2309,8 @@ class WorkerPool:
         remote: str,
         paths: tuple[str, ...],
         snapshot: dict[str, object],
+        index_snapshot: str,
+        paused_head_sha: str,
         base_sha: str,
         expected_remote_sha: str,
         timeout: int,
@@ -2288,6 +2334,10 @@ class WorkerPool:
         )
         if set(current_paths) != set(paths):
             return JobResult(ok=False, error="conflict index was mutated outside host ownership")
+        if current_receipt.get("conflict_index_snapshot") != index_snapshot:
+            return JobResult(ok=False, error="conflict index was mutated outside host ownership")
+        if current_receipt.get("paused_head_sha") != paused_head_sha:
+            return JobResult(ok=False, error="paused rebase head changed outside host ownership")
         current_snapshot = current_receipt.get("conflict_snapshot")
         if not isinstance(current_snapshot, dict) or all(
             current_snapshot.get(path) == snapshot.get(path) for path in paths
@@ -2306,6 +2356,37 @@ class WorkerPool:
                 value=current_receipt,
                 error="rebase conflict resolution required: conflict markers remain",
             )
+        scope_error = self._rebase_conflict_edit_scope_error(
+            cwd,
+            conflict_paths=paths,
+            timeout=timeout,
+        )
+        if scope_error is not None:
+            return scope_error
+        return None
+
+    @staticmethod
+    def _rebase_conflict_edit_scope_error(
+        cwd: Path, *, conflict_paths: tuple[str, ...], timeout: int
+    ) -> JobResult | None:
+        """Reject tracked, staged, or untracked changes outside conflicts."""
+        allowed = set(conflict_paths)
+        probes = (
+            ["git", "diff", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        try:
+            for argv in probes:
+                result = git_utils.run(argv, cwd=cwd, timeout=timeout)
+                changed = {path for path in result.stdout.split("\0") if path}
+                if not changed.issubset(allowed):
+                    return JobResult(
+                        ok=False,
+                        error="rebase conflict resolution changed paths outside host scope",
+                    )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate rebase conflict edit scope")
         return None
 
     def _continue_rebase_process(

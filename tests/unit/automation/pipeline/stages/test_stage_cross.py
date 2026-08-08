@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import ROUTES, Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
+from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
 from hephaestus.automation.pipeline.stages.pr_review import PrReviewStage
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
@@ -26,6 +27,10 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 # Sanity anchors: the reasons this composition exercises are ROUTES rows.
 assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
 assert ROUTES[StageName.IMPLEMENTATION].next == StageName.PR_REVIEW
+assert (
+    ROUTES[StageName.MERGE_WAIT].fail_routes["post_review_rebase_required"]
+    == StageName.IMPLEMENTATION
+)
 
 _LABEL_MUTATIONS = {
     "gh_issue_add_labels",
@@ -184,3 +189,83 @@ class TestAgentErrorPingPongTerminates:
         assert final.note == "agent_error_exhausted"
         label_writes = [name for name, _ in github.mutation_log if name in _LABEL_MUTATIONS]
         assert label_writes == []
+
+
+class TestPostReviewRebaseReusesRestoredWriter:
+    """pr_review cleanup -> merge_wait rebase fail-back -> implementation reuses writer."""
+
+    def test_transition_reuses_restored_writer_without_second_worktree(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale reviewed head resumes the stowed writer before rebasing."""
+        pr_stage = PrReviewStage()
+        impl_stage = ImplementationStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1001,
+            pr_head_branch="1-real-branch",
+            pr_impl_state=(True, False),
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.branch = "1-real-branch"
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "writer_worktree": "/tmp/implementation-writer",
+                "review_worktree": "/tmp/detached-review",
+            }
+        )
+
+        cleanup = pr_stage._cleanup_review_worktree_then(
+            item,
+            StageOutcome(Disposition.ADVANCE, "review_go"),
+        )
+        assert cleanup == Continue(next_state="CLEANUP_REVIEW_WORKTREE_WAIT")
+        item.state = cleanup.next_state
+
+        remove = pr_stage.step(item, ctx)
+        assert isinstance(remove, JobRequest)
+        assert isinstance(remove.job, GitJob)
+        assert remove.job.op == "remove_worktree"
+        pr_stage.on_job_done(item, JobResult(ok=True, value=True), ctx)
+        item.state = remove.on_done_state
+
+        reviewed = pr_stage.step(item, ctx)
+        assert reviewed == StageOutcome(Disposition.ADVANCE, "review_go")
+        assert ROUTES[StageName.PR_REVIEW].next is StageName.MERGE_WAIT
+        assert item.worktree == "/tmp/implementation-writer"
+        assert item.payload["implementation_writer_restored"] is True
+        assert "writer_worktree" not in item.payload
+        assert "review_worktree" not in item.payload
+
+        rebase_failback = MergeWaitStage._post_review_rebase(
+            item,
+            "post_review_rebase_required",
+        )
+        assert rebase_failback == StageOutcome(
+            Disposition.FAIL_BACK,
+            "post_review_rebase_required",
+        )
+
+        item.stage = ROUTES[StageName.MERGE_WAIT].fail_routes[rebase_failback.note]
+        item.state = "ENTER"
+        assert impl_stage.on_enter(item, ctx) is None
+
+        entered = impl_stage.step(item, ctx)
+        assert entered == Continue(next_state="GATE")
+        item.state = entered.next_state
+
+        gated = impl_stage.step(item, ctx)
+        assert gated == Continue(next_state="WORKTREE_WAIT")
+        item.state = gated.next_state
+
+        reused = impl_stage.step(item, ctx)
+        assert reused == Continue(next_state="DIRTY_DECISION_WAIT")
+        assert item.worktree == "/tmp/implementation-writer"
+        assert item.payload["worktree_dirty"] is False
+        assert "implementation_writer_restored" not in item.payload
+
+        item.state = reused.next_state
+        dirty = impl_stage.step(item, ctx)
+        assert dirty == Continue(next_state="REBASE_WAIT")

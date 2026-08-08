@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 import shlex
 from collections.abc import Callable
@@ -631,6 +632,8 @@ class ImplementationStage(Stage):
             item.payload.pop("rebase_conflict", None)
             item.payload.pop("rebase_conflict_paths", None)
             item.payload.pop("rebase_conflict_snapshot", None)
+            item.payload.pop("rebase_conflict_index_snapshot", None)
+            item.payload.pop("rebase_paused_head_sha", None)
             item.payload.pop("rebase_base_sha", None)
             item.payload.pop("rebase_expected_remote_sha", None)
             return Continue(next_state=ADOPTED)
@@ -652,6 +655,8 @@ class ImplementationStage(Stage):
                 "expected_remote_sha": item.payload.get("rebase_expected_remote_sha"),
                 "conflict_paths": item.payload.get("rebase_conflict_paths"),
                 "conflict_snapshot": item.payload.get("rebase_conflict_snapshot"),
+                "conflict_index_snapshot": item.payload.get("rebase_conflict_index_snapshot"),
+                "paused_head_sha": item.payload.get("rebase_paused_head_sha"),
             },
             descr="complete_host_owned_rebase",
         )
@@ -702,9 +707,9 @@ class ImplementationStage(Stage):
     def _implement_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """IMPLEMENT_WAIT submits the implementation job when budget remains."""
         issue = _issue_number(item)
-        exhausted = self._ordinary_implement_budget_outcome(item, ctx, issue)
-        if exhausted is not None:
-            return exhausted
+        entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
+        if entry_outcome is not None:
+            return entry_outcome
         # Clear stale results at submission so a failed later attempt can
         # never replay an earlier attempt's output downstream.
         item.payload.pop("implement_error", None)
@@ -810,6 +815,15 @@ class ImplementationStage(Stage):
             descr="implement",
         )
         return JobRequest(job, on_done_state=TEST_WAIT)
+
+    @staticmethod
+    def _implementation_agent_turn_entry_outcome(
+        item: WorkItem, ctx: StageContext, issue: int
+    ) -> StepResult | None:
+        """Return any outcome that must happen before an ordinary implement turn."""
+        if item.payload.get("rebase_conflict"):
+            return Continue(next_state=REBASE_CONFLICT_WAIT)
+        return ImplementationStage._ordinary_implement_budget_outcome(item, ctx, issue)
 
     @staticmethod
     def _ordinary_implement_budget_outcome(
@@ -1429,6 +1443,8 @@ class ImplementationStage(Stage):
         value = result.value if isinstance(result.value, dict) else {}
         paths = value.get("conflict_paths")
         snapshot = value.get("conflict_snapshot")
+        index_snapshot = value.get("conflict_index_snapshot")
+        paused_head_sha = value.get("paused_head_sha")
         base_sha = value.get("base_sha")
         expected_remote_sha = value.get("expected_remote_sha")
         if (
@@ -1436,6 +1452,9 @@ class ImplementationStage(Stage):
             or not paths
             or not all(isinstance(path, str) and path for path in paths)
             or not isinstance(snapshot, dict)
+            or not isinstance(index_snapshot, str)
+            or re.fullmatch(r"[0-9a-f]{64}", index_snapshot) is None
+            or not is_full_commit_sha(paused_head_sha)
             or not is_full_commit_sha(base_sha)
             or not is_full_commit_sha(expected_remote_sha)
         ):
@@ -1444,6 +1463,8 @@ class ImplementationStage(Stage):
         item.payload["rebase_conflict"] = True
         item.payload["rebase_conflict_paths"] = tuple(paths)
         item.payload["rebase_conflict_snapshot"] = snapshot
+        item.payload["rebase_conflict_index_snapshot"] = index_snapshot
+        item.payload["rebase_paused_head_sha"] = paused_head_sha
         item.payload["rebase_base_sha"] = base_sha
         item.payload["rebase_expected_remote_sha"] = expected_remote_sha
 

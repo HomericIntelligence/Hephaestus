@@ -679,6 +679,8 @@ class TestGate:
                 "rebased": False,
                 "conflict_paths": ("hephaestus/example.py",),
                 "conflict_snapshot": {"hephaestus/example.py": "before"},
+                "conflict_index_snapshot": "1" * 64,
+                "paused_head_sha": "c" * 40,
                 "base_sha": "b" * 40,
                 "expected_remote_sha": "a" * 40,
             },
@@ -690,6 +692,8 @@ class TestGate:
 
         assert item.payload["rebase_conflict"] is True
         assert item.payload["rebase_conflict_paths"] == ("hephaestus/example.py",)
+        assert item.payload["rebase_conflict_index_snapshot"] == "1" * 64
+        assert item.payload["rebase_paused_head_sha"] == "c" * 40
         assert caplog.messages == [
             "implementation:1: writer rebase paused for host-owned conflict resolution"
         ]
@@ -736,6 +740,69 @@ class TestGate:
             Disposition.FINISH_FAIL, "rebase_conflict_exhausted"
         )
 
+    def test_rebase_conflict_in_implement_wait_bypasses_ordinary_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A host conflict routed through IMPLEMENT_WAIT keeps its conflict turn."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.payload.update(
+            {
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("hephaestus/example.py",),
+            }
+        )
+        item.attempts["implement"] = ctx.budget("implement")
+
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
+
+        item.state = "REBASE_CONFLICT_WAIT"
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.descr == "resolve_rebase_conflict"
+        assert item.attempts["implement"] == ctx.budget("implement")
+
+    def test_rebase_conflict_reentry_bypasses_exhausted_ordinary_budget(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A second host conflict still gets its own bounded agent turn."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+        item.attempts["implement"] = ctx.budget("implement")
+        item.attempts["rebase_conflict"] = 1
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value={
+                    "conflict_paths": ("hephaestus/example.py",),
+                    "conflict_snapshot": {"hephaestus/example.py": "after first pass"},
+                    "conflict_index_snapshot": "2" * 64,
+                    "paused_head_sha": "d" * 40,
+                    "base_sha": "b" * 40,
+                    "expected_remote_sha": "a" * 40,
+                },
+                error="rebase conflict resolution required: hephaestus/example.py",
+            ),
+            ctx,
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="REBASE_CONFLICT_WAIT")
+
+        item.state = "REBASE_CONFLICT_WAIT"
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.descr == "resolve_rebase_conflict"
+        assert item.attempts["implement"] == ctx.budget("implement")
+        assert item.attempts["rebase_conflict"] == 1
+
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -748,6 +815,11 @@ class TestGate:
                 "post_review_rebase_required": True,
                 "rebase_conflict": True,
                 "rebase_conflict_paths": ("hephaestus/example.py",),
+                "rebase_conflict_snapshot": {"hephaestus/example.py": "before"},
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
             }
         )
 
@@ -756,6 +828,43 @@ class TestGate:
         assert item.payload["rebase_conflict"] is True
         assert item.payload["post_review_rebase_required"] is True
         assert item.attempts["rebase_conflict"] == 1
+
+        item.state = "REBASE_CONTINUE_WAIT"
+        request = stage.step(item, ctx)
+
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, GitJob)
+        assert request.job.op == "continue_rebase"
+        assert request.job.kwargs["expected_remote_sha"] == "a" * 40
+        assert request.job.kwargs["conflict_index_snapshot"] == "1" * 64
+        assert request.job.kwargs["paused_head_sha"] == "c" * 40
+
+    def test_host_completed_conflict_rebase_clears_receipt_and_requires_fresh_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only host publication clears conflict state and advances to PR review."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+        item.payload.update(
+            {
+                "post_review_rebase_required": True,
+                "rebase_complete": True,
+                "rebase_conflict": True,
+                "rebase_conflict_paths": ("hephaestus/example.py",),
+                "rebase_conflict_snapshot": {"hephaestus/example.py": "before"},
+                "rebase_conflict_index_snapshot": "1" * 64,
+                "rebase_paused_head_sha": "c" * 40,
+                "rebase_base_sha": "b" * 40,
+                "rebase_expected_remote_sha": "a" * 40,
+            }
+        )
+
+        assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
+        assert "post_review_rebase_required" not in item.payload
+        assert "rebase_conflict" not in item.payload
+        assert "rebase_conflict_index_snapshot" not in item.payload
+        assert "rebase_paused_head_sha" not in item.payload
 
 
 class TestImplementationStateSkipGate:
