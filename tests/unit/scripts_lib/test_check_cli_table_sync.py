@@ -20,9 +20,7 @@ def test_load_scripts_uses_shared_toml_resolver(
     """Script discovery delegates TOML parsing to the shared resolver."""
     (tmp_path / "pyproject.toml").write_text("not parsed directly", encoding="utf-8")
     parser = SimpleNamespace(
-        loads=lambda _source: {
-            "project": {"scripts": {"hephaestus-example": "example:main"}}
-        }
+        loads=lambda _source: {"project": {"scripts": {"hephaestus-example": "example:main"}}}
     )
     monkeypatch.setattr(mod, "import_tomllib", lambda: parser)
 

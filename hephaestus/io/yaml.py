@@ -5,9 +5,7 @@ from __future__ import annotations
 import importlib
 import types
 
-_PYYAML_REQUIRED_MESSAGE = (
-    "PyYAML is required for YAML support. Install with: pip install PyYAML"
-)
+_PYYAML_REQUIRED_MESSAGE = "PyYAML is required for YAML support. Install with: pip install PyYAML"
 
 
 def import_yaml() -> types.ModuleType:
