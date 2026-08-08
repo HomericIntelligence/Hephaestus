@@ -1,5 +1,5 @@
 # The façade deliberately re-exports the coordinator's historical symbols.
-# ruff: noqa: F403, F405, D105, D107, E501
+# ruff: noqa: F403, F405, D105, D107
 import logging
 import threading
 import uuid
