@@ -3,7 +3,7 @@
 ``FakeStageGitHub`` extends the canonical pipeline ``FakeGitHub`` (see
 ``tests/unit/automation/pipeline/conftest.py``) with the read surface the
 planning/plan_review stages use (``gh_issue_json``, PR-coverage lookups,
-plan-comment presence), so mutator call sites and the ``mutation_log``
+tri-state plan discovery), so mutator call sites and the ``mutation_log``
 format stay identical to what coordinator tests (#1817) will assert.
 """
 
@@ -33,10 +33,19 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
     PLAN_REVIEW_PREFIX,
 )
-from hephaestus.automation.review_journal import IssueComment, blocked_audit_recovery_body
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    PlanDiscoveryResult,
+    blocked_audit_recovery_body,
+    render_current_plan,
+    render_current_review,
+    render_pending_review,
+)
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
+    STATE_PLAN_NO_GO,
 )
 from tests.unit.automation.pipeline.conftest import FakeGitHub
 
@@ -55,7 +64,7 @@ class FakeStageGitHub(FakeGitHub):
     Reads mirror the real helper names the stages call through
     ``ctx.github``: ``gh_issue_json`` (github_api.issues),
     ``find_merged_closing_pr`` / ``find_pr_for_issue`` /
-    ``close_issue_as_covered`` (_review_utils), and ``has_existing_plan``
+    ``close_issue_as_covered`` (_review_utils), and ``discover_plan``
     (PlannerStateManager).
     """
 
@@ -80,6 +89,8 @@ class FakeStageGitHub(FakeGitHub):
         conversation_resolution: bool = True,
         pr_review_context: dict[str, str] | None = None,
         learn_terminal: bool = False,
+        plan_read_error: str | None = None,
+        journal_read_error: str | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -91,7 +102,7 @@ class FakeStageGitHub(FakeGitHub):
             merged_pr: Canned answer for find_merged_closing_pr.
             open_pr: Canned answer for find_pr_for_issue.
             pr_issue: Canned answer for find_issue_for_pr.
-            has_plan: Canned answer for has_existing_plan.
+            has_plan: Canned answer for plan discovery.
             pr_head_branch: Canned answer for get_pr_head_branch.
             pr_head_writable: Whether the PR head belongs to the base origin
                 and may receive coordinator-owned address commits.
@@ -125,6 +136,8 @@ class FakeStageGitHub(FakeGitHub):
         self._open_pr = open_pr
         self._pr_issue = pr_issue
         self._has_plan = has_plan
+        self._plan_read_error = plan_read_error
+        self._journal_read_error = journal_read_error
         self._pr_head_branch = pr_head_branch
         self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
@@ -195,12 +208,30 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror PipelineGitHub.find_issue_for_pr (PR body Closes lookup)."""
         return self._pr_issue
 
-    def has_existing_plan(self, issue_number: int) -> bool:
-        """Mirror PlannerStateManager.has_existing_plan (plan comment check)."""
-        return self._has_plan
+    def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Return a canned tri-state plan-discovery result."""
+        if self._plan_read_error is not None:
+            return PlanDiscoveryResult.read_error(self._plan_read_error)
+        if self._has_plan:
+            return PlanDiscoveryResult.found(render_current_plan("Fake plan"))
+        return PlanDiscoveryResult.absent()
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
         """Return fake issue comments in their append order with ownership metadata."""
+        if self._journal_read_error is not None:
+            raise CommentJournalReadError(self._journal_read_error)
+        comments = self.comments.get(issue_number, [])
+        if not comments and self._has_plan:
+            comments = [render_current_plan("Fake plan")]
+            if STATE_PLAN_NO_GO in self._issue_labels(issue_number):
+                comments.append(
+                    render_current_review(
+                        "Rejected fake plan\n\nstate:plan-no-go",
+                        revision=1,
+                    )
+                )
+            else:
+                comments.append(render_pending_review(revision=1))
         return [
             comment
             if isinstance(comment, IssueComment)
@@ -209,7 +240,7 @@ class FakeStageGitHub(FakeGitHub):
                 author_login="hephaestus[bot]",
                 viewer_did_author=True,
             )
-            for comment in self.comments.get(issue_number, [])
+            for comment in comments
         ]
 
     def ensure_blocked_audit(self, issue_number: int) -> None:
@@ -383,8 +414,8 @@ class FakeStageGitHub(FakeGitHub):
 
         Delegates to the canonical ``gh_issue_upsert_comment`` recorder so
         the mutation_log keeps the canonical format, and flips the
-        ``has_existing_plan`` answer to True — the posted comment IS the
-        durable plan artifact the verify step reads back.
+        plan-discovery answer to FOUND — the posted comment IS the durable
+        plan artifact the verify step reads back.
         """
         self._has_plan = True
         self.upsert_issue_comment(

@@ -57,8 +57,10 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
-from hephaestus.automation.review_journal import IssueComment
-from hephaestus.automation.state_labels import STATE_SKIP
+from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
+from hephaestus.automation.state_labels import (
+    STATE_SKIP,
+)
 
 from ..events import StageEvent
 from ..github_jobs import GitHubJob
@@ -201,8 +203,8 @@ class StageGitHub(Protocol):
         """Return title/body/head metadata; checkout later derives the review diff."""
         ...
 
-    def has_existing_plan(self, issue_number: int) -> bool:
-        """Return True when a canonical plan artifact exists for the issue."""
+    def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Return the tri-state actor-owned plan-discovery outcome."""
         ...
 
     def issue_comments(self, issue_number: int) -> list[IssueComment]:
@@ -532,7 +534,7 @@ class StageContext:
     coordinator (#1817) maps onto the ``github_api`` mutators, while its
     read surface mirrors the existing helper names (``gh_issue_json``,
     ``find_merged_closing_pr``, ``find_pr_for_issue``,
-    ``has_existing_plan``). Stages never import ``github_api`` directly —
+    ``discover_plan``). Stages never import ``github_api`` directly —
     enforced by ``tests/unit/automation/pipeline/test_pipeline_architecture``.
     """
 
