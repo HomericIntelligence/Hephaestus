@@ -241,14 +241,21 @@ jobs:
       - name: Run integration tests
         # Mirror the required PR gate (_required.yml integration-tests) so a
         # workflow_dispatch release against an arbitrary commit gets the same
-        # sdist-contents / package-import guarantee a merged PR does (issue #1499).
+        # artifact, sdist-contents, and package-import guarantees a merged PR does.
         # --override-ini clears the unit coverage addopts; --strict-markers is safe
-        # because the `integration` marker is registered in pyproject.toml.
+        # because the integration and artifact markers are registered in pyproject.toml.
         # uv sync installed every [project.scripts] binary, so the CLI
         # entry-point checks must never skip here (#2173).
+        # Artifact tests repeat reproducibility, complete-manifest, RECORD,
+        # clean-install, upgrade, and uninstall checks before publication.
         env:
           HEPHAESTUS_REQUIRE_CLI: "1"
-        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
+        run: >-
+          uv run pytest tests/integration
+          --override-ini="addopts="
+          --basetemp=build/pytest-release-integration
+          -v --strict-markers
+          -m "not nightly"
 
   type-check:
     runs-on: ubuntu-24.04

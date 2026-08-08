@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
-"""Integration test: sdist ships required top-level metadata files."""
+"""Integration tests for reproducible and complete source distributions."""
 
 from __future__ import annotations
 
-import subprocess
-import sys
 import tarfile
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
+from .artifact_support import ControlledArtifacts, file_sha256, source_package_files
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-REQUIRED_TOP_LEVEL_FILES = {
+SDIST_TOP_LEVEL_FILES = {
     "README.md",
     "LICENSE",
     "NOTICE",
     "COMPATIBILITY.md",
     "pyproject.toml",
+    # Hatchling force-includes the VCS ignore file in sdists so consumers can
+    # reproduce the source-tree exclusion rules.
+    ".gitignore",
 }
-
-PROMPT_TEMPLATE_PREFIX = "hephaestus/prompts/templates/default/"
-
-
-def _source_prompt_templates() -> set[str]:
-    """Return repository-relative names of every default prompt template."""
-    template_root = REPO_ROOT / PROMPT_TEMPLATE_PREFIX
-    return {path.relative_to(REPO_ROOT).as_posix() for path in template_root.rglob("*.j2")}
 
 
 def _dependency_name(requirement: str) -> str:
@@ -40,8 +35,52 @@ def _dependency_name(requirement: str) -> str:
     return head.strip().lower().replace("_", "-")
 
 
+def _validate_member_name(name: str) -> None:
+    """Reject absolute and traversal paths in an archive."""
+    path = PurePosixPath(name)
+    assert name and not path.is_absolute(), f"unsafe absolute archive member: {name!r}"
+    assert ".." not in path.parts, f"unsafe traversal archive member: {name!r}"
+    assert "\\" not in name, f"unsafe archive separator in member: {name!r}"
+
+
+def _safe_regular_file_members(archive: Path) -> set[str]:
+    """Validate sdist structure and return every regular file without its root."""
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        assert members, "sdist is empty"
+        roots: set[str] = set()
+        seen: set[str] = set()
+        regular_files: set[str] = set()
+
+        for member in members:
+            _validate_member_name(member.name)
+            parts = PurePosixPath(member.name).parts
+            assert parts, f"empty archive member: {member.name!r}"
+            roots.add(parts[0])
+            assert member.isreg() or member.isdir(), (
+                f"unsupported sdist member type: {member.name!r}"
+            )
+            assert not member.issym() and not member.islnk(), (
+                f"linked sdist member is forbidden: {member.name!r}"
+            )
+
+            relative = "/".join(parts[1:])
+            if not relative:
+                assert member.isdir(), f"sdist root must be a directory: {member.name!r}"
+                continue
+            assert relative not in seen, f"duplicate sdist member: {relative!r}"
+            seen.add(relative)
+            if member.isreg():
+                regular_files.add(relative)
+
+        assert len(roots) == 1, f"sdist members have multiple roots: {roots}"
+        return regular_files
+
+
+@pytest.mark.integration
+@pytest.mark.artifact
 def test_dev_group_includes_build_backend_for_no_isolation_sdist() -> None:
-    """The UV dev group supplies backend dependencies for the no-isolation test."""
+    """The UV dev group supplies backend dependencies for controlled builds."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     build_requires = {
@@ -55,55 +94,19 @@ def test_dev_group_includes_build_backend_for_no_isolation_sdist() -> None:
 
 
 @pytest.mark.integration
-def test_sdist_includes_notice_compatibility_and_prompt_templates(tmp_path: Path) -> None:
-    """Building the sdist must include metadata and all default prompts."""
-    probe = subprocess.run(
-        [sys.executable, "-m", "build", "--help"],
-        cwd=REPO_ROOT.parent,
-        check=False,
-        capture_output=True,
+@pytest.mark.artifact
+def test_sdist_build_is_reproducible(controlled_artifacts: ControlledArtifacts) -> None:
+    """Two controlled current-version sdists must be byte-identical."""
+    assert controlled_artifacts.first_sdist.name == controlled_artifacts.second_sdist.name
+    assert file_sha256(controlled_artifacts.first_sdist) == file_sha256(
+        controlled_artifacts.second_sdist
     )
-    if probe.returncode != 0 and b"No module named build" in probe.stderr:
-        pytest.skip("python build frontend is not installed in this environment")
 
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "build",
-            str(REPO_ROOT),
-            "--sdist",
-            "--outdir",
-            str(tmp_path),
-            # This test validates sdist contents, not build isolation or
-            # package-index access. The UV environment already provides the
-            # backend dependencies, so avoid network-only dependency fetching.
-            "--no-isolation",
-        ],
-        cwd=REPO_ROOT.parent,
-        check=True,
-        capture_output=True,
-    )
-    sdists = list(tmp_path.glob("*.tar.gz"))
-    assert len(sdists) == 1, f"expected one sdist, got {sdists}"
 
-    with tarfile.open(sdists[0], "r:gz") as tf:
-        # sdist members are prefixed with "<name>-<version>/"; strip the prefix.
-        members = {
-            member.name.split("/", 1)[1]
-            for member in tf.getmembers()
-            if member.isfile() and "/" in member.name
-        }
-
-    top_level = {name for name in members if "/" not in name}
-
-    missing = REQUIRED_TOP_LEVEL_FILES - top_level
-    assert not missing, f"sdist is missing required files: {sorted(missing)}"
-    assert len(top_level) > 3, f"suspiciously few top-level files: {top_level}"
-
-    expected_templates = _source_prompt_templates()
-    actual_templates = {
-        name for name in members if name.startswith(PROMPT_TEMPLATE_PREFIX) and name.endswith(".j2")
-    }
-    assert expected_templates, "source prompt catalog is empty"
-    assert actual_templates == expected_templates
+@pytest.mark.integration
+@pytest.mark.artifact
+def test_sdist_complete_manifest_matches_source(controlled_artifacts: ControlledArtifacts) -> None:
+    """Every regular sdist member must match the configured source inventory."""
+    members = _safe_regular_file_members(controlled_artifacts.first_sdist)
+    expected = source_package_files() | SDIST_TOP_LEVEL_FILES | {"PKG-INFO"}
+    assert members == expected

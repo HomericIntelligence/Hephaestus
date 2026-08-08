@@ -228,6 +228,7 @@ addopts = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "artifact: reproducible-build, archive-integrity, and installed-package lifecycle tests",
     "unit: marks tests as unit tests",
     "performance: bounded capacity, latency, and sustained-concurrency tests",
     "nightly: high-cost functional tests run by the scheduled nightly workflow",
