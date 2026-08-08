@@ -381,7 +381,8 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     cwd.mkdir()
     (pi_dir / "settings.json").parent.mkdir(parents=True)
     (pi_dir / "settings.json").write_text(
-        json.dumps({"packages": list(catalog.install_specs)}), encoding="utf-8"
+        json.dumps({"packages": [*catalog.install_specs, "npm:unverified-package@1.0.0"]}),
+        encoding="utf-8",
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
     global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"

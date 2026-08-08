@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.agents.pi_plugins import preflight_pi_environment
+from hephaestus.agents.pi_plugins import load_pi_package_catalog, preflight_pi_environment
 
 
 @pytest.mark.nightly
@@ -21,8 +21,10 @@ def test_catalog_pinned_packages_install_and_preflight(
     if os.environ.get("HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE") != "1":
         pytest.skip("set HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE=1 for live package evidence")
     command = shutil.which("hephaestus-install-pi-plugins")
+    npm = shutil.which("npm")
     assert command is not None, "installed console script is required"
     assert shutil.which("pi") is not None, "catalog-pinned Pi CLI is required"
+    assert npm is not None, "npm is required for global package-layout evidence"
     cwd = tmp_path / "repo"
     cwd.mkdir()
     env = dict(os.environ)
@@ -50,6 +52,22 @@ def test_catalog_pinned_packages_install_and_preflight(
     payload = json.loads(result.stdout)
     assert payload["ready"] is True
     assert payload["status"] == "ready"
+
+    npm_root_result = subprocess.run(
+        [npm, "root", "-g"],
+        cwd=cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert npm_root_result.returncode == 0, npm_root_result.stderr
+    npm_root = Path(npm_root_result.stdout.strip())
+    assert npm_root.is_absolute(), npm_root_result.stdout
+    for package in load_pi_package_catalog().packages:
+        if package.kind == "npm":
+            assert (npm_root / package.identity / "package.json").is_file()
 
     pi_dir = Path(env["PI_CODING_AGENT_DIR"])
     sentinel = tmp_path / "compatible-sentinel-loaded"
