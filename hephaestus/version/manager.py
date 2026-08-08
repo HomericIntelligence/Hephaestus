@@ -120,9 +120,10 @@ class VersionManager:
             self.init_files = []
             for init_file in potential_inits:
                 # Skip test, build, and hidden directories
+                relative_parts = init_file.relative_to(self.repo_root).parts
                 if any(
                     part.startswith(".") or part in {"tests", "build", "dist", "__pycache__"}
-                    for part in init_file.parts
+                    for part in relative_parts
                 ):
                     continue
                 # Check if it has a __version__ attribute

@@ -20,6 +20,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
+if os.name == "posix":
+    import grp
+    import pwd
+
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -445,6 +449,7 @@ _LINUX_POSIX_ACL_FILESYSTEMS = frozenset(
         "overlayfs",
         "ramfs",
         "tmpfs",
+        "virtiofs",
         "xfs",
     }
 )
@@ -513,7 +518,12 @@ def _verify_pi_private_acl(path: Path, *, clear: bool) -> None:
     if filesystem_type not in _LINUX_POSIX_ACL_FILESYSTEMS:
         raise OSError("Pi smoke requires a local filesystem with verifiable POSIX ACLs")
 
-    absent_errors = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
+    absent_errors = {
+        errno.ENODATA,
+        errno.ENOTSUP,
+        getattr(errno, "ENOATTR", errno.ENODATA),
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+    }
     for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
         if clear:
             try:
@@ -546,6 +556,20 @@ def _pi_log_path_components(path: Path) -> tuple[Path, ...]:
     return tuple(components)
 
 
+def _pi_group_has_other_users(group_id: int, current_uid: int) -> bool:
+    """Return whether a writable group grants access to another local user."""
+    try:
+        current_name = pwd.getpwuid(current_uid).pw_name
+        group = grp.getgrgid(group_id)
+        members = set(group.gr_mem)
+        members.update(
+            entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == group_id
+        )
+    except (KeyError, OSError):
+        return True
+    return any(member != current_name for member in members)
+
+
 def _verify_pi_private_log_directory(
     path: Path,
     *,
@@ -562,16 +586,20 @@ def _verify_pi_private_log_directory(
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise OSError("Pi smoke artifact path must be a directory, not a symlink")
     current_uid = os.getuid()
-    if require_current_owner:
-        if metadata.st_uid != current_uid:
-            raise OSError("Pi smoke artifact path is not owned by the current user")
-    elif metadata.st_uid not in {0, current_uid}:
-        raise OSError("Pi smoke artifact ancestor is not owner-controlled")
+    if require_current_owner and metadata.st_uid != current_uid:
+        raise OSError("Pi smoke artifact path is not owned by the current user")
     mode = stat.S_IMODE(metadata.st_mode)
     # A sticky directory cannot have another user's entry renamed or removed.
     # Combined with atomic child creation and ownership verification below, it
     # is safe as an ancestor (for example, the system temporary root).
-    if mode & 0o022 and not (metadata.st_mode & stat.S_ISVTX):
+    writable_by_other = bool(mode & stat.S_IWOTH)
+    writable_by_shared_group = bool(mode & stat.S_IWGRP) and _pi_group_has_other_users(
+        metadata.st_gid,
+        current_uid,
+    )
+    if (writable_by_other or writable_by_shared_group) and not (
+        metadata.st_mode & stat.S_ISVTX
+    ):
         raise OSError("Pi smoke artifact path is writable by another user")
     if clear_acl and verify_acl:
         _verify_pi_private_acl(path, clear=True)
