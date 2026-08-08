@@ -2,6 +2,7 @@
 
 import inspect
 import subprocess
+import sys
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import hephaestus.automation.git_runtime as git_runtime
-import hephaestus.automation.git_utils as git_utils
+from hephaestus.automation import git_utils
 from hephaestus.automation.git_utils import (
     DetachedHeadPushError,
     DetachedHeadPushRemoteHeadChangedError,
@@ -79,6 +80,57 @@ class TestIssueAutoImplBranchName:
 
 class TestCommitIfChanges:
     """Tests for commit_if_changes."""
+
+    def test_dirty_tree_imports_commit_helper_on_demand(self) -> None:
+        """A cold git-utils import can load the commit implementation on use."""
+        code = r"""
+import builtins
+import sys
+import types
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import hephaestus.automation.git_utils as git_utils
+
+if "hephaestus.automation.pr_manager" in sys.modules:
+    raise SystemExit("pr_manager was imported before commit_if_changes")
+
+calls = []
+def fake_commit_changes(*args, **kwargs):
+    calls.append((args, kwargs))
+
+real_import = builtins.__import__
+def import_hook(name, globals=None, locals=None, fromlist=(), level=0):
+    if (
+        level == 1
+        and name == "pr_manager"
+        and globals is not None
+        and globals.get("__package__") == "hephaestus.automation"
+    ):
+        module_name = "hephaestus.automation.pr_manager"
+        module = types.ModuleType(module_name)
+        module.commit_changes = fake_commit_changes
+        sys.modules[module_name] = module
+        return module
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = import_hook
+try:
+    with patch.object(git_utils, "run", return_value=Mock(stdout=" M fixed.py\n")):
+        assert git_utils.commit_if_changes(123, Path("/tmp/worktree"), "codex") is True
+finally:
+    builtins.__import__ = real_import
+
+assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None})]
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_commits_with_selected_agent(

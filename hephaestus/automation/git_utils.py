@@ -13,24 +13,25 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
+import hephaestus.automation.git_runtime as _git_runtime
 from hephaestus.constants import agent_git_timeout
 from hephaestus.utils.retry import retry_with_backoff
 
-from .commit_registry import commit_changes
-from .git_runtime import (
-    clear_repo_caches as clear_repo_caches,
-    get_repo_info as get_repo_info,
-    get_repo_root as get_repo_root,
-    get_repo_slug as get_repo_slug,
-    issue_ref as issue_ref,
-    pr_ref as pr_ref,
-    run as run,
-)
 from .session_naming import issue_auto_impl_branch_name as _session_issue_auto_impl_branch_name
 
 logger = logging.getLogger(__name__)
 
 COMMIT_POLICY_REWRITE_EXEC = "git commit --amend --no-edit -S -s --allow-empty"
+
+# Keep the historical patchable/public names while making their compatibility
+# re-export role explicit to static analyzers and type checkers.
+clear_repo_caches = _git_runtime.clear_repo_caches
+get_repo_info = _git_runtime.get_repo_info
+get_repo_root = _git_runtime.get_repo_root
+get_repo_slug = _git_runtime.get_repo_slug
+issue_ref = _git_runtime.issue_ref
+pr_ref = _git_runtime.pr_ref
+run = _git_runtime.run
 
 
 class DetachedHeadPushError(RuntimeError):
@@ -106,6 +107,11 @@ def commit_if_changes(
         return False
 
     try:
+        # Import on demand to keep the product-layer commit implementation out
+        # of the neutral Git utility import path without hidden registration
+        # state or an import-order dependency.
+        from .pr_manager import commit_changes
+
         commit_kwargs: dict[str, Any] = {"allowed_paths": allowed_paths}
         if agent_model is not None:
             commit_kwargs["agent_model"] = agent_model

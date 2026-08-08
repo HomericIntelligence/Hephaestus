@@ -118,16 +118,54 @@ def _module_path(root: Path, module: str) -> Path:
     return path / "__init__.py" if path.is_dir() else path.with_suffix(".py")
 
 
+def _runtime_package_initializers(root: Path, modules: set[str]) -> set[str]:
+    """Return package modules whose initializers perform runtime imports.
+
+    Lazy-export-only initializers are modeled through their explicit export
+    targets below; they do not execute those targets while a child module is
+    imported, so they must not create a synthetic parent edge here.
+    """
+    initializers: set[str] = set()
+    for module in modules:
+        path = _module_path(root, module)
+        if path.name != "__init__.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            (
+                isinstance(node, ast.Import)
+                and any(alias.name.startswith(_AUTOMATION_PREFIX) for alias in node.names)
+            )
+            or (
+                isinstance(node, ast.ImportFrom)
+                and (
+                    node.level > 0
+                    or (node.module is not None and node.module.startswith(_AUTOMATION_PREFIX))
+                )
+            )
+            for node in _visit_runtime_imports(tree)
+        ):
+            initializers.add(module)
+    return initializers
+
+
 def _runtime_import_targets(
     module: str,
     path: Path,
     tree: ast.Module,
     modules: set[str],
+    runtime_package_initializers: set[str],
 ) -> Iterator[str]:
     """Yield automation targets for runtime imports in one source module."""
     for node in _visit_runtime_imports(tree):
         if isinstance(node, ast.Import):
-            yield from (alias.name for alias in node.names)
+            for alias in node.names:
+                parts = alias.name.split(".")
+                for end in range(1, len(parts) + 1):
+                    target = ".".join(parts[:end])
+                    is_leaf = end == len(parts)
+                    if target in modules and (is_leaf or target in runtime_package_initializers):
+                        yield target
             continue
 
         imported_module = (
@@ -150,6 +188,7 @@ def _runtime_import_targets(
 def _build_import_graph(root: Path) -> dict[str, set[str]]:
     """Build the normalized runtime module graph rooted at *root*."""
     modules = _module_names(root)
+    runtime_package_initializers = _runtime_package_initializers(root, modules)
     graph: dict[str, set[str]] = {}
 
     def add_edge(source: str, target: str) -> None:
@@ -168,7 +207,13 @@ def _build_import_graph(root: Path) -> dict[str, set[str]]:
         graph.setdefault(normalized_module, set())
         path = _module_path(root, module)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for target in _runtime_import_targets(module, path, tree, modules):
+        for target in _runtime_import_targets(
+            module,
+            path,
+            tree,
+            modules,
+            runtime_package_initializers,
+        ):
             add_edge(module, target)
         for target in _lazy_export_targets(tree):
             add_edge(module, target)
@@ -234,6 +279,11 @@ def _write_synthetic_graph(tmp_path: Path, fixture_name: str) -> Path:
             "pkg/__init__.py": "from . import child\n",
             "pkg/child.py": "from .. import pkg\n",
         },
+        "import_parent_package_cycle": {
+            "a.py": "import hephaestus.automation.pkg.child\n",
+            "pkg/__init__.py": "from .. import a\n",
+            "pkg/child.py": "",
+        },
         "from_package_import_submodule_cycle": {
             "a.py": "from . import b\n",
             "b.py": "from . import a\n",
@@ -270,6 +320,7 @@ def test_strongly_connected_components_reports_self_loops() -> None:
     [
         "function_local_cycle",
         "child_to_ancestor_cycle",
+        "import_parent_package_cycle",
         "from_package_import_submodule_cycle",
         "lazy_export_cycle",
         "annotated_lazy_export_cycle",

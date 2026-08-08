@@ -34,7 +34,6 @@ from .commit_policy import (
     normalize_conventional_type,
     normalize_strict_conventional_title,
 )
-from .commit_registry import register_commit_changes
 from .git_runtime import get_repo_slug, issue_ref, run
 from .github_api import (
     OpenPrDiscoveryIncompleteError,
@@ -892,14 +891,6 @@ def commit_changes(
     _clear_local_committer_identity(worktree_path, git_timeout)
 
     _commit_with_signature(commit_message, worktree_path, git_timeout)
-
-
-def _dispatch_commit_changes(*args: Any, **kwargs: Any) -> None:
-    """Resolve the registered callback through the patchable public symbol."""
-    commit_changes(*args, **kwargs)
-
-
-register_commit_changes(_dispatch_commit_changes)
 
 
 def ensure_pr_created(
