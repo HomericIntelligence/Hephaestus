@@ -73,9 +73,7 @@ def test_non_owner_cannot_confirm_or_recover_a_live_claim() -> None:
     assert handle is not None
 
     with pytest.raises(GuardLostError):
-        owner.confirm(
-            GuardCredential("Owner/Repo", 2404, uuid4(), uuid4()), timedelta(0)
-        )
+        owner.confirm(GuardCredential("Owner/Repo", 2404, uuid4(), uuid4()), timedelta(0))
     with pytest.raises(GuardConflictError):
         owner.recover(
             "Owner/Repo",
@@ -115,7 +113,7 @@ def test_guard_record_rejects_noncanonical_timestamp() -> None:
     store = InMemoryGuardStore()
     handle = IssueGuard(store).acquire("Owner/Repo", 2404, "planning")
     assert handle is not None
-    payload = handle.record.to_json().replace("Z\"", "+00:00\"")
+    payload = handle.record.to_json().replace('Z"', '+00:00"')
 
     with pytest.raises(ValueError):
         GuardRecord.from_json(payload)
@@ -189,8 +187,7 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
         return subprocess.CompletedProcess(
             ["gh"],
             0,
-            stdout=f"HTTP/1.1 {status} OK\r\nDate: {date}\r\n\r\n"
-            f"{json.dumps(body)}",
+            stdout=f"HTTP/1.1 {status} OK\r\nDate: {date}\r\n\r\n{json.dumps(body)}",
             stderr="",
         )
 
@@ -320,9 +317,7 @@ def test_recovery_cli_inspects_without_recovery_credentials(
     monkeypatch.delenv("HEPHAESTUS_GUARD_RECOVERY_TOKEN", raising=False)
     monkeypatch.setattr(recover_issue_guard, "GitHubIssueGuardStore", EmptyStore)
 
-    assert recover_issue_guard.main(
-        ["--repo", "Owner/Repo", "--issue", "2404", "--inspect"]
-    ) == 0
+    assert recover_issue_guard.main(["--repo", "Owner/Repo", "--issue", "2404", "--inspect"]) == 0
     assert '"guard": null' in capsys.readouterr().out
 
 
@@ -347,18 +342,21 @@ def test_recovery_cli_enforces_operator_actor_allowlist(
             return "unexpected-actor"
 
     monkeypatch.setattr(recover_issue_guard, "GitHubIssueGuardStore", ActorStore)
-    assert recover_issue_guard.main(
-        [
-            "--repo",
-            "Owner/Repo",
-            "--issue",
-            "2404",
-            "--recover",
-            "--expected-claim",
-            str(uuid4()),
-            "--expected-oid",
-            "a" * 40,
-            "--reason",
-            "operator recovery",
-        ]
-    ) == 1
+    assert (
+        recover_issue_guard.main(
+            [
+                "--repo",
+                "Owner/Repo",
+                "--issue",
+                "2404",
+                "--recover",
+                "--expected-claim",
+                str(uuid4()),
+                "--expected-oid",
+                "a" * 40,
+                "--reason",
+                "operator recovery",
+            ]
+        )
+        == 1
+    )

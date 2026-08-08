@@ -87,9 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(_snapshot_json(repository, args.issue, store), sort_keys=True))
             return 0
         if args.expected_claim is None or not args.expected_oid or not args.reason:
-            raise GuardError(
-                "--recover requires --expected-claim, --expected-oid, and --reason"
-            )
+            raise GuardError("--recover requires --expected-claim, --expected-oid, and --reason")
         environment, actors = _recovery_environment()
         store = GitHubIssueGuardStore(repository, env=environment)
         actor = store.actor()

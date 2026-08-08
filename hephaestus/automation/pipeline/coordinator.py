@@ -44,7 +44,9 @@ _COORDINATOR_METRIC_NAMES = (
 class SourceGuardClaim:
     """Temporary source claim that can transfer ownership to a WorkItem."""
 
-    def __init__(self, coordinator: "Coordinator", repository: str, issue: int, handle: GuardHandle | None) -> None:
+    def __init__(
+        self, coordinator: "Coordinator", repository: str, issue: int, handle: GuardHandle | None
+    ) -> None:
         self.coordinator = coordinator
         self.repository = repository
         self.issue = issue
@@ -87,7 +89,9 @@ class SourceGuardClaim:
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if self.handle is None or self.transferred:
             return
-        self.coordinator._release_guard_handle(self.repository, self.issue, self.handle, "source claim finished")
+        self.coordinator._release_guard_handle(
+            self.repository, self.issue, self.handle, "source claim finished"
+        )
 
 
 def _guard_repository(org: str, repo: str) -> str:
@@ -125,7 +129,9 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self.config = config
         self.github = github
         self._github_factory = github_factory
-        self._guard_enabled = guard_store_factory is not None or type(github).__name__ == "PipelineGitHub"
+        self._guard_enabled = (
+            guard_store_factory is not None or type(github).__name__ == "PipelineGitHub"
+        )
         assert_recovery_secret_absent()
         self.run_id = uuid.uuid4()
         self.guard_store_factory = guard_store_factory or GitHubIssueGuardStore
@@ -342,7 +348,12 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         item = self._entry_to_item(entry, repo)
         if is_full_commit_sha(base_sha):
             item.payload[DIRECT_SCOPE_BASE_SHA_KEY] = base_sha
-            if run_nonce and item.kind is ItemKind.ISSUE and item.pr is None and item.issue is not None:
+            if (
+                run_nonce
+                and item.kind is ItemKind.ISSUE
+                and item.pr is None
+                and item.issue is not None
+            ):
                 item.branch = f"{item.issue}-auto-impl-direct-{run_nonce}"
                 item.payload[DIRECT_SCOPE_WORKTREE_NONCE_KEY] = run_nonce
         if item.stage not in (StageName.REPO, StageName.FINISHED):

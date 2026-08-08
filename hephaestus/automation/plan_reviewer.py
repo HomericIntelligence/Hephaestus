@@ -122,9 +122,7 @@ class PlanReviewer:
         self._guard_factory = guard_factory
         self.run_id = uuid.uuid4()
         self.repo_root = get_repo_root() if guard_factory is not None else None
-        self.repo_target = (
-            get_repo_info(self.repo_root) if self.repo_root is not None else None
-        )
+        self.repo_target = get_repo_info(self.repo_root) if self.repo_root is not None else None
         self.repository = (
             f"{self.repo_target[0]}/{self.repo_target[1]}" if self.repo_target else None
         )
