@@ -15,6 +15,7 @@ from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     build_plan_prompt,
@@ -29,6 +30,10 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
+    archived_new_plan,
+    archived_old_plan,
+    is_pending_review,
+    journal_snapshot,
     render_current_plan,
     render_current_review,
 )
@@ -192,6 +197,260 @@ class TestPlanningStageEnter:
         assert outcome is not None
         assert outcome.disposition == Disposition.SKIP
         assert github.mutation_log == []
+
+    def test_force_open_pr_replans_archives_and_requests_review(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Force supersedes an approved plan despite an existing open PR."""
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=456,
+            has_plan=True,
+        )
+        github.comments[39] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Approved.\n\nstate:plan-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        ctx.config.force = True
+        ctx.config.enable_advise = False
+        item = make_work_item(issue=39, state="ENTER")
+        stage = PlanningStage()
+
+        assert stage.on_enter(item, ctx) is None
+        assert github.labels[39] == {STATE_PLAN_NO_GO}
+
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+
+        planner_request = stage.step(item, ctx)
+        assert isinstance(planner_request, JobRequest)
+        assert planner_request.job.descr == "plan"
+
+        stage.on_job_done(item, JobResult(ok=True, value="Plan v2"), ctx)
+        item.state = planner_request.on_done_state
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+
+        snapshot = journal_snapshot(github.issue_comments(39))
+        assert snapshot.revision == 2
+        assert snapshot.current_plan == "Plan v2"
+        assert is_pending_review(snapshot.current_review, revision=2)
+
+        item.state = "ENTER"
+        review_stage = PlanReviewStage()
+        assert review_stage.on_enter(item, ctx) is None
+        review_transition = review_stage.step(item, ctx)
+        assert isinstance(review_transition, Continue)
+        item.state = review_transition.next_state
+        review_request = review_stage.step(item, ctx)
+        assert isinstance(review_request, JobRequest)
+        assert isinstance(review_request.job, AgentJob)
+        assert review_request.job.descr == "review"
+        assert review_request.job.prompt_kwargs["plan_text"] == "Plan v2"
+
+    def test_force_restart_after_partial_revision_resumes_review(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A forced revision resumes from an interrupted journal transaction."""
+
+        class FailReviewArchiveOnce(FakeStageGitHub):
+            failed = False
+
+            def append_issue_comment(
+                self,
+                issue_number: int,
+                marker: str,
+                body: str,
+            ) -> None:
+                if marker.endswith("kind=review -->") and not self.failed:
+                    self.failed = True
+                    raise RuntimeError("injected review archive failure")
+                super().append_issue_comment(issue_number, marker, body)
+
+        github = FailReviewArchiveOnce(
+            labels=[STATE_PLAN_GO],
+            open_pr=456,
+            has_plan=True,
+        )
+        github.comments[40] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Approved.\n\nstate:plan-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        ctx.config.force = True
+        stage = PlanningStage()
+
+        first = make_work_item(issue=40, state="ENTER")
+        assert stage.on_enter(first, ctx) is None
+        first.state = "VERIFY"
+        first.payload["plan_text"] = "Plan v2"
+        with pytest.raises(RuntimeError, match="injected review archive failure"):
+            stage.step(first, ctx)
+
+        restarted = make_work_item(issue=40, state="ENTER")
+        assert stage.on_enter(restarted, ctx) is None
+        assert restarted.state == "VERIFY"
+        assert github.labels[40] == {STATE_NEEDS_PLAN}
+
+        snapshot = journal_snapshot(github.issue_comments(40))
+        assert snapshot.revision == 2
+        assert snapshot.current_plan == "Plan v2"
+        assert is_pending_review(snapshot.current_review, revision=2)
+
+        history = {
+            (artifact.revision, artifact.kind): artifact.body for artifact in snapshot.history
+        }
+        assert set(history) == {(1, "plan"), (1, "review")}
+        assert archived_old_plan(history[(1, "plan")]) == "Plan v1"
+        assert archived_new_plan(history[(1, "plan")]) == "Plan v2"
+        assert "Approved." in history[(1, "review")]
+        immutable_history = dict(history)
+
+        planning_outcome = stage.step(restarted, ctx)
+        assert isinstance(planning_outcome, StageOutcome)
+        assert planning_outcome.disposition == Disposition.ADVANCE
+
+        restarted.state = "ENTER"
+        review_stage = PlanReviewStage()
+        assert review_stage.on_enter(restarted, ctx) is None
+        review_transition = review_stage.step(restarted, ctx)
+        assert isinstance(review_transition, Continue)
+        restarted.state = review_transition.next_state
+        review_request = review_stage.step(restarted, ctx)
+
+        assert isinstance(review_request, JobRequest)
+        assert isinstance(review_request.job, AgentJob)
+        assert review_request.job.descr == "review"
+        assert review_request.job.prompt_kwargs["plan_text"] == "Plan v2"
+        assert {
+            (artifact.revision, artifact.kind): artifact.body
+            for artifact in journal_snapshot(github.issue_comments(40)).history
+        } == immutable_history
+
+    def test_force_plan_go_without_canonical_plan_starts_initial_plan(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Force recovers a plan-go issue whose canonical plan is missing."""
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=456,
+            has_plan=False,
+        )
+        ctx = make_ctx(github=github)
+        ctx.config.force = True
+        ctx.config.enable_advise = False
+        item = make_work_item(issue=41, state="ENTER")
+        stage = PlanningStage()
+
+        assert stage.on_enter(item, ctx) is None
+        assert github.labels[41] == {STATE_NEEDS_PLAN}
+        assert "requires_plan_revision" not in item.payload
+
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+        planner_request = stage.step(item, ctx)
+        assert isinstance(planner_request, JobRequest)
+        assert planner_request.job.descr == "plan"
+
+        stage.on_job_done(item, JobResult(ok=True, value="Initial plan"), ctx)
+        item.state = planner_request.on_done_state
+        outcome = stage.step(item, ctx)
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.ADVANCE
+
+        snapshot = journal_snapshot(github.issue_comments(41))
+        assert snapshot.revision == 1
+        assert snapshot.current_plan == "Initial plan"
+        assert is_pending_review(snapshot.current_review, revision=1)
+        assert snapshot.history == ()
+
+        item.state = "ENTER"
+        review_stage = PlanReviewStage()
+        assert review_stage.on_enter(item, ctx) is None
+        review_transition = review_stage.step(item, ctx)
+        assert isinstance(review_transition, Continue)
+        item.state = review_transition.next_state
+        review_request = review_stage.step(item, ctx)
+        assert isinstance(review_request, JobRequest)
+        assert review_request.job.descr == "review"
+
+    def test_force_unconfirmed_label_transition_retries_before_planner(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Force cannot schedule planning until its exclusive label is confirmed."""
+
+        class PartialLabelGitHub(FakeStageGitHub):
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                self._issue_labels(issue_number).update(add)
+                self._log("edit_labels", issue_number, tuple(add), tuple(remove))
+
+        github = PartialLabelGitHub(labels=[STATE_PLAN_GO], has_plan=True)
+        github.comments[42] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Approved.\n\nstate:plan-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        ctx.config.force = True
+        item = make_work_item(issue=42, state="ENTER")
+
+        outcome = PlanningStage().on_enter(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert journal_snapshot(github.issue_comments(42)).current_plan == "Plan v1"
+
+    def test_force_planner_failure_retries_without_publishing_old_plan(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A failed forced planner job cannot verify the stale approved plan."""
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], has_plan=True)
+        github.comments[43] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Approved.\n\nstate:plan-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        ctx.config.force = True
+        ctx.config.enable_advise = False
+        item = make_work_item(issue=43, state="ENTER")
+        stage = PlanningStage()
+
+        assert stage.on_enter(item, ctx) is None
+        item.state = "PLAN_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+
+        stage.on_job_done(item, JobResult(ok=False, error="agent timeout"), ctx)
+        item.state = request.on_done_state
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition == Disposition.RETRY
+        assert item.state == "PLAN_WAIT"
+        snapshot = journal_snapshot(github.issue_comments(43))
+        assert snapshot.revision == 1
+        assert snapshot.current_plan == "Plan v1"
+        assert snapshot.history == ()
+        assert github.labels[43] == {STATE_PLAN_NO_GO}
 
     def test_unlabeled_entry_adds_needs_plan(self, make_ctx: Any, make_work_item: Any) -> None:
         """Unlabeled entry durably writes state:needs-plan before proceeding."""

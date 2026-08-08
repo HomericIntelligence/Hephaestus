@@ -3405,10 +3405,12 @@ class TestPipelineScopeWiring:
         coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
 
         entries = coordinator._seed_direct_scope("repo-a")
+        ctx = coordinator._ctx_for_repo("repo-a")
 
         assert len(entries) == 1
         assert entries[0].stage is StageName.PLANNING
         assert "force re-plan" in entries[0].reason
+        assert ctx.config.force is True
 
     def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
         """--force must NOT pull a PRE-scope stage forward into the scope.
