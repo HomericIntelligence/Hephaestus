@@ -8,7 +8,11 @@ import pytest
 
 from hephaestus.automation.models import PlanReviewerOptions
 from hephaestus.automation.plan_reviewer import PlanReviewer
-from hephaestus.automation.review_journal import PlanDiscoveryResult, PlanDiscoveryStatus
+from hephaestus.automation.review_journal import (
+    IssueComment,
+    PlanDiscoveryResult,
+    PlanDiscoveryStatus,
+)
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
@@ -418,7 +422,7 @@ class TestLatestReviewUsesAuthoritativeLabel:
 
     def test_legacy_go_comment_cannot_grant_approval(self, reviewer: PlanReviewer) -> None:
         reviewer._comments_cache[123] = [
-            {"body": "## 🔍 Plan Review\n\nVerdict: GO"},
+            IssueComment(body="## 🔍 Plan Review\n\nVerdict: GO"),
         ]
         with patch(
             "hephaestus.automation.plan_reviewer.gh_issue_json",
@@ -750,7 +754,7 @@ class TestFetchIssueCommentsCache:
 
         call_count = 0
 
-        def _side_effect(issue_number: int) -> list[dict[str, str | bool]]:
+        def _side_effect(issue_number: int) -> list[dict[str, object]]:
             nonlocal call_count
             call_count += 1
             selected = comments_123 if issue_number == 123 else comments_456
