@@ -17,20 +17,13 @@ import os
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.io.yaml import import_yaml
 from hephaestus.logging.utils import get_logger
 
 _logger = get_logger(__name__)
 
 _BOOL_TRUTHY: frozenset[str] = frozenset({"true", "yes", "on", "1"})
 _BOOL_FALSY: frozenset[str] = frozenset({"false", "no", "off", "0"})
-
-try:
-    import yaml
-
-    YAML_AVAILABLE = True
-except ImportError:
-    YAML_AVAILABLE = False
-    _logger.warning("PyYAML not available, YAML config support disabled")
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -45,7 +38,7 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     Raises:
         FileNotFoundError: If config file doesn't exist
         ValueError: If config file format is unsupported (e.g. .toml)
-        RuntimeError: If a .yaml/.yml file is given but PyYAML is not installed
+        RuntimeError: If a .yaml/.yml file is given but PyYAML is unavailable
 
     """
     config_path = Path(config_path)
@@ -56,8 +49,7 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     suffix = config_path.suffix.lower()
     with open(config_path) as f:
         if suffix in (".yml", ".yaml"):
-            if not YAML_AVAILABLE:
-                raise RuntimeError("PyYAML is required for YAML config support")
+            yaml = import_yaml()
             return cast(dict[str, Any], yaml.safe_load(f) or {})
         elif suffix == ".json":
             return cast(dict[str, Any], json.load(f))
@@ -164,10 +156,11 @@ def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     Returns:
         Dictionary containing configuration settings
 
-    """
-    if not YAML_AVAILABLE:
-        raise RuntimeError("PyYAML is required for YAML config support")
+    Raises:
+        RuntimeError: If PyYAML is unavailable.
 
+    """
+    import_yaml()
     return load_config(config_path)
 
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tests for configuration utilities."""
 
+import sys
+
 import pytest
 import yaml
 
@@ -63,26 +65,26 @@ class TestLoadConfig:
 
     def test_load_yaml_without_pyyaml_raises_runtime_error(self, tmp_path, monkeypatch):
         """Missing PyYAML on a .yaml file raises RuntimeError, not ValueError (issue #1510)."""
-        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        monkeypatch.setitem(sys.modules, "yaml", None)
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text("key: value\n")
-        with pytest.raises(RuntimeError, match="PyYAML is required for YAML config support"):
+        with pytest.raises(RuntimeError, match=r"Install with: pip install PyYAML"):
             load_config(yaml_file)
 
     def test_load_yml_without_pyyaml_raises_runtime_error(self, tmp_path, monkeypatch):
         """The .yml extension also reports the missing dependency, not a format error."""
-        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        monkeypatch.setitem(sys.modules, "yaml", None)
         yml_file = tmp_path / "config.yml"
         yml_file.write_text("key: value\n")
-        with pytest.raises(RuntimeError, match="PyYAML is required for YAML config support"):
+        with pytest.raises(RuntimeError, match=r"Install with: pip install PyYAML"):
             load_config(yml_file)
 
     def test_load_yaml_without_pyyaml_is_not_value_error(self, tmp_path, monkeypatch):
         """Regression (issue #1510): missing-PyYAML must NOT raise 'Unsupported config format'."""
-        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        monkeypatch.setitem(sys.modules, "yaml", None)
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text("key: value\n")
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match=r"Install with: pip install PyYAML"):
             load_config(yaml_file)
 
 
@@ -570,3 +572,12 @@ class TestLoadYamlConfig:
         """load_yaml_config raises FileNotFoundError for missing file."""
         with pytest.raises(FileNotFoundError):
             load_yaml_config(tmp_path / "missing.yaml")
+
+    def test_load_yaml_config_without_pyyaml_is_actionable(self, tmp_path, monkeypatch):
+        """The YAML-specific entry point uses the shared missing-dependency error."""
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text("key: value\n")
+        monkeypatch.setitem(sys.modules, "yaml", None)
+
+        with pytest.raises(RuntimeError, match=r"Install with: pip install PyYAML"):
+            load_yaml_config(yaml_file)

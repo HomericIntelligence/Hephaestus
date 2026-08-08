@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -178,7 +179,7 @@ class TestResolveFleetConfig:
         """
         from hephaestus.github import fleet_sync
 
-        monkeypatch.setattr("hephaestus.config.utils.YAML_AVAILABLE", False)
+        monkeypatch.setitem(sys.modules, "yaml", None)
         cfg = tmp_path / ".fleet.yml"
         cfg.write_text("org: acme\nrepos: [a, b]\n")
         with pytest.raises(RuntimeError, match=r"Failed to load fleet config from .*\.fleet\.yml"):
