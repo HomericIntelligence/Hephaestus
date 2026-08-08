@@ -1,7 +1,8 @@
 import sys
 from typing import Any, cast
 
-from . import coordinator_observability as _observability
+import hephaestus.automation.pipeline.coordinator_observability as _observability
+
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *

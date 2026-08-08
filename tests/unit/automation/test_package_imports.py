@@ -67,6 +67,33 @@ if loaded:
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+@pytest.mark.parametrize(
+    "modules",
+    [
+        (
+            "hephaestus.automation.pipeline_github",
+            "hephaestus.automation.pr_reviewer",
+            "hephaestus.automation.pipeline.coordinator",
+        ),
+        (
+            "hephaestus.automation.pr_reviewer",
+            "hephaestus.automation.pipeline.coordinator",
+            "hephaestus.automation.pipeline_github",
+        ),
+    ],
+)
+def test_review_pipeline_modules_are_import_order_independent(
+    modules: tuple[str, ...],
+) -> None:
+    """Historical review/coordinator imports must work in either order."""
+    code = "import importlib\n" + "\n".join(
+        f"importlib.import_module({module!r})" for module in modules
+    )
+    result = _run_python(code)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_all_matches_expected() -> None:
     """Assert __all__ exactly matches the expected public API."""
     assert set(automation.__all__) == set(EXPECTED_PUBLIC_SYMBOLS)

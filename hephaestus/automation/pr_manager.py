@@ -34,7 +34,7 @@ from .commit_policy import (
     normalize_conventional_type,
     normalize_strict_conventional_title,
 )
-from .git_utils import get_repo_slug, issue_ref, run
+from .git_runtime import get_repo_slug, issue_ref, run
 from .github_api import (
     OpenPrDiscoveryIncompleteError,
     _find_open_prs_for_head,

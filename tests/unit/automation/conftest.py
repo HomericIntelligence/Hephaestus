@@ -68,6 +68,12 @@ def git_utils_mocks() -> Generator[GitMocks]:
 
 
 @pytest.fixture
+def git_runtime_mocks() -> Generator[GitMocks]:
+    """Mock ``run`` + ``get_repo_root`` as seen by ``git_runtime``."""
+    yield from _patch_run_and_repo_root("hephaestus.automation.git_runtime")
+
+
+@pytest.fixture
 def worktree_mocks() -> Generator[GitMocks]:
     """Mock ``run`` + ``get_repo_root`` as seen by ``worktree_manager`` (#1417)."""
     yield from _patch_run_and_repo_root("hephaestus.automation.worktree_manager")
