@@ -202,18 +202,14 @@ def normalize_issue_comments(
             try:
                 database_id = int(raw_database_id)
             except (TypeError, ValueError) as exc:
-                raise CommentJournalReadError(
-                    f"comment {index} database id was invalid"
-                ) from exc
+                raise CommentJournalReadError(f"comment {index} database id was invalid") from exc
 
         normalized.append(
             IssueComment(
                 body=body,
                 author_login=login,
                 author_association=str(
-                    raw.get("author_association")
-                    or raw.get("authorAssociation")
-                    or ""
+                    raw.get("author_association") or raw.get("authorAssociation") or ""
                 ),
                 created_at=str(raw.get("created_at") or raw.get("createdAt") or ""),
                 updated_at=str(raw.get("updated_at") or raw.get("updatedAt") or ""),
