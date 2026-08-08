@@ -305,8 +305,7 @@ class TestPlanningStageEnter:
         assert is_pending_review(snapshot.current_review, revision=2)
 
         history = {
-            (artifact.revision, artifact.kind): artifact.body
-            for artifact in snapshot.history
+            (artifact.revision, artifact.kind): artifact.body for artifact in snapshot.history
         }
         assert set(history) == {(1, "plan"), (1, "review")}
         assert archived_old_plan(history[(1, "plan")]) == "Plan v1"

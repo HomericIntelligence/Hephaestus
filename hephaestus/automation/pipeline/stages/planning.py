@@ -192,17 +192,10 @@ def _load_planning_journal(
         STATE_PLAN_GO,
     )
     forced_initial_plan = forced_from_plan_go and not snapshot.current_plan
-    is_replan_entry = (
-        _is_replan_entry(
-            labels,
-            revision_already_published=revision_already_published,
-        )
-        or (
-            forced_from_plan_go
-            and bool(snapshot.current_plan)
-            and not revision_already_published
-        )
-    )
+    is_replan_entry = _is_replan_entry(
+        labels,
+        revision_already_published=revision_already_published,
+    ) or (forced_from_plan_go and bool(snapshot.current_plan) and not revision_already_published)
     return (
         comments,
         snapshot,
