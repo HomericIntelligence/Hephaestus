@@ -80,3 +80,37 @@ class TestPendingRequiredCheckNames:
         ):
             result = inspector.pending_required_check_names(42)
         assert "slow-ci" in result
+
+
+class TestGetFailingCiLogs:
+    """Tests for branch-scoped failed-run log collection."""
+
+    def test_scopes_runs_to_branch_and_contains_per_run_failure(
+        self,
+        inspector: CICheckInspector,
+    ) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_call(argv: list[str], **_kwargs: object) -> MagicMock:
+            calls.append(argv)
+            if argv[:2] == ["run", "list"]:
+                return MagicMock(
+                    stdout=(
+                        '[{"databaseId":101,"conclusion":"failure","name":"unit"},'
+                        '{"databaseId":102,"conclusion":"failure","name":"lint"}]'
+                    )
+                )
+            if argv[2] == "101":
+                return MagicMock(stdout="FAILED tests/unit/test_example.py::test_x")
+            raise OSError("log expired")
+
+        with patch(
+            "hephaestus.automation.ci_check_inspector._gh_call",
+            side_effect=fake_gh_call,
+        ):
+            logs = inspector.get_failing_ci_logs(42)
+
+        assert calls[0][:4] == ["run", "list", "--branch", "branch-42"]
+        assert "=== unit ===" in logs
+        assert "test_example.py::test_x" in logs
+        assert "=== lint ===" not in logs

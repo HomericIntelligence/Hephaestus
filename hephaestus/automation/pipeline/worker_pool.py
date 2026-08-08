@@ -908,10 +908,14 @@ def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
     alias = source / "build"
     if alias.exists() or alias.is_symlink():
         raise _HostVerificationBoundaryError("host_verification_output_alias_conflict")
+    coverage_alias = source / "coverage.xml"
+    if coverage_alias.exists() or coverage_alias.is_symlink():
+        raise _HostVerificationBoundaryError("host_verification_output_alias_conflict")
     try:
         target = scratch / "build"
         target.mkdir()
         alias.symlink_to(target, target_is_directory=True)
+        coverage_alias.symlink_to(scratch / "coverage.xml")
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_output_alias_failed") from exc
 

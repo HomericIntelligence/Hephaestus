@@ -273,39 +273,12 @@ check_untyped_defs = false
 [tool.coverage.run]
 branch = true
 source = ["hephaestus"]
+# Exact membership is enforced by
+# tests/unit/validation/test_omit_allowlist.py. Whole automation modules must
+# remain measured; live boundaries are exercised through hermetic substitutes.
 omit = [
     "*/tests/*",
     "*/__init__.py",
-    # Full orchestration loops require a live claude/gh CLI — integration test territory.
-    # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
-    # The membership of this list is frozen in tests/unit/validation/test_omit_allowlist.py
-    # to prevent silent growth; tests/unit/validation/test_omit_justification.py enforces
-    # (via ast import-parsing) that each omitted module has a backing unit-test suite
-    # (issue #1422); and their importability is guarded by
-    # tests/integration/test_orchestration_smoke.py.
-    # implementer.py is a thin CLI wrapper over the pipeline coordinator (epic
-    # #1809): main() seeds --issues into the (implementation, pr_review) scope
-    # and shells out to a live claude/gh orchestration loop, so it is
-    # integration-only. The former implementer_cli / implementer_phase_runner /
-    # implementer_summary modules were deleted in the conversion (#1821).
-    "hephaestus/automation/implementer.py",
-    "hephaestus/automation/planner.py",
-    "hephaestus/automation/ci_driver.py",
-    # CIDriver collaborators extracted from ci_driver.py (#1357 / refs #1179, #1289).
-    # Each drives a live gh/claude/codex session, so like ci_driver.py they are
-    # integration-only; their pure helpers are unit-tested in tests/unit/automation/.
-    "hephaestus/automation/pr_discovery.py",
-    "hephaestus/automation/ci_check_inspector.py",
-    "hephaestus/automation/ci_fix_orchestrator.py",
-    "hephaestus/automation/post_merge_processor.py",
-    "hephaestus/automation/loop_runner.py",
-    # loop_repo_manager.py: repo-management cluster extracted from loop_runner.py (#1360/refs #1179).
-    # All functions shell out to gh/git CLI; their pure-function helpers are unit-tested.
-    "hephaestus/automation/loop_repo_manager.py",
-    # curses_ui.py uses a live terminal; cannot be unit-tested without a real TTY
-    "hephaestus/automation/curses_ui.py",
-    # audit_reviewer.py drives a live agent coordinator session; integration-only
-    "hephaestus/automation/audit_reviewer.py",
 ]
 
 [tool.coverage.report]

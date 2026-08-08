@@ -157,6 +157,38 @@ class TestDiscoverFailingPrs:
         assert result == {}
 
 
+class TestDiscoverWorkset:
+    """Tests for the complete issue/direct/bot/failing discovery union."""
+
+    def test_unions_all_sources_and_deduplicates_shared_prs(self) -> None:
+        options = MagicMock(
+            prs=[20, 40],
+            issues=[],
+            include_bot_prs=True,
+            include_all_authors=True,
+        )
+        discovery = PRDiscovery(
+            options_provider=lambda: options,
+            status_tracker_provider=MagicMock,
+            repo_root_provider=MagicMock,
+        )
+
+        with (
+            patch(
+                "hephaestus.automation.pr_discovery.find_pr_for_issue",
+                side_effect=lambda issue: {1: 10, 2: 10}.get(issue),
+            ),
+            patch.object(discovery, "validate_pr_open", return_value=True),
+            patch.object(discovery, "discover_bot_prs", return_value={30: 30}),
+            patch.object(discovery, "discover_failing_prs", return_value={40: 40, 50: 50}),
+        ):
+            workset = discovery.discover_workset([1, 2])
+
+        assert workset.pr_map == {1: 10, 20: 20, 40: 40, 30: 30, 50: 50}
+        assert workset.shared_pr_issues[10] == [1, 2]
+        assert workset.shared_pr_issues[40] == [40]
+
+
 class TestValidatePrOpen:
     """Tests for direct-PR validation before the final containment sweep."""
 

@@ -1,9 +1,24 @@
-"""Test that the omit-allowlist in pyproject.toml is frozen and documented."""
+"""Test the exact coverage omit list and issue #2371 migration contract."""
 
 import tomllib
 from pathlib import Path
 
-import pytest
+_ALLOWED_OMITS = ["*/tests/*", "*/__init__.py"]
+
+_ISSUE_2371_FLOORS = {
+    "automation/implementer.py",
+    "automation/planner.py",
+    "automation/ci_driver.py",
+    "automation/pr_discovery.py",
+    "automation/ci_check_inspector.py",
+    "automation/ci_fix_orchestrator.py",
+    "automation/post_merge_processor.py",
+    "automation/loop_runner.py",
+    "automation/loop_repo_manager.py",
+    "automation/curses_ui.py",
+    "automation/audit_reviewer.py",
+    "automation/address_review_core.py",
+}
 
 
 def get_pyproject_toml_path() -> Path:
@@ -16,55 +31,26 @@ def get_pyproject_toml_path() -> Path:
     raise RuntimeError("Could not find pyproject.toml")
 
 
-class TestOmitAllowlist:
-    """Tests for the frozen omit-allowlist in pyproject.toml."""
+def test_omit_allowlist_is_exact() -> None:
+    """Only generic test and package-init exclusions are permitted."""
+    root = get_pyproject_toml_path().parent
+    with open(root / "pyproject.toml", "rb") as stream:
+        omit = tomllib.load(stream)["tool"]["coverage"]["run"]["omit"]
 
-    def test_omit_allowlist_frozen(self) -> None:
-        """Verify that [tool.coverage.run].omit contains only the documented modules."""
-        pyproject_path = get_pyproject_toml_path()
-        with open(pyproject_path, "rb") as f:
-            pyproject = tomllib.load(f)
+    assert omit == _ALLOWED_OMITS
 
-        omit_list = pyproject.get("tool", {}).get("coverage", {}).get("run", {}).get("omit", [])
 
-        # Expected omit list: test globs + 11 automation modules
-        expected_globs = {
-            "*/tests/*",
-            "*/__init__.py",
-        }
-        expected_modules = {
-            "hephaestus/automation/implementer.py",
-            "hephaestus/automation/planner.py",
-            "hephaestus/automation/ci_driver.py",
-            # CIDriver collaborators extracted in #1357 (refs #1179, #1289).
-            "hephaestus/automation/pr_discovery.py",
-            "hephaestus/automation/ci_check_inspector.py",
-            "hephaestus/automation/ci_fix_orchestrator.py",
-            "hephaestus/automation/post_merge_processor.py",
-            "hephaestus/automation/loop_runner.py",
-            # loop_repo_manager.py: repo-management cluster extracted from loop_runner.py
-            "hephaestus/automation/loop_repo_manager.py",
-            "hephaestus/automation/curses_ui.py",
-            "hephaestus/automation/audit_reviewer.py",
-        }
+def test_issue_2371_cohort_has_executable_line_floors() -> None:
+    """Every issue cohort source has an explicit measured line floor."""
+    root = get_pyproject_toml_path().parent
+    with open(root / "coverage.toml", "rb") as stream:
+        modules = tomllib.load(stream)["coverage"]["modules"]
 
-        actual_set = set(omit_list)
-        expected_set = expected_globs | expected_modules
+    assert set(modules) >= _ISSUE_2371_FLOORS
+    for module in _ISSUE_2371_FLOORS:
+        assert modules[module] == {"minimum": 70, "metric": "line"}
 
-        # Fail loudly if the omit list has grown or changed
-        if actual_set != expected_set:
-            removed = expected_set - actual_set
-            added = actual_set - expected_set
-            msg = "Omit-allowlist mismatch (guards against silent growth):\n"
-            if removed:
-                msg += f"  Removed (unexpected): {removed}\n"
-            if added:
-                msg += f"  Added (guard this in code): {added}\n"
-            msg += (
-                "See tests/unit/validation/test_omit_allowlist.py"
-                " and tests/integration/test_orchestration_smoke.py\n"
-            )
-            msg += "These tests document and enforce the orchestration module omit-list."
-            pytest.fail(msg)
-
-        assert actual_set == expected_set
+    promoted = _ISSUE_2371_FLOORS - {"automation/address_review_core.py"}
+    assert all((root / "hephaestus" / module).is_file() for module in promoted)
+    assert not (root / "hephaestus/automation/address_review.py").exists()
+    assert (root / "hephaestus/automation/address_review_core.py").is_file()
