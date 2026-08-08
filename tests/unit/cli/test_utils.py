@@ -7,10 +7,11 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
+from typing import Any
+
 import pytest
 
 from hephaestus.cli.utils import (
-from typing import Any
     CommandRegistry,
     add_github_throttle_args,
     add_json_arg,
