@@ -251,6 +251,11 @@ class GuardedGitHubJob:
     operation: GitHubJob
     guard: GuardCredential
 
+    @property
+    def descr(self) -> str:
+        """Expose the bound operation description for generic job observability."""
+        return self.operation.descr
+
     @classmethod
     def bind(
         cls,

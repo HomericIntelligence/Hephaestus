@@ -436,7 +436,7 @@ def _gh_call_impl(
                 check=check,
                 timeout=timeout if timeout is not None else gh_cli_timeout(),
                 log_on_error=log_on_error,
-                env=env,
+                env=dict(env) if env is not None else None,
             )
             return result
         except subprocess.CalledProcessError as e:

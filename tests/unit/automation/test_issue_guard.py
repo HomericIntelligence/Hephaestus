@@ -254,10 +254,11 @@ def test_guarded_proxy_confirms_target_and_blocks_guard_label_mutation() -> None
     store = InMemoryGuardStore()
     handle = IssueGuard(store).acquire("Owner/Repo", 2404, "planning")
     assert handle is not None
-    proxy = GuardedStageGitHub(_FakeGitHub(), store, handle.credential)
+    raw = _FakeGitHub()
+    proxy = GuardedStageGitHub(raw, store, handle.credential)
 
     proxy.add_labels(2404, [STATE_PLAN_GO])
-    assert proxy.raw.calls == [("add_labels", ((2404, [STATE_PLAN_GO]), {}))]
+    assert raw.calls == [("add_labels", ((2404, [STATE_PLAN_GO]), {}))]
     with pytest.raises(GuardTargetError):
         proxy.add_labels(2405, [STATE_PLAN_GO])
     with pytest.raises(GuardTargetError):
