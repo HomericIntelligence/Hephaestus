@@ -2,13 +2,16 @@
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 from hephaestus.validation.schema import (
+    SchemaCheckResult,
     check_files,
     load_schema_map,
+    main,
     resolve_schema,
     validate_file,
 )
@@ -55,6 +58,64 @@ class TestLoadSchemaMap:
         result = load_schema_map(map_file)
         assert len(result) == 2
         assert result[0][1] == Path("schemas/config.schema.json")
+
+    @pytest.mark.parametrize("root", [{}, None, "not-a-list"])
+    def test_rejects_non_list_root(self, tmp_path: Path, root: object) -> None:
+        """Reject schema maps whose root value is not a list."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps(root), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="schema map root must be a list"):
+            load_schema_map(map_file)
+
+    def test_reports_all_malformed_entry_errors(self, tmp_path: Path) -> None:
+        """Report every malformed entry instead of failing during unpacking."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(
+            json.dumps([["only-one"], ["one", "two", "three"], {"regex": ".*"}]),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            load_schema_map(map_file)
+
+        message = str(exc_info.value)
+        assert "entry 0: expected a two-item list" in message
+        assert "entry 1: expected a two-item list" in message
+        assert "entry 2: expected a two-item list" in message
+
+    def test_reports_non_string_field_errors(self, tmp_path: Path) -> None:
+        """Report invalid regex and schema-path field types."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([[42, "schema.json"], [".*", 42]]), encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_schema_map(map_file)
+
+        message = str(exc_info.value)
+        assert "entry 0: regex must be a string" in message
+        assert "entry 1: schema path must be a string" in message
+
+    def test_reports_invalid_regex_and_schema_path_errors(self, tmp_path: Path) -> None:
+        """Report malformed regexes and empty or NUL-containing paths."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["[", ""], [".*", "\x00"]]), encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_schema_map(map_file)
+
+        message = str(exc_info.value)
+        assert "entry 0: invalid regex" in message
+        assert "entry 0: schema path must not be empty" in message
+        assert "entry 1: schema path must not contain NUL" in message
+
+    def test_reports_oversized_regex_quantifier(self, tmp_path: Path) -> None:
+        """Treat regex quantifier overflow as a malformed schema-map entry."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["a{4294967295}", "schema.json"]]), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="entry 0: invalid regex"):
+            load_schema_map(map_file)
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         """Missing file raises FileNotFoundError."""
@@ -134,6 +195,33 @@ class TestValidateFile:
         assert len(errors) == 1
         assert "could not" in errors[0].lower()
 
+    def test_invalid_schema_definition_returns_error(self, tmp_path: Path) -> None:
+        """Invalid Draft 7 schemas become validation diagnostics."""
+        pytest.importorskip("jsonschema")
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text("name: test\n", encoding="utf-8")
+
+        errors = validate_file(yaml_file, {"type": "not-a-json-schema-type"})
+
+        assert len(errors) == 1
+        assert "Invalid JSON Schema" in errors[0]
+        assert "type" in errors[0]
+
+    def test_returns_multiple_validation_errors(self, tmp_path: Path) -> None:
+        """Return all independent instance validation errors."""
+        pytest.importorskip("jsonschema")
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text("{}\n", encoding="utf-8")
+
+        errors = validate_file(
+            yaml_file,
+            {"type": "object", "required": ["name", "version"]},
+        )
+
+        assert len(errors) == 2
+        assert any("name" in error for error in errors)
+        assert any("version" in error for error in errors)
+
 
 class TestCheckFiles:
     """Tests for check_files()."""
@@ -150,13 +238,32 @@ class TestCheckFiles:
         yaml_file.write_text("name: hello\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
+        exit_code, errors = check_files([yaml_file], tmp_path, schema_map)
+        assert exit_code == 0
+        assert errors == []
+
+    def test_returns_schema_check_result_with_compatibility_fields(self, tmp_path: Path) -> None:
+        """check_files preserves its structured public return type."""
+        pytest.importorskip("jsonschema")
+        schema = {"type": "object", "required": ["name"]}
+        schema_file = tmp_path / "schema.json"
+        schema_file.write_text(json.dumps(schema))
+
+        yaml_file = tmp_path / "config" / "bad.yaml"
+        yaml_file.parent.mkdir()
+        yaml_file.write_text("version: 1\n")
+
+        schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
         result = check_files([yaml_file], tmp_path, schema_map)
-        assert result.exit_code == 0
-        assert result.error_count == 0
+
+        assert isinstance(result, SchemaCheckResult)
+        assert result.exit_code == 1
         assert result.requested == 1
         assert result.validated == 1
-        assert result.passed == 1
-        assert result.failed == 0
+        assert result.passed == 0
+        assert result.failed == 1
+        assert result.error_count == len(result.diagnostics)
+        assert result.diagnostics
 
     def test_valid_files_verbose_prints_pass(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -172,11 +279,9 @@ class TestCheckFiles:
         yaml_file.write_text("name: hello\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        result = check_files([yaml_file], tmp_path, schema_map, verbose=True)
-        assert result.exit_code == 0
-        assert result.error_count == 0
-        assert result.validated == 1
-        assert result.passed == 1
+        exit_code, errors = check_files([yaml_file], tmp_path, schema_map, verbose=True)
+        assert exit_code == 0
+        assert errors == []
         captured = capsys.readouterr()
         assert "PASS:" in captured.out
 
@@ -192,15 +297,11 @@ class TestCheckFiles:
         yaml_file.write_text("version: 1\n")
 
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        result = check_files([yaml_file], tmp_path, schema_map, dry_run=True)
-        assert result.exit_code == 0
-        assert result.error_count >= 1
-        assert result.validated == 1
-        assert result.passed == 0
-        assert result.failed == 1
-        assert result.skipped == 0
+        exit_code, errors = check_files([yaml_file], tmp_path, schema_map, dry_run=True)
+        assert exit_code == 0
+        assert len(errors) >= 1
 
-    def test_schema_load_oserror(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    def test_schema_load_oserror(self, tmp_path: Path) -> None:
         """OSError when loading schema file is caught and counted."""
         pytest.importorskip("jsonschema")
         yaml_file = tmp_path / "config" / "test.yaml"
@@ -210,17 +311,58 @@ class TestCheckFiles:
         # Create a schema file path that will raise OSError when read
         schema_file = tmp_path / "nonexistent_schema.json"
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        result = check_files([yaml_file], tmp_path, schema_map)
-        assert result.exit_code == 1
-        assert result.error_count >= 1
-        assert result.failed == 1
-        assert result.validated == 0
-        captured = capsys.readouterr()
-        assert "Could not load schema" in captured.err
+        exit_code, errors = check_files([yaml_file], tmp_path, schema_map)
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert "Could not load schema" in errors[0]
 
-    def test_schema_load_json_decode_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture
-    ) -> None:
+
+class TestMainExisting:
+    """Tests for schema-validation CLI error rendering."""
+
+    def test_oversized_regex_human_error(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Human mode reports malformed regexes without a traceback."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["a{4294967295}", "schema.json"]]), encoding="utf-8")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("name: test\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["hephaestus-validate-schemas", "--schema-map", str(map_file), str(config_file)],
+        )
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "ERROR: Could not load schema map: invalid schema map:" in captured.err
+        assert "invalid regex 'a{4294967295}'" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_oversized_regex_json_error(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """JSON mode emits a structured malformed schema-map error."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["a{4294967295}", "schema.json"]]), encoding="utf-8")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("name: test\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hephaestus-validate-schemas",
+                "--json",
+                "--schema-map",
+                str(map_file),
+                str(config_file),
+            ],
+        )
+
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["errors"]
+        assert "invalid regex 'a{4294967295}'" in payload["errors"][0]
+
+    def test_schema_load_json_decode_error(self, tmp_path: Path) -> None:
         """JSONDecodeError when loading schema file is caught and counted."""
         pytest.importorskip("jsonschema")
         yaml_file = tmp_path / "config" / "test.yaml"
@@ -231,13 +373,10 @@ class TestCheckFiles:
         schema_file = tmp_path / "bad_schema.json"
         schema_file.write_text("{invalid json")
         schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
-        result = check_files([yaml_file], tmp_path, schema_map)
-        assert result.exit_code == 1
-        assert result.error_count >= 1
-        assert result.failed == 1
-        assert result.validated == 0
-        captured = capsys.readouterr()
-        assert "Could not load schema" in captured.err
+        exit_code, errors = check_files([yaml_file], tmp_path, schema_map)
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert "Could not load schema" in errors[0]
 
     def test_no_matching_schema_fails_by_default(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -245,17 +384,12 @@ class TestCheckFiles:
         """File with no matching schema fails unless explicitly skipped."""
         yaml_file = tmp_path / "random.yaml"
         yaml_file.write_text("key: value\n")
+        exit_code, errors = check_files([yaml_file], tmp_path, [])
 
-        result = check_files([yaml_file], tmp_path, [])
-
-        assert result.exit_code == 1
-        assert result.requested == 1
-        assert result.validated == 0
-        assert result.skipped == 0
-        assert result.passed == 0
-        assert result.failed == 1
-        assert result.error_count == 1
-        assert "ERROR: No schema mapping" in capsys.readouterr().err
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert "No schema mapping" in errors[0]
+        assert capsys.readouterr() == ("", "")
 
     def test_mixed_files_tracks_counts(self, tmp_path: Path) -> None:
         """Mapped and unmapped files receive separate outcome counts."""
@@ -268,28 +402,20 @@ class TestCheckFiles:
         unmapped = tmp_path / "unmapped.yaml"
         unmapped.write_text("{}\n")
 
-        result = check_files(
+        exit_code, errors = check_files(
             [mapped, unmapped],
             tmp_path,
             [(re.compile(r"^config/.*\.yaml$"), schema_file)],
         )
 
-        assert result.requested == 2
-        assert result.validated == 1
-        assert result.skipped == 0
-        assert result.passed == 1
-        assert result.failed == 1
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert "No schema mapping" in errors[0]
 
     def test_empty_files_list(self, tmp_path: Path) -> None:
         """Empty files list returns 0."""
-        result = check_files([], tmp_path, [])
-        assert result.exit_code == 0
-        assert result.error_count == 0
-        assert result.requested == 0
-        assert result.validated == 0
-        assert result.skipped == 0
-        assert result.passed == 0
-        assert result.failed == 0
+        exit_code, _errors = check_files([], tmp_path, [])
+        assert exit_code == 0
 
 
 class TestMain:
@@ -479,6 +605,146 @@ class TestMain:
         assert output["skipped"] == 0
         assert output["passed"] == 0
         assert output["failed"] == 0
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    def test_invalid_schema_map_cli_error_is_structured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        json_mode: bool,
+    ) -> None:
+        """Malformed schema maps fail without leaking a traceback."""
+        from hephaestus.validation.schema import main
+
+        target = tmp_path / "config.yaml"
+        target.write_text("name: test\n", encoding="utf-8")
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["[", ""], [42, None]]), encoding="utf-8")
+
+        argv = ["hephaestus-validate-schemas", "--schema-map", str(map_file)]
+        if json_mode:
+            argv.append("--json")
+        argv.append(str(target))
+        monkeypatch.setattr("sys.argv", argv)
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.out + captured.err
+
+        if json_mode:
+            payload = json.loads(captured.out)
+            assert payload["status"] == "error"
+            assert payload["exit_code"] == 1
+            assert "invalid schema map" in payload["message"]
+            assert "entry 0" in payload["errors"][0]
+            assert "entry 1" in payload["errors"][0]
+            assert captured.err == ""
+        else:
+            assert captured.out == ""
+            assert "ERROR: Could not load schema map" in captured.err
+            assert "entry 0" in captured.err
+            assert "entry 1" in captured.err
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    def test_invalid_schema_cli_error_is_structured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        json_mode: bool,
+    ) -> None:
+        """Invalid JSON schemas use the same human/JSON diagnostic contract."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(json.dumps({"type": "not-a-json-schema-type"}), encoding="utf-8")
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "test.yaml"
+        target.write_text("name: test\n", encoding="utf-8")
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]), encoding="utf-8")
+
+        argv = [
+            "hephaestus-validate-schemas",
+            "--schema-map",
+            str(map_file),
+            "--repo-root",
+            str(tmp_path),
+        ]
+        if json_mode:
+            argv.append("--json")
+        argv.append(str(target))
+        monkeypatch.setattr("sys.argv", argv)
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.out + captured.err
+
+        if json_mode:
+            payload = json.loads(captured.out)
+            assert payload["status"] == "error"
+            assert payload["exit_code"] == 1
+            assert payload["message"] == "schema validation failed"
+            assert payload["error_count"] == 1
+            assert any("Invalid JSON Schema" in error for error in payload["errors"])
+            assert captured.err == ""
+        else:
+            assert captured.out == ""
+            assert "ERROR:" in captured.err
+            assert "Invalid JSON Schema" in captured.err
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    def test_unresolved_schema_reference_is_structured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        json_mode: bool,
+    ) -> None:
+        """Unresolved schema references become normal CLI diagnostics."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(json.dumps({"$ref": "#/missing"}), encoding="utf-8")
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "test.yaml"
+        target.write_text("name: test\n", encoding="utf-8")
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]), encoding="utf-8")
+
+        argv = [
+            "hephaestus-validate-schemas",
+            "--schema-map",
+            str(map_file),
+            "--repo-root",
+            str(tmp_path),
+        ]
+        if json_mode:
+            argv.append("--json")
+        argv.append(str(target))
+        monkeypatch.setattr("sys.argv", argv)
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.out + captured.err
+
+        if json_mode:
+            payload = json.loads(captured.out)
+            assert payload["status"] == "error"
+            assert payload["exit_code"] == 1
+            assert payload["message"] == "schema validation failed"
+            assert payload["error_count"] == 1
+            assert any("Invalid JSON Schema reference" in error for error in payload["errors"])
+            assert captured.err == ""
+        else:
+            assert captured.out == ""
+            assert "ERROR:" in captured.err
+            assert "Invalid JSON Schema reference" in captured.err
 
     def test_json_flag_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
@@ -706,9 +972,10 @@ class TestMain:
 
         schema_map = [(re.compile(r"config/.*\.yaml$"), Path("nonexistent.json"))]
 
-        result = check_files([target], tmp_path, schema_map)
-        assert result.exit_code == 1
-        assert result.error_count == 1
+        exit_code, errors = check_files([target], tmp_path, schema_map)
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert "Could not load schema" in errors[0]
 
     def test_check_files_schema_load_json_decode_error(self, tmp_path: Path) -> None:
         """check_files handles JSONDecodeError when parsing schema file."""
@@ -725,6 +992,7 @@ class TestMain:
 
         schema_map = [(re.compile(r"config/.*\.yaml$"), schema_file)]
 
-        result = check_files([target], tmp_path, schema_map)
-        assert result.exit_code == 1
-        assert result.error_count == 1
+        exit_code, errors = check_files([target], tmp_path, schema_map)
+        assert exit_code == 1
+        assert len(errors) == 1
+        assert "Could not load schema" in errors[0]
