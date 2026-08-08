@@ -16,12 +16,8 @@ from hephaestus.automation.pipeline import (
 from hephaestus.automation.pipeline.coordinator_types import _DRAIN_ORDER
 from hephaestus.automation.pipeline.routing import PIPELINE_ORDER
 
-_ROUTE_CASES = tuple(
-    pytest.param(stage, route, id=stage.value) for stage, route in ROUTES.items()
-)
-_NON_TERMINAL_ORDER = tuple(
-    stage for stage in PIPELINE_ORDER if stage is not StageName.FINISHED
-)
+_ROUTE_CASES = tuple(pytest.param(stage, route, id=stage.value) for stage, route in ROUTES.items())
+_NON_TERMINAL_ORDER = tuple(stage for stage in PIPELINE_ORDER if stage is not StageName.FINISHED)
 _SCOPE_CASES = tuple(
     pytest.param(
         frozenset(_NON_TERMINAL_ORDER[start:stop]),
@@ -171,9 +167,7 @@ class TestROUTES:
         assert stages == expected
 
     @pytest.mark.parametrize(("stage", "route"), _ROUTE_CASES)
-    def test_route_entries_are_closed_and_valid(
-        self, stage: StageName, route: Route
-    ) -> None:
+    def test_route_entries_are_closed_and_valid(self, stage: StageName, route: Route) -> None:
         """Every table row has valid targets and a default failure route."""
         assert route.next in ROUTES
         assert set(route.fail_routes.values()) <= set(ROUTES)
@@ -190,9 +184,7 @@ class TestROUTES:
         assert tuple(reversed(PIPELINE_ORDER)) == _DRAIN_ORDER
 
     @pytest.mark.parametrize("stages", _SCOPE_CASES)
-    def test_route_order_drives_every_contiguous_scope(
-        self, stages: frozenset[StageName]
-    ) -> None:
+    def test_route_order_drives_every_contiguous_scope(self, stages: frozenset[StageName]) -> None:
         """Every generated contiguous scope follows the route-derived order."""
         trimmed = PipelineScope(stages).trimmed_routes()
         expected_order = tuple(stage for stage in PIPELINE_ORDER if stage in stages)
@@ -201,9 +193,7 @@ class TestROUTES:
         allowed = set(stages) | {StageName.FINISHED}
         assert all(route.next in allowed for route in trimmed.values())
         assert all(
-            target in allowed
-            for route in trimmed.values()
-            for target in route.fail_routes.values()
+            target in allowed for route in trimmed.values() for target in route.fail_routes.values()
         )
 
     def test_routes_structure(self) -> None:
