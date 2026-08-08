@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from hypothesis import given, strategies as st
 
 from hephaestus.automation.address_review_core import (
     _ADDRESS_PARSE_DEFAULT,
     _parse_addressed_block,
+    parse_addressed_replies,
 )
 
 
@@ -45,3 +47,26 @@ class TestParseAddressedBlockProperties:
         payload = {"addressed": list(addressed), "replies": replies}
         body = f"```json\n{json.dumps(payload)}\n```"
         assert _parse_addressed_block(body)["replies"] == replies
+
+    def test_validates_and_normalizes_all_thread_replies(self) -> None:
+        result = parse_addressed_replies(
+            {
+                "addressed": ["thread-a", "thread-b"],
+                "replies": {"thread-a": " yes ", "thread-b": "done"},
+            },
+            [{"thread_id": "thread-a"}, {"id": "thread-b"}],
+        )
+
+        assert result == {"thread-a": "yes", "thread-b": "done"}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {"addressed": "thread-a", "replies": {}},
+            {"addressed": ["thread-a"], "replies": {"thread-b": "reply"}},
+            {"addressed": ["thread-a"], "replies": {"thread-a": ""}},
+        ],
+    )
+    def test_rejects_incomplete_or_invalid_replies(self, payload: object) -> None:
+        assert parse_addressed_replies(payload, [{"thread_id": "thread-a"}]) is None

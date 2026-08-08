@@ -4,9 +4,23 @@ minimum = 80
 
 # Per-module coverage floors
 # Paths must match Cobertura XML <class filename="..."> attribute exactly.
-# CI enforcer uses branch_rate if > 0, else line_rate (coverage.py:262).
+# New entries must select metric = "line" or "branch"; entries without metric
+# retain the legacy branch-if-positive/otherwise-line behavior.
 [coverage.modules]
 "validation/schema.py" = { minimum = 80 }
 "automation/models.py" = { minimum = 90 }
 "automation/dependency_resolver.py" = { minimum = 74 }
 "automation/arming_state.py" = { minimum = 98 }
+
+"automation/implementer.py" = { minimum = 70, metric = "line" }
+"automation/planner.py" = { minimum = 70, metric = "line" }
+"automation/ci_driver.py" = { minimum = 70, metric = "line" }
+"automation/pr_discovery.py" = { minimum = 70, metric = "line" }
+"automation/ci_check_inspector.py" = { minimum = 70, metric = "line" }
+"automation/ci_fix_orchestrator.py" = { minimum = 70, metric = "line" }
+"automation/post_merge_processor.py" = { minimum = 70, metric = "line" }
+"automation/loop_runner.py" = { minimum = 70, metric = "line" }
+"automation/loop_repo_manager.py" = { minimum = 70, metric = "line" }
+"automation/curses_ui.py" = { minimum = 70, metric = "line" }
+"automation/audit_reviewer.py" = { minimum = 70, metric = "line" }
+"automation/address_review_core.py" = { minimum = 70, metric = "line" }
