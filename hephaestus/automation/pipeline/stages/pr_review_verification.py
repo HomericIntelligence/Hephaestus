@@ -56,6 +56,17 @@ _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
         "tox.ini",
     }
 )
+_FULL_UNIT_COVERAGE_SPEC = _HostVerificationSpec(
+    changed_path="coverage.toml",
+    argv=(
+        "/bin/sh",
+        "-c",
+        "set -e; uv run pytest tests/unit --override-ini=addopts= -v --strict-markers -m "
+        "'not nightly' --cov=hephaestus --cov-report=term-missing --cov-report=xml && "
+        "uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml",
+    ),
+    descr="review_full_unit_coverage",
+)
 # This suite exercises the host verifier's own disk-image and sandbox
 # primitives. Running it inside that verifier would require nested mounts and
 # produces runner failures rather than meaningful code evidence.
@@ -172,6 +183,9 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
     path_triggered_specs = tuple(
         spec for spec in _PATH_HOST_VERIFICATION_SPECS if spec.changed_path in changed_paths
     )
+    coverage_specs = (
+        (_FULL_UNIT_COVERAGE_SPEC,) if changed_paths & {"coverage.toml", "pyproject.toml"} else ()
+    )
     if not any(
         path.endswith(".py") or path in _PYTHON_VALIDATION_CONFIG_PATHS for path in changed_paths
     ):
@@ -222,6 +236,7 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
         *_PYTHON_HOST_VERIFICATION_SPECS,
         *changed_unit_tests,
         *path_triggered_specs,
+        *coverage_specs,
     )
 
 

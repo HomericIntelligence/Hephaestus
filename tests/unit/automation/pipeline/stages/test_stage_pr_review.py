@@ -63,6 +63,9 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     _validation_thread_snapshots,
     _without_duplicate_live_findings,
 )
+from hephaestus.automation.pipeline.stages.pr_review_verification import (
+    _FULL_UNIT_COVERAGE_SPEC,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
@@ -1368,6 +1371,9 @@ class TestPrReviewStageStep:
                     "b/tests/performance/test_worker_pool_load.py\n"
                     "--- a/tests/performance/test_worker_pool_load.py\n"
                     "+++ b/tests/performance/test_worker_pool_load.py\n"
+                    "diff --git a/coverage.toml b/coverage.toml\n"
+                    "--- a/coverage.toml\n"
+                    "+++ b/coverage.toml\n"
                 ),
             }
         )
@@ -1431,6 +1437,14 @@ class TestPrReviewStageStep:
                     "tests/performance/test_worker_pool_load.py",
                     "-q",
                     "--load-report=../scratch/outputs/worker-pool.json",
+                ),
+            ),
+            (
+                "review_full_unit_coverage",
+                (
+                    "/bin/sh",
+                    "-c",
+                    _FULL_UNIT_COVERAGE_SPEC.argv[2],
                 ),
             ),
         )

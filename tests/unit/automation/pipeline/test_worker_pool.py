@@ -48,6 +48,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _host_validation_failure_kind,
     _host_verification_env,
     _host_verification_profile,
+    _prepare_host_output_aliases,
     _quota_backed_volume,
     _repo_lock_path,
     _run_bounded_host_command,
@@ -1428,6 +1429,19 @@ class TestWorkerPoolSubmitComplete:
         ):
             assert Path(environment[key]).is_relative_to(scratch.resolve())
         assert environment["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+    def test_host_output_aliases_keep_coverage_xml_in_scratch(self, tmp_path: Path) -> None:
+        """The full coverage receipt cannot write into the immutable source tree."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        source.mkdir()
+        scratch.mkdir()
+
+        _prepare_host_output_aliases(source, scratch)
+
+        assert (source / "coverage.xml").is_symlink()
+        (source / "coverage.xml").write_text("<coverage />", encoding="utf-8")
+        assert (scratch / "coverage.xml").read_text(encoding="utf-8") == "<coverage />"
 
 
 class TestAgentErrorHandling:
