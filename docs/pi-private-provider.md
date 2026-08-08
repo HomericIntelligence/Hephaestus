@@ -89,6 +89,70 @@ the required package/capability inventory and #2518 enforces lifecycle and
 tool scopes. Do not treat a local model configuration or a successful smoke
 command as automation admission evidence.
 
+## Athena package acceptance
+
+The accepted Athena Pi package is recorded in
+[`athena-pi-package.json`](athena-pi-package.json). Install the concatenation
+of `package.source`, `@`, and the exact 40-character `package.ref`:
+
+```bash
+pi install 'git:github.com/HomericIntelligence/Athena@496815b00f6fb4c8e97466489371b364d52588b5'
+```
+
+`package.version` and `upstream.release_tag` are release metadata. They must
+not replace `package.ref` as installation authority. `pi update --extensions`
+skips the pinned ref and cannot advance it. Upgrade or roll back only after
+reviewing a replacement catalog and explicitly installing its new or previous
+40-character ref. Remove the package with:
+
+```bash
+pi remove 'git:github.com/HomericIntelligence/Athena'
+```
+
+Athena exposes its canonical `skills/` directory as Pi package resources.
+Mnemosyne remains a separately trusted repository dependency governed by
+Athena's canonical dependency-resolution contract; it is not a Pi package.
+The reviewed external capabilities also remain separate operator-installed
+packages: `pi-subagents@0.37.2` supplies delegation and
+`pi-web-access@0.15.0` supplies explicitly scoped web access. Athena bundles
+neither package.
+
+### Acceptance collection and publication
+
+After the upstream package and this implementation PR exist, use clean Athena
+and Hephaestus checkouts and the pinned Pi binary to collect evidence:
+
+```bash
+uv run python scripts/pi_package_acceptance.py collect \
+  --athena-checkout "$ATHENA_CHECKOUT" \
+  --implementation-pr "$HEPHAESTUS_PR_NUMBER" \
+  --pi-bin "$ATHENA_PI_BIN" \
+  --output-dir build/pi-acceptance
+```
+
+Collection performs GitHub reads only. It validates the catalog, exact Athena
+PR/tag/check correspondence, clean checkout revisions, deterministic archive
+contents, exact-ref installation, and package-origin RPC discovery of
+`skill:advise`, `skill:learn`, and `skill:pr-review`. It generates
+`build/pi-acceptance/acceptance.json` and
+`build/pi-acceptance/issue-comment.md` solely from observed results. These
+artifacts are untracked evidence and must not be handwritten or committed.
+
+Inspect both artifacts, then explicitly publish and read back the actor-owned
+issue comment:
+
+```bash
+uv run python scripts/publish_pi_package_acceptance.py \
+  --acceptance build/pi-acceptance/acceptance.json \
+  --comment build/pi-acceptance/issue-comment.md
+```
+
+The publisher is the only forge-write step. It revalidates the catalog and
+implementation PR, refuses foreign or duplicate marker comments, and succeeds
+only after exact actor-owned readback. If acceptance must be rolled back,
+publish evidence for the reviewed prior catalog ref; never retag `v0.4.0` or
+silently advance the existing catalog.
+
 ## Project-level denylist (committed)
 
 `.heph-project-denylist` is committed to the repo and scanned in CI for every

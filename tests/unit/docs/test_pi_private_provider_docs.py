@@ -9,6 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PI_DOC = REPO_ROOT / "docs" / "pi-private-provider.md"
 CONFIG_SUFFIXES = {".json", ".toml", ".yaml", ".yml", ".env", ".ini", ".cfg"}
+PUBLIC_PI_CATALOGS = {"docs/athena-pi-package.json"}
 
 
 def _is_pi_config_surface(path: str) -> bool:
@@ -44,4 +45,4 @@ def test_no_tracked_pi_provider_config_surfaces_exist() -> None:
     )
     paths = [p.decode() for p in result.stdout.split(b"\0") if p]
 
-    assert [p for p in paths if _is_pi_config_surface(p)] == []
+    assert [p for p in paths if p not in PUBLIC_PI_CATALOGS and _is_pi_config_surface(p)] == []
