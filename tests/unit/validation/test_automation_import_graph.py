@@ -330,3 +330,15 @@ def test_graph_detects_synthetic_cycles(tmp_path: Path, fixture_name: str) -> No
     """Every supported import form participates in cycle detection."""
     root = _write_synthetic_graph(tmp_path, fixture_name)
     assert _strongly_connected_components(_build_import_graph(root))
+
+
+def test_dotted_import_records_runtime_parent_initializer_edge(tmp_path: Path) -> None:
+    """A dotted import includes each resolvable runtime parent package."""
+    root = _write_synthetic_graph(tmp_path, "import_parent_package_cycle")
+
+    graph = _build_import_graph(root)
+
+    assert graph["hephaestus.automation.a"] >= {
+        "hephaestus.automation.pkg",
+        "hephaestus.automation.pkg.child",
+    }

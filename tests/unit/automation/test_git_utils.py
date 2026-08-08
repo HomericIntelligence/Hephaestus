@@ -81,12 +81,11 @@ class TestIssueAutoImplBranchName:
 class TestCommitIfChanges:
     """Tests for commit_if_changes."""
 
-    def test_dirty_tree_imports_commit_helper_on_demand(self) -> None:
-        """A cold git-utils import can load the commit implementation on use."""
+    def test_dirty_tree_imports_real_commit_helper_on_demand(self) -> None:
+        """A cold git-utils import loads the real commit module only on use."""
         code = r"""
 import builtins
 import sys
-import types
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -101,18 +100,16 @@ def fake_commit_changes(*args, **kwargs):
 
 real_import = builtins.__import__
 def import_hook(name, globals=None, locals=None, fromlist=(), level=0):
+    module = real_import(name, globals, locals, fromlist, level)
     if (
         level == 1
         and name == "pr_manager"
         and globals is not None
         and globals.get("__package__") == "hephaestus.automation"
     ):
-        module_name = "hephaestus.automation.pr_manager"
-        module = types.ModuleType(module_name)
         module.commit_changes = fake_commit_changes
-        sys.modules[module_name] = module
-        return module
-    return real_import(name, globals, locals, fromlist, level)
+        assert "hephaestus.automation.pr_manager" in sys.modules
+    return module
 
 builtins.__import__ = import_hook
 try:
