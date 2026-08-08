@@ -122,7 +122,7 @@ class VersionManager:
                 # Skip test, build, and hidden directories
                 if any(
                     part.startswith(".") or part in {"tests", "build", "dist", "__pycache__"}
-                    for part in init_file.parts
+                    for part in init_file.relative_to(self.repo_root).parts
                 ):
                     continue
                 # Check if it has a __version__ attribute

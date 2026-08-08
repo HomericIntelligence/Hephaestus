@@ -68,6 +68,38 @@ through installed `hephaestus-*` console scripts.
   `pi_smoke.py` on a cluster node with a fixed export list and no shared
   scheduler artifact (copy and fill partition/account locally).
 
+### Pi package acceptance
+
+- **`pi_package_acceptance.py`** — Validate Athena's exact commit-pinned Pi
+  package, upstream receipts, clean checkouts, archive boundary, and
+  clean-install skill discovery; generate untracked evidence beneath
+  `build/pi-acceptance/`.
+- **`publish_pi_package_acceptance.py`** — Publish and exactly read back the
+  actor-owned Athena `v0.4.0` acceptance comment on issue #2515.
+
+Collection is read-only with respect to GitHub:
+
+```bash
+uv run python scripts/pi_package_acceptance.py collect \
+  --athena-checkout "$ATHENA_CHECKOUT" \
+  --implementation-pr "$HEPHAESTUS_PR_NUMBER" \
+  --pi-bin "$ATHENA_PI_BIN" \
+  --output-dir build/pi-acceptance
+```
+
+Publication is the sole forge-write step and requires the generated evidence
+and comment artifacts:
+
+```bash
+uv run python scripts/publish_pi_package_acceptance.py \
+  --acceptance build/pi-acceptance/acceptance.json \
+  --comment build/pi-acceptance/issue-comment.md
+```
+
+Do not commit or hand-edit the generated files. See
+`docs/pi-private-provider.md` for the exact-ref update, rollback, removal, and
+acceptance/readback contract.
+
 ## Usage
 
 ```bash

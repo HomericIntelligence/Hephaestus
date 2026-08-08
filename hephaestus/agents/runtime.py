@@ -445,6 +445,7 @@ _LINUX_POSIX_ACL_FILESYSTEMS = frozenset(
         "overlayfs",
         "ramfs",
         "tmpfs",
+        "virtiofs",
         "xfs",
     }
 )
@@ -513,7 +514,12 @@ def _verify_pi_private_acl(path: Path, *, clear: bool) -> None:
     if filesystem_type not in _LINUX_POSIX_ACL_FILESYSTEMS:
         raise OSError("Pi smoke requires a local filesystem with verifiable POSIX ACLs")
 
-    absent_errors = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
+    absent_errors = {
+        errno.ENODATA,
+        errno.ENOTSUP,
+        getattr(errno, "ENOATTR", errno.ENODATA),
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+    }
     for attribute in ("system.posix_acl_access", "system.posix_acl_default"):
         if clear:
             try:
@@ -546,6 +552,47 @@ def _pi_log_path_components(path: Path) -> tuple[Path, ...]:
     return tuple(components)
 
 
+def _pi_group_has_other_users(group_id: int, current_uid: int) -> bool:
+    """Return whether a writable group includes an account other than the caller."""
+    try:
+        import grp
+        import pwd
+
+        group = grp.getgrgid(group_id)
+        passwd_entries = pwd.getpwall()
+    except (ImportError, KeyError, OSError):
+        return True
+
+    current_names = {entry.pw_name for entry in passwd_entries if entry.pw_uid == current_uid}
+    group_names = set(group.gr_mem)
+    group_names.update(entry.pw_name for entry in passwd_entries if entry.pw_gid == group_id)
+    return not current_names or bool(group_names - current_names)
+
+
+def _pi_uid_is_mapped(uid: int) -> bool:
+    """Return whether a Linux namespace can act as ``uid``; fail closed elsewhere."""
+    if sys.platform != "linux":
+        return True
+    try:
+        uid_map = Path("/proc/self/uid_map").read_text(encoding="utf-8")
+    except OSError:
+        return True
+
+    valid_mapping = False
+    for line in uid_map.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            return True
+        try:
+            inside_uid, _, length = (int(field) for field in fields)
+        except ValueError:
+            return True
+        valid_mapping = True
+        if inside_uid <= uid < inside_uid + length:
+            return True
+    return not valid_mapping
+
+
 def _verify_pi_private_log_directory(
     path: Path,
     *,
@@ -562,16 +609,23 @@ def _verify_pi_private_log_directory(
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise OSError("Pi smoke artifact path must be a directory, not a symlink")
     current_uid = os.getuid()
-    if require_current_owner:
-        if metadata.st_uid != current_uid:
-            raise OSError("Pi smoke artifact path is not owned by the current user")
-    elif metadata.st_uid not in {0, current_uid}:
+    if require_current_owner and metadata.st_uid != current_uid:
+        raise OSError("Pi smoke artifact path is not owned by the current user")
+    if (
+        not require_current_owner
+        and metadata.st_uid not in {0, current_uid}
+        and _pi_uid_is_mapped(metadata.st_uid)
+    ):
         raise OSError("Pi smoke artifact ancestor is not owner-controlled")
     mode = stat.S_IMODE(metadata.st_mode)
     # A sticky directory cannot have another user's entry renamed or removed.
     # Combined with atomic child creation and ownership verification below, it
     # is safe as an ancestor (for example, the system temporary root).
-    if mode & 0o022 and not (metadata.st_mode & stat.S_ISVTX):
+    writable_by_other = bool(mode & stat.S_IWOTH)
+    writable_by_group_peer = bool(mode & stat.S_IWGRP) and _pi_group_has_other_users(
+        metadata.st_gid, current_uid
+    )
+    if (writable_by_other or writable_by_group_peer) and not (metadata.st_mode & stat.S_ISVTX):
         raise OSError("Pi smoke artifact path is writable by another user")
     if clear_acl and verify_acl:
         _verify_pi_private_acl(path, clear=True)
