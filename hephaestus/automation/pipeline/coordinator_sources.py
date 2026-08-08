@@ -154,10 +154,7 @@ class SourceCoordinator(_CoordinatorHost):
                         )
                         entry = replace(entry, stage=stage, reason=reason, passed=passed)
                     if entry.stage is None:
-                        if (
-                            source.wave_lease is None
-                            and entry.skip_tag_obligation is not None
-                        ):
+                        if source.wave_lease is None and entry.skip_tag_obligation is not None:
                             github.skip_epics({entry.skip_tag_obligation.issue: []})
                         logger.info("[%s] excluded: %s", repo, entry.reason)
                         source.pending = None

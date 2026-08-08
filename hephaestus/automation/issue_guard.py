@@ -8,7 +8,7 @@ same observed record cannot both become the current owner.
 # The store implements a deliberately broad public protocol surface; its
 # individual methods mirror transport operations and are documented by the
 # protocol above.
-# ruff: noqa: D102, D105, D107, E501
+# ruff: noqa: D102, D105, D107
 
 from __future__ import annotations
 
@@ -440,7 +440,9 @@ class IssueGuard:
         except Exception:
             # Best effort only: a failed read-back must never clear a claim
             # after ownership has become ambiguous.
-            logger.warning("issue guard acquisition left recoverable state for %s#%s", repository, issue)
+            logger.warning(
+                "issue guard acquisition left recoverable state for %s#%s", repository, issue
+            )
             raise
 
     def confirm(self, credential: GuardCredential, minimum_valid_for: timedelta) -> GuardHandle:
@@ -779,9 +781,7 @@ class GitHubIssueGuardStore:
         )
 
     def remove_label(self, repository: str, issue: int, label: str) -> None:
-        self._request(
-            ["--method", "DELETE", self._path(f"issues/{issue}/labels/{label}")]
-        )
+        self._request(["--method", "DELETE", self._path(f"issues/{issue}/labels/{label}")])
 
     def _commit(self, repository: str, oid: str) -> tuple[str, datetime]:
         status, body = self._request([self._path(f"git/commits/{oid}")])
