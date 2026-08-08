@@ -266,25 +266,34 @@ class GuardHandle:
 class GuardStore(Protocol):
     """Storage and issue-label operations required by :class:`IssueGuard`."""
 
-    def read_labels(self, repository: str, issue: int) -> Sequence[str]: ...
+    def read_labels(self, repository: str, issue: int) -> Sequence[str]:
+        raise NotImplementedError
 
-    def add_label(self, repository: str, issue: int, label: str) -> None: ...
+    def add_label(self, repository: str, issue: int, label: str) -> None:
+        raise NotImplementedError
 
-    def remove_label(self, repository: str, issue: int, label: str) -> None: ...
+    def remove_label(self, repository: str, issue: int, label: str) -> None:
+        raise NotImplementedError
 
-    def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None: ...
+    def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None:
+        raise NotImplementedError
 
-    def default_tip(self, repository: str) -> tuple[str, str]: ...
+    def default_tip(self, repository: str) -> tuple[str, str]:
+        raise NotImplementedError
 
     def create_commit(
         self, repository: str, tree: str, parents: Sequence[str], message: str
-    ) -> tuple[str, datetime]: ...
+    ) -> tuple[str, datetime]:
+        raise NotImplementedError
 
-    def create_ref(self, repository: str, issue: int, oid: str) -> None: ...
+    def create_ref(self, repository: str, issue: int, oid: str) -> None:
+        raise NotImplementedError
 
-    def update_ref(self, repository: str, issue: int, oid: str, expected_oid: str) -> None: ...
+    def update_ref(self, repository: str, issue: int, oid: str, expected_oid: str) -> None:
+        raise NotImplementedError
 
-    def actor(self) -> str: ...
+    def actor(self) -> str:
+        raise NotImplementedError
 
 
 def _server_now(store: GuardStore) -> datetime:
