@@ -94,3 +94,19 @@ def test_runtime_tools_follow_the_requested_build_architecture() -> None:
     assert 'echo "${gh_sha256}  /tmp/gh.deb" | sha256sum --check' in source
 
     assert source.count('*) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1') == 2
+
+
+def test_github_artifact_downloads_retry_transient_network_failures() -> None:
+    """Pinned GitHub downloads must survive transient runner network resets."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+    download_lines = [
+        line.strip()
+        for line in source.splitlines()
+        if "curl -fsSL" in line and '"https://github.com/' in line
+    ]
+
+    assert len(download_lines) == 2
+    for line in download_lines:
+        assert "--retry 5" in line
+        assert "--retry-all-errors" in line
+        assert "--connect-timeout 30" in line
