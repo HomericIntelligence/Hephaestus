@@ -470,9 +470,9 @@ zero totals, and zero requested/processed counts.
 
 | Command | Description |
 |---|---|
-| `hephaestus-bump-version` | Version consistency checks and atomic version bumping |
-| `hephaestus-check-package-versions` | Check package version consistency across config files |
-| `hephaestus-check-version-consistency` | Version consistency checks across config files |
+| `hephaestus-bump-version` | Compute the next tag-derived semantic version without changing files or tags |
+| `hephaestus-check-package-versions` | Check optional package and documentation version references against the canonical tag |
+| `hephaestus-check-version-consistency` | Verify an expected version matches the canonical tag and installed distribution |
 
 ### Examples
 

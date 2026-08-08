@@ -21,6 +21,7 @@ workflow_dispatch (Auto Tag Release)
          └─ build-and-publish job (after test + type-check succeed)
               ├─ verify tag == package version
               ├─ build wheel + sdist
+              ├─ verify tag == installed wheel version
               ├─ publish to PyPI (trusted publishing)
               └─ create GitHub Release with auto-generated notes
 ```
@@ -41,6 +42,18 @@ Before triggering the workflow, ensure:
 The package version itself does **not** need to be edited in any file: this project uses
 hatch-vcs dynamic versioning, so the package version is derived from the git tag the
 `auto-tag` workflow pushes. There is no `[project].version` field to bump.
+
+To preview the next version locally without changing files or tags:
+
+```bash
+hephaestus-bump-version patch
+```
+
+This command is compute-only. Create the authoritative signed tag through
+**Actions → Auto Tag Release → Run workflow**; do not copy the proposal into
+`VERSION`, `pyproject.toml`, or `hephaestus/__init__.py`. The release workflow
+then verifies the requested tag against hatch-vcs and a freshly installed wheel
+before publication.
 
 ## Manual Tag + Release (escape hatch)
 

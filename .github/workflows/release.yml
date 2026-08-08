@@ -328,6 +328,27 @@ jobs:
           uv run python -m build
           ls -1 dist/
 
+      - name: Verify canonical and installed versions
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${TAG#v}"
+          VERIFY_ENV="build/version-verify"
+          WHEEL="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          if [ -z "${WHEEL}" ]; then
+            echo "::error::No built wheel found for version verification"
+            exit 1
+          fi
+
+          uv venv "${VERIFY_ENV}"
+          uv pip install --python "${VERIFY_ENV}/bin/python" "${WHEEL}"
+          "${VERIFY_ENV}/bin/hephaestus-check-version-consistency" \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --expected-version "${TAG_VERSION}" \
+            --verbose
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
         with:
