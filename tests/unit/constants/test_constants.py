@@ -153,6 +153,8 @@ def test_read_timeout_env_falls_back_on_malformed_value(
     monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", bad_value)
 
     assert constants.read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", 77) == 77
+
+
 @pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
 def test_read_timeout_env_accepts_inclusive_bounds(
     monkeypatch: pytest.MonkeyPatch,

@@ -142,7 +142,7 @@ class TestGdbCmdPrefixParsing:
             captured.append(list(argv))
             return process
 
-        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("hephaestus.forensics.subprocess.Popen", fake_popen)
         return captured
 
     def test_prefix_none_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
@@ -299,7 +299,7 @@ class TestMain:
         popen = Mock(return_value=process)
         monkeypatch.setenv("RUN_UNDER_GDB", "0")
         monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
-        monkeypatch.setattr(gdb_runner.subprocess, "Popen", popen)
+        monkeypatch.setattr(subprocess, "Popen", popen)
 
         assert main(["--timeout", "7", "unused-cores", "tool"]) == 0
         assert popen.call_args.kwargs["start_new_session"] is False
@@ -315,7 +315,7 @@ class TestMain:
         process.wait.return_value = 0
         monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
         monkeypatch.setattr(gdb_runner, "resolve_command", lambda _command: "/tool")
-        monkeypatch.setattr(gdb_runner.subprocess, "Popen", Mock(return_value=process))
+        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
 
         assert run_under_gdb(str(tmp_path / "cores"), "tool", [], timeout=7) == 0
         process.kill.assert_not_called()
@@ -335,9 +335,9 @@ class TestBoundedProcess:
             -signal.SIGKILL,
         ]
         monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
-        monkeypatch.setattr(gdb_runner.subprocess, "Popen", Mock(return_value=process))
+        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
         killpg = Mock()
-        monkeypatch.setattr(gdb_runner.os, "killpg", killpg)
+        monkeypatch.setattr(os, "killpg", killpg)
 
         with pytest.raises(subprocess.TimeoutExpired):
             _run_bounded(["tool"], 7)
@@ -358,7 +358,7 @@ class TestBoundedProcess:
         ]
         popen = Mock(return_value=process)
         monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
-        monkeypatch.setattr(gdb_runner.subprocess, "Popen", popen)
+        monkeypatch.setattr(subprocess, "Popen", popen)
 
         with pytest.raises(subprocess.TimeoutExpired):
             _run_bounded(["tool"], 7)
