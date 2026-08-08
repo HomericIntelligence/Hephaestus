@@ -160,6 +160,20 @@ def test_parse_args_accepts_drive_green_loops() -> None:
     assert loop_runner._parse_args([]).drive_green_loops == 5
 
 
+def test_parse_args_accepts_review_iterations() -> None:
+    """The review budget is explicit and does not reuse the reseed counter."""
+    assert loop_runner._parse_args(["--review-iterations", "10"]).review_iterations == 10
+    assert loop_runner._parse_args([]).review_iterations is None
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_parse_args_rejects_non_positive_review_iterations(bad: str) -> None:
+    """An explicit review budget must allow at least one review round."""
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--review-iterations", bad])
+    assert excinfo.value.code == 2
+
+
 @pytest.mark.parametrize("bad", ["0", "-1"])
 def test_parse_args_rejects_non_positive_drive_green_loops(bad: str) -> None:
     """The merge-poll budget must leave at least one current-run poll available."""

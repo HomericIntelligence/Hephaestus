@@ -215,6 +215,9 @@ class LoopConfig:
     """
 
     loops: int = 5
+    # Optional exact per-cycle cap shared by plan review and implementation
+    # review. None preserves the routing table's established 3/3/6 defaults.
+    review_iterations: int | None = None
     max_workers: int = LOOP_DEFAULT_MAX_WORKERS
     parallel_repos: int = 1
     # Dataclass default covers ONLY the iteration phases (``ALL_PHASES`` =
@@ -300,7 +303,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--loops",
         type=_parse_positive_int,
         default=5,
-        help="Number of loop iterations (default: 5)",
+        help="Repository discovery reseed passes; does not change review budgets (default: 5)",
+    )
+    p.add_argument(
+        "--review-iterations",
+        type=_parse_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Exact per-cycle cap for both plan-review and implementation-review rounds. "
+            "Omit to preserve the routing defaults (plan 3; implementation soft 3/hard 6)."
+        ),
     )
     p.add_argument(
         "--drive-green-loops",
@@ -742,6 +755,16 @@ def _build_pipeline_config(
 
         circuit_breaker_snapshot_provider = all_circuit_breaker_snapshots
 
+    budget_overrides = {"merge": cfg.drive_green_loops}
+    if cfg.review_iterations is not None:
+        budget_overrides.update(
+            {
+                "plan_review_iter": cfg.review_iterations,
+                "pr_review_iter": cfg.review_iterations,
+                "pr_review_hard": cfg.review_iterations,
+            }
+        )
+
     return PipelineConfig(
         org=org,
         repos=repos,
@@ -770,7 +793,7 @@ def _build_pipeline_config(
         include_bot_prs=True,
         include_all_authors=cfg.drive_green_all,
         run_pre_pr_tests=cfg.run_pre_pr_tests,
-        budget_overrides={"merge": cfg.drive_green_loops},
+        budget_overrides=budget_overrides,
         serialize_file_overlap=cfg.serialize_file_overlap,
         metrics_port=cfg.metrics_port,
         circuit_breaker_snapshot_provider=circuit_breaker_snapshot_provider,
@@ -914,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
             root_scope_repos = [cwd_repo]
     cfg = LoopConfig(
         loops=args.loops,
+        review_iterations=args.review_iterations,
         max_workers=args.max_workers,
         drive_green_loops=args.drive_green_loops,
         serialize_file_overlap=args.serialize_file_overlap,

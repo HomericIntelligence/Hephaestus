@@ -193,6 +193,31 @@ def test_build_pipeline_config_maps_drive_green_loops_to_budget(
     assert config.budget_overrides["merge"] == 3
 
 
+def test_build_pipeline_config_maps_explicit_review_iterations_to_exact_caps(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """One operator review cap governs plan and implementation review rounds."""
+    loop_runner.main(["--review-iterations", "10"])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.budget_overrides == {
+        "merge": 5,
+        "plan_review_iter": 10,
+        "pr_review_iter": 10,
+        "pr_review_hard": 10,
+    }
+
+
+def test_build_pipeline_config_omits_review_overrides_by_default(
+    dispatch: dict[str, MagicMock],
+) -> None:
+    """Omitting the flag preserves the routing table's existing 3/3/6 defaults."""
+    loop_runner.main([])
+
+    (config,) = dispatch["run_pipeline"].call_args.args
+    assert config.budget_overrides == {"merge": 5}
+
+
 def test_build_pipeline_config_maps_agent_and_models(
     dispatch: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
