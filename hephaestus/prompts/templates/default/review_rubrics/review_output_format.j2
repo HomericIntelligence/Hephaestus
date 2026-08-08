@@ -1,0 +1,20 @@
+
+**Required output format (structural audit — MANDATORY):**
+
+End with exactly one fenced JSON object and emit no textual decision line.
+Implementation authority is represented only by the live GitHub
+implementation-state label after the PR exists; this pre-PR compatibility
+review remains informational.
+
+```json
+{"grade": "A", "summary": "...", "comments": [
+  {"path": "...", "line": 1, "side": "RIGHT", "severity": "major", "body": "..."}
+]}
+```
+
+`grade` is one of `A`, `B`, `C`, `D`, `E`, or `F`; `summary` is a concise
+informational summary; and `comments` is an array of concrete findings. Each
+comment must provide a repository-relative `path`, positive changed-line
+`line`, `"RIGHT"` side, one of `critical`, `major`, `minor`, or `nitpick`
+severity, and actionable `body`. Emit an empty `comments` array only when no
+findings remain. Do not emit `Verdict:` or any other approval/rejection token.

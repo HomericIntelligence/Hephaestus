@@ -1,0 +1,84 @@
+Hephaestus
+Copyright (c) 2025, Micah Villmow
+
+This product is distributed under the BSD 3-Clause License (see LICENSE).
+
+This product bundles no third-party source code.
+
+================================================================================
+Third-party runtime dependencies
+================================================================================
+
+The following packages are installed as runtime dependencies when you install
+`HomericIntelligence-Hephaestus`. Their licenses are listed below; each is
+compatible with BSD 3-Clause distribution because they are imported, not
+modified or redistributed.
+
+These determinations are machine-enforced on every PR by the `license-scan`
+CI job (scripts/check_license_compatibility.py), which installs the package
+with all runtime extras (`pip install -e .[all]`) and scans the DISTRIBUTED
+dependency set (base + runtime extras, not dev tooling). A new distributed
+dependency under an incompatible license, an unrecognized license string, or a
+missing runtime extra fails CI. When you add a non-vendored copyleft extra
+here, also add it to that script's ALLOWED_EXTRA_COPYLEFT map.
+
+  Jinja2        BSD-3-Clause
+  packaging     Apache-2.0 OR BSD-2-Clause
+  pyyaml        MIT
+  pydantic      MIT
+  tzdata        Apache-2.0 (packaging; bundles public-domain IANA tz database
+                data — installed only on Windows: platform_system == 'Windows')
+
+================================================================================
+Optional (extras) runtime dependencies
+================================================================================
+
+These packages are installed only when the corresponding extra is requested
+(e.g. `pip install HomericIntelligence-Hephaestus[github]`):
+
+  github extra
+    PyGithub    LGPL-3.0-only
+                SPDX: https://spdx.org/licenses/LGPL-3.0-only.html
+
+                Hephaestus declares PyGithub as an optional pip
+                dependency under the `[github]` extra. We do not vendor,
+                modify, redistribute, or statically embed PyGithub's
+                source; the wheel we publish contains zero PyGithub code.
+                Users who install the extra obtain PyGithub directly from
+                PyPI under its own LGPL-3.0-only terms, and may substitute
+                a different version (e.g. `pip install <fork>`) without
+                rebuilding Hephaestus. The authoritative analysis
+                of LGPL-3.0 obligations on combining works is in the
+                LGPLv3 license text itself, which PyPI distributes with
+                every PyGithub release.
+
+  nats extra
+    nats-py     Apache-2.0
+
+  xml extra
+    defusedxml  PSF-2.0
+
+  schema extra
+    jsonschema  MIT
+
+================================================================================
+Build dependencies
+================================================================================
+
+Build-time only; not shipped in the wheel:
+
+  hatchling     MIT
+  hatch-vcs     MIT
+  editables     MIT
+
+================================================================================
+Development dependencies
+================================================================================
+
+The `pyproject.toml` development environment additionally pulls in tooling such as `ruff`,
+`mypy`, `pytest`, `bats-core`, `yamllint`, and `pre-commit`. These are NOT
+distributed as part of `HomericIntelligence-Hephaestus`; they are present only
+in the local development environment and have no bearing on the licenses of
+distributed artifacts. Some (e.g. `yamllint`, `bats-core`) are GPL-licensed,
+which is acceptable because they are external developer tools invoked at
+build/lint time, not linked into the published package.

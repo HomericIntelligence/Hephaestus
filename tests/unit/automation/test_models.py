@@ -1,0 +1,480 @@
+"""Tests for automation Pydantic models."""
+
+from datetime import datetime
+
+import pytest
+
+from hephaestus.automation.models import (
+    DEFAULT_WORKER_COUNT,
+    CIDriverOptions,
+    DependencyGraph,
+    ImplementationPhase,
+    ImplementationState,
+    ImplementerOptions,
+    IssueInfo,
+    IssueState,
+    ParallelWorkerOptionsBase,
+    PlannerOptions,
+    PlanResult,
+    PlanReviewerOptions,
+    ReviewerOptions,
+    VerboseParallelWorkerOptionsBase,
+    WorkerOptionsBase,
+    WorkerResult,
+)
+
+
+class TestIssueState:
+    """Tests for the IssueState enum."""
+
+    def test_merged_is_a_valid_member(self) -> None:
+        """A merged-PR dependency yields ``"MERGED"``; it must parse without error.
+
+        Regression: ``dependency_resolver`` crashed with
+        ``'MERGED' is not a valid IssueState`` when a ``Depends on #N`` reference
+        pointed at a merged PR.
+        """
+        assert IssueState("MERGED") is IssueState.MERGED
+
+    def test_is_done_terminal_states(self) -> None:
+        assert IssueState.CLOSED.is_done is True
+        assert IssueState.MERGED.is_done is True
+        assert IssueState.OPEN.is_done is False
+
+
+class TestIssueInfo:
+    """Tests for IssueInfo model."""
+
+    def test_basic_creation(self) -> None:
+        """Test creating a basic IssueInfo."""
+        issue = IssueInfo(
+            number=123,
+            title="Test issue",
+        )
+
+        assert issue.number == 123
+        assert issue.title == "Test issue"
+        assert issue.body == ""
+        assert issue.state == IssueState.OPEN
+        assert issue.labels == []
+        assert issue.dependencies == []
+        assert issue.priority == 0
+
+    def test_with_dependencies(self) -> None:
+        """Test IssueInfo with dependencies."""
+        issue = IssueInfo(
+            number=123,
+            title="Test issue",
+            dependencies=[100, 101, 102],
+        )
+
+        assert issue.dependencies == [100, 101, 102]
+
+    def test_hashable(self) -> None:
+        """Test IssueInfo is hashable."""
+        issue1 = IssueInfo(number=123, title="Test")
+        issue2 = IssueInfo(number=123, title="Different title")
+        issue3 = IssueInfo(number=456, title="Test")
+
+        # Same number should hash to same value
+        assert hash(issue1) == hash(issue2)
+        # Different number should hash differently (usually)
+        assert hash(issue1) != hash(issue3)
+
+        # Can be used in sets
+        issues = {issue1, issue2, issue3}
+        assert len(issues) == 2  # issue1 and issue2 are considered equal
+
+    def test_equality(self) -> None:
+        """Test IssueInfo equality."""
+        issue1 = IssueInfo(number=123, title="Test")
+        issue2 = IssueInfo(number=123, title="Different title")
+        issue3 = IssueInfo(number=456, title="Test")
+
+        assert issue1 == issue2  # Same number
+        assert issue1 != issue3  # Different number
+
+
+class TestImplementationState:
+    """Tests for ImplementationState model."""
+
+    def test_default_values(self) -> None:
+        """Test ImplementationState default values."""
+        state = ImplementationState(issue_number=123)
+
+        assert state.issue_number == 123
+        assert state.phase == ImplementationPhase.PLANNING
+        assert state.worktree_path is None
+        assert state.branch_name is None
+        assert state.pr_number is None
+        assert state.session_id is None
+        assert state.session_agent is None
+        assert isinstance(state.started_at, datetime)
+        assert state.completed_at is None
+        assert state.error is None
+        assert state.attempts == 0
+
+    def test_serialization(self) -> None:
+        """Test ImplementationState JSON serialization."""
+        state = ImplementationState(
+            issue_number=123,
+            phase=ImplementationPhase.IMPLEMENTING,
+            worktree_path="/tmp/worktree",
+            branch_name="123-test",
+            session_id="abc123",
+            session_agent="codex",
+        )
+
+        # Serialize to JSON
+        json_str = state.model_dump_json()
+        assert "123" in json_str
+        assert "implementing" in json_str
+        assert "abc123" in json_str
+
+        # Deserialize from JSON
+        restored = ImplementationState.model_validate_json(json_str)
+        assert restored.issue_number == state.issue_number
+        assert restored.phase == state.phase
+        assert restored.worktree_path == state.worktree_path
+        assert restored.session_id == state.session_id
+        assert restored.session_agent == state.session_agent
+
+    def test_learn_phase(self) -> None:
+        """Test LEARN phase in ImplementationPhase enum."""
+        assert ImplementationPhase.LEARN == "learn"
+
+        # Verify it can be used in state
+        state = ImplementationState(
+            issue_number=123,
+            phase=ImplementationPhase.LEARN,
+        )
+        assert state.phase == ImplementationPhase.LEARN
+
+    def test_follow_up_issues_phase(self) -> None:
+        """Test FOLLOW_UP_ISSUES phase in ImplementationPhase enum."""
+        assert ImplementationPhase.FOLLOW_UP_ISSUES == "follow_up_issues"
+
+        # Verify it can be used in state
+        state = ImplementationState(
+            issue_number=123,
+            phase=ImplementationPhase.FOLLOW_UP_ISSUES,
+        )
+        assert state.phase == ImplementationPhase.FOLLOW_UP_ISSUES
+
+
+class TestDependencyGraph:
+    """Tests for DependencyGraph model."""
+
+    def test_add_issue(self) -> None:
+        """Test adding issues to graph."""
+        graph = DependencyGraph()
+        issue = IssueInfo(number=123, title="Test")
+
+        graph.add_issue(issue)
+
+        assert 123 in graph.issues
+        assert graph.issues[123] == issue
+        assert 123 in graph.edges
+
+    def test_add_dependency(self) -> None:
+        """Test adding dependency edges."""
+        graph = DependencyGraph()
+
+        # Add issues first (now required)
+        graph.add_issue(IssueInfo(number=123, title="Main"))
+        graph.add_issue(IssueInfo(number=100, title="Dep 1"))
+        graph.add_issue(IssueInfo(number=101, title="Dep 2"))
+
+        graph.add_dependency(123, 100)
+        graph.add_dependency(123, 101)
+
+        assert graph.get_dependencies(123) == [100, 101]
+
+    def test_get_all_dependencies(self) -> None:
+        """Test transitive dependency resolution."""
+        graph = DependencyGraph()
+
+        # Add issues first
+        graph.add_issue(IssueInfo(number=123, title="Main"))
+        graph.add_issue(IssueInfo(number=100, title="Mid"))
+        graph.add_issue(IssueInfo(number=50, title="Base"))
+
+        # Create chain: 123 -> 100 -> 50
+        graph.add_dependency(123, 100)
+        graph.add_dependency(100, 50)
+
+        deps = graph.get_all_dependencies(123)
+
+        assert deps == {100, 50}
+
+    def test_get_all_dependencies_diamond(self) -> None:
+        """Test transitive dependencies with diamond pattern."""
+        graph = DependencyGraph()
+
+        # Add issues first
+        graph.add_issue(IssueInfo(number=123, title="Main"))
+        graph.add_issue(IssueInfo(number=100, title="Mid 1"))
+        graph.add_issue(IssueInfo(number=101, title="Mid 2"))
+        graph.add_issue(IssueInfo(number=50, title="Base"))
+
+        # Create diamond: 123 -> {100, 101} -> 50
+        graph.add_dependency(123, 100)
+        graph.add_dependency(123, 101)
+        graph.add_dependency(100, 50)
+        graph.add_dependency(101, 50)
+
+        deps = graph.get_all_dependencies(123)
+
+        assert deps == {100, 101, 50}
+
+
+class TestPlanResult:
+    """Tests for PlanResult model."""
+
+    def test_successful_plan(self) -> None:
+        """Test successful plan result."""
+        result = PlanResult(
+            issue_number=123,
+            success=True,
+        )
+
+        assert result.issue_number == 123
+        assert result.success is True
+        assert result.error is None
+        assert result.plan_already_exists is False
+
+    def test_failed_plan(self) -> None:
+        """Test failed plan result."""
+        result = PlanResult(
+            issue_number=123,
+            success=False,
+            error="Something went wrong",
+        )
+
+        assert result.success is False
+        assert result.error == "Something went wrong"
+
+
+class TestWorkerResult:
+    """Tests for WorkerResult model."""
+
+    def test_successful_implementation(self) -> None:
+        """Test successful implementation result."""
+        result = WorkerResult(
+            issue_number=123,
+            success=True,
+            pr_number=456,
+            branch_name="123-test",
+            worktree_path="/tmp/worktree",
+        )
+
+        assert result.issue_number == 123
+        assert result.success is True
+        assert result.pr_number == 456
+        assert result.branch_name == "123-test"
+
+    def test_failed_implementation(self) -> None:
+        """Test failed implementation result."""
+        result = WorkerResult(
+            issue_number=123,
+            success=False,
+            error="Implementation failed",
+        )
+
+        assert result.success is False
+        assert result.error == "Implementation failed"
+        assert result.pr_number is None
+
+
+class TestWorkerOptionsBase:
+    """Tests for shared worker option defaults."""
+
+    def test_base_defaults_and_model_dump(self) -> None:
+        """WorkerOptionsBase exposes only the dry-run field."""
+        options = WorkerOptionsBase()
+
+        assert WorkerOptionsBase.model_fields["dry_run"].default is False
+        assert "verbose" not in WorkerOptionsBase.model_fields
+        assert options.model_dump() == {"dry_run": False}
+
+    def test_parallel_and_verbose_base_defaults(self) -> None:
+        """Narrow worker base classes expose only their shared fields."""
+        assert ParallelWorkerOptionsBase.model_fields["max_workers"].default == DEFAULT_WORKER_COUNT
+        assert VerboseParallelWorkerOptionsBase.model_fields["verbose"].default is False
+
+    def test_all_option_models_inherit_shared_fields(self) -> None:
+        """Every automation option model inherits dry-run and omits state_dir."""
+        for model_cls in (
+            PlannerOptions,
+            ImplementerOptions,
+            ReviewerOptions,
+            PlanReviewerOptions,
+            CIDriverOptions,
+        ):
+            assert issubclass(model_cls, WorkerOptionsBase)
+            assert "dry_run" in model_cls.model_fields
+            assert "state_dir" not in model_cls.model_fields
+
+    def test_worker_count_defaults_use_shared_constant(self) -> None:
+        """Worker-count fields all use DEFAULT_WORKER_COUNT without renaming."""
+        assert PlannerOptions.model_fields["parallel"].default == DEFAULT_WORKER_COUNT
+        for model_cls in (
+            ImplementerOptions,
+            ReviewerOptions,
+            PlanReviewerOptions,
+            CIDriverOptions,
+        ):
+            assert model_cls.model_fields["max_workers"].default == DEFAULT_WORKER_COUNT
+
+    def test_constructor_keywords_and_model_dump_are_compatible(self) -> None:
+        """Existing constructor keyword shapes still validate and dump correctly."""
+        cases = (
+            (
+                PlannerOptions,
+                {"issues": [1], "parallel": 5, "dry_run": True},
+                "parallel",
+            ),
+            (
+                ImplementerOptions,
+                {"max_workers": 5, "dry_run": True},
+                "max_workers",
+            ),
+            (ReviewerOptions, {"max_workers": 5, "dry_run": True}, "max_workers"),
+            (
+                PlanReviewerOptions,
+                {"max_workers": 5, "dry_run": True, "verbose": True},
+                "max_workers",
+            ),
+            (CIDriverOptions, {"max_workers": 5, "dry_run": True, "verbose": True}, "max_workers"),
+        )
+
+        for model_cls, kwargs, worker_field in cases:
+            options = model_cls(**kwargs)
+            dumped = options.model_dump(include={worker_field, "dry_run", "verbose"})
+            expected = {worker_field: 5, "dry_run": True}
+            if "verbose" in model_cls.model_fields:
+                expected["verbose"] = True
+
+            assert dumped == expected
+
+
+class TestPlannerOptions:
+    """Tests for PlannerOptions model."""
+
+    def test_default_values(self) -> None:
+        """Test PlannerOptions default values."""
+        options = PlannerOptions(issues=[123, 456])
+
+        assert options.issues == [123, 456]
+        assert options.dry_run is False
+        assert options.force is False
+        assert options.parallel == DEFAULT_WORKER_COUNT
+        assert options.system_prompt_file is None
+        assert options.skip_closed is True
+        assert options.enable_advise is True
+
+    def test_custom_values(self) -> None:
+        """Test PlannerOptions with custom values."""
+        from pathlib import Path
+
+        options = PlannerOptions(
+            issues=[123],
+            dry_run=True,
+            force=True,
+            parallel=5,
+            system_prompt_file=Path("/tmp/prompt.md"),
+            skip_closed=False,
+            enable_advise=False,
+        )
+
+        assert options.dry_run is True
+        assert options.force is True
+        assert options.parallel == 5
+        assert options.skip_closed is False
+        assert options.enable_advise is False
+
+
+class TestImplementerOptions:
+    """Tests for ImplementerOptions model."""
+
+    def test_default_values(self) -> None:
+        """Test ImplementerOptions default values."""
+        options = ImplementerOptions(epic_number=123)
+
+        assert options.epic_number == 123
+        assert options.analyze_only is False
+        assert options.health_check is False
+        assert options.resume is False
+        assert options.max_workers == DEFAULT_WORKER_COUNT
+        assert options.skip_closed is True
+        assert options.auto_merge is True
+        assert options.dry_run is False
+        assert options.enable_learn is True
+        assert options.enable_follow_up is True  # Enabled by default
+
+    def test_custom_values(self) -> None:
+        """Test ImplementerOptions with custom values."""
+        options = ImplementerOptions(
+            epic_number=456,
+            analyze_only=True,
+            health_check=True,
+            resume=True,
+            max_workers=5,
+            skip_closed=False,
+            auto_merge=False,
+            dry_run=True,
+            enable_learn=True,
+            enable_follow_up=True,
+        )
+
+        assert options.epic_number == 456
+        assert options.analyze_only is True
+        assert options.health_check is True
+        assert options.resume is True
+        assert options.max_workers == 5
+        assert options.skip_closed is False
+        assert options.auto_merge is False
+        assert options.dry_run is True
+        assert options.enable_learn is True
+        assert options.enable_follow_up is True
+
+
+def test_issueinfo_eq_with_non_issueinfo_returns_notimplemented() -> None:
+    """__eq__ against a non-IssueInfo returns NotImplemented (models.py:74)."""
+    issue = IssueInfo(number=1, title="t")
+    assert issue.__eq__("not-an-issue") is NotImplemented
+    assert (issue == 1) is False
+
+
+def test_add_issue_idempotent_when_edges_already_present() -> None:
+    """Re-adding an issue whose edges key exists skips re-init (models.py:327->exit)."""
+    graph = DependencyGraph()
+    a = IssueInfo(number=1, title="a")
+    graph.add_issue(a)
+    graph.add_dependency(1, 2)  # populate edges[1] = [2]
+    graph.add_issue(a)  # edges[1] already present -> false branch, no reset
+    assert graph.edges[1] == [2]
+
+
+def test_add_dependency_raises_when_issue_not_in_graph() -> None:
+    """add_dependency raises ValueError for an unknown source issue (models.py:346)."""
+    graph = DependencyGraph()
+    with pytest.raises(ValueError, match=r"Issue #99 not in graph"):
+        graph.add_dependency(99, 1)  # issue 99 absent -> raise ValueError
+
+
+def test_add_dependency_when_edges_key_missing_initializes_list() -> None:
+    """add_dependency seeds edges[] when issue present but edges key absent (models.py:349)."""
+    graph = DependencyGraph()
+    graph.issues[1] = IssueInfo(number=1, title="a")  # issue present, edges key absent
+    graph.add_dependency(1, 2)
+    assert graph.edges[1] == [2]
+
+
+def test_add_dependency_skips_duplicate_edge() -> None:
+    """Adding an existing edge is a no-op (models.py:350->exit, duplicate-edge guard false side)."""
+    graph = DependencyGraph()
+    graph.add_issue(IssueInfo(number=1, title="a"))  # add_issue seeds edges[1]=[]
+    graph.add_dependency(1, 2)
+    graph.add_dependency(1, 2)  # depends_on already in edges[1] -> false branch, no re-append
+    assert graph.edges[1] == [2]

@@ -1,0 +1,1009 @@
+# Platform scope: Linux-only. macOS/Windows CI is out of scope and
+# tracked in #539. Published wheels remain pure-Python importable elsewhere.
+# When #539 lands, expand the matrix to include macOS and Windows runners.
+name: Required Checks
+
+on:
+  pull_request:
+    # This workflow is the sole source of code-validation contexts. Label and
+    # auto-merge events remain outside this workflow: a skipped heavy job reports a successful context, so allowing
+    # those events here could mask a still-running or failed code-event check.
+    types:
+      - opened
+      - synchronize
+      - edited
+      - reopened
+      - ready_for_review
+  push:
+    branches: [main]
+  # merge_group intentionally removed: merge-queue checks are served by the
+  # single fast `merge-queue-smoke` job in merge-queue-smoke.yml. Re-running
+  # all 16+ jobs per queue entry serialized on runner slots (70-90 min per
+  # merge). PR-side jobs in this workflow are unchanged.
+
+concurrency:
+  group: required-${{ github.workflow }}-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The trigger admits only code and merge-group events, so every dependent job
+  # runs. Retain a single output because the code-event contract is consumed by
+  # each job and makes a future trigger broadening explicit in review.
+  changes-gate:
+    name: changes-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      code_event: ${{ steps.decide.outputs.code_event }}
+    steps:
+      - name: Decide whether this event runs the heavy jobs
+        id: decide
+        env:
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          echo "code_event=true" >> "$GITHUB_OUTPUT"
+          echo "Code or merge-group event (${ACTION:-push}) — all validation jobs run."
+
+  forbid-suppressions:
+    name: forbid-suppressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Reject silent-failure workaround in shell/YAML/Dockerfile/justfile/HCL"
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files \
+            -- \
+            '*.sh' '*.bash' '*.yml' '*.yaml' '*.hcl' \
+            'Dockerfile*' '**/Dockerfile*' \
+            'justfile' '**/justfile' 'Justfile' '**/Justfile')
+          declare -a scan_files=()
+          for f in "${files[@]}"; do
+            case "$f" in
+              # Exempt this workflow file (heredoc would otherwise self-match)
+              .github/workflows/_required.yml) continue ;;
+              # Exempt any runbook that documents the rule (if present)
+              docs/runbooks/no-silent-failures.md) continue ;;
+            esac
+            scan_files+=("$f")
+          done
+          if [ "${#scan_files[@]}" -eq 0 ]; then
+            echo "No files to scan"
+            exit 0
+          fi
+          if grep -nE '\|\|[[:space:]]*true([[:space:]]*$|[[:space:]]+#)' "${scan_files[@]}"; then
+            echo ""
+            echo '::error::Found silent-failure workarounds above. Refactor per HomericIntelligence/Odysseus#280.'
+            exit 1
+          fi
+          echo 'OK: no silent-failure workarounds found'
+
+      - name: "Reject continue-on-error workflow opt-out"
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No workflow files"
+            exit 0
+          fi
+          if grep -nE '^[[:space:]]*continue-on-error:[[:space:]]*true[[:space:]]*$' "${files[@]}"; then
+            echo ""
+            msg='::error::Found "continue-on-error: true" above.'
+            msg+=' Fix the root cause per HomericIntelligence/Odysseus#280.'
+            echo "$msg"
+            exit 1
+          fi
+          echo 'OK: no "continue-on-error: true" found'
+
+      - name: "Reject advisory annotation pattern"
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+          # The advisory-annotation pattern in workflow run blocks is morally
+          # equivalent to continue-on-error: true: it lets a tool fail without
+          # failing the CI step. The runbook (Bucket F) requires every tool
+          # to be fail-fast. The only legitimate annotation is informational
+          # text not tied to a tool's exit code — those should use
+          # echo "WARN:" to stdout instead. See docs/runbooks/no-silent-failures.md.
+          declare -a scan_files=()
+          for f in "${files[@]}"; do
+            # Exempt this workflow file (heredoc would otherwise self-match).
+            case "$f" in
+              .github/workflows/_required.yml) continue ;;
+            esac
+            scan_files+=("$f")
+          done
+          if [ "${#scan_files[@]}" -eq 0 ]; then
+            echo "No files to scan"
+            exit 0
+          fi
+          if grep -nF '::warning::' "${scan_files[@]}"; then
+            echo ""
+            msg='::error::Found advisory annotations above.'
+            msg+=' Make the underlying tool fail-fast or use echo "WARN:" to stdout.'
+            msg+=' See HomericIntelligence/Odysseus#282 Bucket F.'
+            echo "$msg"
+            exit 1
+          fi
+          echo 'OK: no advisory annotations found'
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Single source of truth for linting: run the full pre-commit hook suite.
+      # ruff-check, ruff-format, yamllint, and mypy all run as pre-commit hooks,
+      # so invoking them as separate steps here would duplicate that work. The
+      # standalone "Pre-commit" workflow was folded into this required `lint`
+      # job (issue #1173) so that the WHOLE hook suite is a required status
+      # check — previously pre-commit was advisory, which let an unformatted
+      # file land on main via #959 and break pre-commit for every later PR.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
+
+      - name: Cache mypy incremental cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          # Persist incremental cache so the full-tree mypy hook (pass_filenames: false)
+          # re-checks only changed modules across CI runs. See issue #1503.
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-
+
+      - name: Run pre-commit (all hooks)
+        run: |
+          uv sync --all-groups --all-extras --locked
+          uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: Validate documentation links
+        run: uv run hephaestus-validate-links docs --repo-root .
+
+      - name: Upload pre-commit diff
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pre-commit-diffs
+          retention-days: 7
+          path: |
+            .git/pre-commit-*
+
+  uv-lock-check:
+    name: uv-lock-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+
+  justfile-check:
+    name: justfile-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+        with:
+          just-version: "1.36.0"
+      - name: Validate justfile
+        run: |
+          just --evaluate >/dev/null
+          just --list >/dev/null
+
+  symlink-check:
+    name: symlink-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run symlink check
+        run: bash scripts/check-symlinks.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    needs: [lint, changes-gate]
+    if: needs.changes-gate.outputs.code_event == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          files=(scripts/**/*.sh scripts/**/*.sbatch)
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No shell scripts found — nothing to lint."
+            exit 0
+          fi
+          # severity=error catches genuine bugs (unquoted vars in dangerous
+          # contexts, broken syntax) without bikeshedding on style — matches
+          # the bug class that broke the AchaeanFleet automation loop.
+          shellcheck --severity=error "${files[@]}"
+
+  pr-policy:
+    name: pr-policy
+    # Enforces the three HARD repo PR policies on every PR. All checks are gated
+    # by `if: always()` so one failure still surfaces the others:
+    #   1. PR body contains `Closes #N` on its own line.
+    #   2. The PR title and every branch commit subject follow the accepted
+    #      Conventional Commit policy.
+    #   3. Every branch commit carries a DCO Signed-off-by trailer.
+    # Push events are skipped because there is no PR to inspect. Merge-group
+    # events post this required context through a dedicated step because the
+    # PR-specific policy was already checked on the source PR and the synthetic
+    # merge-group payload has no pull_request object.
+    #
+    # This gate intentionally has NO `needs:` — it runs immediately so the
+    # policy checks report without depending on another job's timing.
+    # The earlier `needs: lint` workaround (#680) only delayed the read and left
+    # a required-check-skipped-on-lint-failure wrinkle.
+    if: >-
+      github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Confirm PR policy was evaluated before queue entry
+        if: github.event_name == 'merge_group'
+        run: >-
+          echo "PR policy applies to the source PR; merge-group checks validate the synthetic commit."
+
+      # The policy validator must come from the trusted base revision, never
+      # from the PR head. The base checkout also provides the bootstrap path for
+      # this rollout: the strict title shape is checked below while the strict
+      # validator interface is introduced by this PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy-base
+          persist-credentials: false
+
+      - name: "Fetch PR metadata"
+        id: fetch
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          # `gh pr view --json body,title` exposes the PR body (for the Closes #N
+          # check) and title; the paginated GraphQL query supplies complete
+          # commit messages for the Conventional Commit and DCO checks.
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json body,title \
+            > pr.json
+          query='query($owner:String!,$name:String!,$pr:Int!,$after:String) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                commits(first:100, after:$after) {
+                  nodes {
+                    commit {
+                      message
+                    }
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }'
+          nodes_file="$RUNNER_TEMP/pr-commit-nodes.jsonl"
+          page_file="$RUNNER_TEMP/pr-commit-page.json"
+          : > "$nodes_file"
+          cursor=""
+          while true; do
+            if [ -n "$cursor" ]; then
+              gh api graphql \
+                -f query="$query" \
+                -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+                -F after="$cursor" > "$page_file"
+            else
+              gh api graphql \
+                -f query="$query" \
+                -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+                > "$page_file"
+            fi
+            jq -c '.data.repository.pullRequest.commits.nodes[]' "$page_file" \
+              >> "$nodes_file"
+            has_next=$(jq -r '.data.repository.pullRequest.commits.pageInfo.hasNextPage' \
+              "$page_file")
+            case "$has_next" in
+              false) break ;;
+              true)
+                cursor=$(jq -r '.data.repository.pullRequest.commits.pageInfo.endCursor // empty' \
+                  "$page_file")
+                if [ -z "$cursor" ]; then
+                  echo '::error::Commit page omitted endCursor while hasNextPage=true'
+                  exit 1
+                fi
+                ;;
+              *)
+                echo '::error::Commit page omitted a valid pageInfo.hasNextPage value'
+                exit 1
+                ;;
+            esac
+          done
+          jq -n --slurpfile nodes "$nodes_file" \
+            '{data:{repository:{pullRequest:{commits:{nodes:$nodes}}}}}' \
+            > commits.json
+          echo "Fetched metadata for PR #$PR_NUMBER"
+
+      - name: "Check 1: PR body contains 'Closes #N'"
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
+        env:
+          # PR author login (github.event.pull_request.user.login), passed via
+          # env so the untrusted value never interpolates into the run script.
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          # Dependabot PR bodies are auto-generated and structurally never carry
+          # a `Closes #N` line. Exempt ONLY this body check for dependabot[bot]
+          # (#1070) — the commit metadata checks still apply.
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "OK: Dependabot PR — 'Closes #N' body check is not applicable"
+            exit 0
+          fi
+          # jq -r reads the untrusted body into a shell variable; downstream
+          # use is `printf '%s\n' "$body" | grep`, which never word-splits or
+          # interprets the body as a command, so injection is not possible.
+          body=$(jq -r '.body // ""' pr.json)
+          if printf '%s\n' "$body" | grep -qE '^Closes #[0-9]+[[:space:]]*$'; then
+            echo "OK: PR body contains a Closes #N line"
+          else
+            msg='::error::PR body must contain a line matching `^Closes #N$`'
+            msg+=' (literal "Closes", capital C, on its own line). See AGENTS.md PR policy.'
+            echo "$msg"
+            exit 1
+          fi
+
+      - name: "Check 2: PR title and commit subjects follow Conventional Commits"
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # The PR title becomes the main-branch subject after the required
+          # squash merge, so Git-generated machinery exceptions are disabled.
+          # The validator is read from the trusted base checkout. During the
+          # rollout of strict title mode (#2157), the base validator predates
+          # --strict; the anchored shape check below is the explicit bootstrap
+          # path and remains a defense-in-depth check after the rollout.
+          title=$(jq -r '.title // ""' pr.json)
+          if [[ "$title" == *$'\n'* || "$title" == *$'\r'* ]]; then
+            echo '::error::PR title must be a single line'
+            exit 1
+          fi
+          printf '%s\n' "$title" \
+            | python3 policy-base/scripts/check_conventional_commit.py -
+          if ! printf '%s\n' "$title" | grep -qE \
+            '^(feat|fix|docs|refactor|test|chore|ci|build|perf|style|revert)(\([^()]+\))?!?: .+$'; then
+            echo '::error::PR title must match strict Conventional Commits form'
+            exit 1
+          fi
+          # Subject = first line of each commit message (GraphQL .commit.message
+          # verified to resolve). Branch commits retain the validator's
+          # Git-machinery compatibility. Pipe on stdin, one per line, into the
+          # trusted base validator (DoD row 5 / issue #1209). Empty set passes
+          # by design.
+          jq -r '.data.repository.pullRequest.commits.nodes[]
+                 | .commit.message | split("\n")[0]' commits.json \
+            | python3 policy-base/scripts/check_conventional_commit.py -
+
+      - name: "Check 3: every commit carries a DCO Signed-off-by trailer"
+        if: >-
+          github.event_name == 'pull_request' && always() &&
+          steps.fetch.outcome == 'success'
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          # Dependabot commits are bot-authored, not human DCO attestations;
+          # exempt like Check 1 (#1070).
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "OK: Dependabot PR — DCO sign-off check is not applicable"
+            exit 0
+          fi
+          # Full commit message per node, NUL-separated (the trailer lives in
+          # the body, so unlike Check 2 we keep the whole message). Reuses the
+          # commits.json already fetched above. Empty set passes by design.
+          jq -j '.data.repository.pullRequest.commits.nodes[]
+                 | .commit.message + "\u0000"' commits.json \
+            | python3 policy-base/scripts/check_dco_signoff.py -
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history + tags so test_version_currency can resolve the
+          # latest vX.Y.Z tag for the doc-version-drift guard (#1233).
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install Pi CLI
+        uses: ./.github/actions/setup-pi-cli
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not nightly" \
+            --cov=hephaestus --cov-report=term-missing --cov-report=xml
+
+      - name: Check unit test structure
+        # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
+        run: uv run hephaestus-check-test-structure
+
+      - name: Check per-module coverage floors
+        run: uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run integration tests
+        # uv sync installed every [project.scripts] binary into .venv/bin, so
+        # the CLI entry-point checks must never skip here (#2173).
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
+        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
+
+  installed-cli-tests:
+    # Installed-artifact lane (#2173): build the wheel, install it into a
+    # fresh non-editable venv, and exercise every console binary from PATH
+    # with skipping forbidden. Proves end-users' `pip install` artifacts
+    # actually expose working CLIs — the editable uv env above cannot.
+    name: installed-cli-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # hatch-vcs derives the wheel version from git tags.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Install wheel into fresh venv
+        # [automation] extra: most console scripts live under
+        # hephaestus.automation.*. pytest runs the suite; pyyaml is
+        # imported by tests/conftest.py.
+        run: |
+          uv venv build/cli-venv
+          WHEEL=(dist/*.whl)
+          uv pip install --python build/cli-venv/bin/python "${WHEEL[0]}[automation]" pytest pyyaml
+
+      - name: Run CLI entry-point tests against installed binaries
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
+        run: |
+          export PATH="$PWD/build/cli-venv/bin:$PATH"
+          build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py \
+            --override-ini="addopts=" -v --strict-markers
+
+  shell-tests:
+    name: shell-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+        with:
+          just-version: "1.36.0"
+
+      - name: Run bats shell tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+          bats --recursive tests/shell
+
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked build environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Build wheel and sdist
+        run: uv run python -m build --no-isolation
+
+      - name: Smoke-test installed wheel
+        run: |
+          uv venv /tmp/hephaestus-wheel-smoke
+          uv pip install --python /tmp/hephaestus-wheel-smoke/bin/python dist/homericintelligence_hephaestus-*.whl --force-reinstall
+          /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print('Package version:', hephaestus.__version__)"
+          /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print('OK')"
+
+  security-dependency-scan:
+    name: security/dependency-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked dependency audit environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run pip-audit
+        id: pip-audit
+        run: uv run pip-audit
+
+      - name: Post pip-audit summary
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.pip-audit.outcome }}
+        run: |
+          {
+            echo "## pip-audit Security Scan"
+            echo ""
+            if [ "$AUDIT_OUTCOME" = "success" ]; then
+              echo "No HIGH/CRITICAL vulnerabilities found."
+            else
+              echo "Vulnerabilities detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  security-secrets-scan:
+    name: security/secrets-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Digest-pinned so the scan no longer depends on a transient GitHub
+      # Releases tarball URL (audit #1483). gitleaks is not published on
+      # PyPI, so its image digest is the reproducible pin; it remains
+      # container digest is the reproducible pin instead. Run via `docker
+      # run` rather than a job-level `container:` — the gitleaks image is
+      # musl-based Alpine with no Node.js runtime, which breaks
+      # actions/checkout (a glibc-linked JS action) when it executes inside
+      # the container.
+      - name: Run Gitleaks
+        env:
+          GITLEAKS_IMAGE: >-
+            ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9
+        run: |
+          set -euo pipefail
+          args=(detect --source=. --verbose --exit-code=1)
+          if [ -f .gitleaks.toml ]; then
+            args+=(--config=.gitleaks.toml)
+          fi
+          docker run --rm -v "$PWD:/repo" -w /repo "$GITLEAKS_IMAGE" "${args[@]}"
+
+  security-sast-scan:
+    name: security/sast-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Run bandit (SAST)
+        id: bandit
+        run: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
+
+      - name: Post bandit summary
+        if: always()
+        env:
+          BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+        run: |
+          {
+            echo "## Bandit Static Application Security Testing"
+            echo ""
+            if [ "$BANDIT_OUTCOME" = "success" ]; then
+              echo "No security issues found."
+            else
+              echo "Security issues detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  security-workflow-scan:
+    name: security/workflow-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Run zizmor (workflow SAST)
+        id: zizmor
+        # Offline + medium threshold: deterministic, network-free PR gate.
+        # Online audits (e.g. known-vulnerable-actions) run weekly in
+        # security.yml. Keep these flags identical to the zizmor pre-commit
+        # hook (drift-guarded by tests/unit/ci/test_zizmor_config.py).
+        run: uv run zizmor --no-online-audits --min-severity medium .github/workflows/
+
+      - name: Post zizmor summary
+        if: always()
+        env:
+          ZIZMOR_OUTCOME: ${{ steps.zizmor.outcome }}
+        run: |
+          {
+            echo "## zizmor GitHub Actions Workflow SAST"
+            echo ""
+            if [ "$ZIZMOR_OUTCOME" = "success" ]; then
+              echo "No workflow security findings at medium+ severity."
+            else
+              echo "Workflow security findings detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  schema-validation:
+    name: schema-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Validate GitHub workflow schemas
+        run: |
+          set -euo pipefail
+          # Use check-jsonschema's bundled `vendor.github-workflows` schema so
+          # the job is network-free and fail-fast. No schemastore.org probe and
+          # no advisory `::warning::` outage fallback (Bucket F anti-pattern).
+          mapfile -t wf_files < <(find .github/workflows -name "*.yml")
+          if [ "${#wf_files[@]}" -eq 0 ]; then
+            echo "No workflow files to validate"
+            exit 0
+          fi
+          uvx check-jsonschema \
+            --builtin-schema vendor.github-workflows \
+            "${wf_files[@]}"
+
+  deps-version-sync:
+    name: deps/version-sync
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Check version single-source-of-truth
+        run: |
+          set -euo pipefail
+
+          # Diagnostics (informational only).
+          PKG_VERSION=$(uv run python -c "import hephaestus; print(hephaestus.__version__)")
+          echo "Installed __version__: $PKG_VERSION"
+
+          # ENFORCEMENT: the tested checker asserts there is no
+          # static [project].version, that version is in [project].dynamic,
+          # that [tool.hatch.version].source == "vcs". Under `set -e` a non-zero exit fails the
+          # job — this is the live exit-1 path the old dead VERSION-file
+          # branch never provided.
+          #
+          # Invoked as an installed module (-m) rather than the scripts/ shim:
+          # the module form is immune to sys.path[0]/CWD-dependent __file__
+          # resolution, so the checker's get_repo_root() anchors to the
+          # installed package and reads the checked-out pyproject.toml.
+          uv run python -m hephaestus.scripts_lib.check_version_single_source
+
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+
+  license-scan:
+    name: license-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: changes-gate
+    if: needs.changes-gate.outputs.code_event == 'true'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # hatch-vcs needs full history to compute the version
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      # Install the package + all runtime extras. ``[all]`` is required so
+      # distributed_requirements() can read every runtime extra's Requires-Dist.
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run license scan
+        id: license-scan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: uv run python scripts/check_license_compatibility.py
+
+      - name: Post license-scan summary
+        if: always()
+        env:
+          LICENSE_OUTCOME: ${{ steps.license-scan.outcome }}
+        run: |
+          {
+            echo "## License Compatibility Scan"
+            echo ""
+            if [ "$LICENSE_OUTCOME" = "success" ]; then
+              echo "All distributed dependency licenses compatible with BSD-3-Clause (see NOTICE)."
+            else
+              echo "Non-compatible license or coverage gap detected — see job logs and NOTICE."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # required-checks-gate is an aggregate workflow-level signal and a classic
+  # branch-protection context, alongside the repository ruleset's direct
+  # required contexts. It fans in every gating job above so the full workflow
+  # has one auditable result; add every new gating job to `needs:`. Update the
+  # GitHub ruleset deliberately only when that job also needs its own direct
+  # ruleset context. See docs/ci/required-checks.md.
+  #
+  # `if: always()` is mandatory so an upstream job failure becomes one durable
+  # aggregate result. The step below accepts a skipped dependency only for a
+  # legitimately conditional job; this workflow's trigger never creates
+  # skipped heavy-job contexts from a label or auto-merge event.
+  required-checks-gate:
+    name: required-checks-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    if: always()
+    needs:
+      - changes-gate
+      - forbid-suppressions
+      - lint
+      - uv-lock-check
+      - justfile-check
+      - symlink-check
+      - shellcheck
+      - pr-policy
+      - unit-tests
+      - integration-tests
+      - installed-cli-tests
+      - shell-tests
+      - build
+      - security-dependency-scan
+      - security-secrets-scan
+      - security-sast-scan
+      - security-workflow-scan
+      - schema-validation
+      - deps-version-sync
+      - license-scan
+    steps:
+      - name: Verify no required job failed or was cancelled
+        env:
+          # `needs` is a GitHub-controlled object; passed via env and parsed by
+          # the stdlib json module — never interpolated into the shell, so this
+          # is injection-safe.
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | python3 -c '
+          import json
+          import sys
+
+          needs = json.load(sys.stdin)
+          bad = {
+              name: outcome["result"]
+              for name, outcome in needs.items()
+              if outcome["result"] not in ("success", "skipped")
+          }
+          if bad:
+              print("Required jobs not green:", json.dumps(bad, sort_keys=True))
+              sys.exit(1)
+          print("All required jobs green or legitimately skipped.")
+          '

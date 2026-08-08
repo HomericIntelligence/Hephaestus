@@ -1,0 +1,353 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2", "hatch-vcs>=0.4.0,<1"]
+build-backend = "hatchling.build"
+
+[project]
+name = "HomericIntelligence-Hephaestus"
+dynamic = ["version"]
+description = "Shared utilities and tooling for the HomericIntelligence ecosystem"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.13,<3.14"
+authors = [
+    { name = "Micah Villmow <research@villmow.us>" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+keywords = ["utilities", "helpers", "tooling", "homericintelligence"]
+dependencies = [
+    "Jinja2>=3.1,<4",
+    "packaging>=21.0,<27",
+    "pyyaml>=6.0,<7",
+    # IANA timezone data is bundled with Python on POSIX but not on Windows;
+    # rate_limit.py uses ZoneInfo which needs it on Windows.
+    "tzdata>=2026.2,<2027; platform_system == 'Windows'",
+]
+
+# Optional-dependency groups. The `all` aggregator below intentionally lists
+# all runtime extras (automation, github, nats, toml, xml, schema) — `dev` is
+# kept separate so production installs of `[all]` do not pull pytest/ruff/mypy.
+# `automation` is the product layer (hephaestus.automation) and pulls pydantic;
+# see docs/adr/0001-automation-library-boundary.md. If you change this
+# convention, update the "Optional dependencies" section in README.md.
+[project.optional-dependencies]
+github = [
+    "PyGithub>=2.9.1,<3",
+]
+toml = []
+xml = [
+    "defusedxml>=0.7,<1",
+]
+schema = [
+    "jsonschema>=4.0,<5",
+]
+nats = [
+    # hephaestus.nats is stdlib-dataclass based; keep pydantic owned by [automation].
+    # Guarded by tests/unit/validation/test_base_dep_surface.py.
+    "nats-py>=2.6,<3",
+]
+# Product layer (hephaestus.automation). See docs/adr/0001-automation-library-boundary.md.
+# pydantic is the runtime dependency of hephaestus/automation/models.py. As of
+# issue #1458 it is NO LONGER a base dependency (hephaestus.nats moved to stdlib
+# dataclasses), so this extra is now load-bearing: a base install does not get
+# pydantic. CI verifies the library-side import surface stays clean via
+# tests/unit/validation/test_import_surface.py.
+automation = [
+    "pydantic>=2.12.5,<3",
+]
+all = [
+    "HomericIntelligence-Hephaestus[automation,github,nats,toml,xml,schema]",
+]
+
+[dependency-groups]
+dev = [
+    # pytest 9.x and pytest-cov 7.x are the latest majors; tight floors are
+    # intentional so CI tests against the same majors the install contract
+    # advertises.
+    "pytest>=9.0,<10",
+    "pytest-cov>=7.0,<8",
+    "pre-commit>=3.0,<5",
+    "ruff>=0.15,<1",
+    "mypy>=1.8.0,<3",
+    "build>=1.0,<2",
+    # tests/integration/test_sdist_contents.py builds with --no-isolation, so
+    # pip-based dev installs need the backend requirements in the runtime env.
+    "hatchling>=1.27.0,<2",
+    "hatch-vcs>=0.4.0,<1",
+    "pip-audit>=2.7,<3",
+    # Property-based fuzz testing of LLM-output parsers (issue #1470).
+    "hypothesis>=6.0,<7",
+    "bandit>=1.9.4,<2",
+    # GitHub Actions workflow security scanner (issue #2151); complements
+    # bandit (Python) and ShellCheck (shell). See SECURITY.md.
+    "zizmor>=1.27,<2",
+    "pdoc>=14.0,<17",
+    "pytest-watcher>=0.4,<1",
+]
+automation = [
+    "pydantic>=2.12.5,<3",
+]
+
+[tool.uv]
+default-groups = ["dev", "automation"]
+
+[project.scripts]
+hephaestus-automation-loop = "hephaestus.automation.loop_runner:main"
+hephaestus-plan-issues = "hephaestus.automation.planner:main"
+hephaestus-implement-issues = "hephaestus.automation.implementer:main"
+hephaestus-review-prs = "hephaestus.automation.pr_reviewer:main"
+hephaestus-audit-prs = "hephaestus.automation.audit_reviewer:main"
+hephaestus-drive-prs-green = "hephaestus.automation.ci_driver:main"
+hephaestus-agent-stage = "hephaestus.automation.agent_stage:main"
+hephaestus-ensure-state-labels = "hephaestus.automation.ensure_state_labels:main"
+hephaestus-gh = "hephaestus.github.gh_cli:main"
+hephaestus-merge-prs = "hephaestus.github.pr_merge:main"
+hephaestus-fleet-sync = "hephaestus.github.fleet_sync:main"
+hephaestus-tidy = "hephaestus.github.tidy:main"
+hephaestus-label-severity = "hephaestus.github.severity_label:main"
+hephaestus-prepare-worktree = "hephaestus.github.skill_worktrees:prepare_worktree_main"
+hephaestus-audit-worktrees = "hephaestus.github.skill_worktrees:audit_worktrees_main"
+hephaestus-remove-worktree = "hephaestus.github.skill_worktrees:remove_worktree_main"
+hephaestus-resolve-pr = "hephaestus.github.skill_pr_review:resolve_pr_main"
+hephaestus-collect-pr-evidence = "hephaestus.github.skill_pr_review:collect_pr_evidence_main"
+hephaestus-pr-diff-context = "hephaestus.github.skill_pr_review:pr_diff_context_main"
+hephaestus-repository-evidence = "hephaestus.github.repository_evidence:repository_evidence_main"
+hephaestus-system-info = "hephaestus.system.info:main"
+hephaestus-download-dataset = "hephaestus.datasets.downloader:main"
+hephaestus-check-python-version = "hephaestus.validation.python_version:main"
+hephaestus-check-test-structure = "hephaestus.validation.test_layout:main"
+hephaestus-check-coverage = "hephaestus.validation.coverage:main"
+hephaestus-check-complexity = "hephaestus.validation.complexity:main"
+hephaestus-filter-audit = "hephaestus.validation.audit:main"
+hephaestus-validate-schemas = "hephaestus.validation.schema:main"
+hephaestus-validate-links = "hephaestus.validation.markdown:main"
+hephaestus-check-readmes = "hephaestus.validation.markdown:check_readmes_main"
+hephaestus-check-type-aliases = "hephaestus.validation.type_aliases:main"
+hephaestus-check-docstrings = "hephaestus.validation.docstrings:main"
+hephaestus-check-tier-labels = "hephaestus.validation.tier_labels:main"
+hephaestus-fix-markdown = "hephaestus.markdown.fixer:main"
+hephaestus-audit-doc-policy = "hephaestus.validation.doc_policy:main"
+hephaestus-check-version-consistency = "hephaestus.version.consistency:check_version_consistency_main"
+hephaestus-coredump-handler = "hephaestus.forensics.coredump_handler:main"
+hephaestus-run-under-gdb = "hephaestus.forensics.gdb_runner:main"
+hephaestus-check-package-versions = "hephaestus.version.consistency:check_package_versions_main"
+hephaestus-bump-version = "hephaestus.version.consistency:bump_version_main"
+hephaestus-check-doc-config = "hephaestus.validation.doc_config:main"
+hephaestus-check-stale-scripts = "hephaestus.validation.stale_scripts:main"
+hephaestus-mypy-each-file = "hephaestus.validation.mypy_per_file:main"
+hephaestus-check-links = "hephaestus.markdown.link_fixer:main"
+hephaestus-validate-anchors = "hephaestus.markdown.anchors:main"
+hephaestus-scaffold-subpackage = "hephaestus.scripts_lib.scaffold_subpackage:main"
+hephaestus-bench-precommit = "hephaestus.ci.precommit:bench_precommit_main"
+hephaestus-check-workflow-inventory = "hephaestus.ci.workflows:check_workflow_inventory_main"
+hephaestus-validate-workflow-checkout = "hephaestus.ci.workflows:validate_workflow_checkout_main"
+hephaestus-github-stats = "hephaestus.github.stats:main"
+hephaestus-agent-stats = "hephaestus.agents.stats:main"
+hephaestus-validate-agents = "hephaestus.agents.frontmatter:validate_agents_main"
+hephaestus-check-cli-tier-docs = "hephaestus.validation.cli_tier_docs:main"
+hephaestus-check-api-table-docs = "hephaestus.validation.api_table_docs:main"
+hephaestus-check-api-reference = "hephaestus.validation.api_reference:main"
+hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
+
+[project.urls]
+Homepage = "https://github.com/HomericIntelligence/Hephaestus"
+Repository = "https://github.com/HomericIntelligence/Hephaestus"
+Issues = "https://github.com/HomericIntelligence/Hephaestus/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "hephaestus/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hephaestus"]
+
+[tool.hatch.build.targets.sdist]
+# Ship only the package source plus essential metadata. Without this,
+# hatchling includes the whole repo (CI workflows, .claude config, tests,
+# scripts) in the source distribution. only-include uses exact path
+# anchoring so nested README.md files (.github/, docs/, scripts/) and
+# .gitignore are not swept in.
+only-include = [
+    "hephaestus",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "COMPATIBILITY.md",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+exclude = ["hephaestus/_version.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "D", "UP", "S101", "S102", "S105", "S106", "B", "SIM", "C4", "C901", "ANN204", "RUF"]
+ignore = [
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "D203",   # 1 blank line before class (conflicts with D211)
+    "D213",   # Multi-line summary second line (conflicts with D212)
+    "D417",   # Missing argument descriptions in docstring
+    "SIM117", # Cannot merge nested with statements in all cases
+    "RUF001", # Intentional Unicode in strings/docstrings
+    "RUF002", # Intentional Unicode in docstrings
+    "RUF003", # Intentional Unicode in comments
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "D102", "D107"]
+"scripts/**" = ["C901", "S101", "D102", "D107", "D401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration"]
+pythonpath = ["."]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "-m",
+    "not performance and not nightly",
+    "--cov=hephaestus",
+    "--cov-report=term-missing",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "unit: marks tests as unit tests",
+    "performance: bounded capacity, latency, and sustained-concurrency tests",
+    "nightly: high-cost functional tests run by the scheduled nightly workflow",
+    "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
+    "contract: opt-in sandboxed contract tests against real gh/claude CLIs; skipped unless HEPHAESTUS_CONTRACT_TESTS=1",
+]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_configs = true
+ignore_missing_imports = true
+show_error_codes = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+allow_redefinition = false
+implicit_reexport = false
+# Allow scripts/ (no __init__.py) to be discovered without "found twice" errors
+explicit_package_bases = true
+
+# Incremental type-checking (issue #1503). The pre-commit hook runs mypy over the
+# whole tree (hephaestus/ scripts/ tests/) on any .py change because
+# explicit_package_bases + duplicate basenames make per-file invocation unsafe
+# (see hephaestus/validation/mypy_per_file.py). Making incremental mode explicit
+# — rather than relying on mypy's default — keeps the full scan fast locally and
+# gives CI a single canonical cache path to persist.
+incremental = true
+cache_dir = ".mypy_cache"
+
+# Relax strict typing requirements for test and script code
+[[tool.mypy.overrides]]
+module = ["tests.*", "scripts.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_any_generics = false
+warn_return_any = false
+check_untyped_defs = false
+
+[tool.coverage.run]
+branch = true
+source = ["hephaestus"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+    # Full orchestration loops require a live claude/gh CLI — integration test territory.
+    # Pure-function helpers in these modules are tested in tests/unit/automation/ instead.
+    # The membership of this list is frozen in tests/unit/validation/test_omit_allowlist.py
+    # to prevent silent growth; tests/unit/validation/test_omit_justification.py enforces
+    # (via ast import-parsing) that each omitted module has a backing unit-test suite
+    # (issue #1422); and their importability is guarded by
+    # tests/integration/test_orchestration_smoke.py.
+    # implementer.py is a thin CLI wrapper over the pipeline coordinator (epic
+    # #1809): main() seeds --issues into the (implementation, pr_review) scope
+    # and shells out to a live claude/gh orchestration loop, so it is
+    # integration-only. The former implementer_cli / implementer_phase_runner /
+    # implementer_summary modules were deleted in the conversion (#1821).
+    "hephaestus/automation/implementer.py",
+    "hephaestus/automation/planner.py",
+    "hephaestus/automation/ci_driver.py",
+    # CIDriver collaborators extracted from ci_driver.py (#1357 / refs #1179, #1289).
+    # Each drives a live gh/claude/codex session, so like ci_driver.py they are
+    # integration-only; their pure helpers are unit-tested in tests/unit/automation/.
+    "hephaestus/automation/pr_discovery.py",
+    "hephaestus/automation/ci_check_inspector.py",
+    "hephaestus/automation/ci_fix_orchestrator.py",
+    "hephaestus/automation/post_merge_processor.py",
+    "hephaestus/automation/loop_runner.py",
+    # loop_repo_manager.py: repo-management cluster extracted from loop_runner.py (#1360/refs #1179).
+    # All functions shell out to gh/git CLI; their pure-function helpers are unit-tested.
+    "hephaestus/automation/loop_repo_manager.py",
+    # curses_ui.py uses a live terminal; cannot be unit-tested without a real TTY
+    "hephaestus/automation/curses_ui.py",
+    # audit_reviewer.py drives a live agent coordinator session; integration-only
+    "hephaestus/automation/audit_reviewer.py",
+]
+
+[tool.coverage.report]
+fail_under = 83
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", "build", ".venv"]
+# The UV SAST command passes `--severity-level medium` for PR/pre-commit gating
+# (issue #1481). LOW findings are pre-triaged noise for an automation codebase
+# that legitimately shells out to system tools with fixed literal argument
+# lists. Each suppressed test ID below is reviewed, not silently dropped:
+#
+#   B404/B403 (import subprocess/pickle) - subprocess and pickle are core to
+#     this repo's CLI-orchestration and cache-format helpers; use is scoped by
+#     the more specific B603/B301 checks below, not this import-level flag.
+#   B603/B607 (subprocess call / partial executable path) - all call sites use
+#     git, gh, gpg, or claude with fixed literal argument lists (no shell=True,
+#     no untrusted input in argv[0]); genuine shell-injection risk (shell=True)
+#     is HIGH severity and is unaffected by this threshold.
+#   B101 (assert) - internal invariant checks, not security boundaries.
+#   B105 (hardcoded password string) - false positives on non-secret constant
+#     strings; audited individually, see hephaestus/ci/bandit_low_baseline.json.
+#   B112 (try/except/continue) - intentional retry-loop control flow.
+#   B311 (random) - non-cryptographic random for retry jitter
+#     (hephaestus/utils/retry.py:80); any future security-sensitive use of
+#     `random` would raise this repo's suppressed count, which the weekly
+#     bandit-low-baseline job (.github/workflows/security.yml) catches as
+#     drift against hephaestus/ci/bandit_low_baseline.json.
+#
+# Re-review: quarterly, or whenever the weekly bandit-low-baseline job reports
+# any mismatch (new/increased LOW findings are regressions; reduced/removed
+# findings mean hephaestus/ci/bandit_low_baseline.json is stale).

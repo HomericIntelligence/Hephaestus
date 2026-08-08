@@ -1,0 +1,8 @@
+You are auditing multiple open PRs. EXECUTE the audit - do NOT return a plan.
+For EACH PR listed below, emit ONE ```json fenced block with keys:
+  pr_number (int), verdict (one of: GO|NOGO|UNSURE),
+  summary (str, <= 500 chars), findings (list[str]).
+Do NOT background. Do NOT exit early. Read-only tools only (Read/Grep/Glob).
+
+Open PRs:
+{{ prs_text }}

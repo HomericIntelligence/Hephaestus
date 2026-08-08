@@ -1,0 +1,3321 @@
+"""Coordinator event-loop tests (epic #1809, #1817).
+
+Covers: quiescence with FakeWorkerPool/FakeStageGitHub, the journal-order
+invariant (durable mutation precedes the queue push in one shared trace),
+downstream-first drain order, per-repo in-flight cap, zero-work convergence,
+the loop budget, the non-blocking rate-budget park, dry-run
+asserts-no-submit, poisoned-item isolation, and FAIL_BACK routing.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import uuid
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
+from hephaestus.automation.pipeline import seeding as seeding_mod
+from hephaestus.automation.pipeline.coordinator import (
+    _FAIL_BACK_CAP,
+    Coordinator,
+    PipelineConfig,
+)
+from hephaestus.automation.pipeline.github_jobs import (
+    AppendReplyJournalRequest,
+    GitHubJob,
+    ReplyJournalAppended,
+)
+from hephaestus.automation.pipeline.jobs import (
+    WORKTREE_MATERIALIZED_KEY,
+    AgentJob,
+    GitJob,
+    JobHandle,
+    JobResult,
+)
+from hephaestus.automation.pipeline.routing import (
+    Disposition,
+    PipelineScope,
+    StageName,
+    StageOutcome,
+)
+from hephaestus.automation.pipeline.seeding import SeedEntry
+from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.resilience import (
+    all_circuit_breaker_snapshots,
+    get_circuit_breaker,
+    reset_all_circuit_breakers,
+)
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+
+def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
+    return AgentJob(
+        repo=repo,
+        issue=issue,
+        agent="claude",
+        model="m",
+        prompt_builder=lambda **kwargs: "prompt",
+        cwd=Path("/tmp"),
+        timeout_s=10,
+        descr="stub agent job",
+    )
+
+
+class StubStage:
+    """Scripted stage: each step() pops the next scripted StepResult."""
+
+    def __init__(self, *results: Any, enter: Any = None) -> None:
+        self.results = deque(results)
+        self.enter_result = enter
+        self.calls: list[tuple[str, Any]] = []
+
+    def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+        self.calls.append(("enter", item.issue or item.repo))
+        return self.enter_result
+
+    def step(self, item: WorkItem, ctx: Any) -> Any:
+        self.calls.append(("step", item.issue or item.repo))
+        if not self.results:
+            return StageOutcome(Disposition.FINISH_FAIL, "script exhausted")
+        return self.results.popleft()
+
+    def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+        self.calls.append(("job_done", result.ok))
+
+
+def _github_append_job(tmp_path: Path) -> tuple[GitHubJob, AppendReplyJournalRequest]:
+    """Build one valid typed GitHub job for coordinator completion tests."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    request = AppendReplyJournalRequest(3, marker, f'{marker}\n<!-- {{"format":1}} -->')
+    return GitHubJob("repo-a", tmp_path.resolve(), request, "append"), request
+
+
+def make_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    repos: list[str] | None = None,
+    issues: list[int] | None = None,
+    seed_entries: list[list[SeedEntry]] | None = None,
+    loops: int = 1,
+    max_workers: int = 1,
+    parallel_repos: int = 1,
+    dry_run: bool = False,
+    serialize_file_overlap: bool = True,
+    github: FakeStageGitHub | None = None,
+    rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
+) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
+    """Build a Coordinator wired to fakes, with seeding scripted per pass."""
+    config = PipelineConfig(
+        org="org",
+        repos=repos if repos is not None else ["repo-a"],
+        issues=issues if issues is not None else [],
+        loops=loops,
+        max_workers=max_workers,
+        parallel_repos=parallel_repos,
+        dry_run=dry_run,
+        serialize_file_overlap=serialize_file_overlap,
+        projects_dir=tmp_path,
+    )
+    gh = github or FakeStageGitHub()
+    pool = FakeWorkerPool()
+    passes = deque(seed_entries or [[]])
+
+    def fake_seed(repos_arg: Any, issues_arg: Any, prs_arg: Any) -> list[SeedEntry]:
+        return list(passes.popleft()) if passes else []
+
+    monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
+    coordinator = Coordinator(config, github=gh, pool=pool, install_signals=False)
+    coordinator._rate_budget_ok = rate_budget_ok or (lambda: (True, 0.0))  # type: ignore[method-assign]
+    return coordinator, pool, gh
+
+
+def _issue_item(
+    issue: int = 1, stage: StageName = StageName.PLANNING, repo: str = "repo-a"
+) -> WorkItem:
+    return WorkItem(repo=repo, kind=ItemKind.ISSUE, issue=issue, stage=stage, state="ENTER")
+
+
+def test_github_receipt_applies_before_on_done_state_and_routing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coordinator calls receipt application while the submitting state is intact."""
+    coordinator, _pool, _github = make_coordinator(tmp_path, monkeypatch)
+    calls: list[tuple[str, str]] = []
+
+    class ReceiptStage(StubStage):
+        def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+            del result, ctx
+            calls.append(("on_job_done", item.state))
+
+        def step(self, item: WorkItem, ctx: Any) -> StageOutcome:
+            del ctx
+            calls.append(("step", item.state))
+            return StageOutcome(Disposition.FINISH_FAIL, "receipt_applied")
+
+    coordinator.stages[StageName.PR_REVIEW] = ReceiptStage()
+    item = _issue_item(3, StageName.PR_REVIEW)
+    item.state = "POST"
+    job, request = _github_append_job(tmp_path)
+    handle = JobHandle(job=job, on_done_state="POST_APPLY")
+    coordinator.in_flight[handle] = item
+    coordinator.inflight_per_repo[item.repo] = 1
+
+    coordinator._handle_completion(
+        handle,
+        JobResult(ok=True, value=ReplyJournalAppended(request=request)),
+    )
+
+    assert calls == [("on_job_done", "POST"), ("step", "POST_APPLY")]
+
+
+def test_interrupted_github_job_never_applies_a_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted operation remains resumable in its submitting state."""
+    coordinator, _pool, _github = make_coordinator(tmp_path, monkeypatch)
+    stage = StubStage()
+    coordinator.stages[StageName.PR_REVIEW] = stage
+    item = _issue_item(3, StageName.PR_REVIEW)
+    item.state = "POST"
+    job, _request = _github_append_job(tmp_path)
+    handle = JobHandle(job=job, on_done_state="POST_APPLY")
+    coordinator.in_flight[handle] = item
+    coordinator.inflight_per_repo[item.repo] = 1
+
+    coordinator._handle_completion(
+        handle,
+        JobResult(ok=False, interrupted=True, error="shutdown"),
+    )
+
+    assert not any(name == "job_done" for name, _value in stage.calls)
+    assert item.state == "POST"
+    assert item.result == ItemResult(
+        passed=False,
+        reason="resumable at pr_review",
+        final_stage=StageName.PR_REVIEW,
+    )
+
+
+class TestQuiescence:
+    """Full-run tests driving seeded items to the finished ledger."""
+
+    def test_fresh_direct_issue_uses_a_unique_branch_per_source_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A closed predecessor cannot reserve a later direct run's branch name."""
+        base_sha = "a" * 40
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[617],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        nonce_one = uuid.UUID(int=1)
+        nonce_two = uuid.UUID(int=2)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator.uuid.uuid4",
+            lambda: nonce_one,
+        )
+        first = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        first._begin_direct_issue_source("repo-a", base_sha)
+        first_source = first._direct_issue_source
+        assert first_source is not None
+        assert first._drain_direct_issue_source() == 1
+        first_item = first.queues[StageName.IMPLEMENTATION].snapshot()[0]
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator.uuid.uuid4",
+            lambda: nonce_two,
+        )
+        second = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        second._begin_direct_issue_source("repo-a", base_sha)
+        second_source = second._direct_issue_source
+        assert second_source is not None
+        assert second._drain_direct_issue_source() == 1
+        second_item = second.queues[StageName.IMPLEMENTATION].snapshot()[0]
+
+        assert first_source.run_nonce == nonce_one.hex
+        assert second_source.run_nonce == nonce_two.hex
+        assert first_item.branch == f"617-auto-impl-direct-{nonce_one.hex}"
+        assert second_item.branch == f"617-auto-impl-direct-{nonce_two.hex}"
+        assert first_item.branch != second_item.branch
+        assert first_item.payload["_direct_scope_base_sha"] == base_sha
+        assert first_item.payload["_direct_scope_worktree_nonce"] == nonce_one.hex
+        assert second_item.payload["_direct_scope_worktree_nonce"] == nonce_two.hex
+
+    def test_direct_issue_with_open_replacement_pr_does_not_allocate_a_fresh_branch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact ``Closes #N`` rediscovery path remains an adopted PR path."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[617],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"], open_pr=812),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+
+        assert coordinator._drain_direct_issue_source() == 1
+        item = coordinator.queues[StageName.PR_REVIEW].snapshot()[0]
+
+        assert item.pr == 812
+        assert item.branch == ""
+        assert item.payload["existing_pr"] is True
+
+    def test_direct_issue_source_rotates_overlap_and_admits_independent_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An overlapping candidate cannot consume worker 2's live-work permit."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[22, 23],
+            loops=1,
+            max_workers=2,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        plans = {22: {"shared.py"}, 23: {"independent.py"}}
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            lambda issue, **_kwargs: plans[issue],
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        active = _issue_item(21, StageName.IMPLEMENTATION)
+        assert coordinator._try_acquire_work_permit(active)
+        _fake_in_flight_item(coordinator, active, claimed_files={"shared.py"})
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+
+        assert coordinator._drain_direct_issue_source() == 1
+        queued = coordinator.queues[StageName.IMPLEMENTATION].snapshot()
+        assert [item.issue for item in queued] == [23]
+        assert queued[0].payload["_implementation_file_claims"] == {
+            (("org", "repo-a"), "independent.py")
+        }
+
+    def test_direct_issue_source_caches_unchanged_overlap_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A blocked cursor is rescanned only after active file claims change."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[22],
+            loops=1,
+            max_workers=2,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        fetches: list[int] = []
+
+        def planned(issue: int, **_kwargs: Any) -> set[str]:
+            fetches.append(issue)
+            return {"shared.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            planned,
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        active = _issue_item(21, StageName.IMPLEMENTATION)
+        assert coordinator._try_acquire_work_permit(active)
+        handle = _fake_in_flight_item(coordinator, active, claimed_files={"shared.py"})
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+
+        assert coordinator._drain_direct_issue_source() == 0
+        assert coordinator._drain_direct_issue_source() == 0
+        assert fetches == [22]
+
+        coordinator._inflight_implementation_claims.pop(handle)
+        assert coordinator._drain_direct_issue_source() == 1
+        assert fetches == [22, 22]
+
+    def test_metrics_server_starts_for_run_and_stops_on_teardown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coordinator teardown closes the explicit local listener on every normal exit."""
+        from hephaestus.observability import server as server_mod
+
+        created: list[object] = []
+
+        class FakeMetricsServer:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+                self.started = False
+                self.stopped = False
+                created.append(self)
+
+            def start(self) -> None:
+                self.started = True
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        monkeypatch.setattr(server_mod, "MetricsHTTPServer", FakeMetricsServer)
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=[], loops=1, projects_dir=tmp_path, metrics_port=9123),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator.run() == 0
+        assert len(created) == 1
+        assert created[0].started is True  # type: ignore[attr-defined]
+        assert created[0].stopped is True  # type: ignore[attr-defined]
+
+    def test_explicit_issue_scope_suppresses_repo_discovery_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--issues N scopes the run to N instead of reconstructing the whole repo."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[1850],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        gh = FakeStageGitHub(merged_pr=1851, issue_state="CLOSED")
+
+        def fake_seed(
+            repos_arg: list[str], issues_arg: list[int], prs_arg: list[int]
+        ) -> list[SeedEntry]:
+            assert repos_arg == []
+            assert issues_arg == []
+            assert prs_arg == []
+            return []
+
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", fake_seed)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        coordinator = Coordinator(
+            config,
+            github=gh,
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        assert coordinator.run() == 0
+        assert [item.issue for item in coordinator.items] == [1850]
+        assert all(item.kind is not ItemKind.REPO for item in coordinator.items)
+
+    def test_repo_products_flow_to_finished(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repo seed's products traverse their entry stages into the ledger."""
+        seed = [SeedEntry(kind="repo", identifier="repo-a", stage=StageName.REPO, reason="seed")]
+        # The repo item and its one actionable product are both live until
+        # each reaches the finished sink.
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], max_workers=2
+        )
+
+        class ProducingRepoStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                item.payload["products"] = [
+                    {"kind": "issue", "number": 11, "stage": StageName.PLANNING, "reason": "r"},
+                    {"kind": "issue", "number": 12, "stage": None, "reason": "excluded"},
+                ]
+                return StageOutcome(Disposition.FINISH_PASS, "seeded:1")
+
+        coordinator.stages[StageName.REPO] = ProducingRepoStage()
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            StageOutcome(Disposition.ADVANCE, "planned")
+        )
+        coordinator.stages[StageName.PLAN_REVIEW] = StubStage(
+            StageOutcome(Disposition.FINISH_PASS, "done")
+        )
+
+        exit_code = coordinator.run()
+
+        assert exit_code == 0
+        assert len(coordinator.ledger) == 2  # repo item + issue item
+        assert all(result.passed for result in coordinator.ledger)
+        assert len(pool.submitted) == 0
+        keys = [key for kind, *key in coordinator.event_log if kind == "push"]
+        assert ["planning", "repo-a#11"] in [list(k) for k in keys]
+
+    def test_zero_work_convergence_exits_before_loop_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All-terminal seeds produce zero actionable work: exit after one pass."""
+        seed = [
+            SeedEntry(kind="issue", identifier=5, stage=StageName.FINISHED, reason="PR merged"),
+        ]
+        coordinator, _, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed, seed, seed], loops=5
+        )
+
+        exit_code = coordinator.run()
+
+        assert exit_code == 0
+        assert coordinator._loops_run == 1  # converged, budget not consumed
+        assert len(coordinator.ledger) == 1
+        assert coordinator.ledger[0].passed
+
+    def test_loop_budget_bounds_reseeding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Actionable work each pass re-seeds only up to --loops."""
+        seed = [SeedEntry(kind="issue", identifier=7, stage=StageName.PLANNING, reason="r")]
+        coordinator, _, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed, seed, seed, seed], loops=2
+        )
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            StageOutcome(Disposition.SKIP, "skip"),
+            StageOutcome(Disposition.SKIP, "skip"),
+        )
+
+        exit_code = coordinator.run()
+
+        assert coordinator._loops_run == 2
+        assert exit_code == 1  # SKIP counts as non-passing (fail-skip-blocked)
+        assert [result.reason for result in coordinator.ledger] == ["skip: skip", "skip: skip"]
+
+    def test_reseed_with_only_repo_seeds_is_zero_work_convergence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repo pushes do not keep a zero-work reseed alive."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, loops=2)
+        coordinator._loops_run = 1
+        coordinator._pass_work_count = 1
+
+        def reseed_repo_only() -> int:
+            coordinator._pass_work_count = 0
+            return 1
+
+        monkeypatch.setattr(coordinator, "_seed_pass", reseed_repo_only)
+
+        assert coordinator._reseed_if_converged() is False
+        assert coordinator._loops_run == 2
+
+    def test_poisoned_item_routes_finished_fail_and_loop_survives(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stage exception fails the ITEM, not the loop."""
+        seed = [
+            SeedEntry(kind="issue", identifier=1, stage=StageName.PLANNING, reason="poison"),
+            SeedEntry(kind="issue", identifier=2, stage=StageName.PLAN_REVIEW, reason="ok"),
+        ]
+        coordinator, _, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], parallel_repos=2
+        )
+
+        class PoisonStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                raise RuntimeError("boom")
+
+        coordinator.stages[StageName.PLANNING] = PoisonStage()
+        coordinator.stages[StageName.PLAN_REVIEW] = StubStage(
+            StageOutcome(Disposition.FINISH_PASS, "fine")
+        )
+
+        exit_code = coordinator.run()
+
+        assert exit_code == 1
+        reasons = sorted(result.reason for result in coordinator.ledger)
+        assert any(reason.startswith("poisoned: boom") for reason in reasons)
+        assert any(reason == "fine" for reason in reasons)
+
+    def test_pr_review_adoption_records_completion_before_wait_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct PR review honors the coordinator's callback-before-state order."""
+        github = FakeStageGitHub(pr_head_branch="review-pr")
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        worktree = tmp_path / "build" / ".worktrees" / "pr-review-pr-601"
+        pool.queue_result(JobResult(ok=True, value={"path": str(worktree), "dirty": False}))
+        # Stop after the review job is submitted. This keeps the assertion at
+        # the adoption boundary while exercising the real completion drain.
+        pool.queue_result(JobResult(ok=False, interrupted=True, error="stop"))
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.PR,
+            issue=1,
+            pr=601,
+            stage=StageName.PR_REVIEW,
+            state="ENTER",
+            payload={"_enter_pending": True},
+        )
+
+        coordinator._run_item(item)
+        coordinator._drain_completions()
+
+        assert item.worktree == str(worktree)
+        assert item.payload["direct_pr_worktree"] == str(worktree)
+        assert item.state == "REVIEW_WAIT"
+        jobs = [handle.job for handle in pool.submitted]
+        assert isinstance(jobs[0], GitJob)
+        assert jobs[0].kwargs["isolated"] is True
+
+    def test_issue_seed_with_existing_pr_marks_pr_review_adoption(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue-scoped drive-green input retains its existing-PR provenance."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        entry = SeedEntry(
+            kind="issue",
+            identifier=601,
+            stage=StageName.PR_REVIEW,
+            reason="open PR awaiting review",
+            pr_number=701,
+        )
+
+        item = coordinator._entry_to_item(entry, "repo-a")
+
+        assert item.kind is ItemKind.ISSUE
+        assert item.pr == 701
+        assert item.payload["existing_pr"] is True
+
+    def test_direct_unlinked_pr_finishes_failed_before_review(self, tmp_path: Path) -> None:
+        """A PR number cannot substitute for linked issue requirements."""
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path),
+            github=FakeStageGitHub(pr_issue=None),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.FINISHED
+        assert entries[0].passed is False
+        assert "no linked issue" in entries[0].reason
+
+    def test_direct_pr_metadata_context_enters_checkout_bound_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A direct seed needs metadata, not an unverified remote diff."""
+        github = FakeStageGitHub(
+            pr_issue=700,
+            issue_title="Review the migration",
+            issue_body="Preserve the requirements context.",
+            pr_review_context={
+                "pr_description": "Closes #700\n\nCarry review inputs.",
+                "pr_head_sha": "a" * 40,
+                "pr_base_branch": "main",
+            },
+        )
+        config = PipelineConfig(org="org", repos=["repo-a"], prs=[701], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=github, pool=FakeWorkerPool(), install_signals=False
+        )
+
+        entries = coordinator._seed_direct_scope("repo-a")
+        item = coordinator._entry_to_item(entries[0], "repo-a")
+
+        assert entries[0].stage is StageName.PR_REVIEW
+        assert item.stage is StageName.PR_REVIEW
+        assert item.pr == 701
+        assert item.issue == 700
+        assert item.payload["issue_title"] == "Review the migration"
+        assert item.payload["issue_body"] == "Preserve the requirements context."
+        assert item.payload["pr_description"].startswith("Closes #700")
+        assert "pr_diff" not in item.payload
+
+
+def _fake_in_flight_item(
+    coordinator: Coordinator,
+    item: WorkItem,
+    *,
+    claimed_files: set[str] | None = None,
+) -> JobHandle:
+    """Register *item* as in-flight under a synthetic handle (no real submit)."""
+    handle = JobHandle(
+        job=AgentJob(
+            repo=item.repo,
+            issue=item.issue or 0,
+            agent="claude",
+            model="m",
+            prompt_builder=lambda **_kw: "p",
+            cwd=Path("."),
+            timeout_s=1,
+        ),
+        on_done_state=item.stage,
+    )
+    coordinator.in_flight[handle] = item
+    if claimed_files:
+        repo = (coordinator.config.org, item.repo)
+        coordinator._inflight_implementation_claims[handle] = {
+            (repo, path) for path in claimed_files
+        }
+    coordinator.inflight_per_repo[item.repo] += 1
+    return handle
+
+
+class TestFatalTeardown:
+    """Fatal-exception exit must reap the pool + park in-flight items (#2059)."""
+
+    def test_fatal_exception_shuts_down_pool_and_parks_in_flight(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fatal (non-signal) exit cancels the pool and never leaks in-flight work.
+
+        Before #2059, ``run()``'s finally only reaped on the signal path
+        (``self.shutdown`` set), so a fatal exception left the executor and its
+        in-flight AgentJob subprocesses running.
+        """
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch)
+        in_flight = _issue_item(42, StageName.IMPLEMENTATION)
+        _fake_in_flight_item(coordinator, in_flight)
+
+        def boom() -> None:
+            raise RuntimeError("fatal boom")
+
+        # Raise OUTSIDE _run_item's per-item guard so it reaches run()'s except.
+        monkeypatch.setattr(coordinator, "_drain_queues", boom)
+
+        exit_code = coordinator.run()
+
+        # Fatal, not interrupt: shutdown must NOT be set (would mis-report 130).
+        assert not coordinator.shutdown.is_set()
+        assert coordinator._fatal is True
+        assert exit_code == 1
+        # Pool reaped exactly once; in-flight maps cleared.
+        assert pool.shutdown_calls == 1
+        assert coordinator.in_flight == {}
+        assert not coordinator.inflight_per_repo
+        # The in-flight item was parked RESUMABLE (never silently dropped).
+        assert in_flight.result is not None
+        assert not in_flight.result.passed
+        assert in_flight.result.reason == "resumable at implementation"
+
+    def test_signal_teardown_shuts_down_pool_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Signal path + finally must not double-shutdown the pool (idempotent guard)."""
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch)
+        in_flight = _issue_item(7, StageName.IMPLEMENTATION)
+        _fake_in_flight_item(coordinator, in_flight)
+
+        # Trip an immediate (second-signal) shutdown before the first tick's
+        # top-of-loop check, so _teardown_immediate runs and breaks the loop.
+        original_seed = coordinator._seed_pass
+
+        def seed_then_immediate() -> int:
+            pushed = original_seed()
+            coordinator._immediate = True
+            return pushed
+
+        monkeypatch.setattr(coordinator, "_seed_pass", seed_then_immediate)
+
+        exit_code = coordinator.run()
+
+        assert coordinator.shutdown.is_set()
+        assert exit_code == 130  # interrupt
+        assert pool.shutdown_calls == 1  # _teardown_immediate + finally == once
+        assert coordinator.in_flight == {}
+        assert in_flight.result is not None
+        assert in_flight.result.reason == "resumable at implementation"
+
+
+class TestJournalOrder:
+    """The durable-mutation-precedes-queue-push invariant, in one shared trace."""
+
+    def test_durable_mutation_precedes_queue_push(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every push of a mutated item appears AFTER its durable write."""
+        seed = [SeedEntry(kind="issue", identifier=9, stage=StageName.PLANNING, reason="r")]
+        coordinator, _, gh = make_coordinator(tmp_path, monkeypatch, seed_entries=[seed])
+
+        original_log = gh._log
+
+        def shared_log(name: str, *args: Any) -> None:
+            original_log(name, *args)
+            coordinator.event_log.append(("mutation", name, args))
+
+        gh._log = shared_log  # type: ignore[method-assign]
+
+        class MutatingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                # Durable write immediately before the ADVANCE outcome that
+                # causes the queue push (the house journal-order pattern).
+                ctx.github.add_labels(item.issue, ["state:plan-go"])
+                return StageOutcome(Disposition.ADVANCE, "go")
+
+        coordinator.stages[StageName.PLANNING] = MutatingStage()
+        coordinator.stages[StageName.PLAN_REVIEW] = StubStage(
+            StageOutcome(Disposition.FINISH_PASS, "done")
+        )
+
+        coordinator.run()
+
+        trace = coordinator.event_log
+        mutation_idx = next(
+            i for i, entry in enumerate(trace) if entry[:2] == ("mutation", "gh_issue_add_labels")
+        )
+        push_idx = next(i for i, entry in enumerate(trace) if entry[:2] == ("push", "plan_review"))
+        assert mutation_idx < push_idx, f"push preceded durable mutation: {trace}"
+
+
+class TestDrainOrder:
+    """Downstream-first queue draining."""
+
+    def test_downstream_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """merge_wait drains before review, planning, and repo."""
+        # This test intentionally fills four distinct stages before draining;
+        # the coordinator-wide permit budget must be large enough to admit
+        # that four-item fixture.
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, max_workers=4)
+        for stage in (
+            StageName.PLANNING,
+            StageName.MERGE_WAIT,
+            StageName.PR_REVIEW,
+            StageName.REPO,
+        ):
+            coordinator.stages[stage] = StubStage(StageOutcome(Disposition.FINISH_PASS, "x"))
+        coordinator._push_item(_issue_item(1, StageName.PLANNING), StageName.PLANNING, enter=True)
+        coordinator._push_item(
+            _issue_item(2, StageName.MERGE_WAIT), StageName.MERGE_WAIT, enter=True
+        )
+        coordinator._push_item(_issue_item(3, StageName.PR_REVIEW), StageName.PR_REVIEW, enter=True)
+        repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO)
+        coordinator._push_item(repo_item, StageName.REPO, enter=True)
+        coordinator.event_log.clear()
+
+        coordinator._drain_queues()
+
+        drained = [entry[1] for entry in coordinator.event_log if entry[0] == "drain"]
+        assert drained.index("merge_wait") < drained.index("pr_review")
+        assert drained.index("pr_review") < drained.index("planning")
+        assert drained.index("planning") < drained.index("repo")
+
+
+class TestAdmission:
+    """Per-repo in-flight cap via the distinct inflight_per_repo Counter."""
+
+    def test_per_repo_cap_defers_second_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """max_workers=1: the second same-repo item is not admitted."""
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=1, parallel_repos=2
+        )
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            JobRequest(_agent_job(issue=1), on_done_state="VERIFY"),
+            JobRequest(_agent_job(issue=2), on_done_state="VERIFY"),
+        )
+        coordinator._push_item(_issue_item(1), StageName.PLANNING, enter=True)
+        coordinator._push_item(_issue_item(2), StageName.PLANNING, enter=True)
+
+        coordinator._drain_queues()
+
+        assert len(pool.submitted) == 1
+        assert coordinator.inflight_per_repo["repo-a"] == 1
+        assert len(coordinator.queues[StageName.PLANNING]) == 1
+
+    def test_global_work_window_defers_second_repo_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The global work window caps jobs across repositories and stage queues.
+
+        With C=1, a second item in a different stage cannot be admitted while
+        the first is in flight. The global permit rejects it before the worker
+        admission check, rather than allowing one item per stage queue.
+        """
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=1
+        )
+        coordinator.stages[StageName.MERGE_WAIT] = StubStage(
+            JobRequest(_agent_job(repo="repo-a", issue=1), on_done_state="V"),
+        )
+        coordinator.stages[StageName.PR_REVIEW] = StubStage(
+            JobRequest(_agent_job(repo="repo-b", issue=2), on_done_state="V"),
+        )
+        assert (
+            coordinator._push_item(_issue_item(1, repo="repo-a"), StageName.MERGE_WAIT, enter=True)
+            is True
+        )
+        assert (
+            coordinator._push_item(_issue_item(2, repo="repo-b"), StageName.PR_REVIEW, enter=True)
+            is False
+        )
+        coordinator._drain_queues()
+
+        assert len(pool.submitted) == 1
+        assert coordinator.inflight_per_repo["repo-a"] == 1
+        assert coordinator.inflight_per_repo["repo-b"] == 0
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == []
+
+
+class TestRateBudget:
+    """The non-blocking rate gate parks agent jobs on the timer heap."""
+
+    def test_low_budget_parks_instead_of_submitting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Low GraphQL budget: the AgentJob is timer-parked, never submitted."""
+        coordinator, pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            rate_budget_ok=lambda: (False, 60.0),
+        )
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            JobRequest(_agent_job(), on_done_state="VERIFY")
+        )
+        coordinator._push_item(_issue_item(1), StageName.PLANNING, enter=True)
+
+        coordinator._drain_queues()
+
+        assert pool.submitted == []
+        assert len(coordinator.timers) == 1
+        assert any(entry[0] == "timer_park" for entry in coordinator.event_log)
+
+
+class TestDryRun:
+    """Dry-run: stages' JobRequests are logged-and-advanced; _submit asserts."""
+
+    def test_job_request_advances_without_submission(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[dry-run] a requested job is logged and the item ADVANCEs."""
+        seed = [SeedEntry(kind="issue", identifier=3, stage=StageName.PLANNING, reason="r")]
+        coordinator, pool, _ = make_coordinator(
+            tmp_path, monkeypatch, seed_entries=[seed], dry_run=True
+        )
+        coordinator.stages[StageName.PLANNING] = StubStage(
+            JobRequest(_agent_job(issue=3), on_done_state="VERIFY")
+        )
+        coordinator.stages[StageName.PLAN_REVIEW] = StubStage(
+            StageOutcome(Disposition.FINISH_PASS, "done")
+        )
+
+        exit_code = coordinator.run()
+
+        assert exit_code == 0
+        assert pool.submitted == []
+        assert not any(entry[0] == "submit" for entry in coordinator.event_log)
+
+    def test_submit_asserts_in_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_submit is guarded by an assert: dry-run must never reach it."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, dry_run=True)
+        request = JobRequest(_agent_job(), on_done_state="VERIFY")
+
+        with pytest.raises(AssertionError, match="dry-run must never submit"):
+            coordinator._submit(_issue_item(1), request)
+
+
+class TestFailBackRouting:
+    """The Disposition->action table's FAIL_BACK rows."""
+
+    def test_merge_wait_late_thread_stand_down_is_terminal_not_rerouted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale-ownership handoff must never enter an automatic label path."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(3, StageName.MERGE_WAIT)
+        item.pr = 12
+        item.state = "MERGE"
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._route(
+            item,
+            StageOutcome(Disposition.FINISH_FAIL, "unresolved_review_threads"),
+        )
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "unresolved_review_threads"
+        assert not coordinator.queues[StageName.PR_REVIEW]
+
+    def test_unarmed_merge_wait_lost_approval_returns_to_pr_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unarmed PR with a missing loop label returns for fresh review."""
+        github = FakeStageGitHub(
+            pr_impl_state=(False, False),
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "baseRefName": "main",
+                "autoMergeRequest": None,
+            },
+        )
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+
+        class ReviewAfterMissingApproval(StubStage):
+            def on_enter(self, item: WorkItem, ctx: Any) -> Any:
+                assert github.mutation_log == []
+                return super().on_enter(item, ctx)
+
+        coordinator.stages[StageName.PR_REVIEW] = ReviewAfterMissingApproval(
+            StageOutcome(Disposition.FINISH_FAIL, "stop")
+        )
+        item = _issue_item(3, StageName.MERGE_WAIT)
+        item.pr = 12
+        item.state = "MERGE"
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._drain_queues()
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "stop"
+        assert github.mutation_log == []
+
+    def test_external_auto_merge_block_does_not_enter_pr_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An external arm without approval is terminal, never review-rerouted."""
+        github = FakeStageGitHub(
+            pr_impl_state=(False, False),
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "baseRefName": "main",
+                "autoMergeRequest": {"enabledAt": "elsewhere"},
+            },
+        )
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        item = _issue_item(3, StageName.MERGE_WAIT)
+        item.pr = 12
+        item.state = "MERGE"
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._drain_queues()
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "blocked: auto_merge_already_armed"
+        assert not coordinator.queues[StageName.PR_REVIEW]
+        assert github.mutation_log == []
+
+    def test_partial_merge_wait_state_does_not_enter_pr_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An incomplete read is terminal rather than an unsafe fresh review."""
+        github = FakeStageGitHub(
+            pr_impl_state=(False, False),
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+            },
+        )
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        item = _issue_item(3, StageName.MERGE_WAIT)
+        item.pr = 12
+        item.state = "MERGE"
+
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._drain_queues()
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "pr_state_unverified"
+        assert not coordinator.queues[StageName.PR_REVIEW]
+        assert github.mutation_log == []
+
+    def test_named_reason_routes_to_mapped_stage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pr_review FAIL_BACK(agent_error) regresses to implementation."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(4, StageName.PR_REVIEW)
+        coordinator._push_item(item, StageName.PR_REVIEW, enter=False)
+        coordinator.event_log.clear()
+
+        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+
+        assert item.stage is StageName.IMPLEMENTATION
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+
+    def test_unknown_reason_uses_default_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unmapped reason falls back to the '*' target."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(5, StageName.PLANNING)
+
+        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "mystery"))
+
+        # planning "*" -> finished(fail)
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None and not item.result.passed
+
+    def test_stage_absent_from_route_table_finishes_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A poisoned item whose stage is not in the run's routes finishes failed (#2294).
+
+        Under a partial ``--phases`` scope, ``trimmed_routes`` can omit
+        ``StageName.REPO`` even though the seeder always pushes a REPO item.
+        Routing a poisoned REPO item must fail closed to the sink, not raise
+        ``KeyError`` and crash the whole run.
+        """
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        # Simulate a scope-trimmed route table with no REPO entry. Assign a
+        # fresh copy so the module-level ROUTES dict (aliased by the default
+        # unscoped path) is never mutated across tests.
+        coordinator._routes = {
+            s: r for s, r in coordinator._routes.items() if s is not StageName.REPO
+        }
+        item = WorkItem(
+            repo="repo-a", kind=ItemKind.REPO, issue=None, stage=StageName.REPO, state="ENTER"
+        )
+
+        coordinator._route(item, StageOutcome(Disposition.FINISH_FAIL, "poisoned: boom"))
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None and not item.result.passed
+        assert "poisoned: boom" in item.result.reason
+
+    def test_dry_run_fail_back_finishes_instead_of_regressing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dry-run FAIL_BACK finishes with the would-regress note.
+
+        Dry-run cannot write gate labels, so a real regression would
+        ping-pong until the safety cap while burning live reads.
+        """
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch, dry_run=True)
+        item = _issue_item(7, StageName.IMPLEMENTATION)
+
+        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "plan_not_go"))
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert item.result.reason == "[dry-run] would fail_back: plan_not_go"
+
+    def test_fail_back_safety_cap_terminates_cycles(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pathological regress cycle terminates at the global cap."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(6, StageName.PR_REVIEW)
+        item.payload["_fail_backs"] = _FAIL_BACK_CAP
+
+        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+
+        assert item.stage is StageName.FINISHED
+        assert item.result is not None
+        assert "safety cap" in item.result.reason
+
+
+class TestImplementationAdmission:
+    """Topological order + file-overlap reuse for the implementation queue."""
+
+    def test_relative_writer_path_matches_an_absolute_git_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A relative configured worktree still verifies Git's absolute holder path."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, issues=[22, 23]
+        )
+        monkeypatch.chdir(tmp_path)
+        shared_branch = "shared-head"
+        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
+        owner_path.mkdir(parents=True)
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            stage=StageName.IMPLEMENTATION,
+            branch=shared_branch,
+            worktree="repo-a/build/.worktrees/issue-2268",
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            stage=StageName.IMPLEMENTATION,
+            branch=shared_branch,
+        )
+        coordinator._pipeline_writer_worktrees[("repo-a", shared_branch)] = owner
+
+        assert (
+            coordinator._branch_worktree_owner_status(sibling, shared_branch, str(owner_path))
+            == "verified"
+        )
+
+    @pytest.mark.parametrize(
+        ("owner_pr", "sibling_pr"),
+        [(3001, 3002), (3001, 3001)],
+        ids=("distinct-prs", "consolidated-pr"),
+    )
+    def test_reversed_worktree_completions_wait_for_one_shared_head_writer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        owner_pr: int,
+        sibling_pr: int,
+    ) -> None:
+        """A collision waits for its owner completion, for either shared-head topology."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            serialize_file_overlap=False,
+        )
+        shared_branch = "shared-head"
+        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
+        owner_path.mkdir(parents=True)
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            pr=owner_pr,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=sibling_pr,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
+        coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
+        owner_lease = coordinator._claim_item(StageName.IMPLEMENTATION)
+        sibling_lease = coordinator._claim_item(StageName.IMPLEMENTATION)
+        assert owner_lease is owner
+        assert sibling_lease is sibling
+        owner_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 2268, "branch_name": shared_branch},
+        )
+        sibling_job = GitJob(
+            repo="repo-a",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 2269, "branch_name": shared_branch},
+        )
+        owner_handle = JobHandle(job=owner_job, on_done_state="DIRTY_DECISION_WAIT")
+        sibling_handle = JobHandle(job=sibling_job, on_done_state="DIRTY_DECISION_WAIT")
+        coordinator.in_flight[owner_handle] = owner
+        coordinator.in_flight[sibling_handle] = sibling
+        coordinator.inflight_per_repo["repo-a"] = 2
+
+        # The collision reaches the coordinator first even though the owner
+        # allocated the branch first. It must defer rather than fail closed or
+        # incorrectly start another implementation session.
+        coordinator._handle_completion(
+            sibling_handle,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={"branch": shared_branch, "owner_path": str(owner_path)},
+            ),
+        )
+        assert sibling.result is None
+        assert sibling.payload["branch_worktree_owner"] == {
+            "branch": shared_branch,
+            "owner_path": str(owner_path),
+        }
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+        assert len(coordinator.timers) == 1
+        coordinator._drain_implementation()
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+        assert len(coordinator.timers) == 1
+        assert sibling.attempts["implement"] == 0
+        assert "git_error_retries" not in sibling.payload
+
+        # The owner completion then establishes the only durable writer
+        # receipt. Re-running the sibling consumes its retained receipt and
+        # terminally supersedes it without an implementation agent job.
+        coordinator._handle_completion(
+            owner_handle,
+            JobResult(
+                ok=True,
+                value={"path": str(owner_path), "dirty": False, "status": "", "diff": ""},
+            ),
+        )
+        _deadline, sequence, parked_item = coordinator.timers[0]
+        coordinator.timers[0] = (0.0, sequence, parked_item)
+        coordinator._wake_timers()
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION)
+        assert claimed is sibling
+        coordinator._run_item(sibling)
+
+        assert owner.pr == owner_pr
+        assert sibling.pr == sibling_pr
+        assert owner.branch == sibling.branch == shared_branch
+        assert owner.worktree == str(owner_path)
+        assert coordinator._pipeline_writer_worktrees[("repo-a", shared_branch)] is owner
+        assert sibling.result is not None and sibling.result.passed
+        assert "superseded" in sibling.result.reason
+        assert sibling.worktree == ""
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [sibling]
+        assert not any(isinstance(handle.job, AgentJob) for handle in coordinator.in_flight)
+
+        # If the sole writer later fails, only its checkout is preserved and
+        # shown in rerun guidance; the superseded sibling never aliases it.
+        owner.result = ItemResult(
+            passed=False,
+            reason="writer failed",
+            final_stage=StageName.PR_REVIEW,
+        )
+        coordinator.preserved.append(("repo-a", 2268, str(owner_path)))
+        assert coordinator._active_preserved_worktrees() == [("repo-a", 2268, str(owner_path))]
+
+    def test_external_branch_holder_fails_closed_without_a_writer_registration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manually held branch cannot be mistaken for a redundant pipeline sibling."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=1,
+            serialize_file_overlap=False,
+        )
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=3002,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch="shared-head",
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=False)
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION)
+        assert claimed is item
+        stage = coordinator.stages[StageName.IMPLEMENTATION]
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={
+                    "branch": "shared-head",
+                    "owner_path": str(tmp_path / "manual-worktree"),
+                },
+            ),
+            coordinator._ctx_for(item),
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+        outcome = stage.step(item, coordinator._ctx_for(item))
+        assert isinstance(outcome, StageOutcome)
+        coordinator._route(item, outcome)
+
+        assert item.result is not None and not item.result.passed
+        assert item.result.reason == "branch_worktree_owner_unverified"
+        assert item.worktree == ""
+        assert coordinator._pipeline_writer_worktrees == {}
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [item]
+
+    def test_pending_branch_owner_that_fails_to_register_leaves_sibling_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deferred collision fails closed if the candidate owner allocation fails."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            serialize_file_overlap=False,
+        )
+        shared_branch = "shared-head"
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            pr=3001,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=3002,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
+        coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
+        assert coordinator._claim_item(StageName.IMPLEMENTATION) is owner
+        assert coordinator._claim_item(StageName.IMPLEMENTATION) is sibling
+        owner_handle = JobHandle(
+            job=GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2268, "branch_name": shared_branch},
+            ),
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        sibling_handle = JobHandle(
+            job=GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2269, "branch_name": shared_branch},
+            ),
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        coordinator.in_flight[owner_handle] = owner
+        coordinator.in_flight[sibling_handle] = sibling
+        coordinator.inflight_per_repo["repo-a"] = 2
+
+        coordinator._handle_completion(
+            sibling_handle,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={
+                    "branch": shared_branch,
+                    "owner_path": str(tmp_path / "manual-worktree"),
+                },
+            ),
+        )
+        coordinator._handle_completion(owner_handle, JobResult(ok=False, error="disk full"))
+
+        assert coordinator._pipeline_writer_worktrees == {}
+        _deadline, sequence, parked_item = coordinator.timers[0]
+        coordinator.timers[0] = (0.0, sequence, parked_item)
+        coordinator._wake_timers()
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
+        assert claimed is sibling
+        coordinator._run_item(sibling)
+
+        assert sibling.result is not None and not sibling.result.passed
+        assert sibling.result.reason == "branch_worktree_owner_unverified"
+        assert sibling.worktree == ""
+        assert coordinator.queues[StageName.FINISHED].snapshot() == [sibling]
+
+    def test_materialized_owner_sync_failure_remains_the_verified_writer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-create sync retry cannot make a sibling fail as unverified."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            serialize_file_overlap=False,
+        )
+        shared_branch = "shared-head"
+        owner_path = tmp_path / "repo-a" / "build" / ".worktrees" / "issue-2268"
+        owner_path.mkdir(parents=True)
+        owner = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2268,
+            pr=3001,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        sibling = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=2269,
+            pr=3002,
+            stage=StageName.IMPLEMENTATION,
+            state="WORKTREE_WAIT",
+            branch=shared_branch,
+            payload={"existing_pr": True},
+        )
+        coordinator._push_item(owner, StageName.IMPLEMENTATION, enter=False)
+        coordinator._push_item(sibling, StageName.IMPLEMENTATION, enter=False)
+        assert coordinator._claim_item(StageName.IMPLEMENTATION) is owner
+        assert coordinator._claim_item(StageName.IMPLEMENTATION) is sibling
+        owner_handle = JobHandle(
+            job=GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2268, "branch_name": shared_branch},
+            ),
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        sibling_handle = JobHandle(
+            job=GitJob(
+                repo="repo-a",
+                op="create_worktree",
+                timeout_s=60,
+                kwargs={"issue_number": 2269, "branch_name": shared_branch},
+            ),
+            on_done_state="DIRTY_DECISION_WAIT",
+        )
+        coordinator.in_flight[owner_handle] = owner
+        coordinator.in_flight[sibling_handle] = sibling
+        coordinator.inflight_per_repo["repo-a"] = 2
+
+        coordinator._handle_completion(
+            sibling_handle,
+            JobResult(
+                ok=False,
+                error="branch_worktree_owned",
+                value={"branch": shared_branch, "owner_path": str(owner_path)},
+            ),
+        )
+        coordinator._handle_completion(
+            owner_handle,
+            JobResult(
+                ok=False,
+                error="worktree post-create preparation failed: sync timeout",
+                value={"path": str(owner_path), WORKTREE_MATERIALIZED_KEY: True},
+            ),
+        )
+
+        assert owner.worktree == str(owner_path)
+        assert coordinator._pipeline_writer_worktrees[("repo-a", shared_branch)] is owner
+        _deadline, sequence, parked_item = coordinator.timers[0]
+        coordinator.timers[0] = (0.0, sequence, parked_item)
+        coordinator._wake_timers()
+        claimed = coordinator._claim_item(StageName.IMPLEMENTATION, index=1)
+        assert claimed is sibling
+        coordinator._run_item(sibling)
+
+        assert sibling.result is not None and sibling.result.passed
+        assert "superseded" in sibling.result.reason
+        assert not any(isinstance(handle.job, AgentJob) for handle in coordinator.in_flight)
+
+    def test_full_downstream_retains_implementation_lease_until_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C=1 keeps a completed implementation item leased when review is full.
+
+        Implementation has its own topological drain, so it must claim through
+        the same lease protocol as every other stage.  Popping the source queue
+        directly drops that ownership: a full PR-review queue then turns an
+        already-completed implementation action into a poisoned terminal item.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch)
+        implementation = StubStage(StageOutcome(Disposition.ADVANCE, "PR opened"))
+        coordinator.stages[StageName.IMPLEMENTATION] = implementation
+
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
+        # The global C=1 invariant prevents ordinary admission of both the
+        # implementation item and a review blocker.  Inject a stale full
+        # destination to exercise the defensive lossless-handoff path: it
+        # must retain the source lease rather than poison a completed action.
+        blocker = _issue_item(22, StageName.PR_REVIEW)
+        coordinator.queues[StageName.PR_REVIEW].push(blocker)
+
+        coordinator._drain_implementation()
+
+        assert implementation.calls == [("enter", 21), ("step", 21)]
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [blocker]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+        assert coordinator.queues[StageName.IMPLEMENTATION].occupancy == 1
+        assert coordinator._leases[id(item)].item is item
+        assert coordinator._pending_handoffs[id(item)].target is StageName.PR_REVIEW
+        assert item.result is None
+
+        # Re-draining while the destination remains full must not re-run the
+        # completed implementation action.
+        coordinator._drain_implementation()
+        assert implementation.calls == [("enter", 21), ("step", 21)]
+
+        coordinator.queues[StageName.PR_REVIEW].pop()
+        coordinator._drain_pending_handoffs()
+
+        assert coordinator.queues[StageName.PR_REVIEW].snapshot() == [item]
+        assert id(item) not in coordinator._leases
+        assert id(item) not in coordinator._pending_handoffs
+        assert item.stage is StageName.PR_REVIEW
+
+    def test_retry_and_overlap_deferral_preserve_implementation_fifo_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source retry remains ahead of a later overlap-deferred item."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage(
+            StageOutcome(Disposition.RETRY, "retry next tick")
+        )
+        retrying = _issue_item(21, StageName.IMPLEMENTATION)
+        deferred = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(retrying, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(deferred, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [retrying, deferred]
+
+    @pytest.mark.nightly
+    def test_duplicate_issue_numbers_collapse_to_first_queued(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A duplicate issue work item is dropped, not fatal (#1952 regression).
+
+        A transient retry/fail-back can re-enqueue an issue while a prior copy
+        is still queued. The drain must keep the first-queued item, terminalize
+        the later duplicate as superseded, and dispatch normally — never crash
+        the whole org-wide run.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        ran: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                ran.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        first = _issue_item(21, StageName.IMPLEMENTATION)
+        duplicate = _issue_item(21, StageName.IMPLEMENTATION)
+        # Inject the collision BELOW the upstream idempotency guard (#2107):
+        # push straight onto the queue (the same raw API the drain uses to
+        # re-push deferred items, coordinator.py:873) so this test exercises
+        # the drain-level safety net for a duplicate that arrived by a path
+        # the upstream guard does not cover.
+        for it in (first, duplicate):
+            it.payload["_enter_pending"] = True
+            coordinator._seen_item_ids.add(id(it))
+            coordinator.items.append(it)
+            coordinator.queues[StageName.IMPLEMENTATION].push(it)
+
+        coordinator._drain_implementation()
+
+        # First-queued item dispatched exactly once; duplicate never ran.
+        assert ran == [21]
+        # The duplicate was terminalized as superseded (kept out of dispatch).
+        assert duplicate.stage is StageName.FINISHED
+        assert duplicate.result is not None
+        assert duplicate.result.passed
+        assert "superseded" in duplicate.result.reason
+        # Implementation queue is drained — no duplicate left behind.
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+        # Repo-scoped reason string (#2057).
+        assert duplicate.result.reason == "repo-a#21 superseded by queued duplicate"
+
+    @pytest.mark.nightly
+    def test_cross_repo_same_issue_number_both_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two repos sharing an issue number are DISTINCT work — never collapsed (#2057).
+
+        The implementation queue is stage-keyed, so one drain round can hold
+        ``A#71`` and ``B#71``. Dedup is per-repo: both must dispatch; neither may
+        be silently terminalized as a duplicate of the other.
+        """
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+        )
+        ran: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                ran.append(f"{item.repo}#{item.issue}")
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        a71 = _issue_item(71, StageName.IMPLEMENTATION, repo="repo-a")
+        b71 = _issue_item(71, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(a71, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(b71, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        # BOTH ran — the cross-repo pair is not collapsed.
+        assert sorted(ran) == ["repo-a#71", "repo-b#71"]
+        # Neither was terminalized as a superseded duplicate.
+        assert a71.result is None or "superseded" not in (a71.result.reason or "")
+        assert b71.result is None or "superseded" not in (b71.result.reason or "")
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+
+    @pytest.mark.nightly
+    def test_three_duplicates_collapse_to_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """3+ copies of one issue: first dispatches, ALL later copies terminalize (#2057)."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, parallel_repos=2
+        )
+        ran: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                ran.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        first = _issue_item(21, StageName.IMPLEMENTATION)
+        dup2 = _issue_item(21, StageName.IMPLEMENTATION)
+        dup3 = _issue_item(21, StageName.IMPLEMENTATION)
+        # Inject the collisions BELOW the upstream idempotency guard (#2107):
+        # push straight onto the queue (the same raw API the drain uses to
+        # re-push deferred items, coordinator.py:873) so this test exercises
+        # the drain-level safety net for duplicates that arrived by a path the
+        # upstream guard does not cover. (The guard would otherwise drop dup2/
+        # dup3 at push time, so they'd never reach the drain-level collapse.)
+        for it in (first, dup2, dup3):
+            it.payload["_enter_pending"] = True
+            coordinator._seen_item_ids.add(id(it))
+            coordinator.items.append(it)
+            coordinator.queues[StageName.IMPLEMENTATION].push(it)
+
+        coordinator._drain_implementation()
+
+        assert ran == [21]  # dispatched exactly once
+        for dup in (dup2, dup3):  # every later copy terminalized
+            assert dup.stage is StageName.FINISHED
+            assert dup.result is not None
+            assert dup.result.passed
+            assert "superseded" in dup.result.reason
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+
+    def test_issue_none_items_never_deduped_or_terminalized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue=None items bypass issue-number dedup — never collapsed, never terminalized (#2057).
+
+        The number-keyed topo/overlap dispatch path only handles issue items, so
+        issue=None items are left queued (re-pushed) rather than dispatched here.
+        The invariant this guards: two issue=None items must NOT be treated as
+        duplicates of each other (``None == None``) and terminalized.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        pr_a = WorkItem(
+            repo="repo-a", kind=ItemKind.PR, pr=500, stage=StageName.IMPLEMENTATION, state="ENTER"
+        )
+        pr_b = WorkItem(
+            repo="repo-a", kind=ItemKind.PR, pr=501, stage=StageName.IMPLEMENTATION, state="ENTER"
+        )
+        coordinator._push_item(pr_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(pr_b, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        # Neither was terminalized as a duplicate of the other.
+        assert pr_a.result is None
+        assert pr_b.result is None
+        # Both remain queued for their proper stage handling (order preserved).
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [pr_a, pr_b]
+
+    def test_reseed_while_queued_refuses_second_entry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A new (repo, issue) already queued is refused upstream (#2107).
+
+        The drain-level dedup warning must NOT fire, proving the duplicate never
+        entered the queue in the first place.
+        """
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        first = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        reseed = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")  # new object, same key
+        coordinator._push_item(first, StageName.IMPLEMENTATION, enter=True)
+
+        with caplog.at_level(logging.INFO):
+            coordinator._push_item(reseed, StageName.IMPLEMENTATION, enter=True)
+
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [first]
+        assert "already queued/in-flight" in caplog.text
+        # The drain-level dedup net was never exercised.
+        assert "dropping duplicate work item" not in caplog.text
+
+    def test_cross_repo_same_issue_number_both_enqueue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(#2058) same issue number in different repos remain distinct work."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        a = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        b = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(b, StageName.IMPLEMENTATION, enter=True)
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [a, b]
+
+    def test_same_item_repush_not_blocked_by_guard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An already-tracked item re-pushing itself (retry/advance) is allowed."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        item = _issue_item(21, StageName.PLANNING, repo="repo-a")
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+        coordinator.queues[StageName.PLANNING].pop()  # simulate drain popping it
+        coordinator._push_item(item, StageName.PLANNING, enter=False)  # retry re-push
+        assert coordinator.queues[StageName.PLANNING].snapshot() == [item]
+
+    def test_reseed_while_in_flight_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A (repo, issue) held in in_flight blocks a new seed of the same key."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        live = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator.in_flight[cast(Any, "h1")] = live  # simulate dispatched/in-flight
+        reseed = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(reseed, StageName.IMPLEMENTATION, enter=True)
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == []
+
+    def test_topo_order_and_overlap_reuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dependency order leads the common repo-scoped overlap admission pass."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        # 21 depends on 22 (payload dependency): topo order runs 22 first.
+        item_a = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        item_a.payload["dependencies"] = [22]
+        item_b = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
+        seen_fetches: list[tuple[int, tuple[str, str] | None]] = []
+
+        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
+            seen_fetches.append((issue, repo))
+            return {"shared.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            _planned_files,
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == [22]  # dependency first; 21 deferred by overlap
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+        assert seen_fetches == [(22, ("org", "repo-a")), (21, ("org", "repo-a"))]
+
+    def test_aged_dependent_never_overtakes_its_queued_prerequisite(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aging prioritizes ready work but never reverses an in-queue dependency."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        dependent = _issue_item(21, StageName.IMPLEMENTATION)
+        dependent.payload["dependencies"] = [22, 999]
+        dependent.payload["file_overlap_deferrals"] = 100
+        prerequisite = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(dependent, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(prerequisite, StageName.IMPLEMENTATION, enter=True)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda issue, repo=None: {f"planned-{issue}.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == [22, 21]
+
+    def test_overlap_gate_reuses_admission_snapshot_at_parallel_submission(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mutable plan cannot change its claim after overlap admission."""
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+
+        class SubmittingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                return JobRequest(_agent_job(item.repo, item.issue or 0), StageName.IMPLEMENTATION)
+
+        coordinator.stages[StageName.IMPLEMENTATION] = SubmittingStage()
+        first = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        second = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(first, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(second, StageName.IMPLEMENTATION, enter=True)
+        fetches: list[int] = []
+
+        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
+            del repo
+            fetches.append(issue)
+            if fetches.count(issue) > 1:
+                raise AssertionError("submission must reuse the admission snapshot")
+            return {f"planned-{issue}.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            _planned_files,
+        )
+
+        coordinator._drain_implementation()
+
+        assert fetches == [21, 22]
+        assert len(pool.submitted) == 2
+        assert len(coordinator._inflight_implementation_claims) == 2
+        assert {
+            claim
+            for claims in coordinator._inflight_implementation_claims.values()
+            for claim in claims
+        } == {
+            (("org", "repo-a"), "planned-21.py"),
+            (("org", "repo-a"), "planned-22.py"),
+        }
+
+    def test_overlap_gate_reuses_empty_admission_snapshot_at_submission(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fail-open plan lookup is still an immutable submission snapshot."""
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+
+        class SubmittingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                return JobRequest(_agent_job(item.repo, item.issue or 0), StageName.IMPLEMENTATION)
+
+        coordinator.stages[StageName.IMPLEMENTATION] = SubmittingStage()
+        coordinator._push_item(
+            _issue_item(21, StageName.IMPLEMENTATION), StageName.IMPLEMENTATION, enter=True
+        )
+        coordinator._push_item(
+            _issue_item(22, StageName.IMPLEMENTATION), StageName.IMPLEMENTATION, enter=True
+        )
+        fetches: list[int] = []
+
+        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:
+            del repo
+            fetches.append(issue)
+            if issue == 21:
+                if fetches.count(issue) > 1:
+                    raise AssertionError("unknown plan must not be re-fetched at submission")
+                return None
+            return {"shared.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            _planned_files,
+        )
+
+        coordinator._drain_implementation()
+
+        assert fetches == [21, 22]
+        assert len(pool.submitted) == 2
+
+    def test_overlap_gate_reuses_snapshot_for_every_implementation_subjob(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Worktree/agent/test/push turns share one admission snapshot (#2309)."""
+        coordinator, pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+
+        class MultiJobStage:
+            completed = 0
+
+            def on_enter(self, item: WorkItem, ctx: Any) -> None:
+                del item, ctx
+                return None
+
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                del ctx
+                if self.completed < 2:
+                    return JobRequest(
+                        _agent_job(item.repo, item.issue or 0), StageName.IMPLEMENTATION
+                    )
+                return StageOutcome(Disposition.SKIP, "completed")
+
+            def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
+                del item, result, ctx
+                self.completed += 1
+
+        coordinator.stages[StageName.IMPLEMENTATION] = MultiJobStage()
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        coordinator._push_item(item, StageName.IMPLEMENTATION, enter=True)
+        fetches: list[int] = []
+
+        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
+            del repo
+            fetches.append(issue)
+            if len(fetches) > 1:
+                raise AssertionError(
+                    "every implementation sub-job must reuse the admission snapshot"
+                )
+            return {"hephaestus/automation/pipeline/coordinator.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            _planned_files,
+        )
+
+        coordinator._drain_implementation()
+        coordinator._drain_completions()
+        coordinator._drain_completions()
+
+        assert len(pool.submitted) == 2
+        assert fetches == [21]
+        assert id(item) not in coordinator._implementation_file_claims
+        assert "_implementation_file_claims" not in item.payload
+
+    def test_reviewed_pr_realized_diff_blocks_overlapping_direct_issue(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A PR under review retains its plan and newly verified diff claims."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            issues=[22, 23],
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+        )
+        active = _issue_item(21, StageName.PR_REVIEW)
+        active.pr = 701
+        active.payload["_implementation_file_claims"] = {(("org", "repo-a"), "planned.py")}
+        active.payload["review_changed_paths"] = ["AGENTS.md"]
+        assert coordinator._push_item(active, StageName.PR_REVIEW, enter=True)
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        plans = {22: {"AGENTS.md"}, 23: {"independent.py"}}
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            lambda issue, **_kwargs: plans[issue],
+        )
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+        source = coordinator._direct_issue_source
+        assert source is not None
+        source.issues = deque([22, 23])
+
+        assert coordinator._drain_direct_issue_source() == 1
+        queued = coordinator.queues[StageName.IMPLEMENTATION].snapshot()
+        assert [item.issue for item in queued] == [23]
+        assert coordinator._active_implementation_file_claims() >= {
+            (("org", "repo-a"), "planned.py"),
+            (("org", "repo-a"), "AGENTS.md"),
+        }
+
+    def test_reviewed_pr_rename_claims_source_and_destination(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A verified rename prevents work against either side of the move."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        active = _issue_item(21, StageName.PR_REVIEW)
+        active.pr = 701
+        active.payload["review_changed_paths"] = ["old.py", "new.py"]
+        assert coordinator._push_item(active, StageName.PR_REVIEW, enter=True)
+
+        claims = coordinator._active_implementation_file_claims()
+
+        assert claims >= {
+            (("org", "repo-a"), "old.py"),
+            (("org", "repo-a"), "new.py"),
+        }
+
+    def test_remediation_candidate_does_not_block_itself_but_blocks_peer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A returning PR keeps exclusive ownership without self-deadlocking."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        plan_claim = (("org", "repo-a"), "planned.py")
+        realized_claim = (("org", "repo-a"), "shared.py")
+        returning = _issue_item(21, StageName.PR_REVIEW)
+        assert coordinator._push_item(returning, StageName.PR_REVIEW, enter=True)
+        returning.payload["_implementation_file_claims"] = {plan_claim}
+        returning.payload["review_changed_paths"] = ["shared.py"]
+        coordinator._implementation_file_claims[id(returning)] = {plan_claim}
+        coordinator._route(returning, StageOutcome(Disposition.FAIL_BACK, "agent_error"))
+        assert returning.stage is StageName.IMPLEMENTATION
+        overlapping = _issue_item(22, StageName.IMPLEMENTATION)
+        overlapping.payload["_implementation_file_claims"] = {realized_claim}
+        independent = _issue_item(23, StageName.IMPLEMENTATION)
+        independent_claim = (("org", "repo-a"), "independent.py")
+        independent.payload["_implementation_file_claims"] = {independent_claim}
+
+        dispatch, snapshots = coordinator._select_file_overlap_implementation_items(
+            [(returning, "#21"), (overlapping, "#22"), (independent, "#23")]
+        )
+
+        assert dispatch == [returning, independent]
+        assert snapshots == {
+            id(returning): {plan_claim, realized_claim},
+            id(independent): {independent_claim},
+        }
+        assert returning.payload["_implementation_file_claims"] == {
+            plan_claim,
+            realized_claim,
+        }
+        assert coordinator._implementation_file_claims[id(returning)] == {
+            plan_claim,
+            realized_claim,
+        }
+        assert coordinator._capture_implementation_file_claims(returning) == {
+            plan_claim,
+            realized_claim,
+        }
+        later_dispatch, _ = coordinator._select_file_overlap_implementation_items(
+            [(overlapping, "#22")]
+        )
+        assert later_dispatch == []
+        assert overlapping.payload["file_overlap_deferrals"] == 2
+
+    def test_remediation_candidate_still_honors_same_claim_owned_by_peer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Excluding self ownership must not subtract a peer's equal claim."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        claim = (("org", "repo-a"), "shared.py")
+        returning = _issue_item(21, StageName.IMPLEMENTATION)
+        returning.payload["_implementation_file_claims"] = {claim}
+        coordinator._implementation_file_claims[id(returning)] = {claim}
+        peer = _issue_item(20, StageName.PR_REVIEW)
+        peer.payload["_implementation_file_claims"] = {claim}
+        coordinator._implementation_file_claims[id(peer)] = {claim}
+        assert coordinator._push_item(peer, StageName.PR_REVIEW, enter=True)
+
+        dispatch, _snapshots = coordinator._select_file_overlap_implementation_items(
+            [(returning, "#21")]
+        )
+
+        assert dispatch == []
+        assert returning.payload["file_overlap_deferrals"] == 1
+
+    def test_overlap_claims_survive_review_and_merge_wait_until_finished(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Implementation ownership ends only when the active PR lifecycle ends."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        claim = (("org", "repo-a"), "shared.py")
+        item.payload["_implementation_file_claims"] = {claim}
+        coordinator._implementation_file_claims[id(item)] = {claim}
+
+        coordinator._clear_implementation_file_claims_on_exit(item, StageName.PR_REVIEW)
+        assert coordinator._implementation_file_claims[id(item)] == {claim}
+        assert item.payload["_implementation_file_claims"] == {claim}
+
+        item.stage = StageName.PR_REVIEW
+        coordinator._clear_implementation_file_claims_on_exit(item, StageName.MERGE_WAIT)
+        assert coordinator._implementation_file_claims[id(item)] == {claim}
+
+        item.stage = StageName.MERGE_WAIT
+        coordinator._clear_implementation_file_claims_on_exit(item, StageName.FINISHED)
+        assert id(item) not in coordinator._implementation_file_claims
+        assert "_implementation_file_claims" not in item.payload
+
+    @pytest.mark.parametrize(
+        ("max_workers", "serialize_file_overlap"),
+        [(1, True), (2, False)],
+    )
+    def test_overlap_claim_capture_is_off_without_parallel_serialization(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        max_workers: int,
+        serialize_file_overlap: bool,
+    ) -> None:
+        """Disabled overlap serialization makes no per-subjob plan lookup."""
+        coordinator, pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=max_workers,
+            serialize_file_overlap=serialize_file_overlap,
+        )
+        item = _issue_item(21, StageName.IMPLEMENTATION)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("disabled overlap serialization must not fetch plan claims")
+            ),
+        )
+
+        coordinator._submit(item, JobRequest(_agent_job(item.repo, item.issue or 0), item.stage))
+
+        assert len(pool.submitted) == 1
+        assert coordinator._implementation_file_claims == {}
+        assert coordinator._inflight_implementation_claims == {}
+
+    def test_overlap_gate_checks_ambiguous_numbers_against_active_claims(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cross-repo number collision cannot bypass same-repo reservations."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_repos: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_repos.append(item.repo)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        repo_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_repos == ["repo-b"]
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [repo_a]
+
+    def test_ambiguous_overlap_deferral_ages_then_selects_after_claim_release(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A same-number item ages while blocked and runs when its repo claim releases."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+        )
+        run_repos: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_repos.append(item.repo)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active_handle = _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        repo_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_repos == ["repo-b"]
+        assert repo_a.payload["file_overlap_deferrals"] == 1
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [repo_a]
+
+        coordinator._handle_completion(active_handle, JobResult(ok=True))
+        run_repos.clear()
+        coordinator._drain_implementation()
+
+        assert run_repos == ["repo-a"]
+        assert "file_overlap_deferrals" not in repo_a.payload
+
+    def test_queued_overlap_is_recorded_once_until_active_claims_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stable in-flight claim must not create a polling hot loop."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_issues: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_issues.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active_handle = _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION),
+            claimed_files={"shared.py"},
+        )
+        blocked = _issue_item(7, StageName.IMPLEMENTATION)
+        coordinator._push_item(blocked, StageName.IMPLEMENTATION, enter=True)
+        fetches = 0
+
+        def fetch_planned_files(_issue: int, repo: tuple[str, str]) -> set[str]:
+            nonlocal fetches
+            fetches += 1
+            return {"shared.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            fetch_planned_files,
+        )
+
+        coordinator._drain_implementation()
+        coordinator._drain_implementation()
+
+        assert fetches == 1
+        assert blocked.payload["file_overlap_deferrals"] == 1
+        assert run_issues == []
+
+        coordinator._handle_completion(active_handle, JobResult(ok=True))
+        run_issues.clear()
+        coordinator._drain_implementation()
+
+        assert run_issues == [7]
+        assert "file_overlap_deferrals" not in blocked.payload
+
+    def test_ambiguous_aged_overlap_beats_a_recurring_regular_contender(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An aged same-number item claims its file before a newly recurring regular item."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            repos=["repo-a", "repo-b"],
+            max_workers=2,
+            parallel_repos=2,
+        )
+        run_order: list[str] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(f"{item.repo}#{item.issue}")
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active_a_handle = _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        _fake_in_flight_item(
+            coordinator,
+            _issue_item(6, StageName.IMPLEMENTATION, repo="repo-b"),
+            claimed_files={"other.py"},
+        )
+        ambiguous_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        ambiguous_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(ambiguous_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(ambiguous_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert ambiguous_a.payload["file_overlap_deferrals"] == 1
+        assert ambiguous_b.payload["file_overlap_deferrals"] == 1
+        assert run_order == []
+
+        coordinator._handle_completion(active_a_handle, JobResult(ok=True))
+        recurring_regular = _issue_item(9, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(recurring_regular, StageName.IMPLEMENTATION, enter=True)
+        run_order.clear()
+        coordinator._drain_implementation()
+
+        assert run_order == ["repo-a#7"]
+        assert "file_overlap_deferrals" not in ambiguous_a.payload
+        assert ambiguous_b.payload["file_overlap_deferrals"] == 1
+        assert recurring_regular.payload["file_overlap_deferrals"] == 1
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [
+            ambiguous_b,
+            recurring_regular,
+        ]
+
+    @pytest.mark.parametrize(
+        ("initial_deferrals", "expected_deferrals", "expected_level"),
+        [
+            (9, 10, logging.INFO),
+            (10, 11, logging.WARNING),
+            (11, 12, logging.WARNING),
+        ],
+        ids=("10-info", "11-warning", "12-warning"),
+    )
+    def test_ambiguous_overlap_deferral_uses_normal_warning_threshold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        initial_deferrals: int,
+        expected_deferrals: int,
+        expected_level: int,
+    ) -> None:
+        """Ambiguous overlap deferrals use the normal INFO-to-WARNING boundary."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+        )
+        _fake_in_flight_item(
+            coordinator,
+            _issue_item(8, StageName.IMPLEMENTATION, repo="repo-a"),
+            claimed_files={"shared.py"},
+        )
+        repo_a = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-a")
+        repo_a.payload["file_overlap_deferrals"] = initial_deferrals
+        repo_b = _issue_item(7, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(repo_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(repo_b, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"shared.py"} if repo == ("org", "repo-a") else {"other.py"},
+        )
+
+        with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.coordinator"):
+            coordinator._drain_implementation()
+
+        assert repo_a.payload["file_overlap_deferrals"] == expected_deferrals
+        matching_records = [
+            record
+            for record in caplog.records
+            if record.message
+            == (
+                "implementation repo-a#7 deferred (file overlap); "
+                f"deferrals={expected_deferrals} threshold=10"
+            )
+        ]
+        assert [record.levelno for record in matching_records] == [expected_level]
+
+    def test_overlap_gate_defers_queued_work_that_conflicts_with_inflight_implementation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An active implementation claims its plan files before a later item runs."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        queued = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
+        fetches: list[int] = []
+
+        def _planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str]:
+            del repo
+            fetches.append(issue)
+            if issue == 21 and fetches.count(21) > 1:
+                raise AssertionError("an active plan must not be fetched after submission")
+            return {"hephaestus/automation/pipeline/coordinator.py"}
+
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            _planned_files,
+        )
+        coordinator._submit(active, JobRequest(_agent_job("repo-a", 21), StageName.IMPLEMENTATION))
+        coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
+
+        coordinator._drain_implementation()
+
+        assert run_order == []
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [queued]
+        assert fetches == [21, 22]
+
+    def test_file_overlap_aging_escapes_an_actual_inflight_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deferred hot-file issue outranks a newly queued peer once released."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active = _issue_item(20, StageName.IMPLEMENTATION)
+        active_handle = _fake_in_flight_item(
+            coordinator,
+            active,
+            claimed_files={"hephaestus/automation/pipeline/coordinator.py"},
+        )
+        starved = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(starved, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"hephaestus/automation/pipeline/coordinator.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == []
+        assert starved.payload["file_overlap_deferrals"] == 1
+
+        younger = _issue_item(21, StageName.IMPLEMENTATION)
+        coordinator._push_item(younger, StageName.IMPLEMENTATION, enter=True)
+        coordinator._handle_completion(active_handle, JobResult(ok=True))
+        run_order.clear()
+        coordinator._drain_implementation()
+
+        assert run_order == [22]
+        assert "file_overlap_deferrals" not in starved.payload
+        assert younger.payload["file_overlap_deferrals"] == 1
+
+    def test_overlap_gate_releases_deferred_item_after_inflight_implementation_finishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deferred overlap becomes eligible as soon as its active peer leaves the stage."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        active_handle = _fake_in_flight_item(
+            coordinator,
+            active,
+            claimed_files={"hephaestus/automation/pipeline/coordinator.py"},
+        )
+        queued = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"hephaestus/automation/pipeline/coordinator.py"},
+        )
+
+        coordinator._drain_implementation()
+        coordinator._handle_completion(active_handle, JobResult(ok=True))
+        run_order.clear()  # active completion is not the queued-item dispatch under test
+        coordinator._drain_implementation()
+
+        assert run_order == [22]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+    def test_overlap_gate_keeps_same_paths_in_different_repositories_independent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A path overlap is meaningful only inside the repository that owns it."""
+        coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        _fake_in_flight_item(
+            coordinator,
+            active,
+            claimed_files={"hephaestus/automation/pipeline/coordinator.py"},
+        )
+        queued = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-b")
+        coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: {"hephaestus/automation/pipeline/coordinator.py"},
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == [22]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+    def test_overlap_gate_opt_out_ignores_inflight_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The documented opt-out preserves intentionally concurrent dispatch."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, serialize_file_overlap=False
+        )
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        active = _issue_item(21, StageName.IMPLEMENTATION, repo="repo-a")
+        _fake_in_flight_item(
+            coordinator,
+            active,
+            claimed_files={"hephaestus/automation/pipeline/coordinator.py"},
+        )
+        queued = _issue_item(22, StageName.IMPLEMENTATION, repo="repo-a")
+        coordinator._push_item(queued, StageName.IMPLEMENTATION, enter=True)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.admission._fetch_planned_files",
+            lambda _issue, repo=None: (_ for _ in ()).throw(
+                AssertionError("overlap lookup must be disabled")
+            ),
+        )
+
+        coordinator._drain_implementation()
+
+        assert run_order == [22]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+    def test_file_overlap_serialization_can_be_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--no-serialize-file-overlap lets all ready implementation items dispatch."""
+        coordinator, _pool, _ = make_coordinator(
+            tmp_path, monkeypatch, max_workers=2, serialize_file_overlap=False
+        )
+        run_order: list[int] = []
+
+        class RecordingStage(StubStage):
+            def step(self, item: WorkItem, ctx: Any) -> Any:
+                run_order.append(item.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recorded")
+
+        coordinator.stages[StageName.IMPLEMENTATION] = RecordingStage()
+        item_a = _issue_item(21, StageName.IMPLEMENTATION)
+        item_b = _issue_item(22, StageName.IMPLEMENTATION)
+        coordinator._push_item(item_a, StageName.IMPLEMENTATION, enter=True)
+        coordinator._push_item(item_b, StageName.IMPLEMENTATION, enter=True)
+        coordinator._drain_implementation()
+
+        assert run_order == [21, 22]
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 0
+
+
+class TestDurableEventLog:
+    """Optional JSONL event log mirrors the coordinator's in-memory event log."""
+
+    def test_observability_tick_zeroes_previous_circuit_breaker_state(self, tmp_path: Path) -> None:
+        """A transition leaves exactly one active state gauge for each breaker."""
+        snapshots: dict[str, dict[str, Any]] = {"github": {"state": "closed"}}
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+                circuit_breaker_snapshot_provider=lambda: snapshots,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        coordinator._emit_observability_tick()
+        snapshots["github"]["state"] = "open"
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_circuit_breaker_state{name="github",state="closed"} 0' in rendered
+        assert 'hephaestus_circuit_breaker_state{name="github",state="open"} 1' in rendered
+
+    def test_observability_tick_zeroes_removed_inflight_repo(self, tmp_path: Path) -> None:
+        """A repo that leaves the in-flight counter no longer reports active work."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.inflight_per_repo["repo-a"] = 1
+
+        coordinator._emit_observability_tick()
+        del coordinator.inflight_per_repo["repo-a"]
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        assert 'hephaestus_pipeline_inflight_per_repo{repo="repo-a"} 0' in (
+            coordinator._metrics_registry.render_prometheus()
+        )
+
+    def test_observability_tick_snapshots_lifecycle_and_deduplicates_alerts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A metrics-enabled coordinator durably records only alert transitions."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            metrics_port=9123,
+            alert_queue_depth_threshold=0,
+            circuit_breaker_snapshot_provider=all_circuit_breaker_snapshots,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        coordinator.queues[StageName.PLANNING].push(_issue_item(44, StageName.PLANNING))
+        breaker = get_circuit_breaker("github-observed", failure_threshold=1)
+        with pytest.raises(ConnectionError):
+            breaker.call(lambda: (_ for _ in ()).throw(ConnectionError("down")))
+
+        coordinator._emit_observability_tick()
+        coordinator._emit_observability_tick()
+        coordinator.queues[StageName.PLANNING].pop()
+        reset_all_circuit_breakers()
+        coordinator._emit_observability_tick()
+
+        events = [entry for entry in coordinator.event_log if entry[0].startswith("alert_")]
+        assert [(event[0], event[1]["name"]) for event in events] == [
+            ("alert_fired", "circuit_breaker_open"),
+            ("alert_fired", "queue_depth_exceeds"),
+            ("alert_resolved", "circuit_breaker_open"),
+            ("alert_resolved", "queue_depth_exceeds"),
+        ]
+        snapshots = [entry[1] for entry in coordinator.event_log if entry[0] == "metrics_snapshot"]
+        assert snapshots[0]["queue_depths"]["planning"] == 1
+        # The registry reflects the latest resolved lifecycle state, not a stale
+        # historical high-water mark.
+        assert coordinator._metrics_registry is not None
+        assert 'hephaestus_pipeline_queue_depth{stage="planning"} 0' in (
+            coordinator._metrics_registry.render_prometheus()
+        )
+
+    def test_snapshot_and_tick_expose_stalled_ticks(self, tmp_path: Path) -> None:
+        """Stall state is exported in the snapshot and as a gauge."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._stalled_ticks = 2
+
+        assert coordinator._observability_snapshot()["stalled_ticks"] == 2
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert "hephaestus_pipeline_stalled_ticks 2" in rendered
+        assert "hephaestus_pipeline_loops_total 0" in rendered
+
+    def test_completion_increments_jobs_total_by_stage_and_outcome(self, tmp_path: Path) -> None:
+        """Each completed job increments the jobs_total counter by outcome."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                max_workers=2,
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
+
+        ok_item = _issue_item(1, StageName.IMPLEMENTATION)
+        ok_handle = _fake_in_flight_item(coordinator, ok_item)
+        coordinator._handle_completion(ok_handle, JobResult(ok=True, duration_s=1.5))
+
+        fail_item = _issue_item(2, StageName.IMPLEMENTATION)
+        fail_handle = _fake_in_flight_item(coordinator, fail_item)
+        coordinator._handle_completion(fail_handle, JobResult(ok=False, duration_s=0.5))
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_pipeline_jobs_total{outcome="ok",stage="implementation"} 1' in rendered
+        assert (
+            'hephaestus_pipeline_jobs_total{outcome="failed",stage="implementation"} 1' in rendered
+        )
+        assert "hephaestus_pipeline_agent_job_seconds_total 2" in rendered
+
+    def test_agent_job_seconds_counter_clamps_negative_duration(self, tmp_path: Path) -> None:
+        """A negative duration is clamped so Counter.inc never raises."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
+        item = _issue_item(3, StageName.IMPLEMENTATION)
+        handle = _fake_in_flight_item(coordinator, item)
+
+        coordinator._handle_completion(handle, JobResult(ok=True, duration_s=-1.0))
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert "hephaestus_pipeline_agent_job_seconds_total 0" in rendered
+
+    def test_completion_persists_direct_agent_session_by_logical_role(self, tmp_path: Path) -> None:
+        """The next loop turn can resume the direct agent's saved context."""
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.stages[StageName.IMPLEMENTATION] = StubStage()
+        item = _issue_item(4, StageName.IMPLEMENTATION)
+        handle = JobHandle(
+            job=AgentJob(
+                repo="repo-a",
+                issue=4,
+                agent="codex",
+                model="m",
+                prompt_builder=lambda: "p",
+                cwd=Path("."),
+                timeout_s=1,
+                session_agent="implementer",
+            ),
+            on_done_state=StageName.IMPLEMENTATION,
+        )
+        coordinator.in_flight[handle] = item
+        coordinator.inflight_per_repo[item.repo] += 1
+
+        coordinator._handle_completion(handle, JobResult(ok=True, session_id="codex-session"))
+
+        assert item.session_ids == {"implementer": "codex-session"}
+
+    def test_event_log_path_persists_queue_events(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Configured event_log_path receives JSONL queue/event records."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._push_item(item, StageName.PLANNING, enter=True)
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert records[-1]["event"] == "push"
+        assert records[-1]["fields"] == ["planning", "repo-a#44"]
+        assert coordinator.event_log[-1] == ("push", "planning", "repo-a#44")
+
+    def test_stage_event_rejects_foreign_raw_content_before_jsonl_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Foreign event objects cannot inject reviewer text into the log."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        @dataclass(frozen=True)
+        class UnsafeEvent:
+            reviewer_summary: str
+
+        with pytest.raises(TypeError, match="unsupported stage event"):
+            coordinator._ctx_for_repo("repo-a").emit_event(
+                cast(Any, UnsafeEvent("untrusted reviewer data"))
+            )
+        assert not event_log_path.exists()
+
+    def test_event_log_path_persists_job_completion_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Job completions are durable without logging raw agent output."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        stage = StubStage()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            stages={StageName.PLANNING: stage},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        assert complete["fields"] == [
+            "AgentJob",
+            "repo-a#44",
+            "planning",
+            "REVIEWED",
+            {
+                "descr": "stub agent job",
+                "duration_s": 0.0,
+                "error": None,
+                "interrupted": False,
+                "ok": True,
+            },
+        ]
+        assert "stdout_tail" not in complete["fields"][-1]
+        assert "stderr_tail" not in complete["fields"][-1]
+
+    def test_event_log_completion_records_worker_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Completion records include the worker that executed the submitted job."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        pool = FakeWorkerPool()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        result = JobResult(ok=True, value="done")
+        object.__setattr__(result, "worker_id", "hephaestus-pipeline-worker_0")
+        pool.queue_result(result)
+        item = _issue_item(45, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=45), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        complete = next(record for record in records if record["event"] == "complete")
+        assert complete["fields"][-1]["worker_id"] == "hephaestus-pipeline-worker_0"
+
+    def test_submit_forwards_claim_context_to_worker_pool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Submitted jobs carry item/stage context for worker-claim logging."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        pool = FakeWorkerPool()
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(46, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=46), "REVIEWED"))
+
+        assert pool.submitted_claims == [("repo-a#46", "planning")]
+
+    def test_event_log_path_sanitizes_job_error_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Job completions persist safe error classes, not raw error text."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        stage = StubStage()
+        pool = FakeWorkerPool()
+        pool.queue_result(JobResult(ok=False, error="token=secret private-endpoint"))
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: stage},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+        item = _issue_item(44, StageName.PLANNING)
+
+        coordinator._submit(item, JobRequest(_agent_job(issue=44), "REVIEWED"))
+        coordinator._drain_completions()
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        text = event_log_path.read_text()
+        complete = next(record for record in records if record["event"] == "complete")
+        assert "token=secret" not in text
+        assert "private-endpoint" not in text
+        assert complete["fields"][-1]["error"] == "error"
+
+    def test_event_log_path_persists_resumable_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Interrupted items leave durable resumable breadcrumbs."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.state = "REVIEW_WAIT"
+
+        coordinator._park_resumable(item)
+
+        records = [json.loads(line) for line in event_log_path.read_text().splitlines()]
+        assert records[-1]["event"] == "resumable"
+        assert records[-1]["fields"] == ["repo-a#44", "pr_review", "REVIEW_WAIT"]
+
+    def test_park_resumable_does_not_keep_private_buffer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RESUMABLE parking should not accumulate hidden coordinator state."""
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.state = "REVIEW_WAIT"
+
+        coordinator._park_resumable(item)
+
+        assert "_resumable" not in coordinator.__dict__
+
+    def test_park_resumable_reports_a_receipt_backed_recovery_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An interrupt after remote drift keeps the current-run recovery guidance."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        repo_root = tmp_path / "repo-a"
+        worktree = repo_root / "build" / ".worktrees" / "review-pr-44"
+        worktree.mkdir(parents=True)
+        (worktree / ".git").mkdir()
+        record_direct_review_recovery(
+            repo_root=repo_root,
+            issue=44,
+            pr=1001,
+            worktree=worktree,
+            branch="44-auto",
+            expected_remote_sha="a" * 40,
+            source_sha="b" * 40,
+        )
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.pr = 1001
+
+        coordinator._park_resumable(item)
+
+        assert coordinator._active_recovery_worktrees() == [("repo-a", 44, str(worktree.resolve()))]
+
+    def test_park_resumable_reports_an_unreceipted_detached_push_checkout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shutdown preserves inspection guidance even when receipt creation failed."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(44, StageName.PR_REVIEW)
+        item.pr = 1001
+        worktree = tmp_path / "review-pr-1001"
+        worktree.mkdir()
+        item.worktree = str(worktree)
+        item.state = "PUSH_WAIT"
+        item.payload["direct_pr_worktree"] = item.worktree
+        item.payload["detached_push_failure"] = "remote_changed_unrecorded"
+
+        coordinator._park_resumable(item)
+
+        assert coordinator._active_recovery_worktrees() == [("repo-a", 44, str(worktree))]
+
+
+class TestPipelineScopeWiring:
+    """Scope-trimmed routing + the planner CLI's --force re-plan override (#1820)."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_open_issue_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep scope-wiring tests unit-local; filter behavior has its own test."""
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+
+    def _scoped_config(
+        self,
+        tmp_path: Path,
+        *,
+        issues: list[int],
+        force: bool = False,
+        parallel_repos: int = 1,
+    ) -> PipelineConfig:
+
+        return PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=issues,
+            loops=1,
+            parallel_repos=parallel_repos,
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+            force=force,
+        )
+
+    def test_scoped_routes_include_finished_sink(self, tmp_path: Path) -> None:
+        """A scoped run's route table always carries the FINISHED sink row."""
+        config = self._scoped_config(tmp_path, issues=[1])
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        # Only the two in-scope stages plus the always-present FINISHED sink.
+        assert set(coordinator._routes) == {
+            StageName.PLANNING,
+            StageName.PLAN_REVIEW,
+            StageName.FINISHED,
+        }
+        # PLANNING.next (PLAN_REVIEW) stays in scope; PLAN_REVIEW.next
+        # (IMPLEMENTATION) is out of scope -> rewritten to FINISHED.
+        assert coordinator._routes[StageName.PLANNING].next == StageName.PLAN_REVIEW
+        assert coordinator._routes[StageName.PLAN_REVIEW].next == StageName.FINISHED
+
+    def test_full_run_uses_global_routes(self, tmp_path: Path) -> None:
+        """Without a scope the coordinator routes through the full ROUTES table.
+
+        It uses a COPY of ROUTES, not the shared object itself, so an
+        in-place edit of ``self._routes`` can never corrupt the module-level
+        table for other runs (#2294).
+        """
+        from hephaestus.automation.pipeline.routing import ROUTES
+
+        config = PipelineConfig(org="org", repos=["repo-a"], loops=1, projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._routes == ROUTES
+        assert coordinator._routes is not ROUTES
+
+    def test_direct_issue_scope_hydrates_issue_context_payload(self, tmp_path: Path) -> None:
+        """Explicit --issues seeding preserves the real issue title/body for prompts."""
+        gh = FakeStageGitHub(
+            labels=["state:needs-plan"],
+            issue_title="Hydrate planner context",
+            issue_body="Use the real issue body.",
+        )
+        config = self._scoped_config(tmp_path, issues=[1881])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+        item = coordinator._entry_to_item(entries[0], "repo-a")
+
+        assert entries[0].issue_title == "Hydrate planner context"
+        assert entries[0].issue_body == "Use the real issue body."
+        assert item.payload["issue_title"] == "Hydrate planner context"
+        assert item.payload["issue_body"] == "Use the real issue body."
+
+    def test_seed_pass_filters_closed_explicit_issues_before_classification(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closed explicit --issues are dropped before pipeline classification (#1899)."""
+
+        class RecordingGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(labels=["state:needs-plan"])
+                self.issue_json_calls: list[int] = []
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                self.issue_json_calls.append(issue_number)
+                return super().gh_issue_json(issue_number)
+
+        def fake_filter(repo: str, issue_numbers: list[int]) -> list[int]:
+            assert repo == "repo-a"
+            assert issue_numbers == [1, 2, 3]
+            return [1, 3]
+
+        gh = RecordingGitHub()
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            fake_filter,
+        )
+        config = self._scoped_config(tmp_path, issues=[1, 2, 3], parallel_repos=2)
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        assert coordinator._seed_pass() == 1
+        coordinator._drain_queues()
+        coordinator._drain_completions()
+        coordinator._drain_completions()
+        assert [item.issue for item in coordinator.items] == [1, 3]
+        assert gh.issue_json_calls == [1, 3]
+
+    def test_at_or_past_plan_go_issue_clamps_to_finished(self, tmp_path: Path) -> None:
+        """A plan-go issue classifies to IMPLEMENTATION; the scope clamps it to FINISHED-pass."""
+        gh = FakeStageGitHub(labels=["state:plan-go"])
+        config = self._scoped_config(tmp_path, issues=[1])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        assert coordinator.run() == 0
+        assert len(coordinator.ledger) == 1
+        result = coordinator.ledger[0]
+        assert result.passed
+        assert result.final_stage is StageName.FINISHED
+        # The item never entered an out-of-scope IMPLEMENTATION stage.
+        assert all(item.stage is StageName.FINISHED for item in coordinator.items)
+
+    def test_force_reroutes_plan_go_issue_to_planning(self, tmp_path: Path) -> None:
+        """--force re-routes an at-or-past-plan-go issue back to the scope's first stage."""
+        gh = FakeStageGitHub(labels=["state:plan-go"])
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.PLANNING
+        assert "force re-plan" in entries[0].reason
+
+    def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
+        """--force must NOT pull a PRE-scope stage forward into the scope.
+
+        Regression (#1820 review): under a later scope (e.g.
+        implementation->pr_review) a PLANNING classification is upstream of the
+        scope. force is a redo knob for work at-or-past the scope, not a
+        fast-forward that advances un-started upstream work into it.
+        """
+        # Scope starts at IMPLEMENTATION; PLANNING is pre-scope.
+        scope = PipelineScope(frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW}))
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+        object.__setattr__(config, "scope", scope)
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        stage, reason = coordinator._clamp_seed_stage_to_scope(
+            1, StageName.PLANNING, "needs-plan", scope.stages
+        )
+
+        assert stage is StageName.PLANNING  # left untouched, NOT forced to IMPLEMENTATION
+        assert "force re-plan" not in reason
+
+    def test_needs_plan_issue_seeds_into_planning_within_scope(self, tmp_path: Path) -> None:
+        """An in-scope PLANNING classification is preserved (no clamp)."""
+        gh = FakeStageGitHub(labels=["state:needs-plan"])
+        config = self._scoped_config(tmp_path, issues=[1])
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.PLANNING
+
+
+class TestConfigWiring:
+    """PipelineConfig fields reach the per-repo StageContext the stages read."""
+
+    def test_budget_override_takes_precedence_over_routes_default(self, tmp_path: Path) -> None:
+        """Budget overrides take precedence over the routing-table default."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            budget_overrides={"merge": 3},
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.budget("merge") == 3
+
+    def test_drive_green_filters_flow_to_stage_config(self, tmp_path: Path) -> None:
+        """Discovery flags survive the coordinator's stage-config copy."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            projects_dir=tmp_path,
+            include_bot_prs=False,
+            include_all_authors=True,
+        )
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        ctx = coordinator._ctx_for_repo("repo-a")
+
+        assert ctx.config.include_bot_prs is False
+        assert ctx.config.include_all_authors is True

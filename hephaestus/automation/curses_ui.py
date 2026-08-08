@@ -1,0 +1,340 @@
+"""Curses-based UI for parallel worker visualization.
+
+Provides:
+- Thread-safe log buffer management
+- Real-time status display with curses
+- Per-thread log routing
+
+The :mod:`curses` stdlib module ships with CPython on POSIX but not on Windows
+(``_curses`` is unavailable there). To keep this module importable on Windows —
+so the pure-Python :class:`LogBuffer` / :class:`ThreadLogManager` classes that
+other automation modules depend on stay importable — ``curses`` is loaded under
+a try/except. Instantiating :class:`CursesUI` on a platform without curses
+raises :class:`RuntimeError` with a clear message.
+"""
+
+import atexit
+import contextlib
+import logging
+import threading
+import time
+from collections import deque
+from typing import Any
+
+from hephaestus.utils.terminal import restore_terminal
+
+from .status_tracker import StatusTracker
+
+logger = logging.getLogger(__name__)
+
+try:
+    import curses
+except ModuleNotFoundError:  # Windows: stdlib `curses` is not bundled with CPython.
+    # WHY justified: mypy types the imported `curses` module, so rebinding the
+    # name to None on the Windows fallback path needs [assignment].
+    curses = None  # type: ignore[assignment]
+
+
+class LogBuffer:
+    """Thread-safe circular log buffer."""
+
+    def __init__(self, maxlen: int = 1000) -> None:
+        """Initialize log buffer.
+
+        Args:
+            maxlen: Maximum number of log entries to keep
+
+        """
+        self.buffer: deque[str] = deque(maxlen=maxlen)
+        self.lock = threading.Lock()
+
+    def append(self, message: str) -> None:
+        """Append a log message.
+
+        Args:
+            message: Log message to append
+
+        """
+        with self.lock:
+            self.buffer.append(message)
+
+    def get_recent(self, n: int) -> list[str]:
+        """Get the n most recent log entries.
+
+        Args:
+            n: Number of entries to retrieve
+
+        Returns:
+            List of recent log messages
+
+        """
+        with self.lock:
+            return list(self.buffer)[-n:]
+
+    def clear(self) -> None:
+        """Clear the log buffer."""
+        with self.lock:
+            self.buffer.clear()
+
+
+class ThreadLogManager:
+    """Manager for per-thread log buffers.
+
+    Routes log messages to thread-specific buffers for organized display.
+    """
+
+    def __init__(self) -> None:
+        """Initialize thread log manager."""
+        self.buffers: dict[int, LogBuffer] = {}
+        self.lock = threading.Lock()
+
+    def get_buffer(self, thread_id: int) -> LogBuffer:
+        """Get log buffer for a thread.
+
+        Args:
+            thread_id: Thread identifier
+
+        Returns:
+            LogBuffer for the thread
+
+        """
+        with self.lock:
+            if thread_id not in self.buffers:
+                self.buffers[thread_id] = LogBuffer()
+            return self.buffers[thread_id]
+
+    def log(self, thread_id: int, message: str) -> None:
+        """Log a message to a thread's buffer.
+
+        Args:
+            thread_id: Thread identifier
+            message: Log message
+
+        """
+        buffer = self.get_buffer(thread_id)
+        buffer.append(message)
+
+
+class CursesUI:
+    """Curses-based UI for displaying worker status and logs.
+
+    Displays:
+    - Real-time worker status slots
+    - Recent log messages
+    - Progress indicators
+    """
+
+    def __init__(
+        self,
+        status_tracker: StatusTracker,
+        log_manager: ThreadLogManager,
+    ) -> None:
+        """Initialize curses UI.
+
+        Args:
+            status_tracker: StatusTracker instance
+            log_manager: ThreadLogManager instance
+
+        Raises:
+            RuntimeError: If the stdlib ``curses`` module is unavailable on this
+                platform (notably Windows). The pure-Python classes in this
+                module remain importable in that case; only ``CursesUI`` itself
+                is unusable.
+
+        """
+        if curses is None:
+            raise RuntimeError(
+                "CursesUI requires the stdlib `curses` module, which is not "
+                "bundled with CPython on Windows. Run the automation pipeline "
+                "from a POSIX environment, or set --no-ui."
+            )
+        self.status_tracker = status_tracker
+        self.log_manager = log_manager
+        self.stdscr: Any = None
+        self.running = False
+        self.thread: threading.Thread | None = None
+
+    def _emergency_cleanup(self) -> None:
+        """Emergency cleanup for atexit — restores terminal if stop() was not called."""
+        with contextlib.suppress(Exception):
+            curses.endwin()
+        restore_terminal()
+
+    def start(self) -> None:
+        """Start the curses UI in a background thread."""
+        if self.running:
+            logger.warning("CursesUI already running")
+            return
+
+        self.running = True
+        atexit.register(self._emergency_cleanup)
+        self.thread = threading.Thread(target=self._run_ui, daemon=True)
+        self.thread.start()
+        logger.debug("Started CursesUI thread")
+
+    def stop(self) -> None:
+        """Stop the curses UI."""
+        if not self.running:
+            return
+
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        atexit.unregister(self._emergency_cleanup)
+        logger.debug("Stopped CursesUI")
+
+    def _run_ui(self) -> None:
+        """Run the curses UI loop."""
+        try:
+            curses.wrapper(self._curses_main)
+        except Exception as e:
+            logger.error("CursesUI error: %s", e)
+        finally:
+            # Always reset running flag so UI can be restarted
+            self.running = False
+
+    def _curses_main(self, stdscr: Any) -> None:
+        """Run the main curses loop.
+
+        Args:
+            stdscr: Curses standard screen object
+
+        """
+        self.stdscr = stdscr
+        curses.curs_set(0)  # Hide cursor
+        stdscr.nodelay(True)  # Non-blocking input
+
+        # Initialize color pairs if available
+        if curses.has_colors():
+            curses.start_color()
+            curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
+            curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+            curses.init_pair(3, curses.COLOR_RED, curses.COLOR_BLACK)
+
+        while self.running:
+            try:
+                self._refresh_display()
+                time.sleep(0.5)  # Update twice per second
+            except curses.error:
+                # Terminal resize (SIGWINCH) or too-small terminal.
+                # Inform curses of the new dimensions and retry the refresh
+                # so the TUI recovers gracefully instead of silently freezing.
+                if self.stdscr is not None:
+                    with contextlib.suppress(curses.error):
+                        curses.resizeterm(*self.stdscr.getmaxyx())
+            except KeyboardInterrupt:
+                break
+
+    def _refresh_display(self) -> None:
+        """Refresh the curses display."""
+        if not self.stdscr:
+            return
+
+        self.stdscr.clear()
+        height, width = self.stdscr.getmaxyx()
+
+        # Display title
+        title = "Hephaestus Issue Implementer"
+        if len(title) < width:
+            self.stdscr.addstr(0, 0, title, curses.A_BOLD)
+
+        row = self._draw_workers(start_row=2, height=height, width=width)
+        row = self._draw_separator(start_row=row, height=height, width=width)
+        self._draw_logs(start_row=row, height=height, width=width)
+
+        self.stdscr.refresh()
+
+    def _draw_workers(self, start_row: int, height: int, width: int) -> int:
+        """Render worker status slots; return the next free row.
+
+        Args:
+            start_row: Row to start drawing at
+            height: Terminal height in rows
+            width: Terminal width in columns
+
+        Returns:
+            The next free row after the worker slots
+
+        """
+        statuses = self.status_tracker.get_status()
+        row = start_row
+        for i, status in enumerate(statuses):
+            if row >= height - 1:
+                break
+
+            if status is None:
+                status_text = f"Worker {i}: [idle]"
+                attr = curses.color_pair(1) if curses.has_colors() else curses.A_DIM
+            else:
+                status_text = f"Worker {i}: {status}"
+                attr = curses.color_pair(2) if curses.has_colors() else curses.A_NORMAL
+
+            # Truncate to fit width
+            if len(status_text) > width - 1:
+                status_text = status_text[: width - 4] + "..."
+
+            with contextlib.suppress(curses.error):
+                self.stdscr.addstr(row, 0, status_text, attr)
+
+            row += 1
+        return row
+
+    def _draw_separator(self, start_row: int, height: int, width: int) -> int:
+        """Render the horizontal separator; return the next free row.
+
+        Args:
+            start_row: Row to start drawing at
+            height: Terminal height in rows
+            width: Terminal width in columns
+
+        Returns:
+            The next free row after the separator
+
+        """
+        if start_row >= height - 1:
+            return start_row
+        with contextlib.suppress(curses.error):
+            self.stdscr.addstr(start_row, 0, "-" * min(width - 1, 80))
+        return start_row + 1
+
+    def _draw_logs(self, start_row: int, height: int, width: int) -> int:
+        """Render the recent-activity log tail; return the next free row.
+
+        Args:
+            start_row: Row to start drawing at
+            height: Terminal height in rows
+            width: Terminal width in columns
+
+        Returns:
+            The next free row after the logs
+
+        """
+        row = start_row
+        if row >= height - 1:
+            return row
+
+        with contextlib.suppress(curses.error):
+            self.stdscr.addstr(row, 0, "Recent Activity:", curses.A_BOLD)
+        row += 1
+
+        # Gather recent logs from all threads
+        all_logs: list[str] = []
+        # Take snapshot to avoid RuntimeError if dict changes during iteration
+        for buffer in list(self.log_manager.buffers.values()):
+            all_logs.extend(buffer.get_recent(10))
+
+        # Display most recent logs
+        for log_msg in all_logs[-(height - row - 1) :]:
+            if row >= height - 1:
+                break
+
+            # Truncate to fit width
+            if len(log_msg) > width - 1:
+                log_msg = log_msg[: width - 4] + "..."
+
+            with contextlib.suppress(curses.error):
+                self.stdscr.addstr(row, 0, log_msg)
+
+            row += 1
+
+        return row

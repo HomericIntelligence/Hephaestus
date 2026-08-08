@@ -1,0 +1,354 @@
+"""GitHub issue/PR state-label vocabulary for the automation pipeline.
+
+The automation pipeline uses four mutually-exclusive ``state:*`` labels as the
+single source of truth for an issue's plan-review status. This module is the
+authoritative definition of those labels, the PR-scoped implementation-review
+labels, and the small helpers that interpret them; the reviewer, planner,
+implementer, and the org-wide provisioning script all import from here.
+
+State machine
+-------------
+
+::
+
+    [issue opened]
+        │
+        ▼
+    state:needs-plan ──(planner+reviewer run)──▶ state:plan-no-go ──┐
+            │                         └────────▶ state:plan-blocked │
+            │                                   (automation hold; │
+            │                                    external actor   │
+            │                                    must replace it) │
+            │                                                      │
+            └──────────────────────────────────────────────────────▼
+                                                            state:plan-go
+                                                            (terminal — implementer trusts
+                                                             this exclusively; never
+                                                             re-plans or re-reviews)
+
+At most one of the four labels should be present on an issue at any time.
+Automation removes ordinary siblings while changing state, but it never
+removes ``state:plan-blocked``. If that operator-owned latch appears during a
+concurrent transition, exclusive-state confirmation fails and automation
+stops until an external actor resolves the block and replaces the label.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Sequence
+from typing import Any
+
+# Single source of truth for the four plan-state labels. All label-aware code
+# in the pipeline imports these constants; do not hard-code the names.
+STATE_NEEDS_PLAN = "state:needs-plan"
+STATE_PLAN_NO_GO = "state:plan-no-go"
+STATE_PLAN_GO = "state:plan-go"
+STATE_PLAN_BLOCKED = "state:plan-blocked"
+
+#: All four state labels in one tuple — useful for "ensure none of these are
+#: present" / "remove all of these" operations.
+ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED)
+
+# PR-scoped implementation-review state labels. These deliberately live outside
+# ALL_STATE_LABELS so issue-level plan state remains independent from PR review
+# state.
+STATE_IMPLEMENTATION_NO_GO = "state:implementation-no-go"
+STATE_IMPLEMENTATION_GO = "state:implementation-go"
+ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTATION_GO)
+
+#: Manual override: when present on an issue OR its PR, automation normally
+#: skips that work item entirely (#1083). Unlike the plan/implementation state
+#: labels this is operator-applied (or auto-applied by the review loop when it
+#: exhausts its review budget without clearing its structural review facts — the budget starts at
+#: MAX_REVIEW_ITERATIONS and extends up to MAX_REVIEW_ITERATIONS_HARD_CAP while
+#: the loop keeps making progress, #1554), and it is independent of all
+#: other state labels — so it deliberately lives outside the tuples above.
+#: The implementer has one narrow stale-state recovery path for explicitly
+#: selected issues that also carry ``state:plan-go`` and have no open PR.
+STATE_SKIP = "state:skip"
+
+#: Marker keying the single skip-reason comment per issue (#2256). Every
+#: ``state:skip`` application upserts one comment starting with this marker so
+#: the reason survives outside ephemeral run logs.
+SKIP_REASON_MARKER = "<!-- hephaestus-state-skip-reason -->"
+
+
+def format_skip_reason_comment(reason: str) -> str:
+    """Render the marker-keyed comment body documenting a ``state:skip`` write.
+
+    Args:
+        reason: Human-readable explanation of why automation applied the label.
+
+    Returns:
+        The full comment body, starting with :data:`SKIP_REASON_MARKER`.
+
+    """
+    return (
+        f"{SKIP_REASON_MARKER}\n"
+        f"**Automation applied `state:skip`.**\n\n"
+        f"Reason: {reason}\n\n"
+        f"Remove the label to make the issue eligible for the automation loop "
+        f"again (see docs/runbooks/state-skip-revival.md)."
+    )
+
+
+#: Label names that mark a TRACKING issue (an epic / roadmap) rather than a code
+#: task. Epics and roadmaps are checklists of child work; the planning loop must
+#: not plan or implement them directly (their deliverable is a body edit, not a
+#: PR). Matched case-insensitively. Native GitHub issue types are not exposed by
+#: the installed ``gh`` CLI, so a label name or a title substring is the only
+#: available signal — see :func:`is_epic`.
+EPIC_LABELS = ("epic", "roadmap")
+
+#: Per-label colour (hex without leading ``#``) and short description. The
+#: provisioning script (``hephaestus-ensure-state-labels``) uses these when
+#: creating the labels on a repo so they have a consistent look across the org.
+STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
+    STATE_NEEDS_PLAN: {
+        "color": "fbca04",  # amber — attention needed
+        "description": "Issue has no plan yet; planner should run.",
+    },
+    STATE_PLAN_NO_GO: {
+        "color": "d93f0b",  # red — blocked
+        "description": (
+            "Plan-reviewer's latest verdict was NOGO (or NOGO-exhausted); re-plan next loop."
+        ),
+    },
+    STATE_PLAN_GO: {
+        "color": "0e8a16",  # green — approved
+        "description": "Plan approved by reviewer; implementer may proceed.",
+    },
+    STATE_PLAN_BLOCKED: {
+        "color": "5319e7",
+        "description": (
+            "Automation is stopped; an external actor must resolve the block "
+            "and replace this label."
+        ),
+    },
+    STATE_IMPLEMENTATION_NO_GO: {
+        "color": "d93f0b",  # red — blocked
+        "description": (
+            "Current reviewed head has unresolved implementation-review threads; revise."
+        ),
+    },
+    STATE_IMPLEMENTATION_GO: {
+        "color": "0e8a16",  # green — approved
+        "description": (
+            "Exact reviewed head has no unresolved review threads; "
+            "merge-wait still requires the process-local reviewed-head proof."
+        ),
+    },
+    STATE_SKIP: {
+        "color": "ededed",  # grey — intentionally inert
+        "description": "Automation normally skips this issue/PR in every phase.",
+    },
+}
+
+
+def has_label(labels: Iterable[str], target: str) -> bool:
+    """Return ``True`` iff ``target`` is in the iterable of label names.
+
+    Thin convenience wrapper so callers don't import ``set`` semantics. Useful
+    when reading the labels list off an issue dict.
+    """
+    return target in set(labels)
+
+
+def is_exclusive_plan_state(labels: Iterable[str], expected: str) -> bool:
+    """Return whether *expected* is the issue's one active plan-state label.
+
+    Transition confirmation must validate both halves of an atomic label
+    mutation: the target is present and every mutually-exclusive sibling is
+    absent. Unrelated labels do not affect the result.
+    """
+    if expected not in ALL_STATE_LABELS:
+        raise ValueError(f"unsupported plan state: {expected}")
+    active = set(labels).intersection(ALL_STATE_LABELS)
+    return active == {expected}
+
+
+def is_plan_go(labels: Iterable[str]) -> bool:
+    """Return ``True`` iff GO is the issue's sole plan-state label.
+
+    This is the gate the implementer trusts: once GO, no further planning or
+    review iterations are performed.
+    """
+    return is_exclusive_plan_state(labels, STATE_PLAN_GO)
+
+
+def is_plan_no_go(labels: Iterable[str]) -> bool:
+    """Return ``True`` iff the issue currently carries ``state:plan-no-go``.
+
+    Indicates a NOGO verdict from the most recent reviewer pass (or
+    NOGO-exhausted after MAX_REVIEW_ITERATIONS). The planner will re-plan it
+    on the next loop.
+    """
+    return has_label(labels, STATE_PLAN_NO_GO)
+
+
+def is_implementation_go(labels: Iterable[str]) -> bool:
+    """Return ``True`` iff the PR carries the exclusive positive implementation label."""
+    active = set(labels).intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+    return active == {STATE_IMPLEMENTATION_GO}
+
+
+def is_skipped(labels: Iterable[str]) -> bool:
+    """Return ``True`` iff the issue/PR carries the ``state:skip`` override.
+
+    When set, automation normally skips the work item (#1083). Honored on both
+    issues and their PRs; callers may still add narrower stale-state recovery
+    policy where they have enough context.
+    """
+    return has_label(labels, STATE_SKIP)
+
+
+#: How many leading whitespace-separated title tokens the ``is_epic`` title
+#: fallback inspects. Tracking issues LEAD with the marker ("Epic: ...",
+#: "Q3 Roadmap tracking"); an issue that merely mentions epics mid-sentence
+#: (e.g. a bug report about epic handling, #2251) is a code task and must
+#: not be excluded from planning.
+_EPIC_TITLE_LEADING_TOKENS = 3
+
+
+def is_epic(labels: Iterable[str], title: str = "") -> bool:
+    """Return ``True`` iff the issue is an epic/roadmap tracking issue.
+
+    An issue is treated as an epic when **either** signal matches (both
+    case-insensitive):
+
+    * it carries a label whose name is in :data:`EPIC_LABELS`
+      (``epic`` / ``roadmap``), **or**
+    * its ``title`` LEADS with one of those markers as a standalone token —
+      within the first :data:`_EPIC_TITLE_LEADING_TOKENS` words. A marker
+      appearing later in the title is a mention, not the naming convention
+      (#2251: a bug report titled "...tags state:skip epic labels..." was
+      skip-parked by the anywhere-in-title match).
+
+    The title fallback catches the convention even when the label was not
+    applied. Pure function (no I/O) so both discovery paths and unit tests can
+    call it directly.
+
+    Args:
+        labels: Label names on the issue.
+        title: The issue title (optional; empty disables the title signal).
+
+    Returns:
+        ``True`` if the issue should be excluded from the planning loop.
+
+    """
+    if {label.lower() for label in labels} & set(EPIC_LABELS):
+        return True
+    leading_title = " ".join(title.lower().split()[:_EPIC_TITLE_LEADING_TOKENS])
+    return any(
+        re.search(rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])", leading_title)
+        for marker in EPIC_LABELS
+    )
+
+
+def partition_epics(
+    issues_meta: Sequence[dict[str, Any]],
+) -> tuple[list[int], list[int]]:
+    """Split issue metadata into ``(kept, epics)`` by :func:`is_epic`.
+
+    Pure helper shared by both discovery chokepoints so the loop and the
+    standalone planner exclude epics identically (DRY). Each element is a
+    metadata dict with ``number`` and the optional ``labels`` / ``title``
+    signals; missing keys are treated as absent (an issue with no labels and
+    no title is simply kept).
+
+    Args:
+        issues_meta: Issue metadata dicts, each with at least ``number`` and
+            optionally ``labels`` (list of names) and ``title``.
+
+    Returns:
+        ``(kept_numbers, epic_numbers)``, both sorted ascending. ``kept`` are
+        the real work items the loop should plan; ``epics`` are the tracking
+        issues to exclude (and tag ``state:skip``).
+
+    """
+    kept: list[int] = []
+    epics: list[int] = []
+    for meta in issues_meta:
+        number = int(meta["number"])
+        labels = meta.get("labels") or []
+        title = meta.get("title") or ""
+        (epics if is_epic(labels, title) else kept).append(number)
+    return sorted(kept), sorted(epics)
+
+
+def needs_plan(labels: Iterable[str]) -> bool:
+    """Return ``True`` iff the issue carries ``state:needs-plan`` (or no state label).
+
+    Issues with no state label are treated as needing a plan — the auto-label
+    workflow tags freshly-opened issues with ``state:needs-plan``, and the
+    absence of any state label is functionally equivalent (planner runs).
+
+    Terminal states win: if GO, NO-GO, or BLOCKED is also
+    present (e.g. mid label-churn during the reviewer's apply/remove sequence),
+    the issue is NOT in the needs-plan state regardless of whether
+    ``state:needs-plan`` was already removed.
+    """
+    label_set = set(labels)
+    return not label_set.intersection({STATE_PLAN_GO, STATE_PLAN_NO_GO, STATE_PLAN_BLOCKED})
+
+
+def apply_plan_verdict(*, is_go: bool) -> tuple[str, list[str]]:
+    """Compute the atomic plan-state transition for a reviewer verdict.
+
+    Pure: returns (label_to_add, labels_to_remove). The caller performs the
+    GitHub writes and any logging. Shared (#1814) so the plan_review stage and
+    seeding compute the transition identically.
+
+    GO and NOGO add their verdict label and remove ordinary sibling states.
+    They deliberately never remove BLOCKED, which is an external-actor latch.
+
+    Args:
+        is_go: ``True`` when the reviewer's verdict is GO; ``False`` for NOGO.
+
+    Returns:
+        A tuple (label_to_add, labels_to_remove) where label_to_add is the
+        single label to apply and labels_to_remove is the list of labels to
+        remove.
+
+    """
+    return apply_plan_state(STATE_PLAN_GO if is_go else STATE_PLAN_NO_GO)
+
+
+def apply_plan_state(state_label: str) -> tuple[str, list[str]]:
+    """Compute a plan-state write that never clears an existing BLOCKED latch."""
+    removals = {
+        STATE_PLAN_GO: [STATE_PLAN_NO_GO, STATE_NEEDS_PLAN],
+        STATE_PLAN_NO_GO: [STATE_PLAN_GO, STATE_NEEDS_PLAN],
+        STATE_PLAN_BLOCKED: [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+    }
+    try:
+        return state_label, removals[state_label]
+    except KeyError as exc:
+        raise ValueError(f"unsupported plan-review state: {state_label}") from exc
+
+
+def enter_planning_transition() -> tuple[list[str], list[str]]:
+    """Compute the atomic label swap for (re-)entering the planning stage.
+
+    Pure: returns (labels_to_add, labels_to_remove). The caller performs the
+    single atomic GitHub write. When plan_review exhausts its iteration budget
+    it ADDS ``state:plan-no-go`` and fails back to planning (routing.py "nogo"
+    route). Re-entry must restore ``state:needs-plan`` AND remove the sibling
+    rejection/terminal labels in ONE transition, or (a) the mutually-exclusive
+    label invariant is transiently violated and (b) the labels-first
+    ``has_existing_plan`` gate stays False forever, so VERIFY can never ADVANCE
+    and the re-plan cycle deadlocks (#1857).
+
+    Restores the documented state-machine edge
+    ``state:plan-no-go ──re-plan──▶ needs-plan`` (module docstring lifecycle
+    diagram): add ``state:needs-plan`` and remove NO-GO and GO. BLOCKED is
+    never removed by automation; if it appears in flight, exclusive label
+    confirmation fails until an external actor replaces it.
+
+    Returns:
+        A tuple (labels_to_add, labels_to_remove): ``[STATE_NEEDS_PLAN]`` and
+        the two sibling labels to clear.
+
+    """
+    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO]

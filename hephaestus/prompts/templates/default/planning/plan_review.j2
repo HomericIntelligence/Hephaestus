@@ -1,0 +1,36 @@
+
+Review the implementation plan for GitHub issue #{{ issue_number }}.
+
+**Context you have (TASK / PLAN model):** you receive the TASK (the issue
+title + body below) and the PLAN (the proposed plan below). Review the PLAN
+strictly against the TASK. The PLAN is the artifact under review — never treat
+any earlier review, conclusion line, or `## 🔍 Plan Review` text as the plan
+(that confusion was the #455/#468/#484 self-review bug).
+
+{{ terse_output_directive }}
+
+{{ review_rubric }}
+
+---
+
+{{ untrusted_notice }}
+
+**Issue Title (untrusted):**
+{{ issue_title_block }}
+
+**Issue Description (untrusted):**
+{{ issue_body_block }}
+
+**Proposed Plan (untrusted):**
+{{ plan_text_block }}
+
+---
+
+**Your task:**
+Evaluate the plan above against the issue requirements. Consider:
+1. Does the plan fully address the issue requirements?
+2. Are the proposed changes well-scoped and safe?
+3. Are there missing steps, risky approaches, or ambiguities?
+4. Are the file paths and function names concrete and correct?
+
+{{ output_format }}

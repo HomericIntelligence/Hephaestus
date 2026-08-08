@@ -1,0 +1,912 @@
+"""Tests for hephaestus.automation.loop_runner.
+
+loop_runner is a thin wrapper over the queue-based pipeline (epic #1809): it
+owns CLI parsing, org/repo scope resolution, PipelineConfig construction, and
+the token-preflight + dispatch hand-off. The legacy subprocess-per-phase loop
+was removed in #1819; execution lives in ``hephaestus.automation.pipeline``.
+These tests pin the parser, phase validation, scope resolution, and dispatch
+seams that remain here.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from hephaestus.automation import loop_runner
+from hephaestus.automation.loop_runner import (
+    ALL_PHASES,
+    LoopConfig,
+    _default_phase_timeout_s,
+    _phase_order_warnings,
+    _preflight_token_scopes,
+    _validate_phases,
+    main,
+)
+from hephaestus.utils.helpers import NETWORK_TIMEOUT
+
+# ---------------------------------------------------------------------------
+# Phase topology
+# ---------------------------------------------------------------------------
+
+
+def test_all_phases_is_two_stage_loop_body() -> None:
+    """Default loop-body phases stay plan+implement; drive-green is separate.
+
+    Plan-review, PR-review, and address-review fold into plan/implement
+    (#455/#468/#484). drive-green is the terminal blocking stage (#1560).
+    """
+    from hephaestus.automation.loop_runner import ALL_POST_LOOP_STAGES, ALL_SELECTABLE
+
+    assert ALL_PHASES == ("plan", "implement")
+    assert ALL_POST_LOOP_STAGES == ("drive-green",)
+    assert ALL_SELECTABLE == ("plan", "implement", "drive-green")
+
+
+@pytest.mark.parametrize("dropped", ["review-plans", "review-prs", "address-review"])
+def test_dropped_phases_rejected_by_validation(dropped: str) -> None:
+    """``--phases`` must reject a retired phase name as unknown."""
+    with pytest.raises(SystemExit, match="Unknown phase"):
+        _validate_phases(dropped)
+
+
+# ---------------------------------------------------------------------------
+# CLI / config validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_phases_accepts_full_list() -> None:
+    """Validate phases accepts full list."""
+    assert _validate_phases(",".join(ALL_PHASES)) == ALL_PHASES
+
+
+def test_validate_phases_accepts_subset() -> None:
+    """Validate phases accepts subset."""
+    assert _validate_phases("plan,implement") == ("plan", "implement")
+
+
+def test_validate_phases_rejects_typo() -> None:
+    """Validate phases rejects typo."""
+    with pytest.raises(SystemExit, match="Unknown phase"):
+        _validate_phases("plan,implmnt")
+
+
+def test_phase_order_warnings_drive_green_no_longer_warns() -> None:
+    """Per #818, drive-green without implement is a legitimate operator intent."""
+    cfg_alone = LoopConfig(phases=("drive-green",))
+    cfg_with = LoopConfig(phases=("implement", "drive-green"))
+    assert all("drive-green" not in w for w in _phase_order_warnings(cfg_alone))
+    assert all("drive-green" not in w for w in _phase_order_warnings(cfg_with))
+
+
+def test_phase_order_warnings_plan_without_implement_is_queue_safe() -> None:
+    """Partial phase selection is a queue entry hint, not an unsafe order."""
+    cfg = LoopConfig(phases=("plan",))
+    assert _phase_order_warnings(cfg) == []
+
+
+def test_phase_order_warnings_silent_on_full_pipeline() -> None:
+    """Phase order warnings silent on full pipeline."""
+    cfg = LoopConfig(phases=ALL_PHASES)
+    assert _phase_order_warnings(cfg) == []
+
+
+def test_parse_args_agent_defaults_to_auto_detect() -> None:
+    """Omitted --agent should defer to runtime auto-detection."""
+    args = loop_runner._parse_args([])
+    assert args.agent is None
+
+
+def test_parse_args_accepts_explicit_codex_agent() -> None:
+    """Operators can still force Codex explicitly."""
+    args = loop_runner._parse_args(["--agent", "codex"])
+    assert args.agent == "codex"
+
+
+def test_loop_help_documents_explicit_gh_root_override() -> None:
+    """The executable exception is an explicit, discoverable CLI authority."""
+    assert "--gh-extra-path-root" in loop_runner._build_parser().format_help()
+
+
+def test_parse_args_rejects_gh_root_that_escapes_through_a_symlink(tmp_path: Path) -> None:
+    """The explicit root cannot authorize an executable outside its boundary."""
+    gh_root = tmp_path / "gh-root"
+    gh_root.mkdir()
+    outside = tmp_path / "outside-gh"
+    outside.write_text("#!/bin/sh\n")
+    outside.chmod(0o755)
+    (gh_root / "bin").mkdir()
+    (gh_root / "bin" / "gh").symlink_to(outside)
+
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--gh-extra-path-root", str(gh_root)])
+
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_accepts_no_advise() -> None:
+    """The loop runner can disable advise across child phases."""
+    args = loop_runner._parse_args(["--no-advise"])
+    assert args.no_advise is True
+
+
+def test_parse_args_accepts_run_pre_pr_tests() -> None:
+    """The queue runner can enable the implementation-stage pre-PR test gate."""
+    args = loop_runner._parse_args(["--run-pre-pr-tests"])
+    assert args.run_pre_pr_tests is True
+    assert loop_runner._parse_args([]).run_pre_pr_tests is False
+
+
+def test_parse_args_accepts_nitpick() -> None:
+    """The loop runner can enable nitpick comments across review phases."""
+    assert loop_runner._parse_args(["--nitpick"]).nitpick is True
+    assert loop_runner._parse_args([]).nitpick is False
+
+
+def test_parse_args_accepts_github_throttle_options() -> None:
+    """The loop runner accepts explicit child-phase GitHub throttle config."""
+    args = loop_runner._parse_args(["--gh-global-rate", "4.5", "--gh-global-burst", "11"])
+    assert args.gh_global_rate == 4.5
+    assert args.gh_global_burst == 11.0
+
+
+def test_parse_args_accepts_drive_green_loops() -> None:
+    """--drive-green-loops is parsed; default is 5 (#2246, was --max-merge-attempts #1560)."""
+    assert loop_runner._parse_args(["--drive-green-loops", "3"]).drive_green_loops == 3
+    assert loop_runner._parse_args([]).drive_green_loops == 5
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_parse_args_rejects_non_positive_drive_green_loops(bad: str) -> None:
+    """The merge-poll budget must leave at least one current-run poll available."""
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--drive-green-loops", bad])
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_accepts_issue_scope() -> None:
+    """The loop runner can scope child phases to a comma-separated issue list."""
+    args = loop_runner._parse_args(["--issues", "8, 13"])
+    assert args.issues == [8, 13]
+
+
+def test_parse_args_accepts_pr_scope() -> None:
+    """The loop runner can scope pipeline seeding to a comma-separated PR list."""
+    args = loop_runner._parse_args(["--prs", "77, 78"])
+    assert args.prs == [77, 78]
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "33", "100"])
+def test_parse_args_rejects_out_of_range_max_workers(bad: str) -> None:
+    """Regression for #723: loop_runner must reject --max-workers outside 1-32."""
+    with pytest.raises(SystemExit) as excinfo:
+        loop_runner._parse_args(["--max-workers", bad])
+    assert excinfo.value.code == 2
+
+
+def test_parse_args_accepts_valid_max_workers() -> None:
+    """Valid --max-workers in range 1-32 accepted."""
+    args = loop_runner._parse_args(["--max-workers", "8"])
+    assert args.max_workers == 8
+
+
+def test_parse_args_default_max_workers_is_six() -> None:
+    """Omitted --max-workers defaults to 6 for the queue-based loop."""
+    args = loop_runner._parse_args([])
+    assert args.max_workers == 6
+
+
+def test_parse_args_serialize_file_overlap_default_on() -> None:
+    """File-overlap serialization is on by default; the flag disables it (#1623)."""
+    assert loop_runner._parse_args([]).serialize_file_overlap is True
+    assert loop_runner._parse_args(["--no-serialize-file-overlap"]).serialize_file_overlap is False
+
+
+def test_parse_args_model_flag_wires_to_namespace() -> None:
+    """--model parses into args.model (the path main() reads into cfg.model)."""
+    args = loop_runner._parse_args(["--model", "claude-fable-5"])
+    assert args.model == "claude-fable-5"
+    # Default is empty so the catch-all is inert unless explicitly passed.
+    assert loop_runner._parse_args([]).model == ""
+
+
+# ---------------------------------------------------------------------------
+# CLI scope refinements: fork filter, comma-only --repos, cwd default, --org
+# ---------------------------------------------------------------------------
+
+
+def test_parse_repo_list_comma_only() -> None:
+    """Comma-separated input is parsed; whitespace is stripped."""
+    assert loop_runner._parse_repo_list("foo, bar,baz") == ["foo", "bar", "baz"]
+    assert loop_runner._parse_repo_list("") == []
+    assert loop_runner._parse_repo_list("solo") == ["solo"]
+
+
+def test_repos_argparse_rejects_space_separated() -> None:
+    """Argparse treats space-separated values as positional; raises SystemExit."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--repos", "foo", "bar"])
+
+
+def test_gh_list_repos_filters_forks_and_archived() -> None:
+    """REST ``fork: true`` and ``archived: true`` entries are excluded.
+
+    Repo names are NOT filtered — only archived/fork status gates inclusion.
+    """
+    payload = (
+        '[{"name":"keep","fork":false,"archived":false},'
+        '{"name":"drop-fork","fork":true,"archived":false},'
+        '{"name":"drop-archived","fork":false,"archived":true},'
+        '{"name":"Odysseus","fork":false,"archived":false}]'
+    )
+    with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
+        mock_gh_call.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=payload, stderr=""
+        )
+        names = loop_runner._gh_list_repos("MyOrg")
+    # Odysseus is included — no name-based filtering (issue #814).
+    assert sorted(names) == ["Odysseus", "keep"]
+    invoked_argv = mock_gh_call.call_args[0][0]
+    assert invoked_argv[0] == "api"
+    assert "per_page=100" in invoked_argv[1]
+    assert "type=all" in invoked_argv[1]
+
+
+def test_gh_list_repos_passes_network_timeout() -> None:
+    """``gh repo list`` is routed through gh_call's bounded adapter."""
+    with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
+        mock_gh_call.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="[]", stderr=""
+        )
+        loop_runner._gh_list_repos("MyOrg")
+    assert mock_gh_call.call_args.kwargs["timeout"] == NETWORK_TIMEOUT
+
+
+def test_gh_list_repos_pages_beyond_the_former_two_hundred_cap() -> None:
+    """Organization discovery reads bounded pages without silently truncating."""
+    first_page = [
+        {"name": f"repo-{number:03d}", "fork": False, "archived": False} for number in range(100)
+    ]
+    second_page = [
+        {"name": "repo-100", "fork": False, "archived": False},
+        {"name": "fork", "fork": True, "archived": False},
+    ]
+    with patch(
+        "hephaestus.automation.loop_repo_manager.gh_call",
+        side_effect=[
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(first_page), stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(second_page), stderr=""
+            ),
+        ],
+    ) as mock_gh_call:
+        names = loop_runner._gh_list_repos("MyOrg")
+
+    assert names == [f"repo-{number:03d}" for number in range(100)] + ["repo-100"]
+    assert mock_gh_call.call_args_list[0].args[0] == [
+        "api",
+        "/orgs/MyOrg/repos?per_page=100&type=all&sort=full_name&direction=asc&page=1",
+    ]
+    assert mock_gh_call.call_args_list[1].args[0] == [
+        "api",
+        "/orgs/MyOrg/repos?per_page=100&type=all&sort=full_name&direction=asc&page=2",
+    ]
+
+
+def test_gh_list_repos_timeout_raises_systemexit() -> None:
+    """A timed-out ``gh repo list`` surfaces as a clean SystemExit."""
+    with patch("hephaestus.automation.loop_repo_manager.gh_call") as mock_gh_call:
+        mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=120)
+        with pytest.raises(SystemExit, match="timed out"):
+            loop_runner._gh_list_repos("MyOrg")
+
+
+def test_resolve_org_and_repos_cwd_default() -> None:
+    """No flags + cwd is a github repo → run for that single repo."""
+    args = loop_runner._parse_args([])
+    with patch(
+        "hephaestus.automation.loop_runner._detect_cwd_repo",
+        return_value=("MyOrg", "MyRepo"),
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "MyOrg"
+    assert repos == ["MyRepo"]
+
+
+def test_resolve_org_and_repos_errors_when_no_scope_and_not_git() -> None:
+    """No flags + cwd is not a github repo → return error message."""
+    args = loop_runner._parse_args([])
+    with patch(
+        "hephaestus.automation.loop_runner._detect_cwd_repo",
+        return_value=(None, None),
+    ):
+        _, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is not None
+    assert "cwd is not a github.com repo" in err
+    assert repos == []
+
+
+def test_resolve_org_and_repos_org_no_arg_autodetects() -> None:
+    """``--org`` with no value resolves a streamed organization source."""
+    args = loop_runner._parse_args(["--org"])
+    assert args.org is loop_runner._ORG_AUTODETECT
+    with (
+        patch(
+            "hephaestus.automation.loop_runner._detect_cwd_repo",
+            return_value=("DetectedOrg", "AnyRepo"),
+        ),
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "DetectedOrg"
+    assert repos == []
+    mock_list.assert_not_called()
+
+
+def test_resolve_org_and_repos_org_no_arg_errors_when_not_git() -> None:
+    """``--org`` with no value + cwd not a github repo → error."""
+    args = loop_runner._parse_args(["--org"])
+    with patch(
+        "hephaestus.automation.loop_runner._detect_cwd_repo",
+        return_value=(None, None),
+    ):
+        _, _, err = loop_runner._resolve_org_and_repos(args)
+    assert err is not None
+    assert "--org with no argument" in err
+
+
+def test_resolve_org_and_repos_org_named() -> None:
+    """``--org NAME`` streams the named org without cwd detection."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg"])
+    with (
+        patch(
+            "hephaestus.automation.loop_runner._detect_cwd_repo",
+        ) as mock_detect,
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "ExplicitOrg"
+    assert repos == []
+    mock_detect.assert_not_called()
+    mock_list.assert_not_called()
+
+
+def test_resolve_org_and_repos_org_defers_discovery_without_issue_scan() -> None:
+    """--org does not enumerate repos before the bounded coordinator source."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg"])
+    with (
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
+        patch(
+            "hephaestus.automation.loop_runner._sort_repos_by_open_count",
+            side_effect=AssertionError("--org must not enumerate each repo's issue metadata"),
+        ) as mock_sort,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert err is None
+    assert org == "ExplicitOrg"
+    assert repos == []
+    mock_list.assert_not_called()
+    mock_sort.assert_not_called()
+
+
+@pytest.mark.parametrize("scope", [("--issues", "42"), ("--prs", "42")])
+def test_resolve_org_and_repos_rejects_numeric_scope_without_concrete_repo(
+    scope: tuple[str, str],
+) -> None:
+    """Org-wide direct numeric scopes must not materialize or pick a repo."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", *scope])
+    with patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list:
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert org == "ExplicitOrg"
+    assert repos == []
+    assert err == "--org with --issues/--prs requires exactly one --repos REPO scope."
+    mock_list.assert_not_called()
+
+
+@pytest.mark.parametrize("scope", [("--issues", "42"), ("--prs", "42")])
+def test_resolve_org_and_repos_rejects_multi_repo_numeric_scope(
+    scope: tuple[str, str],
+) -> None:
+    """A direct numeric target has one unambiguous repository owner."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", "--repos", "a,b", *scope])
+
+    org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert org == ""
+    assert repos == []
+    assert err == "--issues/--prs require exactly one repository via --repos REPO."
+
+
+@pytest.mark.parametrize("scope", [("--issues", "42"), ("--prs", "42")])
+def test_resolve_org_and_repos_accepts_single_repo_numeric_scope(
+    scope: tuple[str, str],
+) -> None:
+    """One explicit repository preserves the direct numeric-scope contract."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", "--repos", "target", *scope])
+
+    org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert (org, repos, err) == ("ExplicitOrg", ["target"], None)
+
+
+def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
+    """Organization discovery stays read-only when the loop is a dry run."""
+    args = loop_runner._parse_args(["--org", "ExplicitOrg", "--dry-run"])
+    epic = {"number": 81, "title": "Epic: roadmap", "labels": ["epic"]}
+    with (
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
+        patch(
+            "hephaestus.automation.loop_repo_manager._list_open_issue_meta",
+            return_value=[epic],
+        ),
+        patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+
+    assert err is None
+    assert org == "ExplicitOrg"
+    assert repos == []
+    mock_list.assert_not_called()
+    mock_skip.assert_not_called()
+
+
+def test_resolve_org_and_repos_repos_flag_uses_cwd_org() -> None:
+    """``--repos foo,bar`` uses cwd-detected org without enumerating."""
+    args = loop_runner._parse_args(["--repos", "foo,bar"])
+    assert args.repos == ["foo", "bar"]
+    with (
+        patch(
+            "hephaestus.automation.loop_runner._detect_cwd_repo",
+            return_value=("CwdOrg", "Whatever"),
+        ),
+        patch("hephaestus.automation.loop_runner._gh_list_repos") as mock_list,
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "CwdOrg"
+    assert repos == ["foo", "bar"]
+    mock_list.assert_not_called()
+
+
+def test_resolve_org_and_repos_repos_flag_falls_back_to_explicit_org() -> None:
+    """``--repos foo --org Bar`` (not in a git repo) uses ``Bar`` as the org."""
+    args = loop_runner._parse_args(["--repos", "foo", "--org", "Bar"])
+    with patch(
+        "hephaestus.automation.loop_runner._detect_cwd_repo",
+        return_value=(None, None),
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "Bar"
+    assert repos == ["foo"]
+
+
+def test_resolve_org_and_repos_repos_flag_prefers_explicit_org() -> None:
+    """``--repos foo --org Bar`` should not be overridden by the cwd repo's org."""
+    args = loop_runner._parse_args(["--repos", "foo", "--org", "Bar"])
+    with patch(
+        "hephaestus.automation.loop_runner._detect_cwd_repo",
+        return_value=("CwdOrg", "CurrentRepo"),
+    ):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "Bar"
+    assert repos == ["foo"]
+
+
+def test_detect_cwd_repo_parses_ssh_url() -> None:
+    """SSH origin ``git@github.com:Org/Repo.git`` yields ``Org``."""
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="/tmp/MyRepo\n", stderr=""
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="git@github.com:MyOrg/MyRepo.git\n", stderr=""
+        )
+
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+        org, repo = loop_runner._detect_cwd_repo()
+    assert org == "MyOrg"
+    assert repo == "MyRepo"
+
+
+def test_resolve_org_and_repos_cwd_default_uses_remote_repo_not_worktree_dir() -> None:
+    """No flags should scope the loop to the GitHub repo, not worktree basename."""
+    args = loop_runner._parse_args([])
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout="/tmp/Hephaestus/build/.worktrees/issue-1442\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout="git@github.com:HomericIntelligence/Hephaestus.git\n",
+            stderr="",
+        )
+
+    with patch("hephaestus.automation.loop_repo_manager.subprocess.run", side_effect=fake_run):
+        org, repos, err = loop_runner._resolve_org_and_repos(args)
+    assert err is None
+    assert org == "HomericIntelligence"
+    assert repos == ["Hephaestus"]
+
+
+# ---------------------------------------------------------------------------
+# Token preflight
+# ---------------------------------------------------------------------------
+
+
+def _completed(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Build a CompletedProcess stand-in for mocked subprocess.run calls."""
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def test_preflight_token_scopes_reads_permissions() -> None:
+    """The token preflight ``gh api`` call is routed through gh_call."""
+    with patch("hephaestus.automation.loop_runner.gh_call") as mock_gh_call:
+        mock_gh_call.return_value = _completed(stdout='{"push": true}')
+        _preflight_token_scopes("Org", "Repo")
+    assert mock_gh_call.called
+
+
+def test_preflight_token_scopes_timeout_raises_systemexit() -> None:
+    """A timed-out token preflight surfaces as a clean SystemExit."""
+    with patch("hephaestus.automation.loop_runner.gh_call") as mock_gh_call:
+        mock_gh_call.side_effect = subprocess.TimeoutExpired(cmd="gh", timeout=30)
+        with pytest.raises(SystemExit, match="timed out"):
+            _preflight_token_scopes("Org", "Repo")
+
+
+def test_preflight_token_scopes_warns_on_empty_permissions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Empty permissions log a warning that writes will fail."""
+    with (
+        patch("hephaestus.automation.loop_runner.gh_call") as mock_gh_call,
+        caplog.at_level("WARNING", logger="hephaestus.automation.loop_runner"),
+    ):
+        mock_gh_call.return_value = _completed(stdout="null")
+        _preflight_token_scopes("Org", "Repo")
+    assert any("Token permissions" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Default per-agent-job timeout (#684)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultPhaseTimeout:
+    """The default job timeout applies when --phase-timeout is absent (#684)."""
+
+    def test_default_phase_timeout_is_non_none(self) -> None:
+        """A fresh LoopConfig has a positive default phase timeout."""
+        cfg = LoopConfig()
+        assert cfg.phase_timeout_s is not None
+        assert cfg.phase_timeout_s == _default_phase_timeout_s()
+        assert cfg.phase_timeout_s > 0
+
+    def test_default_phase_timeout_reads_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``HEPH_PHASE_TIMEOUT`` overrides the built-in default."""
+        monkeypatch.setenv("HEPH_PHASE_TIMEOUT", "42")
+        assert _default_phase_timeout_s() == 42.0
+
+    def test_default_phase_timeout_ignores_malformed_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-numeric override falls back to the default instead of crashing."""
+        monkeypatch.setenv("HEPH_PHASE_TIMEOUT", "not-a-number")
+        assert _default_phase_timeout_s() == 7800.0
+
+
+# ---------------------------------------------------------------------------
+# main() → pipeline config wiring
+# ---------------------------------------------------------------------------
+
+
+def _capture_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
+    """Run main() with dispatch stubbed and return the captured PipelineConfig."""
+    from hephaestus.automation.pipeline import coordinator as coordinator_mod
+
+    captured: dict[str, object] = {}
+
+    def _capture(config: object) -> int:
+        captured["config"] = config
+        return 0
+
+    monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
+    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *a, **k: None)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", _capture)
+    main(argv)
+    return captured["config"]
+
+
+def _capture_main_config(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
+    """Run main with only its coordinator dispatch replaced."""
+    from hephaestus.automation.pipeline import coordinator as coordinator_mod
+
+    captured: dict[str, object] = {}
+
+    def capture(config: object) -> int:
+        captured["config"] = config
+        return 0
+
+    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", capture)
+
+    assert main(argv) == 0
+    return captured["config"]
+
+
+def test_main_applies_default_phase_timeout_when_flag_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() builds a PipelineConfig with the default timeout when omitted."""
+    config = _capture_config(
+        ["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"], monkeypatch
+    )
+    assert config.phase_timeout_s == _default_phase_timeout_s()  # type: ignore[attr-defined]
+
+
+def test_main_disables_phase_timeout_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--phase-timeout 0`` explicitly disables the bound (None)."""
+    config = _capture_config(
+        ["--repos", "Repo", "--phase-timeout", "0", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+    assert config.phase_timeout_s is None  # type: ignore[attr-defined]
+
+
+def test_main_passes_org_discovery_as_a_resettable_pipeline_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An org-wide run never materializes repository names in PipelineConfig."""
+    config = _capture_main_config(
+        ["--org", "Org", "--dry-run", "--loops", "1", "--agent", "codex"], monkeypatch
+    )
+
+    assert config.repos == []  # type: ignore[attr-defined]
+    assert callable(config.repo_source_factory)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("port", [0, 65535])
+def test_metrics_port_parser_accepts_tcp_port_range(port: int) -> None:
+    """The opt-in local metrics endpoint accepts every valid TCP port."""
+    assert loop_runner._parse_args(["--metrics-port", str(port)]).metrics_port == port
+
+
+@pytest.mark.parametrize("port", [-1, 65536])
+def test_metrics_port_parser_rejects_out_of_range_values(port: int) -> None:
+    """Bad port values fail during CLI parsing, before coordinator setup."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--metrics-port", str(port)])
+
+
+def test_main_wires_metrics_port_to_pipeline_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The validated CLI port reaches the coordinator's opt-in configuration."""
+    config = _capture_config(
+        ["--repos", "Repo", "--metrics-port", "9123", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+    assert config.metrics_port == 9123  # type: ignore[attr-defined]
+
+
+def test_main_installs_sigtstp_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() fixes Ctrl+Z (#1784) via the shared install_sigtstp_only helper.
+
+    The pipeline's Coordinator already installs its own cooperative
+    SIGINT/SIGTERM/SIGHUP handlers on entry, but never wired SIGTSTP — this
+    wrapper installs it independently before dispatching to the coordinator.
+    """
+    from hephaestus.automation.pipeline import coordinator as coordinator_mod
+
+    monkeypatch.setattr(loop_runner, "_resolve_org_and_repos", lambda args: ("Org", ["Repo"], None))
+    monkeypatch.setattr(loop_runner, "_preflight_token_scopes", lambda *a, **k: None)
+    monkeypatch.setattr(coordinator_mod, "run_pipeline", lambda config: 0)
+
+    with patch("hephaestus.utils.terminal.install_sigtstp_only") as mock_tstp:
+        rc = main(["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"])
+
+    assert rc == 0
+    mock_tstp.assert_called_once_with()
+
+
+def test_main_prefers_current_checkout_parent_for_projects_dir_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loop defaults should use the cwd checkout's projects root when available."""
+    projects_dir = tmp_path / "projects"
+    resolve = patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir)
+    with resolve as resolve_projects_dir:
+        config = _capture_config(
+            ["--repos", "Repo", "--dry-run", "--loops", "1", "--agent", "claude"], monkeypatch
+        )
+    resolve_projects_dir.assert_called_once_with(None, prefer_cwd_parent=True)
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+
+
+def test_main_wires_external_checkout_as_explicit_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An external noncanonical checkout is not rewritten as ``projects_dir / repo``.
+
+    The loop may be launched from an isolated worktree whose path bears no
+    relationship to its remote repository name.  Its matching repo therefore
+    needs an explicit coordinator path, while other requested repos retain the
+    normal projects-root discovery fallback.
+    """
+    checkout = tmp_path / "isolated" / "automation-worktree"
+    projects_dir = tmp_path / "configured-projects"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {"Repo": checkout}  # type: ignore[attr-defined]
+    assert "Other" not in config.repo_roots  # type: ignore[attr-defined]
+
+
+def test_main_does_not_override_explicit_projects_dir_with_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit ``--projects-dir`` remains authoritative for every repo."""
+    checkout = tmp_path / "isolated" / "automation-worktree"
+    projects_dir = tmp_path / "configured-projects"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
+    config = _capture_main_config(
+        [
+            "--repos",
+            "Repo,Other",
+            "--projects-dir",
+            str(projects_dir),
+            "--dry-run",
+            "--loops",
+            "1",
+            "--agent",
+            "claude",
+        ],
+        monkeypatch,
+    )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {}  # type: ignore[attr-defined]
+
+
+def test_main_does_not_override_valid_projects_root_with_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid ``PROJECTS_ROOT`` remains authoritative for every repo."""
+    checkout = tmp_path / "isolated" / "automation-worktree"
+    projects_dir = tmp_path / "configured-projects"
+    projects_dir.mkdir()
+
+    monkeypatch.setenv("PROJECTS_ROOT", str(projects_dir))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
+    config = _capture_main_config(
+        ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {}  # type: ignore[attr-defined]
+
+
+def test_main_does_not_override_projects_root_for_automation_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Automation worktrees continue using their base checkout through projects_dir."""
+    projects_dir = tmp_path / "projects"
+    base_checkout = projects_dir / "Repo"
+    automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {}  # type: ignore[attr-defined]
+
+
+def test_main_uses_noncanonical_automation_worktree_base_as_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An internal worktree under a renamed checkout must not become its own base.
+
+    ``resolve_projects_dir`` correctly unwraps an automation issue worktree
+    to the parent of its base checkout.  When that base checkout itself has a
+    noncanonical name, the loop must still use the base checkout, rather than
+    creating a nested ``build/.worktrees`` tree under the issue checkout.
+    """
+    projects_dir = tmp_path / "projects"
+    base_checkout = projects_dir / "renamed-base-checkout"
+    automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
+
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
+
+    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
+    assert config.repo_roots == {"Repo": base_checkout}  # type: ignore[attr-defined]
+    assert "Other" not in config.repo_roots  # type: ignore[attr-defined]
+
+
+def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PipelineConfig stores the concrete auto-detected provider."""
+    resolve = patch.object(loop_runner, "resolve_agent", return_value="codex")
+    with resolve as mock_resolve:
+        config = _capture_config(["--repos", "Repo", "--dry-run", "--loops", "1"], monkeypatch)
+    mock_resolve.assert_called_once_with(None)
+    assert config.agent == "codex"  # type: ignore[attr-defined]
+
+
+def test_main_errors_on_empty_repo_list() -> None:
+    """An empty resolved repo list is a clean exit-1, not a pipeline dispatch."""
+    # resolve_agent() probes PATH for a real backend; mock it so the test does
+    # not depend on `claude`/`codex`/`pi` being installed (release runners have
+    # no agent backend).
+    with (
+        patch.object(loop_runner, "resolve_agent", return_value="claude"),
+        patch.object(loop_runner, "_resolve_org_and_repos", return_value=("Org", [], None)),
+    ):
+        rc = main([])
+    assert rc == 1
+
+
+def test_legacy_loop_symbols_removed() -> None:
+    """The legacy per-phase subprocess machinery was removed with #1819."""
+    assert not hasattr(loop_runner, "_resolve_phase_bin")
+    assert not hasattr(loop_runner, "_build_phase_argv")
+    assert not hasattr(loop_runner, "run_phase")
+    assert not hasattr(loop_runner, "process_repo")
+    assert not hasattr(loop_runner, "run_loop")
+    assert not hasattr(loop_runner, "_run_post_loop_stages")
+    assert not hasattr(loop_runner, "_PHASE_FLAGS")
+
+
+def test_main_wires_run_pre_pr_tests_to_pipeline_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--run-pre-pr-tests`` reaches the queue implementation stage config."""
+    config = _capture_config(
+        ["--repos", "Repo", "--run-pre-pr-tests", "--loops", "1", "--agent", "claude"],
+        monkeypatch,
+    )
+
+    assert config.run_pre_pr_tests is True  # type: ignore[attr-defined]

@@ -1,0 +1,1099 @@
+"""Tests for hephaestus.automation.pr_manager.
+
+Covers commit_changes filtering of secret files, ensure_pr_created
+fallback paths, and create_pr argument shape — all via mocked subprocess
+and GitHub-API calls.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from hephaestus.automation import pr_manager
+from hephaestus.automation.commit_policy import (
+    ALLOWED_CONVENTIONAL_TYPES,
+    normalize_conventional_type,
+    normalize_strict_conventional_title,
+)
+from hephaestus.automation.github_api import OpenPrDiscoveryIncompleteError
+from hephaestus.automation.session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
+
+
+def _status(stdout: str = "", returncode: int = 0) -> MagicMock:
+    return MagicMock(stdout=stdout, returncode=returncode)
+
+
+def _porcelain(*records: str) -> str:
+    """Build mocked ``git status --porcelain=v1 -z`` output."""
+    return "\0".join(records) + ("\0" if records else "")
+
+
+class TestCommitChanges:
+    """Tests for commit changes."""
+
+    def test_no_changes_raises(self) -> None:
+        with patch.object(pr_manager, "run", return_value=_status("")):
+            with pytest.raises(RuntimeError, match="No changes to commit"):
+                pr_manager.commit_changes(1, Path("/tmp/wt"))
+
+    def test_only_secret_files_raises(self) -> None:
+        porcelain = _porcelain("?? .env", "?? id_rsa", " M secrets/foo.key")
+        with patch.object(pr_manager, "run", return_value=_status(porcelain)):
+            with pytest.raises(RuntimeError, match="All changes appear to be secret"):
+                pr_manager.commit_changes(2, Path("/tmp/wt"))
+
+    def test_filters_secrets_and_commits(self) -> None:
+        porcelain = _porcelain(" M src/foo.py", "?? .env", "?? data.key", " M src/bar.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/foo.py\nM\tsrc/bar.py\n"),  # changed files context
+                _status(" src/foo.py | 1 +\n src/bar.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add foo")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(3, Path("/tmp/wt"))
+
+        # git add must include the .py files but not .env or .key
+        add_call = run_mock.call_args_list[1].args[0]
+        assert "src/foo.py" in add_call
+        assert "src/bar.py" in add_call
+        assert ".env" not in add_call
+        assert "data.key" not in add_call
+
+    def test_allowed_paths_prevent_staging_unlisted_artifacts(self) -> None:
+        porcelain = _porcelain(" M hephaestus/automation/ci_driver.py", "?? output.log")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\thephaestus/automation/ci_driver.py\n"),  # changed files context
+                _status(" hephaestus/automation/ci_driver.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Fix CI driver")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(
+                1405,
+                Path("/tmp/wt"),
+                allowed_paths=("hephaestus/automation/ci_driver.py",),
+            )
+
+        add_call = run_mock.call_args_list[1].args[0]
+        assert add_call == [
+            "git",
+            "add",
+            "--",
+            "hephaestus/automation/ci_driver.py",
+        ]
+
+    def test_commit_uses_cryptographic_signature_and_dco_signoff(self) -> None:
+        porcelain = _porcelain(" M src/foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/foo.py\n"),  # changed files context
+                _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add foo", body="Implement it.")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(3, Path("/tmp/wt"))
+
+        commit_cmd = run_mock.call_args_list[-1].args[0]
+        assert commit_cmd[:4] == ["git", "commit", "-S", "-s"]
+        assert "-m" in commit_cmd
+
+    def test_commit_changes_threads_git_timeout(self) -> None:
+        porcelain = _porcelain(" M src/foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/foo.py\n"),  # changed files context
+                _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add foo", body="Implement it.")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(3, Path("/tmp/wt"), git_timeout=42)
+
+        assert [call.kwargs["timeout"] for call in run_mock.call_args_list] == [
+            42,
+            42,
+            42,
+            42,
+            42,
+            42,
+            42,
+        ]
+
+    def test_handles_renamed_files(self) -> None:
+        porcelain = _porcelain("R  new.py", "old.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),
+                _status(""),
+                _status("R\told.py\tnew.py\n"),
+                _status(" new.py | 1 +\n"),
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),
+            ]
+        )
+        issue = MagicMock(title="Rename")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(4, Path("/tmp/wt"))
+        add_call = run_mock.call_args_list[1].args[0]
+        assert "new.py" in add_call
+
+    def test_stages_deleted_files_without_pathspec(self) -> None:
+        porcelain = _porcelain(" D hephaestus/github/fleet_sync.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),
+                _status(""),
+                _status("D\thephaestus/github/fleet_sync.py\n"),
+                _status(" hephaestus/github/fleet_sync.py | 10 ----------\n"),
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),
+            ]
+        )
+        issue = MagicMock(title="Delete obsolete module")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(1406, Path("/tmp/wt"))
+
+        add_call = run_mock.call_args_list[1].args[0]
+        assert add_call == ["git", "add", "-u", "--", "hephaestus/github/fleet_sync.py"]
+
+    def test_uses_message_agent_for_commit_subject_and_body(self) -> None:
+        porcelain = _porcelain(" M LICENSE", " M NOTICE")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tLICENSE\nM\tNOTICE\n"),  # changed files context
+                _status(" LICENSE | 2 +-\n NOTICE | 2 +-\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Refresh copyright years", body="Update 2024 to 2024-2026.")
+        agent_output = (
+            '{"subject":"docs: update copyright notices",'
+            '"body":"Refresh stale license and notice metadata."}'
+        )
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(
+                pr_manager, "_invoke_git_message_agent", return_value=agent_output
+            ) as invoke,
+        ):
+            pr_manager.commit_changes(
+                1515,
+                Path("/tmp/wt"),
+                agent="codex",
+                agent_model="sol:medium",
+            )
+
+        prompt = invoke.call_args.kwargs["prompt"]
+        assert invoke.call_args.kwargs["model_override"] == "sol:medium"
+        assert "LICENSE" in prompt
+        assert "NOTICE" in prompt
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        assert commit_msg.startswith("docs: update copyright notices\n\n")
+        assert "Refresh stale license and notice metadata." in commit_msg
+        assert "Closes #1515" in commit_msg
+        assert "Implemented-By: Codex" in commit_msg
+        assert "Co-Authored-By: Codex <noreply@openai.com>" in commit_msg
+
+    def test_commit_message_agent_invalid_output_falls_back(self) -> None:
+        porcelain = _porcelain(" M src/feature.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/feature.py\n"),  # changed files context
+                _status(" src/feature.py | 3 +++\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add feature", body="Implement it.")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(10, Path("/tmp/wt"))
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        assert commit_msg.startswith("feat: Implement #10\n\nAdd feature\n")
+        assert "Closes #10" in commit_msg
+
+    def test_commit_clears_local_committer_identity(self) -> None:
+        run_mock = MagicMock(
+            side_effect=[
+                _status(_porcelain(" M src/foo.py")),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/foo.py\n"),  # changed files context
+                _status(" src/foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add foo", body="Implement it.")
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(3, Path("/tmp/wt"))
+
+        cmds = [c.args[0] for c in run_mock.call_args_list]
+        assert ["git", "config", "--unset", "--local", "user.email"] in cmds
+        assert ["git", "config", "--unset", "--local", "user.name"] in cmds
+        commit_idx = next(i for i, c in enumerate(cmds) if c[:2] == ["git", "commit"])
+        unset_idxs = [i for i, c in enumerate(cmds) if c[:3] == ["git", "config", "--unset"]]
+        assert all(i < commit_idx for i in unset_idxs)
+        # Expected exit-5 no-op is tolerated AND quiet (prior-review finding #2).
+        for call in run_mock.call_args_list:
+            if call.args[0][:3] == ["git", "config", "--unset"]:
+                assert call.kwargs.get("check") is False
+                assert call.kwargs.get("log_errors") is False
+
+
+class TestEnsurePRCreated:
+    """Tests for ensure p r created."""
+
+    def test_no_commit_raises(self) -> None:
+        with patch.object(pr_manager, "run", return_value=_status("")):
+            with pytest.raises(RuntimeError, match="No commit found"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+    def test_empty_diff_vs_base_raises_before_pr_create(self) -> None:
+        """A commit exists but the branch has no commits vs base → no PR created.
+
+        Regression for the opaque, retried "No commits between main and
+        <branch>" failure: detect the empty-diff branch up front and raise a
+        clear message instead of letting `gh pr create` fail.
+        """
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),  # git log (a commit exists)
+                _status("origin/master"),  # default base branch (guard)
+                _status("0"),  # rev-list count vs base → no net change
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "create_pr") as create_mock,
+        ):
+            with pytest.raises(RuntimeError, match="No changes produced"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+        create_mock.assert_not_called()
+
+    def test_returns_existing_pr(self) -> None:
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),  # git log
+                _status("origin/master"),  # default base branch (guard)
+                _status("2"),  # rev-list count vs base (has commits)
+                _status("refs/heads/branch"),  # ls-remote (already pushed)
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master")],
+            ) as find_open_pr,
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+        find_open_pr.assert_called_once_with("branch")
+        defer.assert_called_once_with(99)
+
+    def test_existing_pr_containment_failure_does_not_fall_through_to_creation(self) -> None:
+        """A reused PR with an unverified arm must fail instead of creating a duplicate."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[(99, "master")]),
+            patch.object(
+                pr_manager,
+                "ensure_pr_auto_merge_deferred",
+                side_effect=RuntimeError("PR remains armed"),
+            ),
+            patch.object(pr_manager, "create_pr") as create_pr,
+        ):
+            with pytest.raises(RuntimeError, match="PR remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+        create_pr.assert_not_called()
+
+    def test_existing_pr_containment_attempts_later_siblings_after_a_failure(self) -> None:
+        """A failed readback cannot stop containment of a later same-head PR."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        deferred: list[int] = []
+
+        def defer(pr_number: int) -> None:
+            deferred.append(pr_number)
+            if pr_number == 99:
+                raise RuntimeError("PR #99 remains armed")
+
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "release")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred", side_effect=defer),
+        ):
+            with pytest.raises(RuntimeError, match="PR #99 remains armed"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert deferred == [99, 100]
+
+    def test_existing_pr_contains_valid_rows_before_rejecting_incomplete_discovery(self) -> None:
+        """A legacy lookup error cannot prevent containment of known sibling PRs."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        deferred: list[int] = []
+        incomplete = OpenPrDiscoveryIncompleteError(
+            "branch", [(99, "master"), (100, "release")], "malformed PR row"
+        )
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", side_effect=incomplete),
+            patch.object(
+                pr_manager,
+                "ensure_pr_auto_merge_deferred",
+                side_effect=lambda pr_number: deferred.append(pr_number),
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert deferred == [99, 100]
+
+    def test_existing_pr_contains_every_open_pr_on_the_head(self) -> None:
+        """A target-base PR is reused only after every head PR is contained."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "release")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 99
+
+        assert [call.args[0] for call in defer.call_args_list] == [99, 100]
+
+    def test_ambiguous_target_prs_are_contained_before_legacy_creation_refuses(self) -> None:
+        """The legacy caller contains ambiguous PRs before surfacing the ambiguity."""
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),
+                _status("origin/master"),
+                _status("2"),
+                _status("refs/heads/branch"),
+            ]
+        )
+        with (
+            patch.object(
+                pr_manager,
+                "_find_open_prs_for_head",
+                return_value=[(99, "master"), (100, "master")],
+            ),
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "ensure_pr_auto_merge_deferred") as defer,
+        ):
+            with pytest.raises(RuntimeError, match="could not verify existing PR state"):
+                pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt"))
+
+        assert [call.args[0] for call in defer.call_args_list] == [99, 100]
+
+    def test_auto_merge_deferral_rejects_an_incomplete_open_pr_state(self) -> None:
+        """Legacy review containment requires an explicit autoMergeRequest field."""
+        with patch.object(pr_manager, "_gh_call", return_value=_status('{"state": "OPEN"}')):
+            with pytest.raises(RuntimeError, match="could not verify auto-merge disabled"):
+                pr_manager.ensure_pr_auto_merge_deferred(99)
+
+    def test_creates_pr_when_missing(self) -> None:
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),  # git log
+                _status("origin/master"),  # default base branch (guard)
+                _status("3"),  # rev-list count vs base (has commits)
+                _status(""),  # ls-remote (not pushed)
+                _status(""),  # git push
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
+            patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
+        ):
+            assert pr_manager.ensure_pr_created(1, "branch", Path("/tmp/wt")) == 42
+            create_mock.assert_called_once_with(
+                1,
+                "branch",
+                auto_merge=False,
+                agent="claude",
+                base="master",
+                worktree_path=Path("/tmp/wt"),
+                git_message_timeout=1200,
+            )
+
+    def test_creates_pr_with_selected_agent_metadata(self) -> None:
+        run_mock = MagicMock(
+            side_effect=[
+                _status("abc1234 commit msg"),  # git log
+                _status("origin/master"),  # default base branch (guard)
+                _status("1"),  # rev-list count vs base (has commits)
+                _status("refs/heads/branch"),  # ls-remote (already pushed)
+            ]
+        )
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "_find_open_prs_for_head", return_value=[]),
+            patch.object(pr_manager, "create_pr", return_value=42) as create_mock,
+        ):
+            assert (
+                pr_manager.ensure_pr_created(
+                    1,
+                    "branch",
+                    Path("/tmp/wt"),
+                    agent="codex",
+                    agent_model="sol:medium",
+                )
+                == 42
+            )
+            create_mock.assert_called_once_with(
+                1,
+                "branch",
+                auto_merge=False,
+                agent="codex",
+                base="master",
+                worktree_path=Path("/tmp/wt"),
+                git_message_timeout=1200,
+                agent_model="sol:medium",
+            )
+
+
+class TestCreatePR:
+    """Tests for create p r."""
+
+    def test_retired_pr_manager_armer_contains_before_refusing(self) -> None:
+        """The direct legacy armer follows view-disable-readback before rejecting."""
+        responses = iter(
+            [
+                _status('{"state": "OPEN", "autoMergeRequest": {"enabledAt": "now"}}'),
+                _status(""),
+                _status('{"state": "OPEN", "autoMergeRequest": null}'),
+            ]
+        )
+        with patch.object(
+            pr_manager,
+            "_gh_call",
+            side_effect=lambda *_args, **_kwargs: next(responses),
+        ):
+            with pytest.raises(RuntimeError, match="native auto-merge is prohibited"):
+                pr_manager.enable_auto_merge_after_implementation_go(42)
+
+    def test_invokes_gh_pr_create(self) -> None:
+        issue = MagicMock(title="Add feature X")
+        with (
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "gh_pr_create", return_value=7) as gh_mock,
+        ):
+            assert pr_manager.create_pr(5, "branch", auto_merge=True, agent="codex") == 7
+        kwargs = gh_mock.call_args.kwargs
+        assert kwargs["branch"] == "branch"
+        assert "Add feature X" in kwargs["title"]
+        assert kwargs["auto_merge"] is False
+        assert kwargs["base"] == "main"
+        assert "Closes #5" in kwargs["body"]
+        assert "Automated implementation via Codex" in kwargs["body"]
+        assert "Test commands were not recorded by automation" in kwargs["body"]
+        assert "Claude Code" not in kwargs["body"]
+
+    def test_uses_message_agent_for_pr_title_and_body(self) -> None:
+        issue = MagicMock(title="Refresh copyright years", body="Update stale docs.")
+        run_mock = MagicMock(
+            side_effect=[
+                _status("M\tLICENSE\nM\tNOTICE\n"),  # changed files
+                _status(" LICENSE | 2 +-\n NOTICE | 2 +-\n"),  # diff stat
+                _status("33f2ea6 docs: update copyright notices\n"),  # commits
+            ]
+        )
+        agent_output = (
+            '{"title":"docs: update copyright notices",'
+            '"summary":"Refresh stale legal metadata.",'
+            '"changes":["Updated LICENSE copyright range","Updated NOTICE copyright range"],'
+            '"testing":["pytest tests/unit/automation/test_pr_manager.py"]}'
+        )
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(
+                pr_manager, "_invoke_git_message_agent", return_value=agent_output
+            ) as invoke,
+            patch.object(pr_manager, "gh_pr_create", return_value=7) as gh_mock,
+        ):
+            assert (
+                pr_manager.create_pr(
+                    1515,
+                    "1515-auto-impl",
+                    auto_merge=False,
+                    agent="codex",
+                    base="main",
+                    worktree_path=Path("/tmp/wt"),
+                    agent_model="sol:medium",
+                )
+                == 7
+            )
+
+        prompt = invoke.call_args.kwargs["prompt"]
+        assert invoke.call_args.kwargs["model_override"] == "sol:medium"
+        assert "LICENSE" in prompt
+        assert "NOTICE" in prompt
+        assert "33f2ea6 docs: update copyright notices" in prompt
+        kwargs = gh_mock.call_args.kwargs
+        assert kwargs["title"] == "docs: update copyright notices"
+        assert "Refresh stale legal metadata." in kwargs["body"]
+        assert "- Updated LICENSE copyright range" in kwargs["body"]
+        assert "- pytest tests/unit/automation/test_pr_manager.py" in kwargs["body"]
+        assert "Closes #1515" in kwargs["body"]
+        assert "Generated by Codex via Hephaestus automation." in kwargs["body"]
+
+    def test_repairs_malformed_agent_title_before_pr_creation(self) -> None:
+        issue = MagicMock(title="Repair title normalization", body="Do it.")
+        run_mock = MagicMock(
+            side_effect=[
+                _status("M\thephaestus/automation/pr_manager.py\n"),
+                _status(" hephaestus/automation/pr_manager.py | 1 +\n"),
+                _status("abc1234 fix: repair title normalization\n"),
+            ]
+        )
+        agent_output = (
+            '{"title":"fix(): repair title normalization",'
+            '"summary":"Repair malformed titles.",'
+            '"changes":["Normalized the final PR title"],"testing":["pytest"]}'
+        )
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value=agent_output),
+            patch.object(pr_manager, "gh_pr_create", return_value=7) as gh_mock,
+        ):
+            assert (
+                pr_manager.create_pr(
+                    2157,
+                    "2157-auto-impl",
+                    agent="codex",
+                    worktree_path=Path("/tmp/wt"),
+                )
+                == 7
+            )
+
+        assert gh_mock.call_args.kwargs["title"] == "fix: repair title normalization"
+
+    def test_pr_message_agent_invalid_output_falls_back(self) -> None:
+        issue = MagicMock(title="Add feature X", body="Do it.")
+        with (
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+            patch.object(pr_manager, "gh_pr_create", return_value=7) as gh_mock,
+        ):
+            assert (
+                pr_manager.create_pr(
+                    5,
+                    "branch",
+                    auto_merge=True,
+                    agent="codex",
+                    worktree_path=Path("/tmp/wt"),
+                )
+                == 7
+            )
+
+        kwargs = gh_mock.call_args.kwargs
+        assert kwargs["title"] == "feat: Add feature X"
+        assert "Implements #5" in kwargs["body"]
+        assert "Automated implementation via Codex" in kwargs["body"]
+
+
+class TestMessageAgentInvocation:
+    """Tests for the lightweight git-message agent invocation."""
+
+    def test_claude_message_agent_uses_separate_session(self) -> None:
+        with (
+            patch.object(pr_manager, "get_repo_slug", return_value="Hephaestus"),
+            patch.object(
+                pr_manager,
+                "invoke_claude_with_session",
+                return_value=("{}", "sid"),
+            ) as invoke,
+        ):
+            assert (
+                pr_manager._invoke_git_message_agent(
+                    issue_number=9,
+                    agent_kind=AGENT_COMMIT_MESSAGE,
+                    prompt="prompt",
+                    worktree_path=Path("/tmp/wt"),
+                    agent="claude",
+                    timeout=120,
+                    model_override="claude-haiku-4-5",
+                )
+                == "{}"
+            )
+
+        kwargs = invoke.call_args.kwargs
+        assert kwargs["agent"] == AGENT_COMMIT_MESSAGE
+        assert kwargs["model"] == "claude-haiku-4-5"
+        assert kwargs["allowed_tools"] == "Read,Glob,Grep"
+        assert kwargs["timeout"] == 120
+
+    def test_codex_message_agent_uses_read_only_codex_exec(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["codex", "exec"], returncode=0, stdout="{}", stderr=""
+        )
+        with patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent:
+            assert (
+                pr_manager._invoke_git_message_agent(
+                    issue_number=9,
+                    agent_kind=AGENT_PR_MESSAGE,
+                    prompt="prompt",
+                    worktree_path=Path("/tmp/wt"),
+                    agent="codex",
+                    timeout=120,
+                    model_override="luna:medium",
+                )
+                == "{}"
+            )
+
+        kwargs = run_agent.call_args.kwargs
+        assert kwargs["agent"] == "codex"
+        assert kwargs["cwd"] == Path("/tmp/wt")
+        assert kwargs["sandbox"] == "read-only"
+        assert kwargs["model"] == "luna:medium"
+
+    def test_codex_message_agent_uses_pipeline_model_override(self) -> None:
+        """A loop's CLI-selected tier and effort reach the direct runner unchanged."""
+        completed = subprocess.CompletedProcess(
+            args=["codex", "exec"], returncode=0, stdout="{}", stderr=""
+        )
+        with patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent:
+            assert (
+                pr_manager._invoke_git_message_agent(
+                    issue_number=9,
+                    agent_kind=AGENT_PR_MESSAGE,
+                    prompt="prompt",
+                    worktree_path=Path("/tmp/wt"),
+                    agent="codex",
+                    timeout=120,
+                    model_override="sol:medium",
+                )
+                == "{}"
+            )
+
+        assert run_agent.call_args.kwargs["model"] == "sol:medium"
+
+    def test_pi_message_agent_uses_read_only_pi_exec(self) -> None:
+        completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")
+        with (
+            patch.dict("os.environ", {"HEPH_PI_MODEL": "operator-local-alias"}, clear=True),
+            patch.object(pr_manager, "uses_direct_agent_runner", return_value=True),
+            patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
+        ):
+            assert (
+                pr_manager._invoke_git_message_agent(
+                    issue_number=9,
+                    agent_kind=AGENT_PR_MESSAGE,
+                    prompt="prompt",
+                    worktree_path=Path("/tmp/wt"),
+                    agent="pi",
+                    timeout=120,
+                )
+                == "{}"
+            )
+
+        kwargs = run_agent.call_args.kwargs
+        assert kwargs["agent"] == "pi"
+        assert kwargs["cwd"] == Path("/tmp/wt")
+        assert kwargs["sandbox"] == "read-only"
+        assert kwargs["model"] == "operator-local-alias"
+
+
+# ---------------------------------------------------------------------------
+# #717: Co-Authored-By uses a human-shaped name; model id moves to Implemented-By
+# ---------------------------------------------------------------------------
+
+
+_COAUTHOR_HUMAN_NAME_RE = re.compile(r"^Co-Authored-By: [A-Za-z].* <.*@.*>$")
+
+
+class TestCoAuthorLine:
+    """commit_changes emits a human Co-Authored-By and a separate Implemented-By trailer (#717)."""
+
+    def test_claude_coauthor_is_human_name_not_model_id(self) -> None:
+        porcelain = _porcelain(" M src/feature.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/feature.py\n"),  # changed files context
+                _status(" src/feature.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add feature")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model", return_value="claude-test-model-9"),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(10, Path("/tmp/wt"))
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+        assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
+        # Model id must NOT appear in the name slot of Co-Authored-By (#717).
+        assert "claude-test-model-9" not in coauthor_line
+
+    def test_claude_implemented_by_carries_model_id(self) -> None:
+        porcelain = _porcelain(" M src/feature.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tsrc/feature.py\n"),  # changed files context
+                _status(" src/feature.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="Add feature")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model", return_value="claude-test-model-9"),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(11, Path("/tmp/wt"))
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        assert "Implemented-By: claude-test-model-9" in commit_msg
+
+    def test_implemented_by_reflects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-env-override-5")
+        porcelain = _porcelain(" M foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tfoo.py\n"),  # changed files context
+                _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="env override test")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(20, Path("/tmp/wt"))
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        # Env override flows into Implemented-By, not Co-Authored-By.
+        assert "Implemented-By: claude-env-override-5" in commit_msg
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert "claude-env-override-5" not in coauthor_line
+        assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+
+    def test_codex_coauthor_is_codex_human_name(self) -> None:
+        porcelain = _porcelain(" M foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tfoo.py\n"),  # changed files context
+                _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="codex fallback commit")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model") as mock_model,
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(30, Path("/tmp/wt"), agent="codex")
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert coauthor_line == "Co-Authored-By: Codex <noreply@openai.com>"
+        assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
+        assert "Implemented-By: Codex" in commit_msg
+        mock_model.assert_not_called()
+
+    def test_pi_coauthor_and_provenance_are_pi(self) -> None:
+        porcelain = _porcelain(" M foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tfoo.py\n"),  # changed files context
+                _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="pi fallback commit")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "implementer_model") as mock_model,
+            patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
+        ):
+            pr_manager.commit_changes(31, Path("/tmp/wt"), agent="pi")
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        coauthor_line = next(
+            line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
+        )
+        assert coauthor_line == "Co-Authored-By: Pi <noreply@earendil.works>"
+        assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
+        assert "Implemented-By: Pi" in commit_msg
+        mock_model.assert_not_called()
+
+
+class TestImplementationStateLabel:
+    """Tests for pr_has_implementation_state_label (existing-PR idempotency gate)."""
+
+    def test_go_label(self) -> None:
+        gh_mock = _status('{"labels": [{"name": "state:implementation-go"}]}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (True, False)
+
+    def test_no_go_label(self) -> None:
+        gh_mock = _status('{"labels": [{"name": "state:implementation-no-go"}]}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, True)
+
+    def test_no_label(self) -> None:
+        gh_mock = _status('{"labels": [{"name": "bug"}]}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
+
+    def test_empty_labels(self) -> None:
+        gh_mock = _status('{"labels": []}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
+
+    def test_malformed_json_returns_false_false(self) -> None:
+        gh_mock = _status("not json")
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_has_implementation_state_label(7) == (False, False)
+
+
+class TestPrIsGenuinelyStuck:
+    """``pr_is_genuinely_stuck`` distinguishes stuck PRs from pending ones (#1576)."""
+
+    def test_dirty_merge_state_is_stuck(self) -> None:
+        gh_mock = _status('{"mergeStateStatus": "DIRTY", "mergeable": "", "statusCheckRollup": []}')
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is True
+
+    def test_conflicting_mergeable_is_stuck(self) -> None:
+        gh_mock = _status(
+            '{"mergeStateStatus": "BLOCKED", "mergeable": "CONFLICTING", "statusCheckRollup": []}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is True
+
+    def test_red_check_is_stuck(self) -> None:
+        gh_mock = _status(
+            '{"mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE", '
+            '"statusCheckRollup": [{"conclusion": "FAILURE"}]}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is True
+
+    def test_blocked_on_review_is_not_stuck(self) -> None:
+        # Green CI, BLOCKED only because review hasn't approved → NOT stuck.
+        gh_mock = _status(
+            '{"mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE", '
+            '"statusCheckRollup": [{"conclusion": "SUCCESS"}]}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is False
+
+    def test_clean_green_is_not_stuck(self) -> None:
+        gh_mock = _status(
+            '{"mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "statusCheckRollup": []}'
+        )
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is False
+
+    def test_malformed_json_is_not_stuck(self) -> None:
+        # Safe default: never misclassify an unknown PR as stuck.
+        gh_mock = _status("not json")
+        with patch.object(pr_manager, "_gh_call", return_value=gh_mock):
+            assert pr_manager.pr_is_genuinely_stuck(7) is False
+
+
+class TestNormalizeConventionalType:
+    """The shared helper keeps commit and PR types pr-policy-legal (#1587)."""
+
+    def test_disallowed_type_normalized_scope_preserved(self) -> None:
+        assert (
+            normalize_conventional_type("security(audit): add threat model")
+            == "chore(audit): add threat model"
+        )
+
+    def test_allowed_type_unchanged(self) -> None:
+        assert normalize_conventional_type("fix(io): handle EOF") == "fix(io): handle EOF"
+
+    def test_no_prefix_gets_default(self) -> None:
+        assert normalize_conventional_type("add threat model") == "chore: add threat model"
+
+    def test_breaking_bang_preserved(self) -> None:
+        assert normalize_conventional_type("security!: drop API") == "chore!: drop API"
+
+    def test_disallowed_no_scope(self) -> None:
+        assert normalize_conventional_type("wip: stuff") == "chore: stuff"
+
+    def test_allowlist_matches_pr_policy_gate(self) -> None:
+        """The mirrored allowlist MUST equal the pr-policy gate's source of truth."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+        from check_conventional_commit import ALLOWED_TYPES
+
+        assert set(ALLOWED_CONVENTIONAL_TYPES) == set(ALLOWED_TYPES)
+
+
+class TestNormalizeStrictConventionalTitle:
+    """Strict PR titles repair malformed scopes and descriptions."""
+
+    @pytest.mark.parametrize(
+        ("title", "expected"),
+        [
+            ("fix(): repair title normalization", "fix: repair title normalization"),
+            ("security(): repair title normalization", "chore: repair title normalization"),
+            ("fix: ", "fix: update"),
+        ],
+    )
+    def test_repairs_strict_title_violations(self, title: str, expected: str) -> None:
+        assert normalize_strict_conventional_title(title) == expected

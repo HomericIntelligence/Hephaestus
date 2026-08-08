@@ -1,0 +1,454 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"  # fires for human/PAT tag pushes; auto-tag.yml dispatches explicitly
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release"
+        required: true
+      docs_only:
+        description: "Deploy documentation for an existing published release without publishing."
+        required: false
+        default: false
+        type: boolean
+
+# Least-privilege permissions are declared per job below (zizmor
+# excessive-permissions, issue #2151): the workflow-level default is
+# read-only and each job widens only what it needs.
+permissions:
+  contents: read
+
+# Serialize per-tag: this workflow builds, publishes to PyPI, and creates a
+# GitHub release — none idempotent. Two runs for the SAME tag must not race
+# (double-publish); different tags proceed independently. A tag push exposes
+# its short tag name through github.ref_name, matching the explicit dispatch
+# input. Never cancel a publish in flight, hence cancel-in-progress: false.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      completed_release_exists: ${{ steps.resolve.outputs.completed_release_exists }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Resolve release tag to commit SHA
+        id: resolve
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_REF: ${{ github.ref }}
+          DOCS_ONLY: ${{ inputs.docs_only }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_REF" == refs/tags/* ]]; then
+            TAG="${EVENT_REF#refs/tags/}"
+          else
+            TAG="$INPUT_TAG"
+          fi
+
+          if [ -z "$TAG" ]; then
+            echo "::error::An explicit release tag is required" >&2
+            exit 1
+          fi
+
+          if ! SHA="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"; then
+            echo "::error::Release tag ${TAG} does not resolve to a commit" >&2
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag ${TAG} to immutable commit ${SHA}"
+
+          RELEASE_EXISTS=false
+          DRAFT=""
+          RELEASE_RESPONSE=""
+          if RELEASE_RESPONSE="$(
+            gh api --include "repos/${REPOSITORY}/releases/tags/${TAG}" 2>&1
+          )"; then
+            RELEASE_EXISTS=true
+            RELEASE_JSON="$(
+              printf '%s\n' "$RELEASE_RESPONSE" | awk '
+                /^[[:space:]]*$/ { body = 1; next }
+                body { print }
+              '
+            )"
+            DRAFT="$(printf '%s\n' "$RELEASE_JSON" | jq -r '.draft')"
+            IMMUTABLE="$(printf '%s\n' "$RELEASE_JSON" | jq -r '.immutable')"
+            RELEASE_BODY="$(printf '%s\n' "$RELEASE_JSON" | jq -r '.body')"
+          elif printf '%s\n' "$RELEASE_RESPONSE" | grep -qE '^HTTP/[0-9.]+ 404 '; then
+            echo "Release ${TAG} does not exist yet."
+          else
+            echo "::error::Could not inspect existing GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+
+          if [ "$DOCS_ONLY" = "true" ] && [ "$RELEASE_EXISTS" = "true" ] \
+            && [ "$DRAFT" != "false" ]; then
+            echo "::error::Docs-only recovery requires a published GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+
+          SOURCE_PROVENANCE_MATCHES=false
+          SOURCE_PROVENANCE_MARKER="<!-- hephaestus-source-sha:${SHA} -->"
+          if [ "$RELEASE_EXISTS" = "true" ] && [ "$IMMUTABLE" = "true" ]; then
+            if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$SOURCE_PROVENANCE_MARKER"; then
+              SOURCE_PROVENANCE_MATCHES=true
+            # v0.10.0 predates the marker. Its immutable release, signed tag,
+            # successful PyPI deployment, and release job were independently
+            # audited when this one-time recovery path was added.
+            elif [ "$TAG" = "v0.10.0" ] \
+              && [ "$SHA" = "99a5437fc351fd7737fc85e7d4d76504d88a00d1" ]; then
+              SOURCE_PROVENANCE_MATCHES=true
+            fi
+          fi
+
+          if [ "$DOCS_ONLY" != "true" ] && [ "$RELEASE_EXISTS" = "true" ] \
+            && [ "$DRAFT" = "false" ] && [ "$SOURCE_PROVENANCE_MATCHES" != "true" ]; then
+            echo "::error::Existing published release ${TAG} lacks immutable source provenance; refusing an unsafe retry" >&2
+            exit 1
+          fi
+
+          COMPLETED_RELEASE_EXISTS=false
+          if [ "$RELEASE_EXISTS" = "true" ] && [ "$SOURCE_PROVENANCE_MATCHES" = "true" ]; then
+            if ! DEPLOYMENT_IDS="$(
+              gh api "repos/${REPOSITORY}/deployments?environment=pypi&sha=${SHA}" --jq '.[].id'
+            )"; then
+              echo "::error::Could not inspect PyPI deployments for ${SHA}" >&2
+              exit 1
+            fi
+            for DEPLOYMENT_ID in $DEPLOYMENT_IDS; do
+              if ! DEPLOYMENT_STATUS="$({
+                gh api "repos/${REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses?per_page=1" \
+                  --jq '[.[0].state, .[0].target_url] | @tsv'
+              })"; then
+                echo "::error::Could not inspect PyPI deployment ${DEPLOYMENT_ID}" >&2
+                exit 1
+              fi
+              IFS=$'\t' read -r DEPLOYMENT_STATE DEPLOYMENT_URL <<< "$DEPLOYMENT_STATUS"
+              if [ "$DEPLOYMENT_STATE" = "success" ]; then
+                JOB_URL_PREFIX="https://github.com/${REPOSITORY}/actions/runs/"
+                case "$DEPLOYMENT_URL" in
+                  "${JOB_URL_PREFIX}"*/job/*)
+                    RUN_AND_JOB="${DEPLOYMENT_URL#"${JOB_URL_PREFIX}"}"
+                    RUN_ID="${RUN_AND_JOB%%/job/*}"
+                    JOB_ID="${RUN_AND_JOB#*/job/}"
+                    if ! RUN_STATUS="$(
+                      gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}" \
+                        --jq '[.name, .path, .head_sha] | @tsv'
+                    )"; then
+                      echo "::error::Could not inspect release workflow run ${RUN_ID}" >&2
+                      exit 1
+                    fi
+                    IFS=$'\t' read -r WORKFLOW_NAME WORKFLOW_PATH RUN_HEAD_SHA <<< "$RUN_STATUS"
+                    if [ "$WORKFLOW_NAME" != "Release" ] \
+                      || [ "$WORKFLOW_PATH" != ".github/workflows/release.yml" ] \
+                      || [ "$RUN_HEAD_SHA" != "$SHA" ]; then
+                      continue
+                    fi
+                    if ! JOB_STATUS="$(
+                      gh api "repos/${REPOSITORY}/actions/jobs/${JOB_ID}" \
+                        --jq '[
+                          .run_id,
+                          .head_sha,
+                          .name,
+                          ([.steps[] | select(.name == "Publish to PyPI") | .conclusion][0] // ""),
+                          ([.steps[] | select(.name == "Create GitHub Release") | .conclusion][0] // ""),
+                          ([.steps[] | select(.name == "Publish existing draft release") | .conclusion][0] // "")
+                        ] | @tsv'
+                    )"; then
+                      echo "::error::Could not inspect release job ${JOB_ID}" >&2
+                      exit 1
+                    fi
+                    IFS=$'\t' read -r JOB_RUN_ID JOB_HEAD_SHA JOB_NAME PUBLISH_PYPI_CONCLUSION \
+                      CREATE_RELEASE_CONCLUSION FINALIZE_DRAFT_CONCLUSION <<< "$JOB_STATUS"
+                    if [ "$JOB_RUN_ID" = "$RUN_ID" ] \
+                      && [ "$JOB_HEAD_SHA" = "$SHA" ] \
+                      && [ "$JOB_NAME" = "build-and-publish" ] \
+                      && [ "$PUBLISH_PYPI_CONCLUSION" = "success" ] \
+                      && { [ "$CREATE_RELEASE_CONCLUSION" = "success" ] \
+                        || [ "$FINALIZE_DRAFT_CONCLUSION" = "success" ]; }; then
+                      COMPLETED_RELEASE_EXISTS=true
+                      break
+                    fi
+                    ;;
+                esac
+              fi
+            done
+          fi
+          echo "completed_release_exists=${COMPLETED_RELEASE_EXISTS}" >> "$GITHUB_OUTPUT"
+
+          if [ "$DOCS_ONLY" = "true" ] && [ "$RELEASE_EXISTS" != "true" ]; then
+            echo "::error::Docs-only recovery requires an existing GitHub Release for ${TAG}" >&2
+            exit 1
+          fi
+          if [ "$DOCS_ONLY" = "true" ] && [ "$COMPLETED_RELEASE_EXISTS" != "true" ]; then
+            echo "::error::Docs-only recovery requires a successful PyPI publish and GitHub Release creation from the same release workflow run for ${SHA}" >&2
+            exit 1
+          fi
+
+  test:
+    runs-on: ubuntu-24.04
+    needs: resolve-release
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
+    # Unit + integration suites run here; the uv env is cached and dev-install
+    # already ran, so both finish well under this budget. 20 min (vs the prior
+    # 15) is free insurance so a first-run integration slowdown never aborts a
+    # publish (issue #1499).
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.resolve-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
+
+      - name: Editable install (scripts/ smoke tests spawn subprocesses that import hephaestus)
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit
+
+      - name: Run integration tests
+        # Mirror the required PR gate (_required.yml integration-tests) so a
+        # workflow_dispatch release against an arbitrary commit gets the same
+        # sdist-contents / package-import guarantee a merged PR does (issue #1499).
+        # --override-ini clears the unit coverage addopts; --strict-markers is safe
+        # because the `integration` marker is registered in pyproject.toml.
+        # uv sync installed every [project.scripts] binary, so the CLI
+        # entry-point checks must never skip here (#2173).
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
+        run: uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
+
+  type-check:
+    runs-on: ubuntu-24.04
+    needs: resolve-release
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.resolve-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
+
+      - name: Run mypy type checking
+        # Explicit targets: bare `uv run mypy` errors with "Missing target"
+        # because pyproject has no default mypy `files`. Match the required
+        # `lint` pre-commit hook (uv run mypy hephaestus/ scripts/ tests/).
+        run: uv run mypy hephaestus/ scripts/ tests/
+
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [resolve-release, test, type-check]
+    if: ${{ !inputs.docs_only && needs.resolve-release.outputs.completed_release_exists != 'true' }}
+    environment: pypi
+    permissions:
+      contents: write  # Create GitHub Release / upload assets
+      id-token: write  # PyPI trusted-publisher OIDC + PEP 740 attestations
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.resolve-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
+
+      - name: Verify tag matches package version
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          TAG_VERSION="${TAG#v}"
+          # Resolve the version straight from hatch-vcs against the checked-out git
+          # tree. This reads the tag, not installed-package metadata, so it is
+          # immune to a stale editable install restored from the actions cache
+          # (the previous `import hephaestus` check returned "unknown" that way).
+          PKG_VERSION=$(uv run hatchling version)
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match package version ($PKG_VERSION)"
+            exit 1
+          fi
+          echo "Version check passed: $TAG_VERSION"
+
+      - name: Build package
+        shell: bash
+        run: |
+          # hatch-vcs derives the version from git; a dirty tree would taint it
+          # with a +dirty/.devN suffix and publish a wrong version.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty — refusing to build"
+            git status --porcelain
+            exit 1
+          fi
+          uv run python -m build
+          ls -1 dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        with:
+          verbose: true
+          # PEP 740 / Sigstore provenance — lets consumers cryptographically
+          # verify the artifact was built by this workflow run. Requires only
+          # `id-token: write`, granted at the top of this file (release.yml:16).
+          generate_attestations: true
+
+      - name: Check for existing release
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          # A release may already exist for this tag if it was created
+          # manually or by a previous (partially failed) run of this
+          # workflow. GitHub marks releases immutable, and an immutable
+          # release cannot be updated or have assets added — so the
+          # create/update action below must be skipped when one exists.
+          if gh release view "$TAG" --json isImmutable,isDraft -q .isImmutable >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            if gh release view "$TAG" --json isDraft -q .isDraft | grep -qx true; then
+              echo "draft=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "draft=false" >> "$GITHUB_OUTPUT"
+            fi
+            echo "Release $TAG already exists — skipping creation."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: steps.existing.outputs.exists == 'false'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
+        with:
+          tag_name: ${{ needs.resolve-release.outputs.tag }}
+          body: "<!-- hephaestus-source-sha:${{ needs.resolve-release.outputs.sha }} -->"
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach build artifacts to existing release
+        if: steps.existing.outputs.exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          # The release already exists. Try to attach the freshly built
+          # artifacts; an immutable release rejects uploads, so treat an
+          # upload failure as non-fatal — the package is already on PyPI.
+          if gh release upload "$TAG" dist/* --clobber; then
+            echo "Attached dist/* to release $TAG."
+          else
+            echo "::notice::Release $TAG is immutable — build artifacts not attached. The package is published to PyPI."
+          fi
+
+      - name: Publish existing draft release
+        if: steps.existing.outputs.exists == 'true' && steps.existing.outputs.draft == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.resolve-release.outputs.sha }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          MARKER="<!-- hephaestus-source-sha:${SHA} -->"
+          RELEASE_BODY="$(gh release view "$TAG" --json body -q .body)"
+          if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$MARKER"; then
+            gh release edit "$TAG" --draft=false
+          else
+            gh release edit "$TAG" --draft=false --notes "${RELEASE_BODY}
+
+          ${MARKER}"
+          fi
+
+  deploy-docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [resolve-release, test, type-check, build-and-publish]
+    if: ${{ always() && needs.resolve-release.result == 'success' && (inputs.docs_only || (needs.test.result == 'success' && needs.type-check.result == 'success' && needs.build-and-publish.result == 'success' && needs.resolve-release.outputs.completed_release_exists != 'true')) }}
+    # Publish the pdoc API reference to GitHub Pages only after the package
+    # release succeeds, so the online docs always match a version on PyPI.
+    permissions:
+      contents: read
+      pages: write  # Deploy to GitHub Pages
+      id-token: write  # GitHub Pages OIDC deployment
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.resolve-release.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: false  # release artifacts must not read/write a shared cache (zizmor cache-poisoning)
+
+      - name: Editable install (pdoc imports hephaestus to introspect signatures)
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Generate API reference (pdoc -> docs/api/)
+        run: uv run pdoc ./hephaestus ./hephaestus/agents ./hephaestus/benchmarks ./hephaestus/ci ./hephaestus/cli ./hephaestus/config ./hephaestus/datasets ./hephaestus/discovery ./hephaestus/forensics ./hephaestus/github ./hephaestus/io ./hephaestus/logging ./hephaestus/markdown ./hephaestus/nats ./hephaestus/observability ./hephaestus/prompts ./hephaestus/resilience ./hephaestus/scripts_lib ./hephaestus/system ./hephaestus/utils ./hephaestus/validation ./hephaestus/version --output-dir docs/api
+
+      - name: Verify API reference coverage
+        run: uv run hephaestus-check-api-reference --docs-dir docs/api
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: docs/api
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0

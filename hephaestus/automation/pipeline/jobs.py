@@ -1,0 +1,173 @@
+"""Frozen job specs and results for the pipeline worker pool.
+
+Jobs are immutable value objects the coordinator freezes and hands to
+:class:`~hephaestus.automation.pipeline.worker_pool.WorkerPool`. Prompts are
+built IN the worker (several builders fetch diffs / issue bodies via ``gh`` and
+must stay off the coordinator thread), so :class:`AgentJob` carries a
+``prompt_builder`` callable rather than a pre-rendered string.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from hephaestus.automation.pipeline.routing import StageName
+
+from .github_jobs import GitHubJob
+
+GIT_OPS: frozenset[str] = frozenset(
+    {
+        "clone",
+        "sync_checkout",
+        "create_worktree",
+        "verify_pr_review_checkout",
+        "remove_worktree",
+        "rebase",
+        "push",
+        "commit_push",
+        "release_branch_reservation",
+    }
+)
+
+#: Structured failed ``create_worktree`` results set this only after a
+#: checkout was created but a later adopted-branch preparation step failed.
+#: The coordinator retains that physical checkout as first-writer evidence
+#: while its transient retry is pending.
+WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
+
+
+@dataclass(frozen=True)
+class AgentJob:
+    """Job to invoke an agent (Claude or other)."""
+
+    repo: str
+    issue: int | str
+    agent: str
+    model: str
+    prompt_builder: Callable[..., str]
+    cwd: Path
+    timeout_s: int
+    session_agent: str = ""
+    # Direct-runner providers return an opaque session id.  The coordinator
+    # stores it on the WorkItem and supplies it here on subsequent turns so
+    # review/implementation context survives across loop iterations.
+    resume_session_id: str | None = None
+    prompt_kwargs: dict[str, Any] = field(default_factory=dict)
+    output_format: str = "text"
+    # Examples: review_audit.parse_review_audit or a label-native plan parser.
+    # The deprecated textual verdict parser must not be attached here.
+    parse: Callable[[str], Any] | None = None
+    # Existing agent jobs retain the established write-capable default; callers
+    # that only inspect repository state request ``read-only`` explicitly.
+    sandbox: str = "workspace-write"
+    # Optional Claude tool scope for a read-only job.  Most reviewers use the
+    # conservative default assigned by WorkerPool; the full PR-review skill
+    # declares the additional read-only helper capabilities it needs.
+    allowed_tools: str | None = None
+    descr: str = ""
+
+
+@dataclass(frozen=True)
+class BuildTestJob:
+    """Job to run build/test commands.
+
+    Security: ``argv`` MUST NOT carry untrusted (issue-body-derived) strings.
+    It is executed directly as a subprocess argument vector, so only the
+    coordinator may construct these jobs, from vetted command templates.
+    """
+
+    repo: str
+    cwd: Path
+    argv: tuple[str, ...]  # e.g. ("uv", "run", "pytest", "tests", "-q")
+    timeout_s: int
+    # A host-verification command runs from a disposable source snapshot
+    # generated from this checkout-proven immutable commit, never directly
+    # from the reviewer worktree.
+    expected_head_sha: str = ""
+    immutable_source: bool = False
+    descr: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize argv to a tuple so the job is deeply immutable/hashable."""
+        if not isinstance(self.argv, tuple):
+            # frozen dataclass: bypass the frozen __setattr__ for normalization
+            object.__setattr__(self, "argv", tuple(self.argv))
+
+
+@dataclass(frozen=True)
+class GitJob:
+    """Job to perform a git operation.
+
+    Security: ``kwargs`` values are forwarded to git/worktree helpers that
+    shell out, so they MUST NOT carry untrusted (issue-body-derived) strings.
+    Only the coordinator may construct these jobs, from vetted values.
+    """
+
+    repo: str
+    op: str
+    timeout_s: int
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    descr: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate that op is a recognized git operation."""
+        if self.op not in GIT_OPS:
+            raise ValueError(f"unknown git op {self.op!r}; expected one of {sorted(GIT_OPS)}")
+
+
+@dataclass(frozen=True)
+class CompactJob:
+    """Best-effort compaction of one resumable agent session.
+
+    ``CompactJob`` is deliberately distinct from :class:`AgentJob`: it sends
+    ``/compact`` to an existing session and never runs an implementation or
+    review prompt.  Claude resolves its deterministic session id from the
+    logical ``session_agent``; direct runtimes receive the persisted id.
+    """
+
+    repo: str
+    issue: int | str
+    agent: str
+    session_agent: str
+    model: str
+    cwd: Path
+    timeout_s: int
+    session_id: str | None = None
+    # Direct-provider compaction only sends ``/compact`` and never needs write
+    # access.  Keep the policy explicit so it cannot inherit user defaults.
+    sandbox: str = "read-only"
+    descr: str = "compact_session"
+
+
+@dataclass(frozen=True)
+class JobResult:
+    """Result of a completed job."""
+
+    ok: bool
+    value: Any = None
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    error: str | None = None
+    interrupted: bool = False
+    duration_s: float = 0.0
+    worker_id: str = ""
+    session_id: str | None = None
+
+
+@dataclass(frozen=True, eq=False)
+class JobHandle:
+    """Handle to a submitted job, used to correlate its completion.
+
+    Identity semantics (``eq=False``): each ``submit()`` mints a distinct
+    handle that hashes and compares by object identity, NOT by field value.
+    Two submissions of identical job specs therefore produce two distinct
+    handles, so the coordinator can key dicts/sets by handle without
+    collisions, and unhashable field values (``dict`` kwargs, callables)
+    never break hashing.
+    """
+
+    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob
+    on_done_state: str | StageName

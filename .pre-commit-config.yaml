@@ -1,0 +1,397 @@
+# Pre-commit hooks for Hephaestus
+# Install: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
+#
+# Python tool versions are declared in pyproject.toml and locked in uv.lock.
+
+# Ensure `pre-commit install` (documented in CONTRIBUTING.md / README.md) wires
+# BOTH the pre-commit and commit-msg stages, so the conventional-commit-msg hook
+# below actually fires without `--hook-type commit-msg`. See issue #1209.
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+
+  # Python formatting and linting
+  - repo: local
+    hooks:
+      - id: ruff-format-python
+        name: Ruff Format Python
+        description: Format Python files using ruff format
+        entry: uv run ruff format hephaestus/ scripts/ tests/
+        language: system
+        files: ^(hephaestus|scripts|tests)/.*\.py$
+        types: [python]
+        pass_filenames: false
+      - id: ruff-check-python
+        name: Ruff Check Python
+        description: Lint Python files using ruff check
+        entry: uv run ruff check --fix hephaestus/ scripts/ tests/
+        language: system
+        files: ^(hephaestus|scripts|tests)/.*\.py$
+        types: [python]
+        pass_filenames: false
+      - id: mypy-check-python
+        name: Mypy Type Check Python
+        description: Type check Python files using mypy
+        entry: uv run mypy hephaestus/ scripts/ tests/
+        language: system
+        files: ^(hephaestus|scripts|tests)/.*\.py$
+        types: [python]
+        pass_filenames: false
+
+  # Markdown linting
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.20.0
+    hooks:
+      - id: markdownlint-cli2
+        name: Markdown Lint
+        description: Lint markdown files for consistency
+        # docs/ is intentionally IN scope (consolidated from the former
+        # standalone `markdownlint` CI job, #1199). .claude/ stays excluded:
+        # its two tracked .md files (security/guidelines.md,
+        # workflows/development.md) were never linted by that job — keep parity.
+        exclude: ^(build/|\.claude/)
+        args: ['--config', '.markdownlint.yaml', '--fix']
+
+  # YAML linting
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        name: YAML Lint
+        description: Lint YAML files for syntax and style
+        args: ['--config-file', '.yamllint.yaml']
+        exclude: ^(\.venv|build)/
+
+  # Security: CVE scanning
+  - repo: local
+    hooks:
+      - id: pip-audit
+        name: pip-audit (CVE scan)
+        description: Scan dependencies for known CVEs
+        entry: uv run pip-audit
+        language: system
+        pass_filenames: false
+        stages: [manual]
+
+  # Security: mandatory generic staged-secret scanning. Keep this release
+  # aligned with the security/secrets-scan container in _required.yml.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        name: Gitleaks (generic staged-secret scan)
+        stages: [pre-commit]
+
+  # Security: SAST (Static Application Security Testing)
+  - repo: local
+    hooks:
+      - id: bandit
+        name: Bandit (SAST)
+        description: AST-based Python security scanner (subprocess/shell injection)
+        entry: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
+        language: system
+        files: ^(hephaestus|scripts)/.*\.py$
+        types: [python]
+        pass_filenames: false
+
+  # Security: GitHub Actions workflow SAST (issue #2151). Offline + medium
+  # threshold matches the required security/workflow-scan CI job; keep the two
+  # flag sets identical (drift-guarded by tests/unit/ci/test_zizmor_config.py).
+  - repo: local
+    hooks:
+      - id: zizmor
+        name: zizmor (GitHub Actions SAST)
+        description: Static security analysis of GitHub Actions workflows
+        entry: uv run zizmor --no-online-audits --min-severity medium .github/workflows/
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
+
+  # Lock file freshness
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.28
+    hooks:
+      - id: uv-lock
+        name: Check uv lock file
+        description: Verify uv.lock is up to date without modifying it
+        args: [--check]
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$
+
+  # Tech-debt marker linkage enforcement
+  - repo: local
+    hooks:
+      - id: check-no-unlinked-todo
+        name: Check no unlinked tech-debt markers
+        description: Ensure TODO/FIXME/HACK comments reference a tracking issue
+        entry: uv run python -m hephaestus.validation.unlinked_todo
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus|scripts)/.*\.py$|^docs/TECH_DEBT\.md$
+
+  # Source-derived CLI inventory documentation check
+  - repo: local
+    hooks:
+      - id: check-cli-table-sync
+        name: Check CLI documentation sync
+        description: Ensure source-derived CLI inventory documentation matches pyproject.toml [project.scripts]
+        entry: uv run python -m hephaestus.scripts_lib.check_cli_table_sync
+        language: system
+        pass_filenames: false
+        files: ^(README\.md|COMPATIBILITY\.md|AGENTS\.md|CLAUDE\.md|pyproject\.toml|docs/.*\.md)$
+
+  # Living documentation ownership and source-currency guard
+  - repo: local
+    hooks:
+      - id: check-doc-maintenance
+        name: Check normative documentation maintenance
+        description: Reject unowned volatile claims and invalid maintained sources
+        entry: uv run python -m hephaestus.validation.doc_maintenance
+        language: system
+        pass_filenames: false
+        files: ^(.*\.md|pyproject\.toml|hephaestus/automation/pipeline(?:_github\.py|/.*\.py)|hephaestus/prompts/(?:catalog\.py|templates/.*|overrides/.*)|\.github/CODEOWNERS|\.github/workflows/(?:_required|test)\.yml)$
+
+  # Claude settings permission path check
+  - repo: local
+    hooks:
+      - id: check-settings-permission-paths
+        name: Check Claude settings permission paths
+        description: Ensure .claude/settings.json permission paths are canonical POSIX paths
+        entry: uv run python -m hephaestus.scripts_lib.check_settings_permission_paths
+        language: system
+        pass_filenames: false
+        files: ^\.claude/settings\.json$
+
+  # Test structure enforcement
+  - repo: local
+    hooks:
+      - id: check-unit-test-structure
+        name: Check unit test structure
+        description: Enforce tests/unit/ mirrors hephaestus/ and has no loose test files
+        entry: uv run hephaestus-check-test-structure
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus|tests/unit)/
+
+  # CLI stability-tier documentation enforcement (#766)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-cli-tier-docs
+        name: Every [project.scripts] entry must have a tier in COMPATIBILITY.md
+        description: Fails the build if pyproject.toml [project.scripts] and the Console-Script Stability Tiers table in COMPATIBILITY.md drift apart
+        entry: uv run hephaestus-check-cli-tier-docs
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|COMPATIBILITY\.md)$
+
+  # Per-symbol API table documentation enforcement (#1506, #1507)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-api-table-docs
+        name: Every guarded subpackage __all__ must be documented in COMPATIBILITY.md
+        description: Fails the build if a guarded subpackage's __all__ and its API table in COMPATIBILITY.md drift apart
+        entry: uv run hephaestus-check-api-table-docs
+        language: system
+        pass_filenames: false
+        files: ^(hephaestus/(cli|config|system|utils|version)/.*\.py|COMPATIBILITY\.md)$
+
+  # Complexity check
+  - repo: local
+    hooks:
+      - id: ruff-check-complexity
+        name: Ruff Complexity Check (C901)
+        description: Enforce McCabe complexity limit on hephaestus/
+        entry: uv run ruff check --select C901 hephaestus/
+        language: system
+        files: ^hephaestus/.*\.py$
+        types: [python]
+        pass_filenames: false
+
+  # Python version consistency check
+  - repo: local
+    hooks:
+      - id: check-python-version-consistency
+        name: Check Python version consistency
+        description: Ensure Python version is consistent across pyproject.toml and CI
+        entry: uv run hephaestus-check-python-version
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|\.github/workflows/.*\.yml)$
+
+  # GitHub workflow inventory documentation enforcement (#1474)
+  - repo: local
+    hooks:
+      - id: hephaestus-check-workflow-inventory
+        name: hephaestus check workflow inventory
+        description: Ensure .github/workflows/README.md documents every .github/workflows/*.yml file
+        entry: uv run hephaestus-check-workflow-inventory
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: ^(\.pre-commit-config\.yaml|\.github/workflows/(README\.md|.*\.yml))$
+
+  # Version single source of truth check
+  - repo: local
+    hooks:
+      - id: check-version-single-source
+        name: Check version single source of truth
+        description: Ensure pyproject.toml is the sole version authority
+        entry: uv run python -m hephaestus.scripts_lib.check_version_single_source
+        language: system
+        pass_filenames: false
+        files: ^pyproject\.toml$
+
+  # SECURITY.md hard-coded date check: prevents doc-rot from "As of YYYY-MM-DD"
+  # stamps in the rolling support policy. See issue #730.
+  - repo: local
+    hooks:
+      - id: check-security-policy-no-hardcoded-date
+        name: Check SECURITY.md has no hard-coded date
+        description: Reject 'As of YYYY-MM-DD' stamps in SECURITY.md
+        entry: python3 scripts/check_security_policy_no_hardcoded_date.py
+        language: system
+        pass_filenames: false
+        files: ^SECURITY\.md$
+      - id: check-build-dir-untracked
+        name: build/ must stay untracked (gitignored automation scratch)
+        description: >
+          build/ is the sanctioned, gitignored scratch dir for the automation
+          loop. Its name collides with the packaging-output convention, so a
+          stray `git add build/...` or a widened sdist allowlist could sweep
+          automation logs into a distribution. Fail if anything is tracked
+          under build/. See issue #1214.
+        entry: python3 scripts/check_build_dir_untracked.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-private-denylist
+        name: Check private denylist
+        description: >
+          Reject staged or tracked text matching any fixed string in the
+          committed .heph-project-denylist (centrally enforced) or the local,
+          untracked .heph-private-denylist. Diagnostics print only
+          source/path/line, never matched values.
+        entry: python3 scripts/check_private_denylist.py --staged --tracked
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # Conventional Commits enforcement (DoD row 5; issue #1209).
+  # commit-msg stage: pre-commit passes the message file path as the only arg.
+  - repo: local
+    hooks:
+      - id: conventional-commit-msg
+        name: Enforce Conventional Commits
+        description: Reject commit subjects that are not type(scope) description
+        entry: python3 scripts/check_conventional_commit.py
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true
+
+  # DCO enforcement (issue #1516).
+  # commit-msg stage: pre-commit passes the message file path as the only arg.
+  - repo: local
+    hooks:
+      - id: dco-signoff-msg
+        name: Enforce DCO Signed-off-by trailer
+        description: "Reject commit messages lacking a 'Signed-off-by: Name <email>' trailer"
+        entry: python3 scripts/check_dco_signoff.py
+        language: system
+        stages: [commit-msg]
+        pass_filenames: true
+
+  # Forbid silent-failure workarounds (|| true / continue-on-error: true).
+  # See HomericIntelligence/Odysseus#280.
+  - repo: local
+    hooks:
+      - id: forbid-or-true
+        name: "forbid silent-failure workaround in shell/YAML/Dockerfile/justfile/HCL"
+        description: >
+          Rejects the `or-true` idiom (and its whitespace variants) in shell,
+          YAML, Dockerfile, justfile, and HCL sources. Refactor to an explicit
+          `if`-guard, a real conditional, or a documented `set +e`/`set -e`
+          bracket. See HomericIntelligence/Odysseus#280.
+        language: pygrep
+        entry: '\|\|\s*true(\s*$|\s+#)'
+        files: \.(sh|bash|yml|yaml|hcl)$|(^|/)Dockerfile[^/]*$|(^|/)[Jj]ustfile$
+        types: [text]
+        pass_filenames: true
+
+      - id: forbid-continue-on-error
+        name: "forbid continue-on-error workflow opt-out"
+        description: >
+          GitHub Actions `continue-on-error true` (truthy form) hides real CI
+          failures. Fix the underlying job/step instead.
+        language: pygrep
+        entry: '^\s*continue-on-error:\s*true\s*$'
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: true
+
+      - id: forbid-advisory-warnings
+        name: "forbid advisory ::warning:: pattern in workflow run blocks"
+        description: >
+          The advisory-warning workflow annotation is morally equivalent to
+          `continue-on-error: true` when it replaces a tool's failure exit
+          with a benign-looking warning. The CI step still passes, the
+          underlying problem still goes unfixed. Make the step fail-fast
+          instead. The only legitimate use is annotating a step that runs
+          BEFORE the failing tool (e.g., advising on a deprecated config),
+          not wrapping the tool's own exit. See docs/runbooks/no-silent-failures.md.
+        language: pygrep
+        # Match the GitHub Actions advisory-annotation prefix. We exempt
+        # this workflow file (the lint rule itself contains the literal
+        # for self-documentation) via the `exclude` regex below.
+        entry: '::warning::'
+        files: ^\.github/workflows/.*\.ya?ml$
+        exclude: ^\.github/workflows/_required\.yml$
+        pass_filenames: true
+
+      - id: forbid-unwhitelisted-add-to-bashrc
+        name: "forbid non-whitelisted add_to_bashrc call-site (#743)"
+        description: >
+          add_to_bashrc passes its argument to `eval`. Only two shapes are
+          permitted (see ADD_TO_BASHRC_ALLOWED_RE in scripts/shell/install.sh):
+          (1) `eval "$(<abs-path> shellenv)"` or
+          (2) `export PATH=$PATH:<path>` (path may contain $dir for caller
+          expansion; $(...) and other substitution forms are forbidden).
+          Any other shape would let untrusted input reach eval. If you need
+          a new shape, extend BOTH this hook and the shell constant in the
+          same commit.
+        language: pygrep
+        # Pygrep fails when the regex matches. We match any add_to_bashrc
+        # call whose quoted argument is NOT one of the two whitelisted
+        # shapes. Verified against the four real call-sites plus five
+        # synthetic violations (Python re; 9/9 pass at planning time).
+        entry: 'add_to_bashrc\s+"(?!(?:eval \\"\\\$\(/[A-Za-z0-9._/\-]+ shellenv\)\\"|export PATH=\\\$PATH:[A-Za-z0-9._/\-$]+)")[^"]*"'
+        files: ^scripts/shell/install\.sh$
+        pass_filenames: true
+  # Shellcheck for shell scripts
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        name: ShellCheck
+        description: Shell script linter
+        files: \.sh$
+        # -x lets shellcheck follow `# shellcheck source=...` directives
+        # (e.g. install.sh sourcing lib/install_helpers.sh).
+        args: [-x]
+
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+        exclude: ^\.agents/plugins/marketplace\.json$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=5000']
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: detect-private-key
+      - id: detect-aws-credentials
+        args: ['--allow-missing-credentials']

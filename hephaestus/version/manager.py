@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+
+"""Version management utilities for updating and verifying version files.
+
+This module supports two version-source models:
+
+1. **Static pyproject** — ``[project].version = "x.y.z"`` is the source of truth.
+   ``update_pyproject_file()`` rewrites that field; ``verify()`` reads it.
+2. **hatch-vcs dynamic** — ``pyproject.toml`` declares ``dynamic = ["version"]``
+   with ``[tool.hatch.version] source = "vcs"`` and the version is derived from
+   the latest ``vX.Y.Z`` git tag. There is **no** static ``[project].version``.
+   On such projects, ``update_pyproject_file()`` no-ops with a warning (writing
+   would reintroduce the field that the project's ``check-version-single-source``
+   pre-commit hook explicitly rejects).
+
+This module keeps secondary version files in sync regardless of model:
+- VERSION (root file)
+- __init__.py (__version__ attribute)
+
+The project version is derived exclusively from Git tags through hatch-vcs.
+"""
+
+import re
+from pathlib import Path
+from typing import cast
+
+from hephaestus.logging.utils import get_logger
+from hephaestus.utils.helpers import get_repo_root
+from hephaestus.version.parsing import parse_version_tuple
+
+logger = get_logger(__name__)
+
+
+class _UnsetType:
+    """Sentinel type for distinguishing "not provided" from explicit None."""
+
+
+_UNSET = _UnsetType()  # sentinel: use default pyproject_file path
+
+
+_HATCH_VCS_DYNAMIC_RE = re.compile(r'^\s*dynamic\s*=\s*\[\s*[^]]*"version"[^]]*\]', re.MULTILINE)
+
+
+def _is_hatch_vcs_project(pyproject_content: str) -> bool:
+    """Return True if pyproject.toml declares a dynamic version via hatch-vcs.
+
+    Detection is intentionally lenient: any ``dynamic = [..., "version", ...]``
+    declaration is sufficient. The narrower form
+    ``[tool.hatch.version] source = "vcs"`` is a stronger signal but the dynamic
+    declaration alone is enough to mean ``[project].version`` should not exist
+    and therefore should not be written.
+    """
+    return bool(_HATCH_VCS_DYNAMIC_RE.search(pyproject_content))
+
+
+def parse_version(version: str) -> tuple[int, int, int]:
+    """Parse version string into components.
+
+    Args:
+        version: Version string in format "MAJOR.MINOR.PATCH"
+
+    Returns:
+        Tuple of (major, minor, patch)
+
+    Raises:
+        ValueError: If version format is invalid
+
+    """
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", version)
+    if not match:
+        raise ValueError(
+            f"Invalid version format: {version}. Expected format: MAJOR.MINOR.PATCH (e.g., 0.1.0)"
+        )
+
+    # The regex guarantees exactly three all-digit groups; delegate the numeric
+    # conversion to the shared core, then narrow to the fixed 3-tuple contract.
+    major, minor, patch = parse_version_tuple(version, on_non_numeric="raise")
+    return (major, minor, patch)
+
+
+class VersionManager:
+    """Manages version updates across project files."""
+
+    def __init__(
+        self,
+        repo_root: Path | None = None,
+        version_files: list[Path] | None = None,
+        init_files: list[Path] | None = None,
+        pyproject_file: Path | _UnsetType | None = _UNSET,
+    ) -> None:
+        """Initialize the version manager.
+
+        Args:
+            repo_root: Repository root path. If None, will attempt to detect.
+            version_files: List of VERSION file paths. Defaults to [repo_root/VERSION].
+            init_files: List of __init__.py files to update.
+                Defaults to [repo_root/<package>/__init__.py].
+            pyproject_file: Path to pyproject.toml. Defaults to repo_root/pyproject.toml.
+                Pass ``None`` explicitly to skip pyproject.toml updates entirely.
+
+        """
+        self.repo_root = repo_root or get_repo_root()
+        if pyproject_file is _UNSET:
+            self.pyproject_file: Path | None = self.repo_root / "pyproject.toml"
+        else:
+            # The `is _UNSET` check above eliminates the sentinel, but mypy
+            # cannot narrow it out of the union; cast to Path | None so the
+            # assignment type-checks without a blanket suppression.
+            self.pyproject_file = cast("Path | None", pyproject_file)
+        self.version_files = version_files or [self.repo_root / "VERSION"]
+
+        # Auto-detect init files if not provided
+        if init_files is None:
+            # Look for common package __init__.py patterns
+            potential_inits: list[Path] = []
+            for pattern in ["*/__init__.py", "*/*/__init__.py"]:
+                potential_inits.extend(self.repo_root.glob(pattern))
+
+            # Filter to main package init (usually in repo_root/<package>/__init__.py)
+            self.init_files = []
+            for init_file in potential_inits:
+                # Skip test, build, and hidden directories
+                if any(
+                    part.startswith(".") or part in {"tests", "build", "dist", "__pycache__"}
+                    for part in init_file.parts
+                ):
+                    continue
+                # Check if it has a __version__ attribute
+                if init_file.exists():
+                    content = init_file.read_text()
+                    if "__version__" in content:
+                        self.init_files.append(init_file)
+        else:
+            self.init_files = init_files
+
+    def update_pyproject_file(
+        self, pyproject_file: Path, version: str, verbose: bool = True
+    ) -> None:
+        """Update version in pyproject.toml [project].version.
+
+        On hatch-vcs projects (``dynamic = ["version"]`` declared), this is a
+        no-op with an explanatory warning: the version is derived from git tags
+        and rewriting ``[project].version`` would either silently fail (no field
+        to match) or, on a misconfigured repo, reintroduce a static field that
+        the ``check-version-single-source`` pre-commit hook rejects.
+
+        Args:
+            pyproject_file: Path to pyproject.toml
+            version: New version string
+            verbose: Print status messages
+
+        """
+        if not pyproject_file.exists():
+            if verbose:
+                logger.warning("  %s not found, skipping", pyproject_file)
+            return
+
+        content = pyproject_file.read_text()
+
+        if _is_hatch_vcs_project(content):
+            if verbose:
+                logger.warning(
+                    "  %s declares dynamic version via hatch-vcs; "
+                    "skipping [project].version rewrite "
+                    "(tag the release with `git tag -s v%s` instead)",
+                    pyproject_file,
+                    version,
+                )
+            return
+
+        if verbose:
+            logger.info("Updating %s...", pyproject_file)
+
+        # Replace version = "x.y.z" only within the [project] section.
+        # The negative lookahead (?!\[) stops the section match at the next header.
+        new_content = re.sub(
+            r'(\[project\]\n(?:(?!\[).+\n)*?version\s*=\s*")[^"]+(")',
+            rf"\g<1>{version}\g<2>",
+            content,
+        )
+
+        if new_content == content:
+            if verbose:
+                logger.warning("  No version field found under [project] in %s", pyproject_file)
+            return
+
+        pyproject_file.write_text(new_content)
+        if verbose:
+            logger.info('  Updated [project].version = "%s"', version)
+
+    def update_version_file(self, version_file: Path, version: str, verbose: bool = True) -> None:
+        """Update VERSION file.
+
+        Args:
+            version_file: Path to VERSION file
+            version: New version string
+            verbose: Print status messages
+
+        """
+        if verbose:
+            logger.info("Updating %s...", version_file)
+        version_file.write_text(f"{version}\n")
+        if verbose:
+            logger.info("  Updated to %s", version)
+
+    def update_init_file(self, init_file: Path, version: str, verbose: bool = True) -> None:
+        """Update __version__ in __init__.py file.
+
+        Args:
+            init_file: Path to __init__.py file
+            version: New version string
+            verbose: Print status messages
+
+        """
+        if not init_file.exists():
+            if verbose:
+                logger.warning("  %s not found, skipping", init_file)
+            return
+
+        if verbose:
+            logger.info("Updating %s...", init_file)
+
+        content = init_file.read_text()
+
+        # Update __version__ = "x.y.z" pattern
+        new_content = re.sub(
+            r'__version__\s*=\s*["\']([^"\']+)["\']', f'__version__ = "{version}"', content
+        )
+
+        if new_content == content:
+            if verbose:
+                logger.warning("  No __version__ attribute found in %s", init_file)
+            return
+
+        init_file.write_text(new_content)
+        if verbose:
+            logger.info('  Updated __version__ = "%s"', version)
+
+    def update(self, version: str, verbose: bool = True) -> None:
+        """Update all configured version files.
+
+        Updates pyproject.toml first (primary source), then VERSION and __init__.py.
+
+        Args:
+            version: New version string
+            verbose: Print status messages
+
+        """
+        # Parse and validate version
+        major, minor, patch = parse_version(version)
+        if verbose:
+            logger.info(
+                "Parsed version: %s (major=%d, minor=%d, patch=%d)\n", version, major, minor, patch
+            )
+
+        # Update pyproject.toml first (primary source of truth)
+        if self.pyproject_file is not None:
+            self.update_pyproject_file(self.pyproject_file, version, verbose=verbose)
+
+        # Update VERSION files
+        for version_file in self.version_files:
+            self.update_version_file(version_file, version, verbose=verbose)
+
+        # Update __init__.py files
+        for init_file in self.init_files:
+            self.update_init_file(init_file, version, verbose=verbose)
+
+    def verify(self, version: str, verbose: bool = True) -> bool:  # noqa: C901  # validation: many independent version-file consistency checks
+        """Verify that all version files are consistent.
+
+        Args:
+            version: Expected version string
+            verbose: Print status messages
+
+        Returns:
+            True if all files consistent, False otherwise
+
+        """
+        if verbose:
+            logger.info("\nVerifying version files...")
+
+        success = True
+
+        # Check pyproject.toml (primary source of truth)
+        if self.pyproject_file is not None:
+            if self.pyproject_file.exists():
+                content = self.pyproject_file.read_text()
+                match = re.search(
+                    r'\[project\]\n(?:(?!\[).+\n)*?version\s*=\s*"([^"]+)"',
+                    content,
+                )
+                if match and match.group(1) == version:
+                    if verbose:
+                        logger.info(
+                            "  %s [project].version: %s",
+                            self.pyproject_file.relative_to(self.repo_root),
+                            match.group(1),
+                        )
+                else:
+                    if verbose:
+                        found = match.group(1) if match else "<not found>"
+                        logger.error(
+                            "  %s [project].version: %s (expected %s)",
+                            self.pyproject_file.relative_to(self.repo_root),
+                            found,
+                            version,
+                        )
+                    success = False
+            else:
+                if verbose:
+                    logger.warning("  %s not found (skipping)", self.pyproject_file)
+
+        # Check VERSION files
+        for version_file in self.version_files:
+            if version_file.exists():
+                content = version_file.read_text().strip()
+                if content == version:
+                    if verbose:
+                        logger.info("  %s: %s", version_file.relative_to(self.repo_root), content)
+                else:
+                    if verbose:
+                        logger.error(
+                            "  %s: %s (expected %s)",
+                            version_file.relative_to(self.repo_root),
+                            content,
+                            version,
+                        )
+                    success = False
+            else:
+                if verbose:
+                    logger.error("  %s not found", version_file.relative_to(self.repo_root))
+                success = False
+
+        # Check __init__.py files
+        for init_file in self.init_files:
+            if init_file.exists():
+                content = init_file.read_text()
+                # Match __version__ = "x.y.z" pattern
+                match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+                if match and match.group(1) == version:
+                    if verbose:
+                        logger.info(
+                            "  %s: %s", init_file.relative_to(self.repo_root), match.group(1)
+                        )
+                else:
+                    if verbose:
+                        logger.error(
+                            "  %s: version mismatch", init_file.relative_to(self.repo_root)
+                        )
+                    success = False
+            else:
+                if verbose:
+                    logger.warning(
+                        "  %s not found (optional)", init_file.relative_to(self.repo_root)
+                    )
+
+        return success

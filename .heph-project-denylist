@@ -1,0 +1,6 @@
+# Project-level private/PII denylist (committed, centrally enforced).
+# One fixed string per line. Blank lines and #-comments are ignored.
+# Unlike .heph-private-denylist (local, untracked, operator secrets), this
+# file is tracked and scanned in CI for EVERY contributor. Only put patterns
+# here that are safe to name in a public repo (e.g. deprecated internal
+# hostnames, banned placeholder leaks). Genuine secrets go in the local file.

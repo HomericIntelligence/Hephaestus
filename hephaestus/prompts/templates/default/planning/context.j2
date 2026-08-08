@@ -1,0 +1,24 @@
+{{ untrusted_notice }}
+
+**Issue Title (untrusted, GitHub issue #{{ issue_number }}):**
+{{ issue_title_block }}
+
+**Issue Description (untrusted):**
+{{ issue_body_block }}{% if advise_findings_block %}
+
+---
+
+## Prior Learnings from Team Knowledge Base (untrusted)
+
+{{ advise_findings_block }}{% endif %}
+{% if issue_history_block %}
+
+---
+
+## Current rejected plan/review context (untrusted)
+
+{{ issue_history_block }}{% endif %}
+
+---
+
+{{ plan_prompt -}}

@@ -1,0 +1,6 @@
+# pip-audit suppression policy, consumed by `hephaestus-filter-audit`
+# (see hephaestus/validation/audit.py). One advisory ID per line;
+# `#` starts a comment.
+#
+# No vulnerability suppressions are currently approved. Any future entry must
+# be version-scoped, time-bounded, and documented in the security review.

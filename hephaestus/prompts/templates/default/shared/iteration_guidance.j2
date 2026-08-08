@@ -1,0 +1,1 @@
+{% if iteration == 0 %}Treat this as a fresh review — no prior context.{% elif iteration == 1 %}Use the prior review context, but verify independently whether each issue has actually been resolved in this iteration.{% else %}This is the FINAL iteration. Be decisive and emit the required structural audit without an approval or rejection token.{% endif %}

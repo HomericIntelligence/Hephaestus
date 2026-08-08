@@ -1,0 +1,610 @@
+"""Repo-management helpers for the multi-repo automation loop.
+
+Extracted from loop_runner.py (refs #1360 / umbrella #1179). This module
+owns the cluster of functions that interact with GitHub's repo list API,
+local git operations (clone, fetch, rebase), and open-issue/failing-PR
+counting. GitHub CLI calls go through ``hephaestus.github.client.gh_call``;
+local git operations shell out directly. Their
+pure-function helpers are unit-tested in
+``tests/unit/automation/test_loop_repo_manager.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
+from hephaestus.automation.github_api import skip_epics
+from hephaestus.automation.state_labels import is_epic
+from hephaestus.github.client import gh_call
+from hephaestus.resilience.subprocess_resilience import resilient_call
+from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+
+LOG = logging.getLogger(__name__)
+
+
+def _detect_cwd_repo() -> tuple[str | None, str | None]:
+    """Return ``(org, repo_name)`` for the current working directory.
+
+    Returns ``(None, None)`` when cwd is not inside a git repo. For GitHub
+    origin remotes, both ``org`` and ``repo_name`` come from
+    ``git remote get-url origin`` so automation worktree names such as
+    ``issue-1442`` do not masquerade as repository names. Non-GitHub remotes
+    preserve the historical fallback of returning the local top-level basename
+    with ``org`` set to ``None``.
+    """
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=METADATA_TIMEOUT,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return (None, None)
+    repo: str | None = Path(top).name or None
+
+    org: str | None = None
+    try:
+        url = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=METADATA_TIMEOUT,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        url = ""
+
+    host = ""
+    path = ""
+    parsed = urlparse(url)
+    if parsed.scheme:
+        host = (parsed.hostname or "").rstrip(".").lower()
+        path = parsed.path.lstrip("/")
+    elif "@" in url and ":" in url:
+        # SCP-like git remote, e.g. git@github.com:org/repo.git
+        after_at = url.split("@", 1)[1]
+        host_part, path_part = after_at.split(":", 1)
+        host = host_part.rstrip(".").lower()
+        path = path_part.lstrip("/")
+
+    if host == "github.com":
+        parts = path.strip("/").split("/", 1)
+        if len(parts) == 2:
+            org = parts[0] or None
+            remote_repo = parts[1].removesuffix(".git")
+            repo = remote_repo or repo
+
+    return (org, repo)
+
+
+def _iter_gh_repos(org: str) -> Iterator[str]:
+    """Yield non-archived, non-fork organization repos one REST page at a time.
+
+    The generator does not prefetch the next page: the coordinator owns when
+    it asks for the next repository, so an organization-wide run retains one
+    REST page and its bounded pipeline cursors rather than every repository.
+    The API uses ``archived`` and ``fork`` (not GraphQL's ``isArchived`` /
+    ``isFork``); malformed flags fail closed before automation touches a repo.
+    """
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    (
+                        f"/orgs/{org}/repos?per_page=100&type=all&sort=full_name"
+                        f"&direction=asc&page={page}"
+                    ),
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"gh repo list {org} timed out after {exc.timeout}s") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"gh repo list {org} failed (rc={exc.returncode}): {(exc.stderr or '').strip()}"
+            ) from exc
+        try:
+            entries = json.loads(out.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"gh repo list returned invalid JSON: {exc}") from exc
+        if not isinstance(entries, list):
+            raise RuntimeError("gh repo list returned a JSON value other than an array")
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError("gh repo list returned a malformed repository entry")
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                raise RuntimeError("gh repo list returned a repository entry without a name")
+            archived = entry.get("archived")
+            fork = entry.get("fork")
+            if not isinstance(archived, bool) or not isinstance(fork, bool):
+                raise RuntimeError("gh repo list returned a repository entry with malformed flags")
+            if not archived and not fork:
+                yield name
+
+        if len(entries) < 100:
+            return
+        page += 1
+
+
+def _gh_list_repos(org: str) -> list[str]:
+    """Materialize :func:`_iter_gh_repos` for legacy callers and tests only.
+
+    Production ``--org`` execution passes the iterator factory to the
+    coordinator instead, retaining only a bounded source window.
+    """
+    try:
+        return list(_iter_gh_repos(org))
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Yield normalized open-issue metadata one GitHub page at a time.
+
+    The REST issues endpoint is deliberately requested one bounded page at a
+    time.  In particular, do not replace this with ``gh api --paginate
+    --slurp``: that command retains every page before Python can apply
+    backpressure, and the old ``gh issue list --limit 500`` silently omitted
+    the tail of a busy repository.  The cursor is the next page number; one
+    page's JSON body is the maximum discovery metadata retained here.
+
+    GitHub's issues endpoint also returns pull requests.  Those rows are
+    ignored because this helper preserves the historical ``gh issue list``
+    contract.  Every other malformed row or malformed page is fatal rather
+    than being mistaken for an empty/converged repository.
+
+    Raises:
+        RuntimeError: On a network/CLI/JSON failure or malformed API page.
+
+    """
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    f"/repos/{org}/{repo}/issues?state=open&per_page=100"
+                    f"&sort=created&direction=asc&page={page}",
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+            entries = json.loads(out.stdout or "[]")
+            if not isinstance(entries, list):
+                raise ValueError("expected an issue-list page")
+        except (
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(f"failed to list open issues for {org}/{repo}: {exc}") from exc
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue row"
+                )
+            # REST's /issues includes PRs.  They are not issue-source rows.
+            if "pull_request" in entry:
+                continue
+            number = entry.get("number")
+            title = entry.get("title", "")
+            labels = entry.get("labels", [])
+            if not isinstance(number, int) or number <= 0:
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue number"
+                )
+            if not isinstance(title, str) or not isinstance(labels, list):
+                raise RuntimeError(
+                    f"failed to list open issues for {org}/{repo}: malformed issue metadata"
+                )
+            label_names: list[str] = []
+            for label in labels:
+                if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+                    raise RuntimeError(
+                        f"failed to list open issues for {org}/{repo}: malformed issue label"
+                    )
+                label_names.append(label["name"])
+            yield {"number": number, "labels": label_names, "title": title}
+
+        # A short response is the terminal cursor.  An exact 100-row page is
+        # followed by one inexpensive empty-page probe, avoiding a hard cap.
+        if len(entries) < 100:
+            return
+        page += 1
+
+
+def _list_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Return the bounded open-issue metadata iterator for ``org/repo``.
+
+    The historical name is retained for import compatibility, but callers
+    must consume it as a source rather than materializing it.  See
+    :func:`_iter_open_issue_meta` for the page and validation contract.
+    """
+    return _iter_open_issue_meta(org, repo)
+
+
+def _iter_open_pr_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+    """Yield open-PR metadata one REST page at a time for compatibility callers.
+
+    Pipeline repository discovery does not consume this cursor: it advances
+    through linked issue metadata, and unrelated orphan PRs remain out of that
+    source. Do not use ``gh api --paginate --slurp`` in an out-of-band caller:
+    it accumulates every PR page before the caller can apply its own bounds.
+    """
+    page = 1
+    while True:
+        try:
+            out = gh_call(
+                [
+                    "api",
+                    (
+                        f"/repos/{org}/{repo}/pulls?state=open&per_page=100"
+                        f"&sort=created&direction=asc&page={page}"
+                    ),
+                ],
+                timeout=NETWORK_TIMEOUT,
+            )
+            entries = json.loads(out.stdout or "[]")
+            if not isinstance(entries, list):
+                raise ValueError("expected pull-response array")
+        except (
+            subprocess.SubprocessError,
+            RuntimeError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise RuntimeError(f"failed to list open PRs for {org}/{repo}: {exc}") from exc
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"failed to list open PRs for {org}/{repo}: malformed PR entry")
+            number = entry.get("number")
+            if not isinstance(number, int):
+                raise RuntimeError(f"failed to list open PRs for {org}/{repo}: malformed PR number")
+            raw_user = entry.get("user")
+            user = raw_user if isinstance(raw_user, dict) else {}
+            raw_state = entry.get("state")
+            state = raw_state if isinstance(raw_state, str) else "open"
+            yield {
+                "number": number,
+                "state": state.upper(),
+                "isDraft": bool(entry.get("draft", False)),
+                "user": {"login": user.get("login"), "type": user.get("type")},
+            }
+
+        if len(entries) < 100:
+            return
+        page += 1
+
+
+def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
+    """Materialize the bounded cursor for compatibility-only callers.
+
+    Pipeline runtime code consumes no repository-wide open-PR cursor; this
+    wrapper remains for callers that specifically require a complete sorted
+    list.
+    """
+    return sorted(_iter_open_pr_meta(org, repo), key=lambda pr: pr["number"])
+
+
+def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> list[int]:
+    """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
+
+    This is the loop's single canonical issue-discovery call: the result is
+    passed down to the plan/implement child phases via ``--issues`` so they do
+    NOT each re-run their own ``gh issue list``. The scope is ALL open issues
+    (no ``@me`` author/assignee filter) so it matches the child phases'
+    ``gh_list_open_issues`` semantics exactly — the loop's convergence and
+    failing-PR gates then agree with the work the phases actually do.
+
+    Epic/roadmap **tracking** issues are excluded (#1669): they are checklists
+    of child work, not code tasks, so the loop must never plan/implement them.
+    Each excluded epic is tagged ``state:skip`` (best-effort) via
+    :func:`skip_epics` so dashboards see it as intentionally bypassed; that
+    tagging never raises and never affects the returned list. In dry-run mode,
+    the prospective write is logged but never sent to GitHub. Detection uses
+    label names + title because native GitHub issue types are not exposed by the
+    installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
+
+    Sorted ascending so the implementer phase processes oldest-first. GitHub
+    read failures propagate as RuntimeError so automation does not treat an
+    unreadable repo as converged.
+    """
+    kept: list[int] = []
+    for metadata in _list_open_issue_meta(org, repo):
+        number = int(metadata["number"])
+        labels = list(metadata["labels"])
+        if not is_epic(labels, str(metadata["title"])):
+            kept.append(number)
+            continue
+
+        LOG.info(
+            "[%s] issue #%s is an epic/roadmap tracking issue; excluding from planning loop",
+            repo,
+            number,
+        )
+        # Best-effort skip-tagging: never let a label write break discovery.
+        # The owning repo is passed explicitly — this runs in the multi-repo
+        # parent process, where ambient cwd resolution wrote other repos'
+        # epic numbers onto the launch-directory repo (#2245).  The write is
+        # performed before the exclusion is honored, one bounded metadata row
+        # at a time; do not first collect all epic labels in a spill list.
+        if dry_run:
+            LOG.info("[dry-run] [%s] would tag excluded epic #%s state:skip", repo, number)
+        else:
+            try:
+                skip_epics({number: labels}, repo=(org, repo))
+            except Exception as exc:  # pragma: no cover - defensive
+                LOG.warning(
+                    "[%s] could not tag excluded epic #%s state:skip: %s", repo, number, exc
+                )
+    return sorted(kept)
+
+
+def _count_open_issues(org: str, repo: str, *, dry_run: bool = False) -> int:
+    """Return count of open issues in ``org/repo``."""
+    if dry_run:
+        return len(_list_open_issue_numbers(org, repo, dry_run=True))
+    return len(_list_open_issue_numbers(org, repo))
+
+
+def _count_failing_prs(org: str, repo: str) -> int:
+    """Return the number of open non-draft PRs needing loop attention.
+
+    The historical name remains for callers, but the loop deliberately reads
+    no check, workflow, status, or merge state. Its review/approval path is
+    driven only by PR openness and loop-owned labels. Bounded by gh's
+    --limit 1000; cap-hit is logged but still treated as "has work".
+
+    Returns 0 on any gh / parse / timeout failure so the SKIP gate is
+    fail-closed (we don't run the driver when we can't confirm work).
+    """
+    try:
+        out = gh_call(
+            [
+                "pr",
+                "list",
+                "--repo",
+                f"{org}/{repo}",
+                "--state",
+                "open",
+                "--limit",
+                "1000",
+                "--json",
+                "number,isDraft,state",
+            ],
+            timeout=NETWORK_TIMEOUT,
+        )
+    except (subprocess.SubprocessError, RuntimeError, OSError):
+        return 0
+    try:
+        pulls = json.loads(out.stdout or "[]")
+    except json.JSONDecodeError:
+        return 0
+    if len(pulls) >= 1000:
+        LOG.warning(
+            "[%s] _count_failing_prs hit gh's 1000-PR cap; gate may undercount",
+            repo,
+        )
+    return sum(1 for pr in pulls if not pr.get("isDraft") and pr.get("state", "OPEN") == "OPEN")
+
+
+def _sort_repos_by_open_count(org: str, repos: list[str], *, dry_run: bool = False) -> list[str]:
+    """Order repos ascending by open-issue count (smallest backlog first)."""
+    counted: list[tuple[int, int, str]] = []
+    for idx, repo in enumerate(repos):
+        if dry_run:
+            count = _count_open_issues(org, repo, dry_run=True)
+        else:
+            count = _count_open_issues(org, repo)
+        counted.append((count, idx, repo))
+    counted.sort()
+    return [name for _, _, name in counted]
+
+
+def _resolve_repo_dir(projects_dir: Path, repo: str) -> Path:
+    """Return the local directory for ``repo`` under ``projects_dir``."""
+    return projects_dir / repo
+
+
+def _ensure_clone(org: str, repo: str, dest: Path) -> None:
+    """Clone the repo into ``dest`` if not already present."""
+    if (dest / ".git").exists():
+        return
+    LOG.info("Cloning %s/%s -> %s", org, repo, dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        gh_call(
+            ["repo", "clone", f"{org}/{repo}", str(dest)],
+            timeout=NETWORK_TIMEOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"gh repo clone {org}/{repo} failed (rc={exc.returncode})") from exc
+
+
+def _clone_missing_repos(org: str, repos: list[str], projects_dir: Path) -> None:
+    """Sequentially clone any repos not already present.
+
+    Done upfront — before any worker thread starts — so two threads with
+    ``--parallel-repos > 1`` can never race on a missing clone. Matches
+    the bash version's pre-loop clone pass at
+    scripts/run_automation_loop.sh:326-336.
+    """
+    LOG.info("Cloning missing repos ...")
+    for repo in repos:
+        dest = projects_dir / repo
+        if (dest / ".git").exists():
+            LOG.debug("[%s] already cloned at %s", repo, dest)
+            continue
+        try:
+            _ensure_clone(org, repo, dest)
+        except Exception as exc:
+            LOG.error("[%s] clone failed: %s — repo will be marked failed", repo, exc)
+
+
+def _detect_remote_base_ref(repo: str, repo_dir: Path) -> str:
+    """Return the remote default branch ref for ``repo_dir``."""
+    try:
+        symbolic = subprocess.run(
+            ["git", "-C", str(repo_dir), "symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+        detected = symbolic.stdout.strip()
+        if symbolic.returncode == 0 and detected:
+            return detected
+    except subprocess.TimeoutExpired:
+        LOG.warning("[%s] default-branch detection timed out; trying fallback refs", repo)
+
+    for candidate in ("origin/main", "origin/master"):
+        try:
+            verified = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "--verify", candidate],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=METADATA_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if verified.returncode == 0:
+            LOG.warning("[%s] using fallback base ref %s", repo, candidate)
+            return candidate
+    LOG.warning("[%s] could not detect base ref; falling back to origin/main", repo)
+    return "origin/main"
+
+
+def _local_ahead_count(repo: str, repo_dir: Path, base_ref: str) -> int:
+    """Return the number of commits on HEAD that are not in ``base_ref``."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "rev-list", "--count", f"{base_ref}..HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        LOG.warning("[%s] timed out checking local commits ahead of %s", repo, base_ref)
+        return 0
+    if result.returncode != 0:
+        LOG.warning("[%s] could not check local commits ahead of %s", repo, base_ref)
+        return 0
+    try:
+        return int(result.stdout.strip() or "0")
+    except ValueError:
+        LOG.warning("[%s] invalid ahead count for %s: %r", repo, base_ref, result.stdout)
+        return 0
+
+
+def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
+    """Fetch + rebase the remote default branch.
+
+    Returns ``(short_sha, fetch_ok)`` — a 7-char SHA and a flag indicating
+    whether the network refresh succeeded. When ``fetch_ok`` is False the
+    rebase ran against whatever the local clone already had; callers should
+    surface the staleness in operator-facing logs but the SHA value itself
+    remains a clean git hash (no suffix) because it is exported to phase
+    subprocesses as ``HEPH_TRUNK_GITHASH`` and used for session naming
+    (``hephaestus/automation/session_naming.py:181``). Adding a suffix
+    would propagate the "stale" marker into every child session label and
+    would also break any future caller that consumed the env var as a git
+    ref. The staleness is conveyed via the second return value instead.
+
+    If the local checkout is ahead of the detected base ref, the rebase uses a
+    per-commit exec hook that re-signs and DCO-signs replayed commits so repo
+    preparation cannot silently create PR-policy-invalid history.
+    """
+    fetch_ok = True
+    try:
+        fetch_result = resilient_call(
+            subprocess.run,
+            ["git", "-C", str(repo_dir), "fetch", "origin", "--quiet"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=NETWORK_TIMEOUT,
+            circuit_breaker_name="git-fetch",
+        )
+    except subprocess.TimeoutExpired:
+        LOG.warning("[%s] git fetch timed out; rebasing against stale remote base", repo)
+        fetch_ok = False
+    else:
+        # subprocess.run(check=False) does NOT raise on non-zero rc. macOS
+        # sandbox denials surface here as rc=1 with stderr "cannot open
+        # .git/FETCH_HEAD: Operation not permitted" (#993). Without this
+        # inspection the loop logs the resulting trunk SHA as if the refresh
+        # succeeded, masking the permission problem.
+        rc = getattr(fetch_result, "returncode", 0)
+        if rc != 0:
+            stderr = (getattr(fetch_result, "stderr", "") or "").strip()
+            LOG.warning(
+                "[%s] git fetch failed (rc=%s); rebasing against stale remote base: %s",
+                repo,
+                rc,
+                stderr or "<no stderr>",
+            )
+            fetch_ok = False
+    base_ref = _detect_remote_base_ref(repo, repo_dir)
+    local_ahead = _local_ahead_count(repo, repo_dir, base_ref)
+    rebase_cmd = ["git", "-C", str(repo_dir), "rebase", "--empty=drop", base_ref]
+    if local_ahead > 0:
+        rebase_cmd.extend(["--exec", COMMIT_POLICY_REWRITE_EXEC])
+    rebase_cmd.append("--quiet")
+    rb = subprocess.run(
+        rebase_cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=METADATA_TIMEOUT,
+    )
+    if rb.returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "rebase", "--abort"],
+            capture_output=True,
+            check=False,
+            timeout=METADATA_TIMEOUT,
+        )
+        if local_ahead > 0:
+            LOG.warning(
+                "[%s] rebase failed with %s local commit(s) ahead of %s; preserving HEAD",
+                repo,
+                local_ahead,
+                base_ref,
+            )
+        else:
+            # No local commits are at risk, so restore a clean remote-base trunk
+            # and keep the loop moving.
+            LOG.warning("[%s] rebase failed, hard-resetting to %s", repo, base_ref)
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "reset", "--hard", base_ref, "--quiet"],
+                capture_output=True,
+                check=False,
+                timeout=METADATA_TIMEOUT,
+            )
+    sha = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "--short=7", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=METADATA_TIMEOUT,
+    )
+    return (sha.stdout.strip() or "unknown", fetch_ok)

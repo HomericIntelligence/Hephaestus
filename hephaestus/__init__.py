@@ -1,0 +1,150 @@
+"""Hephaestus - Centralized utility library for HomericIntelligence ecosystem."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from hephaestus._version_lookup import get_version
+
+__version__ = get_version()
+
+__author__ = "Micah Villmow"
+
+# Public API surface — prefer subpackage imports for full access:
+#   from hephaestus.utils import slugify
+#   from hephaestus.io.utils import load_data
+#
+# Design note: __all__ lists the *recommended* top-level symbols (9 most-used).
+# _LAZY_IMPORTS maps the full set of lazily-loaded symbols (28 total) that are
+# also accessible via `hephaestus.<name>` but not re-exported by star-import.
+# This keeps `import hephaestus` fast (PEP 562) while providing convenient access.
+__all__ = [
+    "ContextLogger",
+    "__version__",
+    "ensure_directory",
+    "get_logger",
+    "get_system_info",
+    "load_config",
+    "retry_with_backoff",
+    "setup_logging",
+    "slugify",
+]
+
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # name -> (module, attr)
+    "COMMAND_REGISTRY": ("hephaestus.cli.utils", "COMMAND_REGISTRY"),
+    "add_logging_args": ("hephaestus.cli.utils", "add_logging_args"),
+    "confirm_action": ("hephaestus.cli.utils", "confirm_action"),
+    "create_parser": ("hephaestus.cli.utils", "create_parser"),
+    "format_output": ("hephaestus.cli.utils", "format_output"),
+    "format_table": ("hephaestus.cli.utils", "format_table"),
+    "register_command": ("hephaestus.cli.utils", "register_command"),
+    "get_setting": ("hephaestus.config.utils", "get_setting"),
+    "load_config": ("hephaestus.config.utils", "load_config"),
+    "merge_configs": ("hephaestus.config.utils", "merge_configs"),
+    "ensure_directory": ("hephaestus.io.utils", "ensure_directory"),
+    "load_data": ("hephaestus.io.utils", "load_data"),
+    "read_file": ("hephaestus.io.utils", "read_file"),
+    "safe_write": ("hephaestus.io.utils", "safe_write"),
+    "save_data": ("hephaestus.io.utils", "save_data"),
+    "write_file": ("hephaestus.io.utils", "write_file"),
+    "write_secure": ("hephaestus.io.utils", "write_secure"),
+    "detect_rate_limit": ("hephaestus.github.rate_limit", "detect_rate_limit"),
+    "parse_reset_epoch": ("hephaestus.github.rate_limit", "parse_reset_epoch"),
+    "wait_until": ("hephaestus.github.rate_limit", "wait_until"),
+    "ContextLogger": ("hephaestus.logging.utils", "ContextLogger"),
+    "get_logger": ("hephaestus.logging.utils", "get_logger"),
+    "setup_logging": ("hephaestus.logging.utils", "setup_logging"),
+    "format_system_info": ("hephaestus.system.info", "format_system_info"),
+    "get_system_info": ("hephaestus.system.info", "get_system_info"),
+    "flatten_dict": ("hephaestus.utils", "flatten_dict"),
+    "get_proj_root": ("hephaestus.utils", "get_proj_root"),
+    "get_repo_root": ("hephaestus.utils", "get_repo_root"),
+    "human_readable_size": ("hephaestus.utils", "human_readable_size"),
+    "install_package": ("hephaestus.utils", "install_package"),
+    "retry_with_backoff": ("hephaestus.utils", "retry_with_backoff"),
+    "run_subprocess": ("hephaestus.utils", "run_subprocess"),
+    "slugify": ("hephaestus.utils", "slugify"),
+    # validation (v0.5.0)
+    "check_coverage": ("hephaestus.validation.coverage", "check_coverage"),
+    "check_max_complexity": ("hephaestus.validation.complexity", "check_max_complexity"),
+    "check_python_version_consistency": (
+        "hephaestus.validation.python_version",
+        "check_python_version_consistency",
+    ),
+    "check_test_structure": (
+        "hephaestus.validation.test_layout",
+        "check_test_structure",
+    ),
+    "filter_audit_results": ("hephaestus.validation.audit", "filter_audit_results"),
+}
+
+_REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS: dict[str, str] = {
+    "get_config_value": (
+        "use load_config(), merge_configs(), and get_setting() from hephaestus.config"
+    ),
+    "retry_with_jitter": (
+        "use retry_with_backoff(..., jitter=True, max_delay=...) from hephaestus.utils"
+    ),
+}
+
+
+def _assert_removed_top_level_symbols_not_in_lazy_imports() -> None:
+    """Fail fast if a removed top-level symbol is accidentally reintroduced lazily."""
+    reintroduced = set(_REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS) & set(_LAZY_IMPORTS)
+    if reintroduced:
+        names = ", ".join(sorted(reintroduced))
+        raise RuntimeError(
+            f"Removed top-level deprecated symbols must not be present in _LAZY_IMPORTS: {names}"
+        )
+
+
+_assert_removed_top_level_symbols_not_in_lazy_imports()
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy-load public symbols on first access (PEP 562)."""
+    if name in _LAZY_IMPORTS:
+        module_name, attr = _LAZY_IMPORTS[name]
+        import importlib
+
+        module = importlib.import_module(module_name)
+        value = getattr(module, attr)
+        # Cache in module globals to avoid repeated lookups
+        globals()[name] = value
+        return value
+    if name in _REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS:
+        replacement = _REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS[name]
+        raise AttributeError(
+            f"module 'hephaestus' has no attribute {name!r}; {name!r} was removed, {replacement}"
+        )
+    raise AttributeError(f"module 'hephaestus' has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Expose lazily-loaded public symbols to dir() (PEP 562).
+
+    Paired with __getattr__ so introspection tools (IPython tab-completion,
+    IDEs, documentation generators) can discover the full public API. Returns
+    only names — no attribute access — so no lazy module is imported.
+    """
+    return sorted(
+        (set(_LAZY_IMPORTS) | set(__all__) | set(globals()))
+        - set(_REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS)
+    )
+
+
+# Static declarations for the lazily-loaded names in __all__. These are
+# annotation-only statements: with ``from __future__ import annotations`` they
+# are never evaluated, create no module attribute, and trigger no import — so
+# __getattr__ above still resolves each name on first access (PEP 562). They
+# exist purely so static analysers see every __all__ entry as defined.
+ContextLogger: type
+ensure_directory: Callable[..., Any]
+get_logger: Callable[..., Any]
+get_system_info: Callable[..., Any]
+load_config: Callable[..., Any]
+retry_with_backoff: Callable[..., Any]
+setup_logging: Callable[..., Any]
+slugify: Callable[..., str]

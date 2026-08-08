@@ -1,0 +1,198 @@
+name: Security
+
+on:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "NOTICE"
+      - "**/*.py"
+      - ".github/workflows/security.yml"
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Read-only scans — safe to cancel. Collapse successive pushes to the same PR
+# branch (head_ref) so only the latest scan runs; schedule/dispatch fall back to
+# github.ref for a stable per-ref group.
+concurrency:
+  group: security-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pip-audit:
+    name: Dependency vulnerability scan
+    # PR-time pip-audit runs in _required.yml (security/dependency-scan). Skip
+    # here on PRs to avoid the ~2x duplicate run; still runs on the weekly
+    # schedule + manual dispatch. See issue #1182.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked dependency audit environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run pip-audit
+        id: pip-audit
+        run: uv run pip-audit
+
+      - name: Post pip-audit summary
+        if: always()
+        env:
+          AUDIT_OUTCOME: ${{ steps.pip-audit.outcome }}
+        run: |
+          {
+            echo "## pip-audit Security Scan"
+            echo ""
+            if [ "$AUDIT_OUTCOME" = "success" ]; then
+              echo "No HIGH/CRITICAL vulnerabilities found."
+            else
+              echo "Vulnerabilities detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sast:
+    name: Static Application Security Testing
+    # PR-time SAST runs in _required.yml (security/sast-scan). Skip here on PRs
+    # to avoid the ~2x duplicate run; still runs on the weekly schedule +
+    # manual dispatch. See issue #1182.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Run bandit (SAST)
+        id: bandit
+        run: uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium
+
+      - name: Run bandit LOW-severity baseline check
+        id: bandit-low
+        run: |
+          mkdir -p build
+          uv run bandit -c pyproject.toml -r hephaestus scripts \
+            --severity-level low --exit-zero -f json -o build/bandit_low.json
+          uv run python hephaestus/ci/bandit_baseline_check.py build/bandit_low.json hephaestus/ci/bandit_low_baseline.json
+
+      - name: Post bandit summary
+        if: always()
+        env:
+          BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+          BANDIT_LOW_OUTCOME: ${{ steps.bandit-low.outcome }}
+        run: |
+          {
+            echo "## Bandit Static Application Security Testing"
+            echo ""
+            if [ "$BANDIT_OUTCOME" != "success" ]; then
+              echo "Medium-or-higher security findings detected — see job logs."
+            elif [ "$BANDIT_LOW_OUTCOME" != "success" ]; then
+              echo "LOW-severity baseline mismatch detected — see job logs."
+            else
+              echo "No unreviewed security findings or baseline drift detected."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  workflow-scan:
+    name: GitHub Actions workflow security scan
+    # PR-time scan runs in _required.yml (security/workflow-scan). This weekly
+    # run additionally enables the online, API-backed audits (e.g.
+    # known-vulnerable-actions) that the offline PR gate cannot perform.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Run zizmor (workflow SAST with online audits)
+        id: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run zizmor --min-severity medium .github/workflows/
+
+      - name: Post zizmor summary
+        if: always()
+        env:
+          ZIZMOR_OUTCOME: ${{ steps.zizmor.outcome }}
+        run: |
+          {
+            echo "## zizmor GitHub Actions Workflow SAST"
+            echo ""
+            if [ "$ZIZMOR_OUTCOME" = "success" ]; then
+              echo "No workflow security findings at medium+ severity."
+            else
+              echo "Workflow security findings detected — see job logs for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  license-scan:
+    name: License compatibility scan
+    # PR-time license-scan runs in _required.yml (license-scan, gated via
+    # required-checks-gate). Skip here on PRs to avoid the ~2x duplicate run;
+    # still runs on the weekly schedule + manual dispatch. See issue #1514.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0  # hatch-vcs needs full history to compute the version
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run license scan
+        id: license-scan
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: uv run python scripts/check_license_compatibility.py
+
+      - name: Post license-scan summary
+        if: always()
+        env:
+          LICENSE_OUTCOME: ${{ steps.license-scan.outcome }}
+        run: |
+          {
+            echo "## License Compatibility Scan"
+            echo ""
+            if [ "$LICENSE_OUTCOME" = "success" ]; then
+              echo "All distributed dependency licenses compatible with BSD-3-Clause (see NOTICE)."
+            else
+              echo "Non-compatible license or coverage gap detected — see job logs and NOTICE."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

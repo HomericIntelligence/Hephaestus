@@ -1,0 +1,113 @@
+# Platform scope: Linux-only.
+#
+# This workflow intentionally runs only on `ubuntu-latest`; platform expansion
+# is tracked separately in #539.
+#
+# macOS and Windows support is tracked separately in #539 and is currently
+# out of scope. The published wheels remain pure-Python and importable on
+# other platforms (see CONTRIBUTING.md "Platform Support"), but CI does
+# not exercise them there.
+#
+# When #539 lands, expand `matrix.os` here and remove this header.
+# Tracking: #794, #539.
+
+name: Test
+
+# Cross-Python compatibility matrix.
+#
+# The authoritative required gate is `.github/workflows/_required.yml`: it runs
+# lint (ruff/yamllint/mypy), the canonical unit-tests + integration-tests jobs
+# (Python 3.13, coverage gated by [tool.coverage.report].fail_under in pyproject.toml + per-module coverage floors), the
+# build smoke test, and the security/schema/pr-policy gates.
+#
+# To fix the DRY violation (and ~2x runner cost) flagged in #687, this workflow
+# no longer re-runs the `lint` job (ruff check/format + mypy) — that lives in
+# `_required.yml` and is the required check. What remains here is ONLY the
+# multi-interpreter test matrix that `_required.yml` does NOT cover: it proves
+# the library imports and its tests pass on the supported Python 3.13 runtime.
+#
+# Coverage gating, the coverage upload, and the build smoke test were also
+# dropped here — `_required.yml` already gates all three on 3.13. Do NOT re-add
+# a lint job, coverage gating, or a build step to this file.
+#
+# NOTE: the Python 3.13 classifier is intentionally kept in
+# the matrix below. The `hephaestus-check-python-version` check (and its
+# pre-commit hook) require this workflow's python-version matrix to cover every
+# `Programming Language :: Python :: 3.x` classifier in pyproject.toml. Adding a
+# new supported Python means adding it here AND to the classifiers.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # merge_group intentionally removed: merge-queue checks are served by the
+  # single fast `merge-queue-smoke` job in merge-queue-smoke.yml (see that file).
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS and Windows are tracked separately in #539 — the test suite is
+        # mostly Linux-pinned (paths, file modes, curses, fcntl) and the
+        # cross-OS port is a multi-session effort, not blocking 1.0. The
+        # runtime fixes already in place (#533/#534/#536/#537/#538) stay.
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+        test-type: [unit, integration]
+    # `shell: bash` is harmless on ubuntu and keeps the matrix re-expansion
+    # trivial once #539 is picked up.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Pi CLI
+        if: matrix.test-type == 'unit'
+        uses: ./.github/actions/setup-pi-cli
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked project environment
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Run unit tests
+        if: matrix.test-type == 'unit'
+        run: uv run pytest tests/unit --override-ini="addopts=" -v --strict-markers -m "not nightly"
+
+      - name: Check unit test structure
+        if: matrix.test-type == 'unit'
+        # Use the strict CLI (also flags loose test_*.py files at tests/unit/ root).
+        run: uv run hephaestus-check-test-structure
+
+      - name: Run integration tests
+        if: matrix.test-type == 'integration'
+        # uv sync installed every [project.scripts] binary, so the CLI
+        # entry-point checks must never skip here (#2173).
+        env:
+          HEPHAESTUS_REQUIRE_CLI: "1"
+        run: |
+          uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"
