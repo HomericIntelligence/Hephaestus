@@ -10,6 +10,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:
@@ -39,15 +40,21 @@ def test_required_build_job_runs_artifact_suite() -> None:
 
 
 def test_general_integration_job_excludes_artifact_suite() -> None:
-    """The general integration job leaves the dedicated artifact lane isolated."""
-    workflow = _load_workflow(REQUIRED_WORKFLOW)
-    integration_run = _step_run(
-        workflow,
-        "integration-tests",
-        "Run integration tests (in container)",
+    """General integration invocations leave the artifact lane isolated."""
+    integration_runs = (
+        _step_run(
+            _load_workflow(REQUIRED_WORKFLOW),
+            "integration-tests",
+            "Run integration tests (in container)",
+        ),
+        _step_run(
+            _load_workflow(TEST_WORKFLOW),
+            "test",
+            "Run integration tests",
+        ),
     )
 
-    assert "not nightly and not artifact" in integration_run
+    assert all("not nightly and not artifact" in run for run in integration_runs)
 
 
 def test_release_integration_job_includes_artifact_suite() -> None:

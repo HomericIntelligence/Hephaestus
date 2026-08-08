@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,25 @@ REPRESENTATIVE_ENTRY_POINTS = (
     "hephaestus-system-info",
     "hephaestus-check-python-version",
 )
+
+
+def _project_console_scripts() -> tuple[str, ...]:
+    """Return every console-script name declared by the project metadata."""
+    project_root = Path(__file__).resolve().parents[2]
+    with (project_root / "pyproject.toml").open("rb") as pyproject_file:
+        pyproject = tomllib.load(pyproject_file)
+
+    scripts = pyproject["project"]["scripts"]
+    assert isinstance(scripts, dict)
+    script_names: list[str] = []
+    for name, target in scripts.items():
+        assert isinstance(name, str)
+        assert isinstance(target, str)
+        script_names.append(name)
+    return tuple(script_names)
+
+
+PROJECT_CONSOLE_SCRIPTS = _project_console_scripts()
 
 
 def _new_clean_environment(root: Path, uv: str) -> Path:
@@ -147,6 +167,25 @@ def _run_representative_entry_points(venv_dir: Path) -> None:
         assert "usage" in combined.lower(), f"{command} did not print usage:\n{combined[:1000]}"
 
 
+def _console_script_launchers(venv_dir: Path, command: str) -> tuple[Path, ...]:
+    """Return all launcher paths generated for one console script on this platform."""
+    binary_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
+    if sys.platform == "win32":
+        return (binary_dir / f"{command}.exe", binary_dir / f"{command}-script.py")
+    return (binary_dir / command,)
+
+
+def _assert_console_scripts_installed(venv_dir: Path) -> None:
+    """Assert every console script declared by the project has its launcher files."""
+    missing_launchers = [
+        launcher
+        for command in PROJECT_CONSOLE_SCRIPTS
+        for launcher in _console_script_launchers(venv_dir, command)
+        if not launcher.exists()
+    ]
+    assert not missing_launchers, f"missing console-script launchers: {missing_launchers}"
+
+
 def _assert_only_current_dist_info_remains(venv_dir: Path) -> None:
     """Ensure upgrading removed the previous package dist-info directory."""
     site_packages = _site_packages(venv_dir)
@@ -167,12 +206,15 @@ def _uninstall(venv_dir: Path, uv: str) -> None:
     )
 
 
-def _assert_representative_entry_points_absent(venv_dir: Path) -> None:
-    """Prove uninstall removed representative installed scripts."""
-    binary_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
-    for command in REPRESENTATIVE_ENTRY_POINTS:
-        script = binary_dir / (f"{command}.exe" if sys.platform == "win32" else command)
-        assert not script.exists()
+def _assert_console_scripts_absent(venv_dir: Path) -> None:
+    """Prove uninstall removed every platform-specific console-script launcher."""
+    remaining_launchers = [
+        launcher
+        for command in PROJECT_CONSOLE_SCRIPTS
+        for launcher in _console_script_launchers(venv_dir, command)
+        if launcher.exists()
+    ]
+    assert not remaining_launchers, f"remaining console-script launchers: {remaining_launchers}"
     assert not (_site_packages(venv_dir) / "hephaestus").exists()
     assert not list(_site_packages(venv_dir).glob("homericintelligence_hephaestus-*.dist-info"))
 
@@ -186,6 +228,7 @@ def test_current_wheel_clean_install_runs_representative_entry_points(
     _assert_distribution_absent(installed)
     _install(installed, controlled_artifacts.first_wheel, controlled_artifacts.uv)
     _assert_installed_version(installed, CURRENT_TEST_VERSION)
+    _assert_console_scripts_installed(installed)
     _run_representative_entry_points(installed)
 
 
@@ -198,6 +241,7 @@ def test_current_sdist_clean_install_runs_representative_entry_points(
     _assert_distribution_absent(installed)
     _install(installed, controlled_artifacts.first_sdist, controlled_artifacts.uv)
     _assert_installed_version(installed, CURRENT_TEST_VERSION)
+    _assert_console_scripts_installed(installed)
     _run_representative_entry_points(installed)
 
 
@@ -212,12 +256,13 @@ def test_wheel_upgrade_and_clean_uninstall(
 
     _install(installed, controlled_artifacts.first_wheel, controlled_artifacts.uv, upgrade=True)
     _assert_installed_version(installed, CURRENT_TEST_VERSION)
+    _assert_console_scripts_installed(installed)
     _assert_only_current_dist_info_remains(installed)
     _run_representative_entry_points(installed)
 
     _uninstall(installed, controlled_artifacts.uv)
     _assert_distribution_absent(installed)
-    _assert_representative_entry_points_absent(installed)
+    _assert_console_scripts_absent(installed)
 
 
 def test_missing_build_frontend_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
