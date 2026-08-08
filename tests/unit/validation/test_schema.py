@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from hephaestus.validation.schema import (
     check_files,
     load_schema_map,
+    main,
     resolve_schema,
     validate_file,
 )
@@ -105,6 +107,14 @@ class TestLoadSchemaMap:
         assert "entry 0: invalid regex" in message
         assert "entry 0: schema path must not be empty" in message
         assert "entry 1: schema path must not contain NUL" in message
+
+    def test_reports_oversized_regex_quantifier(self, tmp_path: Path) -> None:
+        """Treat regex quantifier overflow as a malformed schema-map entry."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["a{4294967295}", "schema.json"]]), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="entry 0: invalid regex"):
+            load_schema_map(map_file)
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         """Missing file raises FileNotFoundError."""
@@ -281,6 +291,52 @@ class TestCheckFiles:
         assert exit_code == 1
         assert len(errors) == 1
         assert "Could not load schema" in errors[0]
+
+
+class TestMainExisting:
+    """Tests for schema-validation CLI error rendering."""
+
+    def test_oversized_regex_human_error(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Human mode reports malformed regexes without a traceback."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["a{4294967295}", "schema.json"]]), encoding="utf-8")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("name: test\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["hephaestus-validate-schemas", "--schema-map", str(map_file), str(config_file)],
+        )
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "ERROR: Could not load schema map: invalid schema map:" in captured.err
+        assert "invalid regex 'a{4294967295}'" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_oversized_regex_json_error(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """JSON mode emits a structured malformed schema-map error."""
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([["a{4294967295}", "schema.json"]]), encoding="utf-8")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("name: test\n", encoding="utf-8")
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "hephaestus-validate-schemas",
+                "--json",
+                "--schema-map",
+                str(map_file),
+                str(config_file),
+            ],
+        )
+
+        assert main() == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["errors"]
+        assert "invalid regex 'a{4294967295}'" in payload["errors"][0]
 
     def test_schema_load_json_decode_error(self, tmp_path: Path) -> None:
         """JSONDecodeError when loading schema file is caught and counted."""
@@ -615,6 +671,56 @@ class TestMain:
             assert captured.out == ""
             assert "ERROR:" in captured.err
             assert "Invalid JSON Schema" in captured.err
+
+    @pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+    def test_unresolved_schema_reference_is_structured(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        json_mode: bool,
+    ) -> None:
+        """Unresolved schema references become normal CLI diagnostics."""
+        pytest.importorskip("jsonschema")
+        from hephaestus.validation.schema import main
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(json.dumps({"$ref": "#/missing"}), encoding="utf-8")
+        target_dir = tmp_path / "config"
+        target_dir.mkdir()
+        target = target_dir / "test.yaml"
+        target.write_text("name: test\n", encoding="utf-8")
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps([[r"^config/.*\.yaml$", str(schema)]]), encoding="utf-8")
+
+        argv = [
+            "hephaestus-validate-schemas",
+            "--schema-map",
+            str(map_file),
+            "--repo-root",
+            str(tmp_path),
+        ]
+        if json_mode:
+            argv.append("--json")
+        argv.append(str(target))
+        monkeypatch.setattr("sys.argv", argv)
+
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.out + captured.err
+
+        if json_mode:
+            payload = json.loads(captured.out)
+            assert payload["status"] == "error"
+            assert payload["exit_code"] == 1
+            assert payload["message"] == "schema validation failed"
+            assert payload["error_count"] == 1
+            assert any("Invalid JSON Schema reference" in error for error in payload["errors"])
+            assert captured.err == ""
+        else:
+            assert captured.out == ""
+            assert "ERROR:" in captured.err
+            assert "Invalid JSON Schema reference" in captured.err
 
     def test_json_flag_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture

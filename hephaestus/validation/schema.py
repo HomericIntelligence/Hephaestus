@@ -80,7 +80,7 @@ def load_schema_map(schema_map_file: Path) -> SchemaMapping:
         else:
             try:
                 pattern = re.compile(raw_pattern)
-            except re.error as exc:
+            except (re.error, OverflowError) as exc:
                 errors.append(f"entry {index}: invalid regex {raw_pattern!r}: {exc}")
 
         if not isinstance(raw_schema_path, str):
@@ -145,6 +145,13 @@ def validate_file(file_path: Path, schema: object) -> list[str]:
             "Install with: pip install HomericIntelligence-Hephaestus[schema]"
         ]
 
+    try:
+        from referencing.exceptions import Unresolvable
+
+        reference_error: type[Exception] = Unresolvable
+    except ImportError:  # pragma: no cover - jsonschema before referencing integration
+        reference_error = jsonschema.exceptions.RefResolutionError
+
     validator_type = jsonschema.Draft7Validator
     try:
         validator_type.check_schema(schema)
@@ -160,7 +167,12 @@ def validate_file(file_path: Path, schema: object) -> list[str]:
 
     errors: list[str] = []
     validator = validator_type(schema)
-    for error in sorted(validator.iter_errors(content), key=lambda e: list(e.path)):
+    try:
+        validation_errors = sorted(validator.iter_errors(content), key=lambda e: list(e.path))
+    except reference_error as exc:
+        return [f"Invalid JSON Schema reference: {exc}"]
+
+    for error in validation_errors:
         path = ".".join(str(p) for p in error.absolute_path) or "<root>"
         errors.append(f"  [{path}] {error.message}")
     return errors
