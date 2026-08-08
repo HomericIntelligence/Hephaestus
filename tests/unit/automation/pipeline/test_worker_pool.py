@@ -547,7 +547,7 @@ class TestWorkerPoolSubmitComplete:
             pool.submit(job, StageName.IMPLEMENTATION)
             _handle, result = completion_q.get(timeout=10)
 
-        mock_resolve.assert_called_once_with("codex")
+        mock_resolve.assert_called_once_with("codex", cwd=job.cwd)
         mock_session.assert_called_once_with(
             agent="codex",
             prompt="test prompt",
