@@ -63,7 +63,7 @@ may change incompatibly in a minor release.
 The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
-Hephaestus installs 57 console scripts via `[project.scripts]` in
+Hephaestus installs 58 console scripts via `[project.scripts]` in
 `pyproject.toml`.
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
 
@@ -20,13 +20,49 @@ from hephaestus.automation.pipeline.stages.base import (
     ConditionalMergeResult,
     ImplementationThreadReplyResult,
     ReviewerThreadReconciliationResult,
+    StageContext,
     StageGitHub,
 )
 from hephaestus.automation.state_labels import STATE_IN_PROGRESS
 
+from .github_jobs import GitHubJob, GuardedGitHubJob
+
 
 class GuardTargetError(GuardError):
     """A worker attempted to use a credential for another target."""
+
+
+def guarded_stage_context(host: Any, item: Any, base: StageContext) -> StageContext:
+    """Bind issue-bearing stage access to the work item's live guard."""
+    if item.issue is None or host.config.dry_run or not host._guard_enabled:
+        return base
+    handle = host._guard_for_item(item)
+    return replace(
+        base,
+        github=GuardedStageGitHub(
+            raw=base.github,
+            guard_store=host.guard_store_factory(handle.credential.repository),
+            credential=handle.credential,
+        ),
+    )
+
+
+def guarded_pipeline_job(host: Any, item: Any, job: Any) -> Any:
+    """Confirm ownership and bind GitHub mutations before worker dispatch."""
+    if not host._guard_enabled or item.issue is None:
+        return job
+    host._confirm_item_guard(item, host._minimum_dispatch_lease(job))
+    if item.pr is not None:
+        linked = host._ctx_for_repo(item.repo).github.find_issue_for_pr(item.pr)
+        if linked != item.issue:
+            raise GuardTargetError("PR-to-issue association changed before dispatch")
+    if isinstance(job, GitHubJob):
+        return GuardedGitHubJob.bind(
+            job,
+            host._guard_for_item(item).credential,
+            org=host.config.org,
+        )
+    return job
 
 
 @dataclass

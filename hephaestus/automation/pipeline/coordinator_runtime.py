@@ -6,8 +6,7 @@ import hephaestus.automation.pipeline.coordinator_observability as _observabilit
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
-from .github_jobs import GitHubJob, GuardedGitHubJob
-from .guarded_github import GuardedStageGitHub, GuardTargetError
+from .guarded_github import guarded_pipeline_job, guarded_stage_context
 
 # This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
@@ -96,26 +95,10 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _ctx_for(self, item: WorkItem) -> StageContext:
         """Return the (cached, per-repo) StageContext for *item*."""
-        base = self._ctx_for_repo(item.repo)
-        if item.issue is None or self.config.dry_run or not self._guard_enabled:
-            return base
-        handle = self._guard_for_item(item)
-        return replace(
-            base,
-            github=GuardedStageGitHub(
-                raw=base.github,
-                guard_store=self.guard_store_factory(handle.credential.repository),
-                credential=handle.credential,
-            ),
-        )
+        return guarded_stage_context(self, item, self._ctx_for_repo(item.repo))
 
     def _budget_for(self, name: str) -> int:
-        """Config-aware budget accessor injected as ``StageContext.budget_fn``.
-
-        A ``config.budget_overrides`` entry (e.g. ``--max-fix-iterations N`` ->
-        takes precedence over the ROUTES default, so a caller can tune a
-        stage's per-item budget without editing the routing table.
-        """
+        """Return a configured budget override or the route default."""
         override = self.config.budget_overrides.get(name)
         if override is not None:
             return override
@@ -995,19 +978,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         sanctioned fallback).
         """
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
-        job: Any = request.job
-        if self._guard_enabled and item.issue is not None:
-            self._confirm_item_guard(item, self._minimum_dispatch_lease(job))
-            if item.pr is not None:
-                linked = self._ctx_for_repo(item.repo).github.find_issue_for_pr(item.pr)
-                if linked != item.issue:
-                    raise GuardTargetError("PR-to-issue association changed before dispatch")
-            if isinstance(job, GitHubJob):
-                job = GuardedGitHubJob.bind(
-                    job,
-                    self._guard_for_item(item).credential,
-                    org=self.config.org,
-                )
+        job: Any = guarded_pipeline_job(self, item, request.job)
         if isinstance(job, AgentJob):
             ok, delay = self._rate_budget_ok()
             if not ok:

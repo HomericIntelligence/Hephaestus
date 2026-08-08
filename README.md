@@ -306,7 +306,7 @@ config = merge_with_env({}, convert_bools=True)
 
 Run any command with `--help` to see full usage.
 
-The package currently installs 57 console scripts from `[project.scripts]`.
+The package currently installs 58 console scripts from `[project.scripts]`.
 
 ### Automation
 
