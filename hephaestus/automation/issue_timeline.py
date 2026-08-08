@@ -107,6 +107,11 @@ def _is_obsolete_automation_comment(body: str) -> bool:
     )
 
 
+def _has_exact_leading_marker(body: str, marker: str) -> bool:
+    """Return whether the first non-whitespace line is exactly *marker*."""
+    return body.lstrip().partition("\n")[0].strip() == marker
+
+
 def plan_issue_timeline_compaction(
     comments: Sequence[IssueComment],
 ) -> IssueTimelineCompaction:
@@ -127,8 +132,24 @@ def plan_issue_timeline_compaction(
     snapshot = journal_snapshot(owned)
     plan_comments = [comment for comment in owned if is_plan_comment(comment.body)]
     review_comments = [comment for comment in owned if is_plan_review_comment(comment.body)]
-    target_plan = plan_comments[-1] if plan_comments else None
-    target_review = review_comments[-1] if review_comments else None
+    canonical_plans = [
+        comment
+        for comment in plan_comments
+        if _has_exact_leading_marker(comment.body, PLAN_CANONICAL_MARKER)
+    ]
+    canonical_reviews = [
+        comment
+        for comment in review_comments
+        if _has_exact_leading_marker(comment.body, PLAN_REVIEW_CANONICAL_MARKER)
+    ]
+    target_plan = (
+        canonical_plans[-1] if canonical_plans else (plan_comments[-1] if plan_comments else None)
+    )
+    target_review = (
+        canonical_reviews[-1]
+        if canonical_reviews
+        else (review_comments[-1] if review_comments else None)
+    )
 
     prior_fingerprints = list(snapshot.prior_plan_fingerprints)
     for comment in plan_comments[:-1]:

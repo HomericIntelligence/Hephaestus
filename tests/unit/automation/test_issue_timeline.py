@@ -8,7 +8,11 @@ from hephaestus.automation.issue_timeline import (
     issue_comments_from_metadata,
     plan_issue_timeline_compaction,
 )
-from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_COMMENT_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+)
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     IssueComment,
@@ -94,3 +98,17 @@ def test_malformed_legacy_marker_fails_before_planning_deletion() -> None:
 
     with pytest.raises(RuntimeError, match="malformed legacy automation marker"):
         plan_issue_timeline_compaction(comments)
+
+
+def test_existing_canonical_pointer_is_kept_when_newer_legacy_comment_exists() -> None:
+    """Migration updates the canonical ID then deletes a later legacy source."""
+    comments = [
+        _comment(1, render_current_plan("Older canonical", revision=1)),
+        _comment(2, f"{PLAN_COMMENT_MARKER}\n\nLatest legacy plan"),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert "Latest legacy plan" in (result.plan_body or "")
+    assert result.plan_needs_update
+    assert result.delete_comment_ids == (2,)
