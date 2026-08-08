@@ -88,9 +88,7 @@ def test_plan_phase_discover_plan_found_on_plan_comment(tmp_path: Path) -> None:
     with (
         mock.patch(
             "hephaestus.automation._plan_phase.fetch_issue_comments_metadata",
-            return_value=[
-                {"body": "# Implementation Plan\n\nstep 1", "user": {"login": "bot"}}
-            ],
+            return_value=[{"body": "# Implementation Plan\n\nstep 1", "user": {"login": "bot"}}],
         ),
         mock.patch("hephaestus.automation._plan_phase.gh_current_login", return_value="bot"),
     ):

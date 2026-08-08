@@ -2741,9 +2741,7 @@ class TestRepoScoping:
 
         assert adapter.issue_comments(7) == [
             IssueComment(body="plan", author_login="bot", viewer_did_author=True, database_id=1),
-            IssueComment(
-                body="review", author_login="bot", viewer_did_author=True, database_id=2
-            ),
+            IssueComment(body="review", author_login="bot", viewer_did_author=True, database_id=2),
         ]
 
     def test_issue_reads_include_repo_arg(
