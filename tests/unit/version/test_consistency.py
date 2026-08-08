@@ -12,10 +12,9 @@ import json
 import pytest
 
 import hephaestus.version.consistency as consistency
+from hephaestus.version import bump_version, check_version_consistency
 from hephaestus.version.consistency import (
-    bump_version,
     check_package_version_consistency,
-    check_version_consistency,
     preview_version,
 )
 
@@ -94,8 +93,11 @@ def test_check_requested_version_no_matching_sources(tmp_path, monkeypatch):
 
 
 def test_check_version_consistency_preserves_legacy_signature(tmp_path, set_canonical, capsys):
-    """The public status check still accepts the historical positional verbose flag."""
+    """The exported status check accepts both historical calling forms."""
     set_canonical("1.2.3")
+
+    assert check_version_consistency(tmp_path) == 0
+    assert capsys.readouterr().out == ""
 
     assert check_version_consistency(tmp_path, True) == 0
     assert "Canonical version (git tag): 1.2.3" in capsys.readouterr().out
@@ -197,8 +199,8 @@ def test_check_package_consistency_scan_skills_ignores_code_blocks(tmp_path, set
     ("part", "expected"),
     [("patch", "1.2.4"), ("minor", "1.3.0"), ("major", "2.0.0")],
 )
-def test_bump_version_computes_without_mutation(tmp_path, set_canonical, part, expected):
-    """Compute each semantic bump without creating or changing files."""
+def test_public_bump_version_computes_without_mutation(tmp_path, set_canonical, part, expected):
+    """The exported legacy wrapper returns success without changing files."""
     set_canonical("1.2.3")
 
     assert preview_version(tmp_path, part) == expected
