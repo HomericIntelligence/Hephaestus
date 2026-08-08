@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
+from unittest import skipUnless
 from unittest.mock import Mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -181,24 +183,28 @@ def _write_package(root: Path, name: str, version: str) -> None:
 
 def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
-    """Settings and installed roots must agree before extension code executes."""
-    from hephaestus.agents.pi_plugins import inspect_pi_package_inventory, load_pi_package_catalog
+    """Global npm packages resolve through npm rather than the Pi settings root."""
+    from hephaestus.agents import pi_plugins
 
     pi_dir = tmp_path / "pi-home"
     cwd = tmp_path / "repo"
     cwd.mkdir()
-    catalog = load_pi_package_catalog()
+    catalog = pi_plugins.load_pi_package_catalog()
     (pi_dir / "settings.json").parent.mkdir(parents=True)
     (pi_dir / "settings.json").write_text(
         json.dumps({"packages": list(catalog.install_specs)}), encoding="utf-8"
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
+    global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"
     _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
-    _write_package(pi_dir / "npm" / "pi-subagents", "pi-subagents", "0.37.2")
-    _write_package(pi_dir / "npm" / "pi-web-access", "pi-web-access", "0.15.0")
+    _write_package(global_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(global_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
+    npm_root = Mock(return_value=pi_plugins.ProcessResult(0, f"{global_npm_root}\n", ""))
+    monkeypatch.setattr(pi_plugins, "run_bounded_command", npm_root)
 
-    result = inspect_pi_package_inventory(
+    result = pi_plugins.inspect_pi_package_inventory(
         cwd,
         catalog,
         pi_dir=pi_dir,
@@ -208,7 +214,38 @@ def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
     assert result.ready is True
     assert result.status == "ready"
     assert result.roots["athena"] == athena_root.resolve()
+    assert result.roots["pi-subagents"] == (global_npm_root / "pi-subagents").resolve()
     assert set(result.scopes.values()) == {"user"}
+    npm_root.assert_called_once_with(("npm", "root", "-g"), timeout=30)
+
+
+def test_project_inventory_uses_pi_npm_node_modules_layout(tmp_path: Path) -> None:
+    """Project-local npm packages resolve below ``.pi/npm/node_modules``."""
+    from hephaestus.agents.pi_plugins import inspect_pi_package_inventory, load_pi_package_catalog
+
+    cwd = tmp_path / "repo"
+    project_root = cwd / ".pi"
+    project_root.mkdir(parents=True)
+    catalog = load_pi_package_catalog()
+    (project_root / "settings.json").write_text(
+        json.dumps({"packages": list(catalog.install_specs)}), encoding="utf-8"
+    )
+    athena_root = project_root / "git" / "github.com" / "HomericIntelligence" / "Athena"
+    project_npm_root = project_root / "npm" / "node_modules"
+    _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
+    _write_package(project_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(project_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
+
+    result = inspect_pi_package_inventory(
+        cwd,
+        catalog,
+        pi_dir=tmp_path / "pi-home",
+        git_head=lambda root: catalog.packages[0].pin if root == athena_root else "",
+    )
+
+    assert result.ready is True
+    assert result.roots["pi-web-access"] == (project_npm_root / "pi-web-access").resolve()
+    assert set(result.scopes.values()) == {"project"}
 
 
 def test_probe_requires_verified_source_info_provenance(tmp_path: Path) -> None:
@@ -278,6 +315,41 @@ def test_probe_requires_verified_source_info_provenance(tmp_path: Path) -> None:
     assert result.status == "capability_provenance_mismatch"
 
 
+def test_capability_inventory_rejects_non_object_command_and_tool_entries(
+    tmp_path: Path,
+) -> None:
+    """Malformed RPC list elements produce a stable failure instead of a traceback."""
+    from hephaestus.agents.pi_plugins import (
+        InventoryResult,
+        load_pi_package_catalog,
+        verify_capability_inventory,
+    )
+
+    catalog = load_pi_package_catalog()
+    inventory = InventoryResult(
+        ready=True,
+        status="ready",
+        roots={package.key: tmp_path / package.key for package in catalog.packages},
+        scopes={package.key: "user" for package in catalog.packages},
+    )
+    valid_lists: dict[str, Any] = {
+        "commands": [],
+        "reported_commands": [],
+        "active_tools": [],
+        "all_tools": [],
+    }
+
+    for field in ("commands", "reported_commands", "all_tools"):
+        for malformed in (None, "not-an-object"):
+            payload = dict(valid_lists)
+            payload[field] = [malformed]
+
+            result = verify_capability_inventory(payload, inventory, catalog)
+
+            assert result.ready is False
+            assert result.status == "capability_payload_malformed"
+
+
 def test_parser_exposes_scope_dry_run_json_approval_timeout_and_yes() -> None:
     """The operator CLI exposes every issue-owned safety control."""
     from hephaestus.agents.pi_plugins import build_parser
@@ -295,7 +367,7 @@ def test_parser_exposes_scope_dry_run_json_approval_timeout_and_yes() -> None:
 
 
 def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
-    """The capability extension is executed only after static inventory passes."""
+    """The capability extension runs without executing ambient Pi extensions."""
     from hephaestus.agents.pi_plugins import (
         ProcessResult,
         load_pi_package_catalog,
@@ -312,16 +384,24 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         json.dumps({"packages": list(catalog.install_specs)}), encoding="utf-8"
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
+    global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"
     _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
-    _write_package(pi_dir / "npm" / "pi-subagents", "pi-subagents", "0.37.2")
-    _write_package(pi_dir / "npm" / "pi-web-access", "pi-web-access", "0.15.0")
+    _write_package(global_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(global_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
     rpc_calls: list[tuple[str, ...]] = []
+    ambient_sentinel = tmp_path / "ambient-extension-loaded"
+    ambient_extensions = pi_dir / "extensions"
+    ambient_extensions.mkdir()
+    (ambient_extensions / "sentinel.ts").write_text(
+        "export default function () {}", encoding="utf-8"
+    )
+    isolated_paths: list[Path] = []
 
     def source_info(package: str, leaf: str) -> dict[str, str]:
         root = {
             "athena": athena_root,
-            "pi-subagents": pi_dir / "npm" / "pi-subagents",
-            "pi-web-access": pi_dir / "npm" / "pi-web-access",
+            "pi-subagents": global_npm_root / "pi-subagents",
+            "pi-web-access": global_npm_root / "pi-web-access",
         }[package]
         return {
             "origin": "package",
@@ -343,7 +423,25 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     def runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessResult:
         if argv[-1] == "--version":
             return ProcessResult(0, "0.80.2\n", "")
+        if argv == ("npm", "root", "-g"):
+            return ProcessResult(0, f"{global_npm_root}\n", "")
         rpc_calls.append(argv)
+        probe_env = kwargs["env"]
+        probe_cwd = kwargs["cwd"]
+        assert probe_env is not None
+        assert probe_cwd is not None
+        isolated_agent_dir = Path(probe_env["PI_CODING_AGENT_DIR"])
+        isolated_paths.extend((isolated_agent_dir, probe_cwd))
+        if isolated_agent_dir == pi_dir or probe_cwd == cwd:
+            ambient_sentinel.write_text("loaded", encoding="utf-8")
+        configured = json.loads((isolated_agent_dir / "settings.json").read_text(encoding="utf-8"))
+        assert configured["packages"] == [
+            str(athena_root.resolve()),
+            str((global_npm_root / "pi-subagents").resolve()),
+            str((global_npm_root / "pi-web-access").resolve()),
+        ]
+        assert not (isolated_agent_dir / "extensions").exists()
+        assert not (probe_cwd / ".pi").exists()
         assert kwargs["keep_stdin_open"] is True
         request = "".join(kwargs["input_text"] or "")
         nonce = json.loads(request.splitlines()[1])["message"].split()[-1]
@@ -390,6 +488,50 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     assert len(rpc_calls) == 1
     assert "--mode" in rpc_calls[0]
     assert "rpc" in rpc_calls[0]
+    assert not ambient_sentinel.exists()
+    assert all(not path.exists() for path in isolated_paths)
+
+
+def test_isolated_probe_preserves_verified_package_scopes(tmp_path: Path) -> None:
+    """The isolated settings expose each root only through its verified scope."""
+    from hephaestus.agents import pi_plugins
+
+    catalog = pi_plugins.load_pi_package_catalog()
+    roots = {package.key: tmp_path / package.key for package in catalog.packages}
+    inventory = pi_plugins.InventoryResult(
+        ready=True,
+        status="ready",
+        roots=roots,
+        scopes={
+            "athena": "user",
+            "pi-subagents": "project",
+            "pi-web-access": "project",
+        },
+    )
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+
+    with pi_plugins._isolated_pi_probe_environment(cwd, inventory, catalog) as (
+        probe_cwd,
+        probe_env,
+        trust,
+    ):
+        agent_dir = Path(probe_env["PI_CODING_AGENT_DIR"])
+        user_settings = json.loads((agent_dir / "settings.json").read_text(encoding="utf-8"))
+        project_settings = json.loads(
+            (probe_cwd / ".pi" / "settings.json").read_text(encoding="utf-8")
+        )
+
+        assert user_settings["packages"] == [str(roots["athena"])]
+        assert project_settings["packages"] == [
+            str(roots["pi-subagents"]),
+            str(roots["pi-web-access"]),
+        ]
+        assert trust == "--approve"
+
+    assert not agent_dir.exists()
+    assert not probe_cwd.exists()
+    assert not (cwd / "build").exists()
 
 
 def test_catalog_rejects_mutable_or_incomplete_pins(tmp_path: Path) -> None:
@@ -433,6 +575,32 @@ def test_bounded_runner_times_out_and_stops_output_overflow() -> None:
     assert timed_out.returncode != 0
     assert overflow.output_overflow is True
     assert len(overflow.stdout.encode()) <= 1_048_576
+
+
+@skipUnless(sys.platform == "win32", "requires Windows process semantics")
+def test_bounded_runner_windows_timeout_terminates_descendants(tmp_path: Path) -> None:
+    """A timed-out Windows command cannot leave a spawned installer child running."""
+    from hephaestus.agents.pi_plugins import run_bounded_command
+
+    sentinel = tmp_path / "descendant-survived"
+    child = (
+        "import pathlib,sys,time; "
+        "time.sleep(1); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); "
+        "time.sleep(30)"
+    )
+
+    result = run_bounded_command((sys.executable, "-c", parent, child, str(sentinel)), timeout=0.2)
+
+    assert result.timed_out is True
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not sentinel.exists():
+        time.sleep(0.05)
+    assert not sentinel.exists(), "timed-out child process survived its parent"
 
 
 def test_bounded_runner_delivers_stdin_and_keeps_streams_separate() -> None:
@@ -533,6 +701,18 @@ def test_installer_safe_defaults_confirmation_and_partial_state(tmp_path: Path) 
     assert install_env is not None
     assert install_env["NPM_CONFIG_IGNORE_SCRIPTS"] == "true"
     assert install_env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_pi_child_environment_honors_the_operator_agent_directory(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Install and preflight subprocesses share the selected Pi configuration root."""
+    from hephaestus.agents import pi_plugins
+
+    pi_dir = tmp_path / "pi-agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+
+    assert pi_plugins._pi_child_env()["PI_CODING_AGENT_DIR"] == str(pi_dir)
 
 
 def test_installer_rejects_invalid_controls_and_reports_timeout(tmp_path: Path) -> None:
@@ -697,9 +877,9 @@ def test_rpc_parser_requires_top_level_notify_and_correlation() -> None:
 
 def test_global_no_approve_inventory_ignores_project_package_shadow(tmp_path: Path) -> None:
     """Global verification cannot be satisfied or shadowed by unapproved project settings."""
-    from hephaestus.agents.pi_plugins import inspect_pi_package_inventory, load_pi_package_catalog
+    from hephaestus.agents import pi_plugins
 
-    catalog = load_pi_package_catalog()
+    catalog = pi_plugins.load_pi_package_catalog()
     pi_dir = tmp_path / "pi-home"
     cwd = tmp_path / "repo"
     cwd.mkdir()
@@ -712,16 +892,18 @@ def test_global_no_approve_inventory_ignores_project_package_shadow(tmp_path: Pa
         json.dumps({"packages": ["npm:pi-subagents@9.9.9"]}), encoding="utf-8"
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
+    global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"
     _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
-    _write_package(pi_dir / "npm" / "pi-subagents", "pi-subagents", "0.37.2")
-    _write_package(pi_dir / "npm" / "pi-web-access", "pi-web-access", "0.15.0")
+    _write_package(global_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(global_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
-    result = inspect_pi_package_inventory(
+    result = pi_plugins.inspect_pi_package_inventory(
         cwd,
         catalog,
         pi_dir=pi_dir,
         git_head=lambda _root: catalog.packages[0].pin,
         include_project=False,
+        runner=Mock(return_value=pi_plugins.ProcessResult(0, f"{global_npm_root}\n", "")),
     )
 
     assert result.ready is True

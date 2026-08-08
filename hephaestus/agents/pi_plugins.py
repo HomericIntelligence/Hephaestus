@@ -8,6 +8,7 @@ module, never the reverse.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import queue
@@ -18,9 +19,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -32,6 +35,62 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _VERSION_OUTPUT_RE = re.compile(r"(?:pi\s+|v)?([0-9]+\.[0-9]+\.[0-9]+)\n?\Z")
 _MAX_OUTPUT_BYTES = 1_048_576
+_CREATE_SUSPENDED = 0x00000004
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_SET_QUOTA = 0x0100
+_THREAD_SUSPEND_RESUME = 0x0002
+_TH32CS_SNAPTHREAD = 0x00000004
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_int64),
+        ("per_job_user_time_limit", ctypes.c_int64),
+        ("limit_flags", ctypes.c_uint32),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_uint32),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_uint32),
+        ("scheduling_class", ctypes.c_uint32),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _JobObjectBasicLimitInformation),
+        ("io_info", _IoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _ThreadEntry32(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_uint32),
+        ("usage_count", ctypes.c_uint32),
+        ("thread_id", ctypes.c_uint32),
+        ("owner_process_id", ctypes.c_uint32),
+        ("base_priority", ctypes.c_int32),
+        ("delta_priority", ctypes.c_int32),
+        ("flags", ctypes.c_uint32),
+    ]
 
 
 def _object(value: Any, context: str) -> dict[str, Any]:
@@ -199,15 +258,122 @@ class CommandRunner(Protocol):
         """Execute one bounded argument vector."""
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:  # pragma: no cover - exercised on Windows CI
-            process.kill()
-    except ProcessLookupError:
+class _WindowsJob:
+    """Windows Job Object that owns a subprocess and all of its descendants."""
+
+    def __init__(self) -> None:  # pragma: no cover - exercised on Windows CI
+        win_dll = cast(Any, vars(ctypes)["WinDLL"])
+        self._kernel32 = win_dll("kernel32", use_last_error=True)
+        self._configure_signatures()
+        self._handle = cast(int | None, self._kernel32.CreateJobObjectW(None, None))
+        if not self._handle:
+            raise self._error("CreateJobObjectW")
+        limits = _JobObjectExtendedLimitInformation()
+        limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            self._handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            error = self._error("SetInformationJobObject")
+            self.close()
+            raise error
+
+    def _configure_signatures(self) -> None:  # pragma: no cover - exercised on Windows CI
+        pointer = ctypes.c_void_p
+        dword = ctypes.c_uint32
+        bool_type = ctypes.c_int32
+        self._kernel32.CreateJobObjectW.argtypes = [pointer, ctypes.c_wchar_p]
+        self._kernel32.CreateJobObjectW.restype = pointer
+        self._kernel32.SetInformationJobObject.argtypes = [pointer, dword, pointer, dword]
+        self._kernel32.SetInformationJobObject.restype = bool_type
+        self._kernel32.OpenProcess.argtypes = [dword, bool_type, dword]
+        self._kernel32.OpenProcess.restype = pointer
+        self._kernel32.AssignProcessToJobObject.argtypes = [pointer, pointer]
+        self._kernel32.AssignProcessToJobObject.restype = bool_type
+        self._kernel32.TerminateJobObject.argtypes = [pointer, dword]
+        self._kernel32.TerminateJobObject.restype = bool_type
+        self._kernel32.CreateToolhelp32Snapshot.argtypes = [dword, dword]
+        self._kernel32.CreateToolhelp32Snapshot.restype = pointer
+        self._kernel32.Thread32First.argtypes = [pointer, pointer]
+        self._kernel32.Thread32First.restype = bool_type
+        self._kernel32.Thread32Next.argtypes = [pointer, pointer]
+        self._kernel32.Thread32Next.restype = bool_type
+        self._kernel32.OpenThread.argtypes = [dword, bool_type, dword]
+        self._kernel32.OpenThread.restype = pointer
+        self._kernel32.ResumeThread.argtypes = [pointer]
+        self._kernel32.ResumeThread.restype = dword
+        self._kernel32.CloseHandle.argtypes = [pointer]
+        self._kernel32.CloseHandle.restype = bool_type
+
+    @staticmethod
+    def _error(operation: str) -> OSError:  # pragma: no cover - exercised on Windows CI
+        get_last_error = cast(Callable[[], int], vars(ctypes)["get_last_error"])
+        error = get_last_error()
+        return OSError(error, f"{operation} failed with Windows error {error}")
+
+    def assign(self, pid: int) -> None:  # pragma: no cover - exercised on Windows CI
+        process_handle = self._kernel32.OpenProcess(
+            _PROCESS_TERMINATE | _PROCESS_SET_QUOTA, False, pid
+        )
+        if not process_handle:
+            raise self._error("OpenProcess")
+        try:
+            if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+                raise self._error("AssignProcessToJobObject")
+        finally:
+            self._kernel32.CloseHandle(process_handle)
+
+    def resume(self, pid: int) -> None:  # pragma: no cover - exercised on Windows CI
+        snapshot = self._kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
+            raise self._error("CreateToolhelp32Snapshot")
+        try:
+            entry = _ThreadEntry32()
+            entry.size = ctypes.sizeof(entry)
+            found = bool(self._kernel32.Thread32First(snapshot, ctypes.byref(entry)))
+            while found:
+                if entry.owner_process_id == pid:
+                    thread_handle = self._kernel32.OpenThread(
+                        _THREAD_SUSPEND_RESUME, False, entry.thread_id
+                    )
+                    if not thread_handle:
+                        raise self._error("OpenThread")
+                    try:
+                        if self._kernel32.ResumeThread(thread_handle) == 0xFFFFFFFF:
+                            raise self._error("ResumeThread")
+                    finally:
+                        self._kernel32.CloseHandle(thread_handle)
+                    return
+                found = bool(self._kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
+        finally:
+            self._kernel32.CloseHandle(snapshot)
+        raise OSError(f"suspended process {pid} has no resumable thread")
+
+    def terminate(self) -> None:  # pragma: no cover - exercised on Windows CI
+        if self._handle and not self._kernel32.TerminateJobObject(self._handle, 1):
+            raise self._error("TerminateJobObject")
+
+    def close(self) -> None:  # pragma: no cover - exercised on Windows CI
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
+def _terminate_process(
+    process: subprocess.Popen[bytes], windows_job: _WindowsJob | None = None
+) -> None:
+    if os.name == "posix":
         # The child may exit between the liveness check and signal delivery.
-        pass
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        return
+    if windows_job is not None:  # pragma: no cover - exercised on Windows CI
+        with suppress(OSError):
+            windows_job.terminate()
+    with suppress(OSError):  # pragma: no cover - exercised on Windows CI
+        process.kill()
 
 
 def _read_process_pipe(
@@ -237,6 +403,7 @@ def _close_process_input(process: subprocess.Popen[bytes]) -> None:
 
 def _run_windows_process(
     process: subprocess.Popen[bytes],
+    windows_job: _WindowsJob,
     input_text: str | None,
     timeout: float,
     keep_stdin_open: bool,
@@ -261,7 +428,7 @@ def _run_windows_process(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
-            _terminate_process(process)
+            _terminate_process(process, windows_job)
             break
         try:
             name, chunk = events.get(timeout=min(remaining, 0.1))
@@ -275,7 +442,7 @@ def _run_windows_process(
         total += len(chunk)
         if total > _MAX_OUTPUT_BYTES:
             overflow = True
-            _terminate_process(process)
+            _terminate_process(process, windows_job)
             break
     _close_process_input(process)
     process.wait()
@@ -358,17 +525,33 @@ def run_bounded_command(
     """Run one argv without a shell and kill it on timeout or output overflow."""
     if timeout <= 0:
         raise ValueError("timeout must be positive")
-    process = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=os.name == "posix",
-    )
-    if os.name != "posix":
-        return _run_windows_process(process, input_text, timeout, keep_stdin_open)
+    windows_job = _WindowsJob() if os.name != "posix" else None
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=os.name == "posix",
+            creationflags=_CREATE_SUSPENDED if windows_job is not None else 0,
+        )
+    except BaseException:
+        if windows_job is not None:
+            windows_job.close()
+        raise
+    if windows_job is not None:
+        try:
+            windows_job.assign(process.pid)
+            windows_job.resume(process.pid)
+            return _run_windows_process(process, windows_job, input_text, timeout, keep_stdin_open)
+        except BaseException:
+            _terminate_process(process, windows_job)
+            process.wait()
+            raise
+        finally:
+            windows_job.close()
     return _run_posix_process(process, input_text, timeout, keep_stdin_open)
 
 
@@ -569,6 +752,7 @@ def _pi_child_env() -> dict[str, str]:
         "LC_ALL",
         "PATH",
         "PATHEXT",
+        "PI_CODING_AGENT_DIR",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
@@ -723,6 +907,25 @@ def _default_git_head(root: Path) -> str:
     return result.stdout.strip()
 
 
+def _resolve_global_npm_root(runner: CommandRunner | None = None) -> Path:
+    """Return npm's configured global package root without loading Pi packages."""
+    command_runner = run_bounded_command if runner is None else runner
+    try:
+        result = command_runner(("npm", "root", "-g"), timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"cannot resolve global npm root: {exc}") from exc
+    if result.returncode != 0 or result.timed_out or result.output_overflow:
+        detail = (result.stderr or result.stdout or "npm root -g failed").strip()
+        raise ValueError(f"cannot resolve global npm root: {detail[:1000]}")
+    lines = result.stdout.splitlines()
+    if len(lines) != 1 or not lines[0].strip():
+        raise ValueError("cannot resolve global npm root: malformed npm output")
+    root = Path(lines[0].strip()).expanduser()
+    if not root.is_absolute():
+        raise ValueError("cannot resolve global npm root: npm returned a relative path")
+    return root
+
+
 def inspect_pi_package_inventory(
     cwd: Path,
     catalog: PiPackageCatalog,
@@ -730,6 +933,7 @@ def inspect_pi_package_inventory(
     pi_dir: Path | None = None,
     git_head: Callable[[Path], str] = _default_git_head,
     include_project: bool = True,
+    runner: CommandRunner | None = None,
 ) -> InventoryResult:
     """Verify exact effective settings and installed roots without loading extensions."""
     user_root = (pi_dir or Path(os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent"))).expanduser()
@@ -743,6 +947,7 @@ def inspect_pi_package_inventory(
         return InventoryResult(False, "package_settings_invalid", {}, {}, str(exc))
     roots: dict[str, Path] = {}
     scopes: dict[str, str] = {}
+    global_npm_root: Path | None = None
     for package in catalog.packages:
         matches_user = [
             source
@@ -759,13 +964,19 @@ def inspect_pi_package_inventory(
             return InventoryResult(False, "package_inventory_mismatch", roots, scopes, package.key)
         scope = "project" if matches_project else "user"
         scope_root = project_root if matches_project else user_root
-        candidate = (
-            scope_root / "npm" / package.identity
-            if package.kind == "npm"
-            else scope_root / "git" / package.identity
-        )
         try:
-            root = _require_contained_root(scope_root, candidate)
+            if package.kind == "npm":
+                if scope == "project":
+                    install_root = project_root / "npm" / "node_modules"
+                else:
+                    if global_npm_root is None:
+                        global_npm_root = _resolve_global_npm_root(runner)
+                    install_root = global_npm_root
+                candidate = install_root / package.identity
+            else:
+                install_root = scope_root
+                candidate = scope_root / "git" / package.identity
+            root = _require_contained_root(install_root, candidate)
             manifest = _object(
                 json.loads((root / "package.json").read_text(encoding="utf-8")),
                 f"{package.key} package.json",
@@ -832,12 +1043,14 @@ def verify_capability_inventory(
         or not isinstance(reported_commands, list)
         or not isinstance(active_tools, list)
         or not isinstance(all_tools, list)
+        or not all(isinstance(entry, dict) for entry in commands)
+        or not all(isinstance(entry, dict) for entry in reported_commands)
+        or not all(isinstance(name, str) for name in active_tools)
+        or not all(isinstance(entry, dict) for entry in all_tools)
     ):
         return CapabilityResult(False, "capability_payload_malformed")
     command_entries = cast(list[dict[str, Any]], commands)
     reported_command_entries = cast(list[dict[str, Any]], reported_commands)
-    if not all(isinstance(name, str) for name in active_tools):
-        return CapabilityResult(False, "capability_payload_malformed")
     active_names = cast(list[str], active_tools)
     all_entries = cast(list[dict[str, Any]], all_tools)
     for package in catalog.packages:
@@ -945,6 +1158,52 @@ def _parse_capability_rpc(stdout: str, nonce: str) -> dict[str, Any]:
     return payload
 
 
+@contextmanager
+def _isolated_pi_probe_environment(
+    cwd: Path,
+    inventory: InventoryResult,
+    catalog: PiPackageCatalog,
+) -> Iterator[tuple[Path, dict[str, str], str]]:
+    """Expose only verified package roots to the Pi capability subprocess."""
+    build_root = cwd / "build"
+    remove_build_root = not build_root.exists()
+    build_root.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="pi-preflight-", dir=build_root) as temporary:
+            root = Path(temporary)
+            agent_dir = root / "agent"
+            probe_cwd = root / "project"
+            agent_dir.mkdir()
+            probe_cwd.mkdir()
+            user_packages = [
+                str(inventory.roots[package.key])
+                for package in catalog.packages
+                if inventory.scopes[package.key] == "user"
+            ]
+            project_packages = [
+                str(inventory.roots[package.key])
+                for package in catalog.packages
+                if inventory.scopes[package.key] == "project"
+            ]
+            if user_packages:
+                (agent_dir / "settings.json").write_text(
+                    json.dumps({"packages": user_packages}), encoding="utf-8"
+                )
+            if project_packages:
+                project_settings = probe_cwd / ".pi" / "settings.json"
+                project_settings.parent.mkdir()
+                project_settings.write_text(
+                    json.dumps({"packages": project_packages}), encoding="utf-8"
+                )
+            env = _pi_child_env()
+            env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+            trust = "--approve" if project_packages else "--no-approve"
+            yield probe_cwd, env, trust
+    finally:
+        if remove_build_root:
+            build_root.rmdir()
+
+
 def preflight_pi_environment(
     cwd: Path,
     *,
@@ -968,6 +1227,7 @@ def preflight_pi_environment(
         pi_dir=pi_dir,
         git_head=git_head,
         include_project=trust_override != "--no-approve",
+        runner=runner,
     )
     if not inventory.ready:
         return _preflight_failure(
@@ -984,8 +1244,6 @@ def preflight_pi_environment(
         "--extension",
         str(Path(__file__).with_name("pi_capability_probe.ts")),
     )
-    if trust_override is not None:
-        command += (trust_override,)
     requests = "\n".join(
         (
             json.dumps({"type": "get_commands", "id": "hephaestus-commands"}),
@@ -1000,14 +1258,19 @@ def preflight_pi_environment(
         )
     )
     try:
-        result = runner(
-            command,
-            cwd=cwd,
-            env=_pi_child_env(),
-            timeout=timeout,
-            input_text=requests,
-            keep_stdin_open=True,
-        )
+        with _isolated_pi_probe_environment(cwd, inventory, catalog) as (
+            probe_cwd,
+            probe_env,
+            isolated_trust,
+        ):
+            result = runner(
+                (*command, isolated_trust),
+                cwd=probe_cwd,
+                env=probe_env,
+                timeout=timeout,
+                input_text=requests,
+                keep_stdin_open=True,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         return _preflight_failure(
             "capability_probe_failed", catalog, detail=str(exc), inventory=inventory

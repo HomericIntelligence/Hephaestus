@@ -10,10 +10,14 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.agents.pi_plugins import preflight_pi_environment
+
 
 @pytest.mark.nightly
-def test_catalog_pinned_packages_install_and_preflight(tmp_path: Path) -> None:
-    """The real external artifacts satisfy the same operator preflight contract."""
+def test_catalog_pinned_packages_install_and_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compatible Pi preflight loads packages without ambient extensions."""
     if os.environ.get("HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE") != "1":
         pytest.skip("set HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE=1 for live package evidence")
     command = shutil.which("hephaestus-install-pi-plugins")
@@ -46,6 +50,25 @@ def test_catalog_pinned_packages_install_and_preflight(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["ready"] is True
     assert payload["status"] == "ready"
+
+    pi_dir = Path(env["PI_CODING_AGENT_DIR"])
+    sentinel = tmp_path / "compatible-sentinel-loaded"
+    extension_dir = pi_dir / "extensions"
+    extension_dir.mkdir(parents=True)
+    (extension_dir / "sentinel.ts").write_text(
+        (
+            'import { writeFileSync } from "node:fs";\n'
+            f'writeFileSync({json.dumps(str(sentinel))}, "loaded");\n'
+            "export default function () {}\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+
+    preflight = preflight_pi_environment(cwd, pi_dir=pi_dir, timeout=180)
+
+    assert preflight.ready is True, preflight.remediation_message()
+    assert not sentinel.exists(), "compatible Pi loaded an ambient extension during preflight"
 
 
 @pytest.mark.nightly
