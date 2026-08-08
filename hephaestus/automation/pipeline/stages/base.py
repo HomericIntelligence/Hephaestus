@@ -58,11 +58,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
 from hephaestus.automation.review_journal import IssueComment
-from hephaestus.automation.state_labels import (
-    SKIP_REASON_MARKER,
-    STATE_SKIP,
-    format_skip_reason_comment,
-)
+from hephaestus.automation.state_labels import STATE_SKIP
 
 from ..events import StageEvent
 from ..github_jobs import GitHubJob
@@ -720,17 +716,17 @@ def _is_confirmed_open_unarmed(pr_state: dict[str, Any] | None) -> bool:
 
 
 def write_skip_label(issue_number: int, ctx: StageContext, reason: str) -> None:
-    """Durably apply ``state:skip`` with a reason comment, non-fatally.
+    """Durably apply ``state:skip`` and log its reason, non-fatally.
 
     Single home for the exhaustion/no-commits skip write (previously
-    duplicated across the implementation and pr_review stages). The reason
-    is documented on the issue via the marker-keyed skip-reason comment so
-    it survives outside ephemeral run logs (#2256).
+    duplicated across the implementation and pr_review stages). The label is
+    the durable state authority; the reason belongs in structured run logs so
+    automation does not add a third canonical comment to the linked issue.
 
     Args:
         issue_number: GitHub issue number.
         ctx: Stage context carrying the GitHub accessor.
-        reason: Human-readable explanation for the skip, posted as a comment.
+        reason: Human-readable explanation included in the run log.
 
     """
     try:
@@ -742,16 +738,7 @@ def write_skip_label(issue_number: int, ctx: StageContext, reason: str) -> None:
             STATE_SKIP,
             e,
         )
-    try:
-        ctx.github.upsert_issue_comment(
-            issue_number, SKIP_REASON_MARKER, format_skip_reason_comment(reason)
-        )
-    except Exception as e:
-        logger.warning(
-            "pipeline:%d: failed to post skip-reason comment (non-fatal): %s",
-            issue_number,
-            e,
-        )
+    logger.warning("pipeline:%d: applied %s: %s", issue_number, STATE_SKIP, reason)
 
 
 @runtime_checkable

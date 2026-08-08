@@ -746,7 +746,7 @@ class TestPlanningStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 
-    def test_replan_archives_pair_before_updating_both_canonical_comments(
+    def test_replan_replaces_both_canonical_comments_without_history(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Feedback-triggered planning uses the same durable revision transaction."""
@@ -767,13 +767,10 @@ class TestPlanningStageStep:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
         comments = github.comments[27]
+        assert len(comments) == 2
         assert "<!-- revision: 2 -->" in comments[0]
         assert "Review pending for implementation plan revision 2" in comments[1]
-        assert comments[2].startswith("<!-- hephaestus-plan-history:revision=1:kind=plan -->")
-        assert comments[3].startswith("<!-- hephaestus-plan-history:revision=1:kind=review -->")
         assert [entry[0] for entry in github.mutation_log] == [
-            "append_issue_comment",
-            "append_issue_comment",
             "gh_issue_upsert_comment",
             "gh_issue_upsert_comment",
             "edit_labels",

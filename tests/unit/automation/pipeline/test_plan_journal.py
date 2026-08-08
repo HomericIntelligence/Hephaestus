@@ -62,16 +62,15 @@ class _CrashOnceJournalGitHub(FakeStageGitHub):
         )
 
 
-@pytest.mark.parametrize("crash_on", ["review_archive", "canonical_plan", "pending_review"])
-def test_restart_completes_each_interrupted_revision_write(crash_on: str) -> None:
-    """Every write-success/next-write-failure window converges on restart."""
-    github = _CrashOnceJournalGitHub(crash_on)
+def test_restart_repairs_a_plan_written_before_pending_review() -> None:
+    """A restart replaces a stale review after the revised plan became durable."""
+    github = _CrashOnceJournalGitHub("pending_review")
     github.comments[7] = [
         render_current_plan("Plan v1", revision=1),
         render_current_review("Needs rollback.", revision=1),
     ]
 
-    with pytest.raises(RuntimeError, match=crash_on):
+    with pytest.raises(RuntimeError, match="pending_review"):
         publish_plan_revision(7, "Plan v2 with rollback", github, require_change=True)
 
     reconcile_plan_journal(7, github)
@@ -80,12 +79,34 @@ def test_restart_completes_each_interrupted_revision_write(crash_on: str) -> Non
     assert snapshot.revision == 2
     assert snapshot.current_plan == "Plan v2 with rollback"
     assert snapshot.current_review_revision == 2
-    assert [artifact.kind for artifact in snapshot.history] == ["plan", "review"]
+    assert snapshot.history == ()
     mutations_after_recovery = list(github.mutation_log)
 
     reconcile_plan_journal(7, github)
 
     assert github.mutation_log == mutations_after_recovery
+
+
+def test_failed_canonical_plan_write_preserves_the_previous_revision_for_retry() -> None:
+    """A failed first write loses no public artifact and a clean retry can publish."""
+    github = _CrashOnceJournalGitHub("canonical_plan")
+    github.comments[7] = [
+        render_current_plan("Plan v1", revision=1),
+        render_current_review("Needs rollback.", revision=1),
+    ]
+
+    with pytest.raises(RuntimeError, match="canonical_plan"):
+        publish_plan_revision(7, "Plan v2 with rollback", github, require_change=True)
+
+    preserved = journal_snapshot(github.issue_comments(7))
+    assert preserved.revision == 1
+    assert preserved.current_plan == "Plan v1"
+    assert preserved.current_review == "Needs rollback."
+
+    published = publish_plan_revision(7, "Plan v2 with rollback", github, require_change=True)
+
+    assert published.revision == 2
+    assert len(github.comments[7]) == 2
 
 
 def test_plan_oscillation_is_blocked_before_v1_is_republished() -> None:
@@ -103,6 +124,67 @@ def test_plan_oscillation_is_blocked_before_v1_is_republished() -> None:
     assert result.is_stuck
     assert "repeats a previous plan" in result.no_progress_reason
     assert github.comments[8] == before
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "# Implementation Plan\n\n```diff\n-old\n+new\n```",
+        "# Implementation Plan\n\ndiff --git a/a.py b/a.py\n@@ -1 +1 @@",
+    ],
+)
+def test_publication_rejects_raw_patch_content(candidate: str) -> None:
+    """A generated patch can never become a public canonical plan comment."""
+    github = FakeStageGitHub()
+
+    result = publish_plan_revision(8, candidate, github, require_change=False)
+
+    assert result.is_stuck
+    assert "raw patch" in result.no_progress_reason
+    assert github.comments.get(8, []) == []
+
+
+def test_amendment_replaces_canonical_comments_without_public_history() -> None:
+    """A revised plan leaves only the latest plan and latest review on the issue."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+    github.comments[8] = [
+        render_current_plan("Plan v1", revision=1),
+        render_current_review("Needs rollback.\n\nstate:plan-no-go", revision=1),
+    ]
+
+    result = publish_plan_revision(8, "Plan v2 with rollback", github, require_change=True)
+
+    assert result.changed
+    assert len(github.comments[8]) == 2
+    snapshot = journal_snapshot(github.issue_comments(8))
+    assert snapshot.revision == 2
+    assert snapshot.current_plan == "Plan v2 with rollback"
+    assert snapshot.current_review_revision == 2
+    assert snapshot.history == ()
+    public_text = "\n".join(str(comment) for comment in github.comments[8])
+    assert "Previous Implementation Plan" not in public_text
+    assert "Review of Previous Plan" not in public_text
+    assert "```diff" not in public_text
+
+
+def test_legacy_interrupted_archive_recovers_without_appending_more_history() -> None:
+    """Legacy crash recovery converges canonical pointers without new archives."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+    legacy_archive = archive_plan_body(1, "Plan v1", "Plan v2")
+    github.comments[8] = [
+        render_current_plan("Plan v1", revision=1),
+        render_current_review("Needs rollback.\n\nstate:plan-no-go", revision=1),
+        legacy_archive,
+    ]
+
+    reconcile_plan_journal(8, github)
+
+    snapshot = journal_snapshot(github.issue_comments(8))
+    assert snapshot.revision == 2
+    assert snapshot.current_plan == "Plan v2"
+    assert snapshot.current_review_revision == 2
+    assert not any(name == "gh_issue_comment" for name, _args in github.mutation_log)
+    assert not any(name == "append_issue_comment" for name, _args in github.mutation_log)
 
 
 def test_restart_rejects_conflicting_bodies_for_one_history_identity() -> None:

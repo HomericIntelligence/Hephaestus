@@ -189,7 +189,7 @@ class TestPlanReviewStageOnEnter:
         assert item.payload["plan_text"] == "Durable plan"
         assert item.payload["plan_revision"] == 4
 
-    def test_restart_reconciles_partial_archive_before_reviewing(
+    def test_restart_reconciles_legacy_archive_without_appending_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         stage = PlanReviewStage()
@@ -206,22 +206,35 @@ class TestPlanReviewStageOnEnter:
 
         assert item.payload["plan_text"] == "Plan 2 with tests"
         assert item.payload["plan_revision"] == 2
-        assert any(
+        assert not any(
             body.startswith(HISTORY_MARKER.format(revision=1, kind="review"))
             for body in github.comments[2]
         )
+        assert "Review pending for implementation plan revision 2" in github.comments[2][1]
 
-    def test_reconciliation_failure_leaves_old_canonical_plan_retryable(
+    def test_reconciliation_failure_leaves_new_canonical_plan_retryable(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         class FailOnceGitHub(FakeStageGitHub):
             fail_once = True
 
-            def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-                if self.fail_once and marker.endswith("kind=review -->"):
+            def upsert_issue_comment(
+                self,
+                issue_number: int,
+                marker: str,
+                body: str,
+                *,
+                legacy_marker: str | None = None,
+            ) -> None:
+                if self.fail_once and "Review pending for implementation plan revision 2" in body:
                     self.fail_once = False
-                    raise RuntimeError("injected append failure")
-                super().append_issue_comment(issue_number, marker, body)
+                    raise RuntimeError("injected canonical review failure")
+                super().upsert_issue_comment(
+                    issue_number,
+                    marker,
+                    body,
+                    legacy_marker=legacy_marker,
+                )
 
         stage = PlanReviewStage()
         github = FailOnceGitHub()
@@ -233,9 +246,9 @@ class TestPlanReviewStageOnEnter:
         ctx = make_ctx(github=github)
         item = make_work_item(issue=3, state="ENTER")
 
-        with pytest.raises(RuntimeError, match="injected append failure"):
+        with pytest.raises(RuntimeError, match="injected canonical review failure"):
             stage.on_enter(item, ctx)
-        assert "Plan 1" in github.comments[3][0]
+        assert "Plan 2 with tests" in github.comments[3][0]
 
         assert stage.on_enter(item, ctx) is None
         assert item.payload["plan_text"] == "Plan 2 with tests"
@@ -885,7 +898,7 @@ class TestPlanReviewStageOnJobDone:
             ),
         ]
 
-    def test_amend_archives_previous_plan_and_review_before_replacing_canonical(
+    def test_amend_replaces_canonical_pair_without_history_comments(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         stage = PlanReviewStage()
@@ -904,14 +917,10 @@ class TestPlanReviewStageOnJobDone:
         stage.on_job_done(item, JobResult(ok=True, value="Plan v2 with tests"), ctx)
 
         comments = github.comments[2]
+        assert len(comments) == 2
         assert comments[0].startswith(PLAN_CANONICAL_MARKER)
         assert "<!-- revision: 2 -->" in comments[0]
         assert comments[1].startswith(PLAN_REVIEW_CANONICAL_MARKER)
-        assert comments[2].startswith("<!-- hephaestus-plan-history:revision=1:kind=plan -->")
-        assert "Plan v1" in comments[2]
-        assert "Changes from Revision 1 to Revision 2" in comments[2]
-        assert comments[3].startswith("<!-- hephaestus-plan-history:revision=1:kind=review -->")
-        assert "review text (NOGO)" in comments[3]
 
     def test_revised_plan_waits_for_exclusive_needs_plan_confirmation(
         self, make_ctx: Any, make_work_item: Any
@@ -1635,14 +1644,6 @@ class TestReviewFlowWithFakePool:
             (
                 "edit_labels",
                 (21, (STATE_PLAN_NO_GO,), (STATE_PLAN_GO, STATE_NEEDS_PLAN)),
-            ),
-            (
-                "append_issue_comment",
-                (21, "<!-- hephaestus-plan-history:revision=1:kind=plan -->"),
-            ),
-            (
-                "append_issue_comment",
-                (21, "<!-- hephaestus-plan-history:revision=1:kind=review -->"),
             ),
             ("gh_issue_upsert_comment", (21, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),

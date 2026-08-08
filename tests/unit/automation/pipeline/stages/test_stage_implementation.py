@@ -2873,7 +2873,6 @@ class TestCommitPushAndPrCreate:
         assert result.disposition == Disposition.SKIP
         assert github.mutation_log == [
             ("gh_issue_add_labels", (9, (STATE_SKIP,))),
-            ("gh_issue_upsert_comment", (9, "<!-- hephaestus-state-skip-reason -->")),
         ]
 
     def test_no_commits_with_externally_armed_pr_blocks_without_skip_label(
@@ -2922,7 +2921,6 @@ class TestCommitPushAndPrCreate:
         assert stage.step(item, ctx) == StageOutcome(Disposition.SKIP, "no commits vs base")
         assert github.mutation_log == [
             ("gh_issue_add_labels", (9, (STATE_SKIP,))),
-            ("gh_issue_upsert_comment", (9, "<!-- hephaestus-state-skip-reason -->")),
         ]
 
     def test_skip_label_write_is_non_fatal(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -3168,7 +3166,7 @@ class TestFullWalks:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitHubJob)
         assert result.job.request == AppendReplyJournalRequest(
-            issue_number=3,
+            issue_number=7,
             marker=marker,
             body=body,
         )

@@ -589,16 +589,12 @@ absolute operator state:
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — **sole authority** |
 | `state:skip` | absolute | operator / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
 
-Every **stage-issued** `state:skip` durable write (the `pr_review` and
-`implementation` write paths, plus repo-stage epic tagging) has a
-best-effort `gh_issue_upsert_comment` companion produced via
-[`format_skip_reason_comment`](../hephaestus/automation/state_labels.py), using
-the [`SKIP_REASON_MARKER`](../hephaestus/automation/state_labels.py) prefix
-`<!-- hephaestus-state-skip-reason -->` so the reason survives outside the
-run log (#2264). Epic tagging in
-[`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py) is the
-sole sanctioned seeding write: it adds both the skip label and this comment
-before excluding the epic from the rest of the pipeline.
+Every **stage-issued** `state:skip` write uses the label as its durable
+authority and emits the reason to structured run logs. It does not add an
+issue comment. Epic tagging in
+[`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py) remains
+the sole sanctioned seeding write and adds only the skip label before
+excluding the epic from the rest of the pipeline.
 
 Label colors per [`STATE_LABEL_SPECS`](../hephaestus/automation/state_labels.py).
 Provisioning script
@@ -740,11 +736,10 @@ Architectural contract:
 
 ### 5.2 Planning
 
-Planning produces one canonical implementation plan from the issue and its
-durable chronological journal. The GitHub journal remains complete for audit
-and recovery. A resumed rejected plan receives only bounded context for its
-current canonical plan and paired current review; superseded revisions do not
-compete with the active critique. A blocked plan is an automation stop: only
+Planning produces one canonical implementation plan from the issue, latest
+canonical plan, and latest canonical review. Superseded revisions are replaced,
+not appended. Bounded hidden fingerprints preserve oscillation detection
+without exposing old plans or raw patches. A blocked plan is an automation stop: only
 an external actor may resolve the dependency and replace `state:plan-blocked`
 with exactly one next plan-state label.
 
@@ -785,13 +780,13 @@ Architectural contract:
 - The first automation journal role is the canonical implementation plan,
   identified by an opaque marker and updated only by its owning GitHub actor.
 - A restarted rejected plan receives only its bounded current canonical plan
-  and paired current review. Superseded revision comments remain audit and
-  recovery artifacts and are not active planner context.
+  and paired current review. Superseded revisions are not public comments; the
+  latest plan carries bounded prior fingerprints for no-progress detection.
 - Journal ingestion is bounded by both comment count and body bytes. If either
   limit is exceeded, automation stops with an explicit manual-recovery error
   instead of silently dropping old plan/review revisions.
-- Historical revision comments are actor-owned, append-once, and never edited
-  or deleted.
+- Raw patches (`diff --git`, unified hunks, or fenced `diff` blocks) are
+  rejected before publication.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
 - `state:plan-blocked` is never removed or replaced by automation. Comments do
@@ -820,8 +815,7 @@ flowchart LR
     Review -->|"plan-blocked"| BlockLatch["Confirmed blocked label"]
     BlockLatch --> BlockAudit["Canonical blocked explanation"]
     Label -->|"plan-go"| Implementation
-    Label -->|"plan-no-go"| Archive["Archive prior plan and review"]
-    Archive --> Planning
+    Label -->|"plan-no-go"| Planning
     BlockAudit --> External["Human or dependency"]
 ```
 
@@ -830,8 +824,8 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> ReconcileJournal
-    ReconcileJournal --> LoadHistory: journal complete
-    ReconcileJournal --> ReconcileJournal: interrupted archive recovered
+    ReconcileJournal --> LoadHistory: canonical comments complete
+    ReconcileJournal --> ReconcileJournal: legacy archive recovered
     ReconcileJournal --> Failed: conflicting actor-owned immutable artifact
     LoadHistory --> Review: context available
     LoadHistory --> Failed: context unavailable
@@ -847,11 +841,10 @@ stateDiagram-v2
     ApplyLabel --> RetryReview: label write or confirmation failed
     ApplyLabel --> Approved: state:plan-go confirmed
     ApplyLabel --> AssessRevision: state:plan-no-go confirmed
-    AssessRevision --> ArchiveRevision: improvement remains possible
+    AssessRevision --> Amend: improvement remains possible
     AssessRevision --> Blocked: no improvement and planning is stuck
     AssessRevision --> Blocked: external decision or dependency required
     AssessRevision --> Failed: revision limit reached
-    ArchiveRevision --> Amend: prior plan archived with recovery payload
     Amend --> PublishRevision: revised plan produced
     PublishRevision --> Review: canonical comments updated
     Approved --> [*]
@@ -865,15 +858,13 @@ Architectural contract:
   by an opaque marker and updated only by its owning GitHub actor.
 - Marker collisions authored by other actors are inert. They cannot become
   canonical artifacts, establish replay identity, or stop an owned write.
-- Before canonical comments change, the previous plan and its review are
-  appended as immutable chronological comments.
-- The plan archive contains the next-plan recovery payload. On restart, a
-  missing review archive or canonical update is completed idempotently before
-  another agent runs.
+- Canonical comments are replaced in place. On restart, a stale or missing
+  canonical review is repaired to the current revision before another agent
+  runs. Retired archive comments are read only for migration recovery.
 - Review receives the current plan and direct prior critique. An amendment
-  receives the bounded current canonical plan and direct critique; superseded
-  journal revisions remain durable audit and recovery artifacts, not prompt
-  context.
+  receives the bounded current canonical plan and direct critique. Superseded
+  revisions are summarized only as cumulative high-level bullets in the
+  current plan's `Changes from Review` section.
 - A blocked verdict states exactly what decision or dependency is required.
   Because BLOCKED is the safety latch, its label is confirmed before the
   fallible explanatory write; an audit-write failure can never leave the item
@@ -1090,6 +1081,9 @@ Architectural contract:
   that ceiling, malformed pagination, or a cursor cycle fails the read without
   exposing partial review facts. Root-comment-only ownership and dedupe queries
   use `comments(first:1)` because later comments are outside those contracts.
+- Transient implementation-reply recovery records use the PR's issue-comment
+  channel, never the linked issue. Human-facing implementation responses remain
+  attached to their native PR review threads.
 - The review decision proof is a fresh GitHub snapshot plus a clean checkout
   at that snapshot's head. A GitHub marker can recover only a candidate reply
   after restart; it is never a substitute for that fresh proof.
@@ -1735,7 +1729,7 @@ Exit-code priority is:
  on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
  compares that proof with the confirmed-unarmed live PR and issues a normal
  SHA-conditional merge rather than arming or polling auto-merge.
-- **Skip-reason marker** — the `<!-- hephaestus-state-skip-reason -->` HTML-comment marker ([`SKIP_REASON_MARKER`](../hephaestus/automation/state_labels.py)) that prefixes every `state:skip` reason-comment body produced by [`format_skip_reason_comment`](../hephaestus/automation/state_labels.py), so a repo reader can deterministically trace the automated skip reason.
+- **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New skip reasons are recorded in run logs.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
