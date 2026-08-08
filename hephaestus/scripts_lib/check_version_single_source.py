@@ -17,10 +17,10 @@ Usage:
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import get_repo_root as _get_repo_root
 
 
@@ -36,8 +36,9 @@ def get_repo_root() -> Path:
 
 def _load_toml(path: Path) -> dict[str, Any]:
     """Parse a TOML file into a dict."""
+    tomllib = import_tomllib()
     with path.open("rb") as fh:
-        return tomllib.load(fh)
+        return cast(dict[str, Any], tomllib.load(fh))
 
 
 def check_pyproject_dynamic_version(repo_root: Path) -> bool:

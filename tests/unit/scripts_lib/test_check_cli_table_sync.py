@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -10,6 +11,20 @@ import yaml
 from hephaestus.scripts_lib import check_cli_table_sync as mod
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_load_scripts_uses_shared_toml_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Script discovery delegates TOML parsing to the shared resolver."""
+    (tmp_path / "pyproject.toml").write_text("not parsed directly", encoding="utf-8")
+    parser = SimpleNamespace(
+        loads=lambda _source: {"project": {"scripts": {"hephaestus-example": "example:main"}}}
+    )
+    monkeypatch.setattr(mod, "import_tomllib", lambda: parser)
+
+    assert mod._load_scripts(tmp_path) == {"hephaestus-example"}
 
 
 def test_readme_command_extraction_uses_inline_command_references(tmp_path: Path) -> None:
