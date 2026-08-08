@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -35,6 +37,16 @@ class SchemaCheckResult:
     skipped: int
     passed: int
     failed: int
+
+    @property
+    def error_count(self) -> int:
+        """Return the number of diagnostics for legacy callers."""
+        return len(self.diagnostics)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Support legacy tuple-unpacking into ``(exit_code, diagnostics)``."""
+        yield self.exit_code
+        yield self.diagnostics
 
 
 def load_schema_map(schema_map_file: Path) -> SchemaMapping:
@@ -185,8 +197,8 @@ def check_files(
     verbose: bool = False,
     dry_run: bool = False,
     allow_unmapped: bool = False,
-) -> tuple[int, list[str]]:
-    """Validate files and return ``(exit_code, diagnostics)``.
+) -> SchemaCheckResult:
+    """Validate files and return the aggregate schema-check result.
 
     Args:
         files: List of file paths to check.
@@ -197,10 +209,10 @@ def check_files(
         allow_unmapped: If True, skip files without a schema mapping.
 
     Returns:
-        Tuple of exit code and individual diagnostic messages.
+        Aggregate exit code, diagnostics, and file outcome counts.
 
     """
-    result = _check_files(
+    return _check_files(
         files,
         repo_root,
         schema_map,
@@ -208,7 +220,6 @@ def check_files(
         dry_run=dry_run,
         allow_unmapped=allow_unmapped,
     )
-    return result.exit_code, result.diagnostics
 
 
 def _check_files(
@@ -356,7 +367,7 @@ def main() -> int:
             print(f"ERROR: {message}", file=sys.stderr)
         return 1
 
-    result = _check_files(
+    result = check_files(
         args.files,
         repo_root,
         schema_map,

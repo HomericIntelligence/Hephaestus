@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.validation.schema import (
+    SchemaCheckResult,
     check_files,
     load_schema_map,
     main,
@@ -240,6 +241,29 @@ class TestCheckFiles:
         exit_code, errors = check_files([yaml_file], tmp_path, schema_map)
         assert exit_code == 0
         assert errors == []
+
+    def test_returns_schema_check_result_with_compatibility_fields(self, tmp_path: Path) -> None:
+        """check_files preserves its structured public return type."""
+        pytest.importorskip("jsonschema")
+        schema = {"type": "object", "required": ["name"]}
+        schema_file = tmp_path / "schema.json"
+        schema_file.write_text(json.dumps(schema))
+
+        yaml_file = tmp_path / "config" / "bad.yaml"
+        yaml_file.parent.mkdir()
+        yaml_file.write_text("version: 1\n")
+
+        schema_map = [(re.compile(r"^config/.*\.yaml$"), schema_file)]
+        result = check_files([yaml_file], tmp_path, schema_map)
+
+        assert isinstance(result, SchemaCheckResult)
+        assert result.exit_code == 1
+        assert result.requested == 1
+        assert result.validated == 1
+        assert result.passed == 0
+        assert result.failed == 1
+        assert result.error_count == len(result.diagnostics)
+        assert result.diagnostics
 
     def test_valid_files_verbose_prints_pass(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
