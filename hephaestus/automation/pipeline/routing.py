@@ -83,7 +83,8 @@ class Route:
 #   plan_review_iter=3, pr_review_iter=3, pr_review_hard=6
 #                                             <- architecture doc stage sections
 #   clone=2, plan=2, plan_cycles=2,
-#   implement=2, test_fix=1                <- architecture doc stage sections
+#   implement=2, rebase_conflict=2, test_fix=1
+#                                             <- architecture doc stage sections
 #   merge=DEFAULT_DRIVE_GREEN_LOOPS        <- loop_runner.py LoopConfig.drive_green_loops
 #                                             and --drive-green-loops defaults
 ROUTES: dict[StageName, Route] = {
@@ -115,7 +116,7 @@ ROUTES: dict[StageName, Route] = {
             "already_implementation_go_pr": StageName.MERGE_WAIT,
             "*": StageName.FINISHED,
         },
-        budgets={"implement": 2, "test_fix": 1},
+        budgets={"implement": 2, "rebase_conflict": 2, "test_fix": 1},
     ),
     StageName.PR_REVIEW: Route(
         next=StageName.MERGE_WAIT,
@@ -138,6 +139,8 @@ ROUTES: dict[StageName, Route] = {
             "not_implementation_go": StageName.PR_REVIEW,
             "reviewed_head_missing": StageName.PR_REVIEW,
             "reviewed_head_drift": StageName.PR_REVIEW,
+            "merge_conflicting": StageName.IMPLEMENTATION,
+            "post_review_rebase_required": StageName.IMPLEMENTATION,
             "*": StageName.FINISHED,
         },
         budgets={"merge": DEFAULT_DRIVE_GREEN_LOOPS},

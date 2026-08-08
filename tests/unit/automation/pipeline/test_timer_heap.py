@@ -219,7 +219,7 @@ class TestRetryDelayConsumption:
                     "baseRefName": "main",
                     "autoMergeRequest": None,
                     "mergeable": "MERGEABLE",
-                    "mergeStateStatus": "BEHIND",
+                    "mergeStateStatus": "BLOCKED",
                 }
 
         coordinator, clock = clocked

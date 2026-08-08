@@ -39,7 +39,8 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # their stage rather than retry it consume no retry budget: plan_not_go
 # (implementation -> plan_review), already_implementation_go_pr (-> merge_wait),
 # not_implementation_go / reviewed_head_missing / reviewed_head_drift
-# (merge_wait -> pr_review),
+# (merge_wait -> pr_review), merge_conflicting / post_review_rebase_required
+# (merge_wait -> implementation),
 # missing_worktree (-> implementation),
 # no_pr (-> finished), and merge-wait re-review routes all
 # map to None.
@@ -56,6 +57,8 @@ _REASON_BUDGET: dict[str, str | None] = {
     "not_implementation_go": None,
     "reviewed_head_missing": None,
     "reviewed_head_drift": None,
+    "merge_conflicting": None,
+    "post_review_rebase_required": None,
     "missing_worktree": None,
     "no_pr": None,
     # #2054 terminalizes every open merge-wait item after containment.

@@ -1,0 +1,16 @@
+
+## Rebase Conflict Resolution Required
+
+The host has paused a signed-policy rebase after finding conflicts. Your role is limited to
+editing the conflicted file contents listed below. Do not run Git commands, stage files, continue
+or abort the rebase, commit, push, or edit any path outside this list. The host will validate the
+index, continue and sign the rebase, verify ancestry and metadata, and publish with an exact-head
+lease before sending the rewritten head to a fresh review.
+
+Conflicted paths:
+{% for path in conflict_paths %}- `{{ path }}`
+{% endfor %}
+
+Resolve every listed file according to the linked issue and current codebase behavior. Remove all
+conflict markers, preserve the compatible intent of both sides, and return a concise explanation
+of the content edits. If the safe resolution is unclear, leave the file unresolved and say why.

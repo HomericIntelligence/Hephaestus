@@ -319,6 +319,8 @@ class PipelineGitHubJobRunner:
                 return None, fingerprint
             if status in conflicting or mergeable == "CONFLICTING":
                 return "merge_conflicting", fingerprint
+            if status == "BEHIND":
+                return "post_review_rebase_required", fingerprint
             if status not in retryable and mergeable != "UNKNOWN":
                 return "merge_readiness_unknown", fingerprint
             return "readiness_wait", fingerprint

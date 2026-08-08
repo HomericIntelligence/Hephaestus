@@ -18,6 +18,7 @@ PIPELINE_DIR = Path(__file__).parents[4] / "hephaestus" / "automation" / "pipeli
 
 READ_ONLY = "Read,Glob,Grep"
 WRITE = "Read,Write,Edit,Glob,Grep,Bash"
+EDIT_ONLY = "Read,Write,Edit,Glob,Grep"
 ADDRESS = "Read,Write,Edit,Glob,Grep,Bash,Task,Skill"
 PR_REVIEW = "Read,Glob,Grep,Bash,Skill,Agent,WebFetch"
 READ_ONLY_SCOPES = frozenset({READ_ONLY, PR_REVIEW})
@@ -43,6 +44,11 @@ EXPECTED_SCOPES = {
     ): READ_ONLY,
     ("stages/implementation.py", "_implement_wait", "get_address_review_prompt"): ADDRESS,
     ("stages/implementation.py", "_implement_wait", "build_implementation_prompt"): WRITE,
+    (
+        "stages/implementation.py",
+        "_rebase_conflict_wait",
+        "build_implementation_prompt",
+    ): EDIT_ONLY,
     ("stages/implementation.py", "_testfix_wait", "build_test_fix_prompt"): WRITE,
     ("stages/pr_review_jobs.py", "_submit_review_job", "get_pr_review_analysis_prompt"): PR_REVIEW,
     ("stages/pr_review_jobs.py", "_validate_wait", "get_review_validation_prompt"): READ_ONLY,

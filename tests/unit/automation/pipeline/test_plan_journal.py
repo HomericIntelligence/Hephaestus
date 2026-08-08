@@ -138,5 +138,5 @@ def test_publication_rejects_concurrent_canonical_pointer_overwrite() -> None:
 
     github = CompetingWriterGitHub()
 
-    with pytest.raises(RuntimeError, match=r"concurrent plan journal write.*manual recovery"):
+    with pytest.raises(RuntimeError, match=r"concurrent plan journal write.*another pipeline item"):
         publish_plan_revision(9, "Expected plan", github, require_change=False)
