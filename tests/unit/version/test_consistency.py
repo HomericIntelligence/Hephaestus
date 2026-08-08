@@ -47,7 +47,7 @@ def test_version_from_git_tag_passes_metadata_timeout(
     completed = subprocess.CompletedProcess([], 0, stdout="v1.2.3\n", stderr="")
     run = Mock(return_value=completed)
     monkeypatch.setattr(consistency, "METADATA_TIMEOUT", 17)
-    monkeypatch.setattr(consistency.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
 
     assert consistency._version_from_git_tag(tmp_path) == "1.2.3"
     assert run.call_args.kwargs["timeout"] == 17
@@ -66,7 +66,7 @@ def test_version_from_git_tag_timeout_warns_and_falls_back(
         output=hostile,
         stderr=hostile,
     )
-    monkeypatch.setattr(consistency.subprocess, "run", Mock(side_effect=error))
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=error))
     monkeypatch.setattr(consistency, "_version_from_metadata", lambda: "7.8.9")
 
     assert consistency._get_canonical_version(tmp_path) == "7.8.9"
