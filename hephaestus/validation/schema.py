@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,15 +28,25 @@ SchemaMapping = list[tuple[re.Pattern[str], Path]]
 
 @dataclass(frozen=True)
 class SchemaCheckResult:
-    """Aggregate outcome of checking requested files against schemas."""
+    """Aggregate outcome used to render the schema-validation CLI status."""
 
     exit_code: int
-    error_count: int
+    diagnostics: list[str]
     requested: int
     validated: int
     skipped: int
     passed: int
     failed: int
+
+    @property
+    def error_count(self) -> int:
+        """Return the number of diagnostics for legacy callers."""
+        return len(self.diagnostics)
+
+    def __iter__(self) -> Iterator[Any]:
+        """Support legacy tuple-unpacking into ``(exit_code, diagnostics)``."""
+        yield self.exit_code
+        yield self.diagnostics
 
 
 def load_schema_map(schema_map_file: Path) -> SchemaMapping:
@@ -55,11 +66,52 @@ def load_schema_map(schema_map_file: Path) -> SchemaMapping:
         List of compiled ``(regex_pattern, schema_path)`` tuples.
 
     Raises:
-        FileNotFoundError: If the schema map file does not exist.
+        OSError: If the schema map cannot be read.
+        json.JSONDecodeError: If the schema map is not valid JSON.
+        ValueError: If the decoded schema map has an invalid structure.
 
     """
-    data = json.loads(schema_map_file.read_text(encoding="utf-8"))
-    return [(re.compile(pattern), Path(schema_path)) for pattern, schema_path in data]
+    data: object = json.loads(schema_map_file.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("schema map root must be a list")
+
+    schema_map: SchemaMapping = []
+    errors: list[str] = []
+
+    for index, entry in enumerate(data):
+        if not isinstance(entry, list) or len(entry) != 2:
+            errors.append(f"entry {index}: expected a two-item list [regex, schema_path]")
+            continue
+
+        raw_pattern, raw_schema_path = entry
+        pattern: re.Pattern[str] | None = None
+        schema_path: Path | None = None
+
+        if not isinstance(raw_pattern, str):
+            errors.append(f"entry {index}: regex must be a string")
+        else:
+            try:
+                pattern = re.compile(raw_pattern)
+            except (re.error, OverflowError) as exc:
+                errors.append(f"entry {index}: invalid regex {raw_pattern!r}: {exc}")
+
+        if not isinstance(raw_schema_path, str):
+            errors.append(f"entry {index}: schema path must be a string")
+        elif not raw_schema_path.strip():
+            errors.append(f"entry {index}: schema path must not be empty")
+        elif "\x00" in raw_schema_path:
+            errors.append(f"entry {index}: schema path must not contain NUL")
+        else:
+            schema_path = Path(raw_schema_path)
+
+        if pattern is not None and schema_path is not None:
+            schema_map.append((pattern, schema_path))
+
+    if errors:
+        details = "\n".join(f"- {error}" for error in errors)
+        raise ValueError(f"invalid schema map:\n{details}")
+
+    return schema_map
 
 
 def resolve_schema(file_path: Path, repo_root: Path, schema_map: SchemaMapping) -> Path | None:
@@ -86,12 +138,12 @@ def resolve_schema(file_path: Path, repo_root: Path, schema_map: SchemaMapping) 
     return None
 
 
-def validate_file(file_path: Path, schema: dict[str, object]) -> list[str]:
+def validate_file(file_path: Path, schema: object) -> list[str]:
     """Validate a YAML config file against a JSON schema.
 
     Args:
         file_path: Path to the YAML config file.
-        schema: Parsed JSON schema dict.
+        schema: Parsed JSON schema.
 
     Returns:
         List of human-readable error strings (empty means valid).
@@ -106,14 +158,33 @@ def validate_file(file_path: Path, schema: dict[str, object]) -> list[str]:
         ]
 
     try:
+        from referencing.exceptions import Unresolvable
+
+        reference_error: type[Exception] = Unresolvable
+    except ImportError:  # pragma: no cover - jsonschema before referencing integration
+        reference_error = jsonschema.exceptions.RefResolutionError
+
+    validator_type = jsonschema.Draft7Validator
+    try:
+        validator_type.check_schema(schema)
+    except jsonschema.exceptions.SchemaError as exc:
+        path = ".".join(str(part) for part in exc.absolute_path) or "<root>"
+        return [f"Invalid JSON Schema at [{path}]: {exc.message}"]
+
+    try:
         with open(file_path) as fh:
             content = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
         return [f"Could not read/parse YAML: {exc}"]
 
     errors: list[str] = []
-    validator = jsonschema.Draft7Validator(schema)
-    for error in sorted(validator.iter_errors(content), key=lambda e: list(e.path)):
+    validator = validator_type(schema)
+    try:
+        validation_errors = sorted(validator.iter_errors(content), key=lambda e: list(e.path))
+    except reference_error as exc:
+        return [f"Invalid JSON Schema reference: {exc}"]
+
+    for error in validation_errors:
         path = ".".join(str(p) for p in error.absolute_path) or "<root>"
         errors.append(f"  [{path}] {error.message}")
     return errors
@@ -127,27 +198,46 @@ def check_files(
     dry_run: bool = False,
     allow_unmapped: bool = False,
 ) -> SchemaCheckResult:
-    """Validate each requested file and return distinct outcome counts.
+    """Validate files and return the aggregate schema-check result.
 
     Args:
         files: List of file paths to check.
         repo_root: Repository root for schema resolution.
         schema_map: List of ``(regex_pattern, schema_path)`` tuples.
         verbose: If True, print passing file names.
-        dry_run: If True, print errors but return 0.
+        dry_run: If True, report errors but return 0.
         allow_unmapped: If True, skip files without a schema mapping.
 
     Returns:
-        Aggregate exit code, diagnostic count, and file outcome counts.
+        Aggregate exit code, diagnostics, and file outcome counts.
 
     """
+    return _check_files(
+        files,
+        repo_root,
+        schema_map,
+        verbose=verbose,
+        dry_run=dry_run,
+        allow_unmapped=allow_unmapped,
+    )
+
+
+def _check_files(
+    files: list[Path],
+    repo_root: Path,
+    schema_map: SchemaMapping,
+    verbose: bool = False,
+    dry_run: bool = False,
+    allow_unmapped: bool = False,
+) -> SchemaCheckResult:
+    """Validate files and collect diagnostics plus CLI rendering counts."""
     requested = len(files)
     validated = 0
     skipped = 0
     passed = 0
     failed = 0
-    schema_cache: dict[Path, dict[str, Any]] = {}
-    error_count = 0
+    schema_cache: dict[Path, object] = {}
+    diagnostics: list[str] = []
 
     for file_path in files:
         schema_path = resolve_schema(file_path, repo_root, schema_map)
@@ -159,40 +249,32 @@ def check_files(
                 )
                 skipped += 1
             else:
-                print(f"ERROR: No schema mapping for {file_path}", file=sys.stderr)
+                diagnostics.append(f"No schema mapping for {file_path}")
                 failed += 1
-                error_count += 1
             continue
 
         if schema_path not in schema_cache:
             try:
                 schema_cache[schema_path] = json.loads(schema_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                print(
-                    f"ERROR: Could not load schema {schema_path}: {exc}",
-                    file=sys.stderr,
-                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                diagnostics.append(f"Could not load schema {schema_path}: {exc}")
                 failed += 1
-                error_count += 1
                 continue
 
         validated += 1
         errors = validate_file(file_path, schema_cache[schema_path])
         if errors:
-            print(f"FAIL: {file_path}", file=sys.stderr)
-            for error in errors:
-                print(error, file=sys.stderr)
+            diagnostics.extend(f"{file_path}: {error.strip()}" for error in errors)
             failed += 1
-            error_count += len(errors)
         else:
             passed += 1
             if verbose:
                 print(f"PASS: {file_path}")
 
-    exit_code = 0 if dry_run or failed == 0 else 1
+    exit_code = 0 if dry_run or not diagnostics else 1
     return SchemaCheckResult(
         exit_code=exit_code,
-        error_count=error_count,
+        diagnostics=diagnostics,
         requested=requested,
         validated=validated,
         skipped=skipped,
@@ -262,7 +344,11 @@ def main() -> int:
 
     if args.schema_map is None:
         if args.json:
-            emit_json_status(1, message="--schema-map is required")
+            emit_json_status(
+                1,
+                message="--schema-map is required",
+                errors=["--schema-map is required"],
+            )
         else:
             print(
                 "ERROR: --schema-map is required. Provide a JSON file mapping "
@@ -273,25 +359,28 @@ def main() -> int:
 
     try:
         schema_map = load_schema_map(args.schema_map)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
+        message = f"Could not load schema map: {exc}"
         if args.json:
-            emit_json_status(1, message=f"Could not load schema map: {exc}")
+            emit_json_status(1, message=message, errors=[message])
         else:
-            print(f"ERROR: Could not load schema map: {exc}", file=sys.stderr)
+            print(f"ERROR: {message}", file=sys.stderr)
         return 1
 
     result = check_files(
         args.files,
         repo_root,
         schema_map,
-        verbose=args.verbose,
+        verbose=args.verbose and not args.json,
         dry_run=args.dry_run,
         allow_unmapped=args.allow_unmapped,
     )
     if args.json:
         emit_json_status(
             result.exit_code,
-            error_count=result.error_count,
+            message="schema validation failed" if result.exit_code else None,
+            errors=result.diagnostics,
+            error_count=len(result.diagnostics),
             files_checked=result.validated,
             requested=result.requested,
             validated=result.validated,
@@ -300,6 +389,9 @@ def main() -> int:
             failed=result.failed,
             dry_run=args.dry_run,
         )
+    elif result.diagnostics:
+        for error in result.diagnostics:
+            print(f"ERROR: {error}", file=sys.stderr)
     else:
         print(
             "Summary: "
