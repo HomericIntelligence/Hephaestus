@@ -729,7 +729,7 @@ class TestFetchIssueCommentsCache:
         with (
             patch(
                 "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
-            return_value=[_rest_comment(str(comment["body"])) for comment in comments],
+                return_value=[_rest_comment(str(comment["body"])) for comment in comments],
             ) as mock_fetch,
             patch.object(
                 reviewer,
