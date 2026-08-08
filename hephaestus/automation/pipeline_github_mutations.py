@@ -306,11 +306,8 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         """Apply and read back exclusive ``state:implementation-no-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-no-go"):
             return
-        if self._repo_slug is not None:
-            self._add_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
-            self._remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
-        else:
-            pr_manager.mark_pr_implementation_no_go(pr_number)
+        self._add_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
+        self._remove_labels(pr_number, [STATE_IMPLEMENTATION_GO])
         has_go, has_no_go = self.pr_has_implementation_state_label(pr_number)
         if has_go or not has_no_go:
             raise RuntimeError(f"PR #{pr_number} implementation-no-go label read-back failed")

@@ -31,13 +31,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeGuard, cast
 
+import hephaestus.automation.claude_invoke as claude_invoke
+import hephaestus.automation.git_utils as git_utils
+import hephaestus.automation.subprocess_registry as subprocess_registry
 from hephaestus.agents.runtime import (
     AgentExecutionError,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
 )
-from hephaestus.automation import claude_invoke, git_utils, subprocess_registry
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner

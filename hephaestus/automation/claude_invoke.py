@@ -31,7 +31,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from hephaestus.automation import subprocess_registry
+import hephaestus.automation.subprocess_registry as subprocess_registry
 from hephaestus.automation.agent_config import (
     agent_default_timeout,
     fallback_model,

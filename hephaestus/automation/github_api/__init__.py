@@ -26,7 +26,7 @@ from hephaestus.io.utils import write_secure as write_secure
 from hephaestus.utils.cache import ThreadSafeCache as ThreadSafeCache
 from hephaestus.utils.helpers import strip_null_bytes as strip_null_bytes
 
-from ..git_utils import get_repo_info as get_repo_info, run as run
+from ..git_runtime import get_repo_info as get_repo_info, run as run
 from ..models import IssueInfo as IssueInfo, IssueState as IssueState
 from ..state_labels import STATE_SKIP as STATE_SKIP, is_skipped as is_skipped
 

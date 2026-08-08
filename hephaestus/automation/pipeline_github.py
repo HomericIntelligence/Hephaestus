@@ -62,7 +62,6 @@ if _typing.TYPE_CHECKING:
         logging,
         normalize_scope_retraction_paths,
         os,
-        pr_manager,
         quote,
         re,
         read_timeout_env,
@@ -243,11 +242,8 @@ class PipelineGitHub(
         """Apply and read back exclusive ``state:implementation-go``."""
         if self._skip(f"mark PR #{pr_number} implementation-go"):
             return
-        if self._repo_slug is not None:
-            self._add_labels(pr_number, [STATE_IMPLEMENTATION_GO])
-            self._remove_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
-        else:
-            pr_manager.mark_pr_implementation_go(pr_number)
+        self._add_labels(pr_number, [STATE_IMPLEMENTATION_GO])
+        self._remove_labels(pr_number, [STATE_IMPLEMENTATION_NO_GO])
         has_go, has_no_go = self.pr_has_implementation_state_label(pr_number)
         if not has_go or has_no_go:
             raise RuntimeError(f"PR #{pr_number} implementation-go label read-back failed")

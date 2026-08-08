@@ -489,16 +489,17 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         )
 
     def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
-        """Return ``(has_go, has_no_go)`` (``pr_manager``)."""
-        if self._repo_slug is not None:
-            try:
-                result = self._gh(["pr", "view", str(pr_number), "--json", "labels"], check=False)
-                data = json.loads(result.stdout or "{}")
-                labels = self._label_names_from_payload(data if isinstance(data, dict) else {})
-            except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
-                return (False, False)
-            return is_implementation_go(labels), has_label(labels, STATE_IMPLEMENTATION_NO_GO)
-        return pr_manager.pr_has_implementation_state_label(pr_number)
+        """Return the exclusive implementation-state label flags."""
+        try:
+            result = self._gh(
+                ["pr", "view", str(pr_number), "--json", "labels"],
+                check=False,
+            )
+            data = json.loads(result.stdout or "{}")
+            labels = self._label_names_from_payload(data if isinstance(data, dict) else {})
+        except (subprocess.SubprocessError, RuntimeError, OSError, json.JSONDecodeError):
+            return (False, False)
+        return is_implementation_go(labels), has_label(labels, STATE_IMPLEMENTATION_NO_GO)
 
     def _unresolved_threads(self, pr_number: int) -> list[dict[str, Any]]:
         """Fetch unresolved threads through the complete repo-scoped GraphQL view.

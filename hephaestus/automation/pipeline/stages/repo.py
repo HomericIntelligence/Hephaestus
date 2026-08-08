@@ -35,7 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeGuard
 
-from hephaestus.automation import loop_repo_manager as _repo_manager
+import hephaestus.automation.loop_repo_manager as _repo_manager
+import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     IssueWaveError,
@@ -44,7 +45,6 @@ from hephaestus.automation.issue_waves import (
     WaveLease,
     is_full_commit_sha as is_wave_commit_sha,
 )
-from hephaestus.automation.pipeline import seeding as _seeding
 
 from .base import (
     GIT_JOB_TIMEOUT_S,
