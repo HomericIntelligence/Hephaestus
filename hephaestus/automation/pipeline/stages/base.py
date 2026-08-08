@@ -59,9 +59,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.state_labels import (
-    SKIP_REASON_MARKER,
     STATE_SKIP,
-    format_skip_reason_comment,
 )
 
 from ..events import StageEvent
