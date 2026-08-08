@@ -587,7 +587,8 @@ jobs:
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
           -e HEPHAESTUS_REQUIRE_CLI
           hephaestus-ci:local uv run pytest tests/integration
-          --override-ini="addopts=" -v --strict-markers -m "not nightly"
+          --override-ini="addopts=" --basetemp=build/pytest-integration
+          -v --strict-markers -m "not nightly and not artifact"
 
   installed-cli-tests:
     # Installed-artifact lane (#2173): build the wheel, install it into a
@@ -711,20 +712,12 @@ jobs:
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
 
-      - name: Build wheel and sdist (in container)
+      - name: Validate reproducible artifacts and package lifecycle
         run: >
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
-          hephaestus-ci:local uv run python -m build --no-isolation
-
-      - name: Smoke-test installed wheel (in container)
-        run: |
-          podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
-            hephaestus-ci:local bash -c '
-            uv venv /tmp/hephaestus-wheel-smoke
-            uv pip install --python /tmp/hephaestus-wheel-smoke/bin/python dist/homericintelligence_hephaestus-*.whl --force-reinstall
-            /tmp/hephaestus-wheel-smoke/bin/python -c "import hephaestus; print(\"Package version:\", hephaestus.__version__)"
-            /tmp/hephaestus-wheel-smoke/bin/python -c "from hephaestus import slugify, retry_with_backoff, setup_logging; print(\"OK\")"
-          '
+          hephaestus-ci:local uv run pytest tests/integration
+          --override-ini="addopts=" --basetemp=build/pytest-artifacts
+          -v --strict-markers -m artifact
 
   security-dependency-scan:
     name: security/dependency-scan

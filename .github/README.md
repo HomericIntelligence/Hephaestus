@@ -18,7 +18,9 @@ Continuous Integration pipeline that runs on every push and pull request to `mai
 
 - **Unit tests**: pytest with the coverage floor defined by
   [`pyproject.toml [tool.coverage.report]`](../pyproject.toml)
-- **Integration tests**: import smoke tests + wheel build/install
+- **Integration tests**: import and console-entry-point checks
+- **Build**: reproducible wheel/sdist manifests, wheel RECORD integrity, and
+  clean-install, upgrade, and uninstall lifecycle validation
 - **Structure check**: enforces test mirrors source layout
 
 **Status Badge:**
@@ -47,7 +49,8 @@ The consolidated required-status-check gate that runs on every pull request to
 shellcheck, the `pr-policy` gate (enforces `Closes #N`, DCO trailers, the
 Conventional Commit PR title used for squash history, and every branch commit
 subject),
-unit/integration/shell tests, wheel build, security scans (pip-audit, Gitleaks,
+unit/integration/shell tests, reproducible wheel and sdist validation,
+installed-package lifecycle checks, security scans (pip-audit, Gitleaks,
 bandit), workflow-schema validation, and version-sync. Cryptographic commit
 signatures are enforced by the active `homeric-main-baseline` ruleset. The
 automation loop runs `$athena:pr-review` and owns the

@@ -50,9 +50,13 @@ def _run_step(
     )
 
 
-def test_build_smoke_step_is_valid_bash() -> None:
-    """The required build lane must reach its wheel smoke test."""
-    step = _workflow_step("_required.yml", "build", "Smoke-test installed wheel (in container)")
+def test_build_artifact_step_is_valid_bash() -> None:
+    """The required build lane must reach its artifact validation suite."""
+    step = _workflow_step(
+        "_required.yml",
+        "build",
+        "Validate reproducible artifacts and package lifecycle",
+    )
 
     result = subprocess.run(["bash", "-n", "-c", step], text=True, capture_output=True, check=False)
 
