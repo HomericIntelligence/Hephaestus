@@ -68,14 +68,17 @@ ALL_IMPLEMENTATION_STATE_LABELS = (STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTAT
 #: selected issues that also carry ``state:plan-go`` and have no open PR.
 STATE_SKIP = "state:skip"
 
-#: Marker keying the single skip-reason comment per issue (#2256). Every
-#: ``state:skip`` application upserts one comment starting with this marker so
-#: the reason survives outside ephemeral run logs.
+#: Legacy marker retained only so the timeline compactor can identify old
+#: actor-owned skip comments. New skip writes use the label plus run logs and
+#: never create an issue comment.
 SKIP_REASON_MARKER = "<!-- hephaestus-state-skip-reason -->"
 
 
 def format_skip_reason_comment(reason: str) -> str:
-    """Render the marker-keyed comment body documenting a ``state:skip`` write.
+    """Render the legacy skip body for migration and compatibility tests.
+
+    Runtime paths must not publish this body. ``state:skip`` is the durable
+    authority and its human-readable reason is emitted to the run log.
 
     Args:
         reason: Human-readable explanation of why automation applied the label.

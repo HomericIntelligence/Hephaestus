@@ -1,10 +1,8 @@
-"""Transactional GitHub journal updates for implementation-plan revisions.
+"""Transactional canonical comments for implementation-plan revisions.
 
-The canonical plan and review comments are mutable pointers to the current
-revision.  Superseded plan/review pairs are immutable issue comments.  A plan
-archive is written first because it contains the proposed next plan; that
-recovery payload lets a restart finish the remaining review-archive and
-canonical-plan writes without asking another agent to regenerate anything.
+An issue has one mutable plan pointer and one mutable review pointer. Older
+revisions are represented only by bounded plan fingerprints in hidden metadata;
+legacy append-only artifacts are read solely to migrate interrupted runs.
 """
 
 from __future__ import annotations
@@ -15,12 +13,10 @@ from typing import Protocol
 
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX
 from hephaestus.automation.review_journal import (
-    HISTORY_MARKER,
     IssueComment,
-    archive_plan_body,
-    archive_review_body,
     archived_new_plan,
     archived_old_plan,
+    contains_raw_patch,
     is_pending_review,
     journal_snapshot,
     normalized_plan,
@@ -40,10 +36,6 @@ class PlanJournalGitHub(Protocol):
 
     def gh_issue_json(self, issue_number: int) -> dict[str, object]:
         """Return live issue metadata including the authoritative labels."""
-        pass
-
-    def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-        """Append one immutable, replay-safe issue comment."""
         pass
 
     def upsert_plan_comment(self, issue_number: int, plan: str) -> None:
@@ -120,7 +112,7 @@ def reconcile_plan_journal(issue_number: int, github: PlanJournalGitHub) -> list
     snapshot = journal_snapshot(comments)
     plan_artifacts = [artifact for artifact in snapshot.history if artifact.kind == "plan"]
     if not plan_artifacts:
-        if snapshot.current_plan and not snapshot.current_review:
+        if snapshot.current_plan and snapshot.current_review_revision != snapshot.revision:
             _upsert_pending_review(issue_number, snapshot.revision, github)
             return github.issue_comments(issue_number)
         return comments
@@ -134,36 +126,22 @@ def reconcile_plan_journal(issue_number: int, github: PlanJournalGitHub) -> list
     current_is_missing = not snapshot.current_plan and snapshot.revision == pending.revision + 1
     current_is_next = bool(snapshot.current_plan and snapshot.revision == pending.revision + 1)
     if current_is_next:
-        has_archived_review = any(
-            artifact.kind == "review" and artifact.revision == pending.revision
-            for artifact in snapshot.history
-        )
         review_is_stale = snapshot.current_review_revision != snapshot.revision
-        if has_archived_review and review_is_stale:
+        if review_is_stale:
             _upsert_pending_review(issue_number, snapshot.revision, github)
             return github.issue_comments(issue_number)
         return comments
     if not (current_is_superseded or current_is_missing):
         return comments
 
-    if snapshot.current_review_revision == pending.revision and snapshot.current_review:
-        review_marker = HISTORY_MARKER.format(revision=pending.revision, kind="review")
-        github.append_issue_comment(
-            issue_number,
-            review_marker,
-            archive_review_body(pending.revision, snapshot.current_review),
-        )
-    elif not any(
-        artifact.kind == "review" and artifact.revision == pending.revision
-        for artifact in snapshot.history
-    ):
-        # Advancing without the paired review would erase the decision that
-        # caused this revision, so leave the transaction visibly incomplete.
-        return comments
-
+    prior_fingerprints = tuple(sorted(known_plan_fingerprints(comments)))
     github.upsert_plan_comment(
         issue_number,
-        render_current_plan(next_plan, revision=pending.revision + 1),
+        render_current_plan(
+            next_plan,
+            revision=pending.revision + 1,
+            prior_fingerprints=prior_fingerprints,
+        ),
     )
     _upsert_pending_review(issue_number, pending.revision + 1, github)
     return github.issue_comments(issue_number)
@@ -176,7 +154,10 @@ def known_plan_fingerprints(comments: Sequence[IssueComment | str]) -> set[str]:
     for artifact in snapshot.history:
         if artifact.kind == "plan":
             plans.extend((archived_old_plan(artifact.body), archived_new_plan(artifact.body)))
-    return {plan_fingerprint(plan) for plan in plans if plan.strip()}
+    return {
+        *snapshot.prior_plan_fingerprints,
+        *(plan_fingerprint(plan) for plan in plans if plan.strip()),
+    }
 
 
 def publish_plan_revision(
@@ -209,6 +190,18 @@ def publish_plan_revision(
     candidate_plan = normalized_plan(candidate)
     candidate_fingerprint = plan_fingerprint(candidate)
     current_fingerprint = plan_fingerprint(snapshot.current_plan)
+
+    if contains_raw_patch(candidate):
+        return PlanPublication(
+            revision=snapshot.revision,
+            plan=snapshot.current_plan,
+            changed=False,
+            no_progress_reason=(
+                "The proposed plan contains a raw patch or diff hunk. Public plans must "
+                "describe intended changes without embedding source diffs; regenerate the "
+                "complete plan before publication."
+            ),
+        )
 
     if not candidate_plan:
         return PlanPublication(
@@ -287,22 +280,18 @@ def publish_plan_revision(
             f"exclusive {STATE_PLAN_NO_GO} label"
         )
 
-    plan_marker = HISTORY_MARKER.format(revision=snapshot.revision, kind="plan")
-    review_marker = HISTORY_MARKER.format(revision=snapshot.revision, kind="review")
-    github.append_issue_comment(
-        issue_number,
-        plan_marker,
-        archive_plan_body(snapshot.revision, snapshot.current_plan, candidate_plan),
-    )
-    github.append_issue_comment(
-        issue_number,
-        review_marker,
-        archive_review_body(snapshot.revision, snapshot.current_review),
-    )
     next_revision = snapshot.revision + 1
+    prior_fingerprints = (
+        *snapshot.prior_plan_fingerprints,
+        current_fingerprint,
+    )
     github.upsert_plan_comment(
         issue_number,
-        render_current_plan(candidate_plan, revision=next_revision),
+        render_current_plan(
+            candidate_plan,
+            revision=next_revision,
+            prior_fingerprints=prior_fingerprints,
+        ),
     )
     _upsert_pending_review(issue_number, next_revision, github)
     _confirm_publication(issue_number, candidate_plan, next_revision, github)

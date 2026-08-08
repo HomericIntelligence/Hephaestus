@@ -119,7 +119,7 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
             pass
 
         def issue_comments(self, issue: int) -> list[IssueComment]:
-            assert issue == 3
+            assert issue == 7
             return [IssueComment(body=journal_body, viewer_did_author=True)]
 
         def gh_pr_state(self, pr: int) -> dict[str, object]:
@@ -147,7 +147,7 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
     monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
     runner = module.PipelineGitHubJobRunner(org="example-org", dry_run=False)
     recovery_request = RecoverReplyJournalRequest(
-        issue_number=3,
+        issue_number=7,
         pr_number=7,
         threads=FrozenJson.snapshot(threads),
     )

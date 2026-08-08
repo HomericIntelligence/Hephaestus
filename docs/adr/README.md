@@ -34,3 +34,4 @@ numbered, and listed here.
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
 | [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Accepted |
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
+| [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Accepted |
