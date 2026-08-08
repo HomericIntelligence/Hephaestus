@@ -3222,6 +3222,60 @@ class TestGitOps:
         rebase.assert_not_called()
         push.assert_not_called()
 
+    def test_restored_writer_publish_rebase_syncs_and_returns_to_review_on_head_drift(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A restored writer must not rebase stale local H against newer remote E."""
+        expected_head = "a" * 40
+        synced_head = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": expected_head,
+                "sync_to_expected_remote_head": True,
+                "pr_number": 70,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True) as clean,
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as sync,
+            patch.object(pool, "_read_publish_head", return_value=synced_head),
+            patch(f"{_WP}.git_utils.run") as run,
+            patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "rebased": False,
+            "published": False,
+            "head_drift": True,
+            "head_sha": synced_head,
+        }
+        clean.assert_called_once_with(tmp_path, timeout=60)
+        sync.assert_called_once_with(
+            tmp_path,
+            "7-auto-impl",
+            remote="origin",
+            pr_number=70,
+            timeout=60,
+        )
+        run.assert_not_called()
+        rebase.assert_not_called()
+        push.assert_not_called()
+
     def test_direct_rebase_dispatch_rejects_the_retired_publish_mode(
         self,
         pool: WorkerPool,

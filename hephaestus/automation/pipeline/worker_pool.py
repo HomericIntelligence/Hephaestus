@@ -2053,8 +2053,10 @@ class WorkerPool:
                 error="detached reviewer rebase publication is unsupported",
             )
         publish_rebased_head = bool(kwargs.pop("publish_rebased_head", False))
+        sync_to_expected_remote_head = bool(kwargs.pop("sync_to_expected_remote_head", False))
         branch = str(kwargs.pop("branch", "") or "")
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
+        pr_number = kwargs.pop("pr_number", None)
         cwd = Path(str(kwargs.get("cwd") or ""))
         if publish_rebased_head:
             if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
@@ -2062,6 +2064,17 @@ class WorkerPool:
             remote = str(kwargs.get("remote", "origin"))
             base_branch = str(kwargs.get("base_branch", "main"))
             base_ref = f"{remote}/{base_branch}"
+            synced = self._sync_writer_to_expected_remote_head(
+                cwd,
+                enabled=sync_to_expected_remote_head,
+                branch=branch,
+                remote=remote,
+                pr_number=pr_number,
+                expected_remote_sha=expected_remote_sha,
+                timeout=job.timeout_s,
+            )
+            if synced is not None:
+                return synced
             git_utils.run(
                 ["git", "fetch", remote, base_branch],
                 cwd=cwd,
@@ -2125,6 +2138,63 @@ class WorkerPool:
             ok=True,
             value={"rebased": True, "published": True, "head_sha": source_sha},
         )
+
+    def _sync_writer_to_expected_remote_head(
+        self,
+        cwd: Path,
+        *,
+        enabled: bool,
+        branch: str,
+        remote: str,
+        pr_number: object,
+        expected_remote_sha: str,
+        timeout: int,
+    ) -> JobResult | None:
+        """Sync a restored writer checkout and prove it matches the rebase lease."""
+        if not enabled:
+            return None
+        try:
+            if not git_utils.is_clean_working_tree(cwd, timeout=timeout):
+                return JobResult(
+                    ok=False,
+                    error="restored writer checkout dirty before remote sync",
+                )
+            try:
+                sync_pr_number = (
+                    int(pr_number)
+                    if isinstance(pr_number, (int, str)) and not isinstance(pr_number, bool)
+                    else None
+                )
+            except ValueError:
+                sync_pr_number = None
+            git_utils.sync_worktree_to_remote_branch(
+                cwd,
+                branch,
+                remote=remote,
+                pr_number=sync_pr_number,
+                timeout=timeout,
+            )
+            source_sha = self._read_publish_head(cwd, timeout=timeout)
+            if isinstance(source_sha, JobResult):
+                return source_sha
+            if source_sha != expected_remote_sha:
+                return JobResult(
+                    ok=True,
+                    value={
+                        "rebased": False,
+                        "published": False,
+                        "head_drift": True,
+                        "head_sha": source_sha,
+                    },
+                )
+            if not git_utils.is_clean_working_tree(cwd, timeout=timeout):
+                return JobResult(
+                    ok=False,
+                    error="restored writer checkout dirty after remote sync",
+                )
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return JobResult(ok=False, error=f"restored writer remote sync failed: {exc}")
+        return None
 
     def _conflict_receipt(
         self,

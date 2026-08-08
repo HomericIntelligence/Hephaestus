@@ -209,6 +209,8 @@ _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _REPLY_JOURNAL_RECOVERY_RESULT = "_reply_journal_recovery_result"
 _REPLY_JOURNAL_APPEND_RESULT = "_reply_journal_append_result"
 _REPLY_HANDOFF_RESULT = "_reply_handoff_result"
+_SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
+_REBASE_HEAD_DRIFT = "rebase_head_drift"
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -429,6 +431,8 @@ class ImplementationStage(Stage):
             # detached, read-only snapshot.  Reuse it for remediation: trying
             # to create a second worktree for the same PR branch would either
             # fail the branch-ownership guard or tempt review to write there.
+            if item.payload.get("post_review_rebase_required"):
+                item.payload[_SYNC_RESTORED_WRITER_BEFORE_REBASE] = True
             item.payload["worktree_dirty"] = False
             return Continue(next_state=DIRTY_DECISION_WAIT)
         logger.info("implementation:%d: requesting worktree job", issue)
@@ -591,11 +595,17 @@ class ImplementationStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_unavailable")
         if item.payload.get("rebase_conflict"):
             return Continue(next_state=REBASE_CONFLICT_WAIT)
+        if item.payload.pop(_REBASE_HEAD_DRIFT, None):
+            item.payload.pop("post_review_rebase_required", None)
+            item.payload.pop("rebase_conflict", None)
+            item.payload.pop(_SYNC_RESTORED_WRITER_BEFORE_REBASE, None)
+            return Continue(next_state=ADOPTED)
         if item.payload.pop("rebase_error", None):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_rebase_failed")
         if item.payload.pop("rebase_complete", None):
             item.payload.pop("post_review_rebase_required", None)
             item.payload.pop("rebase_conflict", None)
+            item.payload.pop(_SYNC_RESTORED_WRITER_BEFORE_REBASE, None)
             return Continue(
                 next_state=(
                     IMPLEMENT_WAIT if item.payload.get("implementation_remediation") else ADOPTED
@@ -607,18 +617,22 @@ class ImplementationStage(Stage):
         expected_head = state.get("headRefOid") if isinstance(state, dict) else None
         if not is_full_commit_sha(expected_head):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_head_unavailable")
+        kwargs: dict[str, object] = {
+            "cwd": _worktree_path(item, ctx),
+            "base_branch": "main",
+            "remote": "origin",
+            "publish_rebased_head": True,
+            "branch": item.branch,
+            "expected_remote_sha": expected_head,
+        }
+        if item.payload.get(_SYNC_RESTORED_WRITER_BEFORE_REBASE):
+            kwargs["sync_to_expected_remote_head"] = True
+            kwargs["pr_number"] = item.pr
         job = GitJob(
             repo=item.repo,
             op="rebase",
             timeout_s=GIT_JOB_TIMEOUT_S,
-            kwargs={
-                "cwd": _worktree_path(item, ctx),
-                "base_branch": "main",
-                "remote": "origin",
-                "publish_rebased_head": True,
-                "branch": item.branch,
-                "expected_remote_sha": expected_head,
-            },
+            kwargs=kwargs,
             descr="rebase_writer_before_review",
         )
         return JobRequest(job, on_done_state=REBASE_WAIT)
@@ -1125,7 +1139,11 @@ class ImplementationStage(Stage):
 
         if item.state == REBASE_WAIT:
             if result.ok:
-                item.payload["rebase_complete"] = True
+                value = result.value if isinstance(result.value, dict) else {}
+                if value.get("head_drift"):
+                    item.payload[_REBASE_HEAD_DRIFT] = True
+                else:
+                    item.payload["rebase_complete"] = True
             elif result.error == "mechanical rebase hit conflicts; resolution required":
                 logger.warning(
                     "implementation:%s: writer rebase paused for host-owned conflict resolution",

@@ -1241,7 +1241,53 @@ class TestWorktreeAndAdvise:
 
         assert result == Continue(next_state="DIRTY_DECISION_WAIT")
         assert item.payload["worktree_dirty"] is False
+        assert item.payload["sync_restored_writer_before_rebase"] is True
         assert "implementation_writer_restored" not in item.payload
+
+        item.state = result.next_state
+        dirty = stage.step(item, make_ctx())
+        assert dirty == Continue(next_state="REBASE_WAIT")
+
+        item.state = dirty.next_state
+        rebase = stage.step(item, make_ctx())
+        assert isinstance(rebase, JobRequest)
+        assert isinstance(rebase.job, GitJob)
+        assert rebase.job.kwargs["sync_to_expected_remote_head"] is True
+        assert rebase.job.kwargs["pr_number"] == 1001
+
+    def test_restored_writer_head_drift_returns_to_fresh_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A restored writer that syncs past its rebase proof is never published."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload.update(
+            {
+                "post_review_rebase_required": True,
+                "sync_restored_writer_before_rebase": True,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value={
+                    "rebased": False,
+                    "published": False,
+                    "head_drift": True,
+                    "head_sha": "b" * 40,
+                },
+            ),
+            ctx,
+        )
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="ADOPTED")
+        assert "post_review_rebase_required" not in item.payload
+        assert "sync_restored_writer_before_rebase" not in item.payload
+        assert "rebase_complete" not in item.payload
 
     def test_direct_scope_worktree_uses_its_bootstrap_pin_without_refresh(
         self, make_ctx: Any, make_work_item: Any
