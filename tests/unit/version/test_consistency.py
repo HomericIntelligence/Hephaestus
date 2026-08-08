@@ -8,8 +8,8 @@ git tags, not a file. Tests inject a canonical version by monkeypatching
 """
 
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
