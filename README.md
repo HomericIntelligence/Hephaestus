@@ -306,13 +306,14 @@ config = merge_with_env({}, convert_bools=True)
 
 Run any command with `--help` to see full usage.
 
-The package currently installs 56 console scripts from `[project.scripts]`.
+The package currently installs 57 console scripts from `[project.scripts]`.
 
 ### Automation
 
 | Command | Description |
 |---|---|
 | `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |
+| `hephaestus-install-pi-plugins` | Install and preflight the catalog-pinned Pi CLI package set; passing this gate does not bypass #2518 |
 | `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
 | `hephaestus-review-prs` | PR review/remediation automation using Claude Code or Codex in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
@@ -338,10 +339,13 @@ aliases. Configure the OpenAI-compatible provider in the local Pi config, set
 `HEPH_PI_MODEL=<operator-local-alias>` for the explicit smoke sentinel, and see
 [`docs/pi-private-provider.md`](docs/pi-private-provider.md) for the sanitized
 setup and denylist guard. That smoke seam does not yet select those values
-through Pi's native provider/model contract. Pi is not yet admitted to normal
-Hephaestus automation: `--agent pi` fails closed until #2516 verifies the
-required packages and #2518 enforces native selection, lifecycle, and tool
-scopes. The local setup is for the explicit adapter-smoke seam only.
+through Pi's native provider/model contract. Run
+`hephaestus-install-pi-plugins --dry-run --json` to inspect the exact package
+plan and `hephaestus-install-pi-plugins --global --yes --no-approve` to install
+the safe global defaults. Passing package preflight does not admit normal Pi
+automation: `--agent pi` remains fail-closed until #2518 enforces native
+selection, lifecycle, and tool scopes. The local setup also supports the
+explicit adapter-smoke seam.
 
 #### Running the automation loop from a source checkout (macOS / Codex)
 

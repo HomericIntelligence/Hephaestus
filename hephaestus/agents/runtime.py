@@ -20,6 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
+from hephaestus.agents.pi_plugins import preflight_pi_environment
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -79,9 +80,12 @@ PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
     "--offline",
 )
 PI_AUTOMATION_PREFLIGHT_ERROR = (
-    "Pi automation preflight is unavailable until #2516 verifies the required "
-    "package/capability inventory and #2518 enforces lifecycle and tool scopes. "
-    "Use Claude or Codex for automation until those stages are complete."
+    "Pi automation preflight is unavailable. Run "
+    "`hephaestus-install-pi-plugins --dry-run --json` to inspect the required setup."
+)
+PI_SCOPE_LIFECYCLE_ERROR = (
+    "Pi package preflight passed, but normal automation remains unavailable until "
+    "#2518 enforces lifecycle and role-scoped tool contracts. Use Claude or Codex meanwhile."
 )
 REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
@@ -241,7 +245,12 @@ def is_agent_authenticated(agent: AgentName) -> bool:
 
 def _pi_models_configured() -> bool:
     """Return True when Pi has at least one local model alias configured."""
-    config_path = Path.home() / PI_MODEL_CONFIG_RELATIVE_PATH
+    configured_root = os.environ.get("PI_CODING_AGENT_DIR", "").strip()
+    config_path = (
+        Path(configured_root).expanduser() / "models.json"
+        if configured_root
+        else Path.home() / PI_MODEL_CONFIG_RELATIVE_PATH
+    )
     try:
         payload: Any = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -257,23 +266,28 @@ def _pi_models_configured() -> bool:
     return False
 
 
-def _require_pi_automation_admission() -> None:
-    """Block every normal Pi automation entry point until admission exists.
+def _require_pi_automation_admission(cwd: Path) -> None:
+    """Run package preflight, then retain the separate #2518 admission block.
 
     Only the explicitly named ``run_pi_smoke_session`` helper remains the
     fixed tool-free, non-interactive operator-smoke seam. #2516 replaces this
-    temporary block with verified package-preflight evidence.
+    package/capability failures name the installer entry point. Passing that
+    gate is necessary but intentionally insufficient for normal automation.
     """
-    raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+    result = preflight_pi_environment(cwd)
+    if not result.ready:
+        raise RuntimeError(f"{PI_AUTOMATION_PREFLIGHT_ERROR} {result.remediation_message()}")
+    raise RuntimeError(PI_SCOPE_LIFECYCLE_ERROR)
 
 
-def resolve_agent(agent: str | None) -> AgentName:
+def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
     """Resolve an optional provider selection into a concrete backend."""
+    effective_cwd = Path.cwd() if cwd is None else cwd
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
         if agent == "pi":
-            _require_pi_automation_admission()
+            _require_pi_automation_admission(effective_cwd)
         if not is_agent_authenticated(agent):
             if shutil.which(agent) is None:
                 raise RuntimeError(
@@ -299,7 +313,7 @@ def resolve_agent(agent: str | None) -> AgentName:
     )
     if not installed_agents:
         if shutil.which("pi") is not None:
-            _require_pi_automation_admission()
+            _require_pi_automation_admission(effective_cwd)
         raise RuntimeError(
             "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
             "or pass --agent after installing the selected backend."
@@ -1471,7 +1485,7 @@ def _run_pi_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run Pi with prompt content attached via an ephemeral file, not argv."""
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
-        _require_pi_automation_admission()
+        _require_pi_automation_admission(cwd)
     prompt_path: Path | None = None
     private_temp_dir: Path | None = None
     try:
@@ -1582,7 +1596,7 @@ def _invoke_pi_session(
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
-        _require_pi_automation_admission()
+        _require_pi_automation_admission(cwd)
     cmd = list(base_cmd) if base_cmd is not None else _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
@@ -1622,7 +1636,7 @@ def run_pi_session(
     approval: str = "never",
 ) -> AgentRunResult:
     """Run a new Pi JSON-mode session and capture its id."""
-    _require_pi_automation_admission()
+    _require_pi_automation_admission(cwd)
     del approval
     return _invoke_pi_session(
         prompt=prompt,
@@ -1672,7 +1686,7 @@ def resume_pi_session(
     approval: str = "never",
 ) -> AgentRunResult:
     """Resume a Pi JSON-mode session by id."""
-    _require_pi_automation_admission()
+    _require_pi_automation_admission(cwd)
     del approval
     return _invoke_pi_session(
         prompt=prompt,
@@ -1697,7 +1711,7 @@ def run_agent_text(
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
     if is_pi(agent):
-        _require_pi_automation_admission()
+        _require_pi_automation_admission(cwd)
     if is_codex(agent):
         return run_codex_text(
             prompt,
@@ -1732,7 +1746,7 @@ def run_agent_session(
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     if is_pi(agent):
-        _require_pi_automation_admission()
+        _require_pi_automation_admission(cwd)
     if is_codex(agent):
         return run_codex_session(
             prompt,
@@ -1769,7 +1783,7 @@ def resume_agent_session(
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     if is_pi(agent):
-        _require_pi_automation_admission()
+        _require_pi_automation_admission(cwd)
     if is_codex(agent):
         return resume_codex_session(
             session_id,

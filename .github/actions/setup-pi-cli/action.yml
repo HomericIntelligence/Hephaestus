@@ -13,5 +13,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
-        pi --version
+        pi_spec="$(node -e 'const p=require("./hephaestus/agents/pi_package_catalog.json").compatibility.pi; process.stdout.write(`${p.npm_name}@${p.version}`)')"
+        expected="${pi_spec##*@}"
+        npm install -g --ignore-scripts "$pi_spec"
+        test "$(pi --version)" = "$expected"

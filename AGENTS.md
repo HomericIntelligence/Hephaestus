@@ -589,8 +589,11 @@ Codex, and the currently fail-closed Pi provider boundary. It provides:
   providers through the neutral boundary. Public `run_pi_*` execution helpers
   also reject unadmitted automation; only `run_pi_smoke_session` is the fixed
   tool-free, non-interactive operator smoke seam. Normal Pi automation remains
-  blocked until its package preflight and stage scope contracts are complete;
-  the smoke seam is not admission evidence. See ADR-0019 and ADR-0020.
+  blocked until its stage scope contracts are complete;
+  `hephaestus-install-pi-plugins` installs and preflights the catalog-pinned Pi
+  CLI/package set, but passing preflight does not bypass #2518's lifecycle and
+  role-scope admission gate. The smoke seam is not admission evidence. See
+  ADR-0019, ADR-0020, and ADR-0023.
 - Claude is normally invoked via `hephaestus.automation.claude_invoke.invoke_claude_with_session`;
   the library-only fleet-sync conflict fallback uses `claude_code_sdk` with the scoped call-site
   controls below.

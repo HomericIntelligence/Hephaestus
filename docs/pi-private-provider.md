@@ -84,38 +84,44 @@ prints matched values or source lines.
 ## Automation admission
 
 This configuration supports explicit local adapter-smoke validation. Normal
-Hephaestus automation intentionally rejects `--agent pi` until #2516 verifies
-the required package/capability inventory and #2518 enforces lifecycle and
-tool scopes. Do not treat a local model configuration or a successful smoke
-command as automation admission evidence.
+Hephaestus automation runs package/capability preflight for `--agent pi`, then
+continues to reject normal execution until #2518 enforces lifecycle and tool
+scopes. Do not treat a local model configuration, package readiness, or a
+successful smoke command as automation admission evidence.
 
 ## Athena package acceptance
 
-The accepted Athena Pi package is recorded in
-[`athena-pi-package.json`](athena-pi-package.json). Install the concatenation
-of `package.source`, `@`, and the exact 40-character `package.ref`:
+The accepted Pi CLI and package set are recorded in the packaged catalog. Inspect
+the exact subprocess plan without changing settings or executing package code:
 
 ```bash
-pi install 'git:github.com/HomericIntelligence/Athena@496815b00f6fb4c8e97466489371b364d52588b5'
+hephaestus-install-pi-plugins --dry-run --json
 ```
 
-`package.version` and `upstream.release_tag` are release metadata. They must
-not replace `package.ref` as installation authority. `pi update --extensions`
-skips the pinned ref and cannot advance it. Upgrade or roll back only after
-reviewing a replacement catalog and explicitly installing its new or previous
-40-character ref. Remove the package with:
+Install globally with the safe trust default, or explicitly choose a local scope:
 
 ```bash
-pi remove 'git:github.com/HomericIntelligence/Athena'
+hephaestus-install-pi-plugins --global --yes --no-approve
+hephaestus-install-pi-plugins --project-local --yes --approve
+pi --version
 ```
+
+Global scope and `--no-approve` are defaults. Project-local `--approve` applies
+only to the verification process and is not persisted. A CLI identity/version
+mismatch fails before package installation or extension loading. Partial
+installs are retained and reported; rerun the same command to recover.
+
+Pins change only through a reviewed catalog update. Hephaestus maintainers rerun
+the Athena acceptance workflow for an Athena commit change and the live package
+smoke for any Pi CLI or npm companion change. Roll back by reverting the catalog
+and reinstalling its prior exact pins; `pi update` is not an ownership path.
 
 Athena exposes its canonical `skills/` directory as Pi package resources.
 Mnemosyne remains a separately trusted repository dependency governed by
 Athena's canonical dependency-resolution contract; it is not a Pi package.
-The reviewed external capabilities also remain separate operator-installed
-packages: `pi-subagents@0.37.2` supplies delegation and
-`pi-web-access@0.15.0` supplies explicitly scoped web access. Athena bundles
-neither package.
+The reviewed external capabilities remain separate catalog-pinned packages:
+`pi-subagents` supplies delegation and `pi-web-access` supplies explicitly
+scoped web access. Athena bundles neither package.
 
 ### Acceptance collection and publication
 

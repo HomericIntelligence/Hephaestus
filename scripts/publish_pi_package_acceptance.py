@@ -27,6 +27,7 @@ from pi_package_acceptance import (
     HEPHAESTUS_REPOSITORY,
     GhGitHubTransport,
     GitHubTransport,
+    atomic_write,
     catalog_digest,
     load_catalog,
     render_issue_comment,
@@ -40,6 +41,27 @@ ISSUE_COMMENTS = "/repos/HomericIntelligence/Hephaestus/issues/2515/comments"
 
 class IndeterminateWriteError(RuntimeError):
     """Raised when a forge write may have succeeded without a response."""
+
+
+def update_athena_catalog_commit(path: Path, accepted_commit: str) -> None:
+    """Atomically update only the accepted full Athena commit in the catalog."""
+    if re.fullmatch(r"[0-9a-f]{40}", accepted_commit) is None:
+        raise ValueError("accepted Athena commit must be a full lowercase SHA")
+    try:
+        document = _object(json.loads(path.read_text(encoding="utf-8")), "catalog")
+        packages = _object(document.get("packages"), "catalog.packages")
+        athena = _object(packages.get("athena"), "catalog.packages.athena")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load package catalog: {exc}") from exc
+    athena["commit"] = accepted_commit
+    # Re-parse before replacement so malformed surrounding records cannot be published.
+    temporary = path.with_name(f".{path.name}.validation")
+    try:
+        temporary.write_text(json.dumps(document), encoding="utf-8")
+        load_catalog(temporary)
+    finally:
+        temporary.unlink(missing_ok=True)
+    atomic_write(path, json.dumps(document, indent=2) + "\n")
 
 
 class PublishingGitHubTransport(GhGitHubTransport):

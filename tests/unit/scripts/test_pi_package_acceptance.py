@@ -84,6 +84,19 @@ def test_catalog_parses_the_pinned_contract(acceptance_module: ModuleType, tmp_p
     assert catalog.compatibility.delegation == "pi-subagents@0.37.2"
 
 
+def test_collector_consumes_the_packaged_catalog_authority(
+    acceptance_module: ModuleType,
+) -> None:
+    """Acceptance and runtime bootstrap read the same distributable pin source."""
+    expected = SCRIPT.parents[1] / "hephaestus" / "agents" / "pi_package_catalog.json"
+
+    assert expected == acceptance_module.CATALOG_PATH
+    assert not (SCRIPT.parents[1] / "docs" / "athena-pi-package.json").exists()
+    catalog = acceptance_module.load_catalog(expected)
+    assert catalog.package.ref == ATHENA_REF
+    assert catalog.compatibility.pi == "@earendil-works/pi-coding-agent@0.80.2"
+
+
 def test_checkout_validation_requires_remote_head_and_clean_tree(
     acceptance_module: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

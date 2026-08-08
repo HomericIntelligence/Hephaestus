@@ -76,11 +76,12 @@ def test_trust_model_documented_for_unpinned(install_script: str) -> None:
     )
 
 
-def test_installer_can_install_real_pi_cli(install_script: str) -> None:
-    """The bootstrap path must install the real Pi CLI, not a fake binary."""
+def test_installer_can_install_catalog_pinned_pi_cli(install_script: str) -> None:
+    """The ecosystem bootstrap derives the real Pi CLI from one catalog."""
     assert "has_cmd pi" in install_script
-    assert "@earendil-works/pi-coding-agent@0.80.2" in install_script
-    assert "npm install -g --ignore-scripts" in install_script
+    assert "pi_package_catalog.json" in install_script
+    assert "PI_CODING_AGENT_NPM_PACKAGE=" not in install_script
+    assert 'npm install -g --ignore-scripts "$pi_package"' in install_script
     assert "pi --version" in install_script
 
 

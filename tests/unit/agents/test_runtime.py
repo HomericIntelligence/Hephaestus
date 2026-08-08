@@ -2311,6 +2311,63 @@ def test_resolve_agent_explicit_pi_fails_closed_until_preflight_exists(tmp_path:
             agent_runtime.resolve_agent("pi")
 
 
+def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> None:
+    """A failed package gate names the bootstrap command and effective cwd."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    failure = PiPreflightResult(
+        ready=False,
+        status="package_inventory_mismatch",
+        remediation="Run hephaestus-install-pi-plugins --global --yes --no-approve",
+    )
+    with patch(
+        "hephaestus.agents.runtime.preflight_pi_environment", return_value=failure
+    ) as preflight:
+        with pytest.raises(RuntimeError, match="hephaestus-install-pi-plugins"):
+            agent_runtime.resolve_agent("pi", cwd=tmp_path)
+
+    preflight.assert_called_once_with(tmp_path)
+
+
+def test_resolve_pi_ready_still_fails_for_2518(tmp_path: Path) -> None:
+    """Package readiness does not bypass lifecycle and role-scope admission."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    with patch(
+        "hephaestus.agents.runtime.preflight_pi_environment",
+        return_value=PiPreflightResult.ready_result(),
+    ):
+        with pytest.raises(RuntimeError, match="#2518"):
+            agent_runtime.resolve_agent("pi", cwd=tmp_path)
+
+
+def test_pi_models_configured_honors_pi_coding_agent_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Private Pi model discovery follows the operator-selected Pi root."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir()
+    (pi_dir / "models.json").write_text(
+        json.dumps({"models": [{"id": "private-alias"}]}), encoding="utf-8"
+    )
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+
+    assert agent_runtime._pi_models_configured() is True
+
+
+def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: Path) -> None:
+    """Every provider-neutral direct Pi path binds preflight to its worktree."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    failure = PiPreflightResult(False, "package_inventory_mismatch", "install packages")
+    with patch(
+        "hephaestus.agents.runtime.preflight_pi_environment", return_value=failure
+    ) as preflight:
+        with pytest.raises(RuntimeError, match="package_inventory_mismatch"):
+            agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
+    preflight.assert_called_once_with(tmp_path)
+
+
 def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:
     """An explicit Pi selection reports the actionable preflight boundary first."""
     with patch("hephaestus.agents.runtime.shutil.which", return_value=None):

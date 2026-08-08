@@ -173,7 +173,12 @@ readonly JUST_SHA256_LINUX_AARCH64="bb3886b15e2cbcb9c0eb19956297d36de4eaef45b89d
 readonly JUST_SHA256_DARWIN_X86_64="30aacf9cbf021c2ff36fff5a05c800360e2020e527916e1c0960452ef5a8568c"
 readonly JUST_SHA256_DARWIN_AARCH64="e7a824c4d92cdea270b61474bd48e851aedc4c65f9c5245c12b32df6de9b536f"
 
-readonly PI_CODING_AGENT_NPM_PACKAGE="@earendil-works/pi-coding-agent@0.80.2"
+pi_coding_agent_npm_package() {
+    node -e '
+      const p = require(process.argv[1]).compatibility.pi;
+      process.stdout.write(p.npm_name + "@" + p.version);
+    ' "$REPO_ROOT/hephaestus/agents/pi_package_catalog.json"
+}
 
 # Portable SHA-256: GNU coreutils on Linux, BSD `shasum -a 256` on macOS.
 _sha256_cmd() {
@@ -914,11 +919,12 @@ else
             # TRUST MODEL — Pi coding-agent via npm
             #
             # npm verifies tarball SHA-512 integrity against the registry on every
-            # install (built-in, no flag needed). The package version is pinned in
-            # PI_CODING_AGENT_NPM_PACKAGE. --ignore-scripts follows upstream Pi
+            # install (built-in, no flag needed). The package version is derived
+            # from pi_package_catalog.json. --ignore-scripts follows upstream Pi
             # install guidance and avoids executing package lifecycle hooks.
             # ─────────────────────────────────────────────────────────────────────
-            if npm install -g --ignore-scripts "$PI_CODING_AGENT_NPM_PACKAGE" >/dev/null 2>&1; then
+            pi_package="$(pi_coding_agent_npm_package)"
+            if npm install -g --ignore-scripts "$pi_package" >/dev/null 2>&1; then
                 check_pass "pi installed (npm integrity-checked)"
             else
                 check_fail "pi — install failed (see https://github.com/earendil-works/pi)"

@@ -131,6 +131,30 @@ def _base_responses(body: str) -> dict[tuple[str, str], Any]:
     }
 
 
+def test_catalog_commit_update_preserves_every_other_record(
+    modules: tuple[ModuleType, ModuleType], tmp_path: Path
+) -> None:
+    """Acceptance publication changes only a validated full Athena commit."""
+    collector, publisher = modules
+    catalog, _evidence, _comment, _body = _write_inputs(tmp_path, collector, publisher)
+    # Exercise the packaged-catalog form owned by #2516 rather than the legacy fixture.
+    source = (
+        Path(__file__).resolve().parents[3] / "hephaestus" / "agents" / "pi_package_catalog.json"
+    )
+    before = json.loads(source.read_text(encoding="utf-8"))
+    catalog.write_text(json.dumps(before), encoding="utf-8")
+
+    publisher.update_athena_catalog_commit(catalog, "b" * 40)
+
+    after = json.loads(catalog.read_text(encoding="utf-8"))
+    assert after["packages"]["athena"]["commit"] == "b" * 40
+    before["packages"]["athena"]["commit"] = "b" * 40
+    assert after == before
+    for invalid in ("main", "b" * 12, "B" * 40):
+        with pytest.raises(ValueError, match="full lowercase SHA"):
+            publisher.update_athena_catalog_commit(catalog, invalid)
+
+
 def test_create_and_exact_readback(modules: tuple[ModuleType, ModuleType], tmp_path: Path) -> None:
     """No marker creates one actor-owned comment and verifies its exact body."""
     collector, publisher = modules

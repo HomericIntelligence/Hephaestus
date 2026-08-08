@@ -35,3 +35,4 @@ numbered, and listed here.
 | [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Accepted |
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Accepted |
+| [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
