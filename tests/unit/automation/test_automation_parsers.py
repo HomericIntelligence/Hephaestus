@@ -537,7 +537,19 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "loops",
             "_StoreAction",
             5,
-            help_text="Number of loop iterations (default: 5)",
+            help_text=(
+                "Repository discovery reseed passes; does not change review budgets (default: 5)"
+            ),
+        ),
+        _action_spec(
+            ("--review-iterations",),
+            "review_iterations",
+            "_StoreAction",
+            None,
+            help_text=(
+                "Exact per-cycle cap for both plan-review and implementation-review rounds. "
+                "Omit to preserve the routing defaults (plan 3; implementation soft 3/hard 6)."
+            ),
         ),
         _max_workers_spec(
             "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases.",
