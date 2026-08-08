@@ -1648,7 +1648,7 @@ class WorkerPool:
         the executing worker identity.
         """
         try:
-            agent = resolve_agent(job.agent)
+            agent = resolve_agent(job.agent, cwd=job.cwd)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
             prompt = job.prompt_builder(**job.prompt_kwargs)

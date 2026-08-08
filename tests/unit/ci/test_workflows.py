@@ -30,6 +30,8 @@ from hephaestus.ci.workflows import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PERFORMANCE_DOC = REPO_ROOT / "docs" / "performance-testing.md"
 SETUP_PI_ACTION = REPO_ROOT / ".github/" / "actions" / "setup-pi-cli" / "action.yml"
+CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
+NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml"
 
 
 class TestCollectYmlFiles:
@@ -353,12 +355,22 @@ class TestWorkflowToolErrors:
 class TestPiCliSetup:
     """Regression tests for installing the real Pi CLI in test environments."""
 
-    def test_setup_pi_action_pins_real_npm_package(self) -> None:
+    def test_setup_pi_action_consumes_catalog_pinned_package(self) -> None:
         text = SETUP_PI_ACTION.read_text(encoding="utf-8")
         assert "actions/setup-node@" in text
         assert "node-version: 22.19.0" in text
-        assert "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2" in text
+        assert "pi_package_catalog.json" in text
+        assert "@earendil-works/pi-coding-agent@0.80.2" not in text
+        assert 'npm install -g --ignore-scripts "$pi_spec"' in text
         assert "pi --version" in text
+
+    def test_container_and_nightly_lane_consume_the_catalog(self) -> None:
+        container = CONTAINERFILE.read_text(encoding="utf-8")
+        nightly = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
+
+        assert "pi_package_catalog.json" in container
+        assert "@earendil-works/pi-coding-agent@0.80.2" not in container
+        assert "HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE" in nightly
 
     def test_setup_pi_action_pins_setup_node_by_full_sha(self) -> None:
         """The composite action must not use a mutable setup-node tag."""

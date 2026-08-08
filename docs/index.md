@@ -39,7 +39,7 @@ annotations for documented first-level subpackages, excluding the
 `hephaestus.automation` product layer and the package's CLI entry points,
 regenerated from the released package via [pdoc](https://pdoc.dev/).
 
-Full CLI usage and option details for all 56 CLI entry points remain available
+Full CLI usage and option details for all 57 CLI entry points remain available
 through each command's `--help` output.
 
 To build the same reference locally (output to the git-ignored `docs/api/`):
