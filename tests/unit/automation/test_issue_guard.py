@@ -193,7 +193,7 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
 
     def call(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append((args, kwargs))
-        paths = {arg for arg in args if arg.startswith("repos/Owner/Repo/")}
+        paths = {arg for arg in args if arg.startswith("repos/Owner/Repo")}
         if args[-1] == "user":
             return response(200, {"login": "operator"})
         if any(path.endswith("issues/2404") for path in paths):
@@ -212,7 +212,7 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
             "issue-2404" in path for path in paths
         ):
             return response(201, {})
-        if any(path.endswith("Owner/Repo/") for path in paths):
+        if "repos/Owner/Repo" in paths:
             return response(200, {"default_branch": "main"})
         return response(200, {})
 
@@ -222,6 +222,8 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
     github.remove_label("Owner/Repo", 2404, "state:extra")
     assert github.actor() == "operator"
     assert github.default_tip("Owner/Repo") == ("4" * 40, tree_oid)
+    assert any("repos/Owner/Repo" in args for args, _kwargs in calls)
+    assert all("repos/Owner/Repo/" not in args for args, _kwargs in calls)
     assert github.create_commit("Owner/Repo", tree_oid, ["4" * 40], record.to_json())[0]
     github.create_ref("Owner/Repo", 2404, commit_oid)
     github.update_ref("Owner/Repo", 2404, commit_oid, "1" * 40)

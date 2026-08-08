@@ -763,7 +763,8 @@ class GitHubIssueGuardStore:
         return self._last_server_time
 
     def _path(self, suffix: str) -> str:
-        return f"repos/{self.repository}/{suffix}"
+        root = f"repos/{self.repository}"
+        return f"{root}/{suffix}" if suffix else root
 
     def read_labels(self, repository: str, issue: int) -> Sequence[str]:
         status, body = self._request([self._path(f"issues/{issue}")])
