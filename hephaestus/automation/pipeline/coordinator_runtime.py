@@ -3,6 +3,7 @@ from typing import Any, cast
 
 from . import coordinator_observability as _observability
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
 
 # This collaborator consumes the façade's shared type namespace by design.
@@ -1325,14 +1326,12 @@ class CoordinatorRuntime(_CoordinatorHost):
 
         def _handler(signum: int, frame: object) -> None:
             if self.shutdown.is_set():
-                logger.warning("second signal %d: immediate shutdown", signum)
+                logger.warning(shutdown_signal_message(signum, self.config.grace_s, immediate=True))
                 self._immediate = True
                 self._wake_completion_wait()
             else:
                 logger.warning(
-                    "signal %d: graceful shutdown (grace %.0fs; press again to force)",
-                    signum,
-                    self.config.grace_s,
+                    shutdown_signal_message(signum, self.config.grace_s, immediate=False)
                 )
                 self.shutdown.set()
                 self._grace_deadline = time.monotonic() + self.config.grace_s

@@ -75,6 +75,17 @@ FINISH = MW_FINISH
 _REQUESTABLE_READINESS = frozenset({"CLEAN", "HAS_HOOKS", "UNSTABLE"})
 _RETRYABLE_READINESS = frozenset({"BEHIND", "BLOCKED", "UNKNOWN"})
 _CONFLICTING_READINESS = frozenset({"CONFLICTING", "DIRTY"})
+
+
+def _post_review_rebase_reason(status: str, mergeable: str) -> str | None:
+    """Return the implementation-owned rebase reason for reviewed readiness."""
+    if status in _CONFLICTING_READINESS or mergeable == "CONFLICTING":
+        return "merge_conflicting"
+    if status == "BEHIND":
+        return "post_review_rebase_required"
+    return None
+
+
 _READINESS_WAIT_INITIAL_S = 5.0
 _READINESS_WAIT_TIMEOUT_S = 30 * 60.0
 _READINESS_WAIT_DELAY_CAP_S = 60.0
@@ -224,6 +235,8 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.BLOCKED, outcome)
         if outcome in {"not_implementation_go", "reviewed_head_drift"}:
             return StageOutcome(Disposition.FAIL_BACK, outcome)
+        if outcome in {"merge_conflicting", "post_review_rebase_required"}:
+            return self._post_review_rebase(item, outcome)
         if outcome == "readiness_wait":
             if receipt.attempted and item.attempts["merge"] >= ctx.budget("merge"):
                 return StageOutcome(Disposition.FINISH_FAIL, "merge_attempts_exhausted")
@@ -473,11 +486,18 @@ class MergeWaitStage(Stage):
                 declined_fingerprint=declined_fingerprint,
                 park_if_ready=park_if_ready,
             )
-        if status in _CONFLICTING_READINESS or mergeable == "CONFLICTING":
-            return StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
+        rebase_reason = _post_review_rebase_reason(status, mergeable)
+        if rebase_reason is not None:
+            return self._post_review_rebase(item, rebase_reason)
         if status not in _RETRYABLE_READINESS and mergeable != "UNKNOWN":
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_unknown")
         return self._park_for_readiness(item, ctx)
+
+    @staticmethod
+    def _post_review_rebase(item: WorkItem, reason: str) -> StageOutcome:
+        """Send a reviewed stale/conflicting head to implementation ownership."""
+        item.payload["post_review_rebase_required"] = True
+        return StageOutcome(Disposition.FAIL_BACK, reason)
 
     @staticmethod
     def _readiness_fingerprint(item: WorkItem, readiness: dict[str, Any]) -> list[str] | None:

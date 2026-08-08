@@ -957,10 +957,10 @@ def test_fresh_same_head_proof_retries_a_prior_unstable_decline(
 
 
 @pytest.mark.parametrize("merge_state_status", ["CONFLICTING", "DIRTY"])
-def test_405_conflicting_or_dirty_readiness_is_terminal(
+def test_405_conflicting_or_dirty_readiness_returns_to_implementer(
     make_ctx: Any, make_work_item: Any, merge_state_status: str
 ) -> None:
-    """Conflict-like GitHub readiness states are not retried as transient readiness."""
+    """A reviewed conflict is handed to the implementation agent to resolve."""
     github = _ConditionalGitHub(
         states=[_open_pr(), _open_pr(), _open_pr()],
         merge_results=[
@@ -982,13 +982,33 @@ def test_405_conflicting_or_dirty_readiness_is_terminal(
         ],
     )
 
-    result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
-    )
+    item = _reviewed_item(make_work_item)
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
 
-    assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_conflicting")
+    assert result == StageOutcome(Disposition.FAIL_BACK, "merge_conflicting")
+    assert item.payload["post_review_rebase_required"] is True
     assert github.merge_attempts == [(12, "a" * 40)]
     assert github.mutation_log == []
+
+
+def test_reviewed_behind_head_returns_to_implementer_for_rebase(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """A reviewer does not validate against current main; implementation rebases later."""
+    github = _ConditionalGitHub(
+        readiness={
+            **_open_pr(),
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+        }
+    )
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(MergeWaitStage(), item, make_ctx(github=github))
+
+    assert result == StageOutcome(Disposition.FAIL_BACK, "post_review_rebase_required")
+    assert item.payload["post_review_rebase_required"] is True
+    assert github.merge_attempts == []
 
 
 def test_409_reconciliation_external_arm_blocks_without_label_mutation(
@@ -1085,7 +1105,7 @@ def test_200_without_merged_true_is_terminal(make_ctx: Any, make_work_item: Any)
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_not_merged")
 
 
-def test_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
+def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
     make_ctx: Any, make_work_item: Any
 ) -> None:
     """A normal CI restart fits while readiness waiting remains bounded."""
@@ -1097,7 +1117,7 @@ def test_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadline(
             "autoMergeRequest": None,
             "baseRefName": "main",
             "mergeable": "MERGEABLE",
-            "mergeStateStatus": "BEHIND",
+            "mergeStateStatus": "BLOCKED",
         },
     )
     item = _reviewed_item(make_work_item)

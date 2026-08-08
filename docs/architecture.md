@@ -1057,6 +1057,13 @@ Architectural contract:
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
+- When that host rebase conflicts, it remains paused under the captured base and
+  PR-head lease. A separately budgeted edit-only agent may modify only the
+  host-reported conflict paths and has no shell/Git tool. The host rejects a
+  no-op, unresolved markers, index mutation, remote-head drift, missing captured
+  base ancestry, or unsigned/non-DCO replayed commits. Only the host stages the
+  resolution, continues the policy-signing rebase, and exact-lease-publishes the
+  rewritten head; the result always returns to a fresh PR review.
 - A post-push implementation-reply handoff is an exact, bounded host-only
   retry of one immutable response batch. A failed or partial PR-state read,
   including a per-thread read that temporarily lags the just-pushed head,
@@ -1222,7 +1229,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `repo` | `FINISHED` | `*` → `FINISHED` | `clone = 2` |
 | `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
-| `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `test_fix = 1` |
+| `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `rebase_conflict = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error` or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
@@ -1233,8 +1240,8 @@ Budget provenance (cross-check):
   are defined in [`pipeline/routing.py`](../hephaestus/automation/pipeline/routing.py),
   with the latter as the progress-aware extension cap.
 - `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
- `test_fix = 1`, `merge =
- DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
+  `rebase_conflict = 2`, and `test_fix = 1` are fixed stage budgets.
+- `merge = DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
  [`loop_runner.py LoopConfig.drive_green_loops`](../hephaestus/automation/loop_runner.py).
 - `merge = 5` (CLI default for `--drive-green-loops`,
  [`DEFAULT_DRIVE_GREEN_LOOPS`](../hephaestus/automation/pipeline/routing.py))

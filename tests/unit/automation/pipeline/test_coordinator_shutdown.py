@@ -285,6 +285,28 @@ class TestInterruptSemantics:
         assert coordinator._completion_wakeup.is_set()
         assert coordinator.completion_q.empty()
 
+    def test_sigint_reports_timed_grace_and_second_ctrl_c_instruction(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An operator sees exactly how Ctrl+C shutdown escalation works."""
+        coordinator = _coordinator(tmp_path, monkeypatch, grace_s=17.0)
+        coordinator._install_signal_handlers()
+        import signal as signal_mod
+
+        handler = signal_mod.getsignal(signal_mod.SIGINT)
+        assert callable(handler)
+
+        with caplog.at_level("WARNING"):
+            handler(signal_mod.SIGINT, None)
+
+        assert caplog.messages[-1] == (
+            "Ctrl+C received: timed graceful shutdown started (17s); "
+            "press Ctrl+C again to force teardown"
+        )
+
 
 class TestNormalTeardownExitSemantics:
     """Ordinary pool cleanup must not manufacture an interrupt outcome (#2431)."""
