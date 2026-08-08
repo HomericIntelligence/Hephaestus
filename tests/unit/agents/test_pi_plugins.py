@@ -582,22 +582,31 @@ def test_bounded_runner_windows_timeout_terminates_descendants(tmp_path: Path) -
     """A timed-out Windows command cannot leave a spawned installer child running."""
     from hephaestus.agents.pi_plugins import run_bounded_command
 
+    started = tmp_path / "descendant-started"
     sentinel = tmp_path / "descendant-survived"
     child = (
-        "import pathlib,sys,time; "
-        "time.sleep(1); "
-        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+        "import pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text('started', encoding='utf-8')\n"
+        "time.sleep(1.5)\n"
+        "pathlib.Path(sys.argv[2]).write_text('survived', encoding='utf-8')\n"
     )
     parent = (
-        "import subprocess,sys,time; "
-        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); "
-        "time.sleep(30)"
+        "import pathlib, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]])\n"
+        "started = pathlib.Path(sys.argv[2])\n"
+        "deadline = time.monotonic() + 0.8\n"
+        "while not started.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(30)\n"
     )
 
-    result = run_bounded_command((sys.executable, "-c", parent, child, str(sentinel)), timeout=0.2)
+    result = run_bounded_command(
+        (sys.executable, "-c", parent, child, str(started), str(sentinel)), timeout=1.0
+    )
 
     assert result.timed_out is True
-    deadline = time.monotonic() + 3
+    assert started.exists(), "test descendant did not start before the timeout"
+    deadline = time.monotonic() + 2
     while time.monotonic() < deadline and not sentinel.exists():
         time.sleep(0.05)
     assert not sentinel.exists(), "timed-out child process survived its parent"
