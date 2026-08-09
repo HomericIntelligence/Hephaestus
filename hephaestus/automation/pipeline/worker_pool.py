@@ -143,7 +143,11 @@ _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS = 20_000
 # 512 MiB quota; the measured nested-runtime fixture peaks near 234 MiB, so
 # smaller HFS+ images leave insufficient filesystem and SQLite headroom.
 _HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
-_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 2_048  # POSIX ulimit -f units
+# macOS ``ulimit -f`` uses 512-byte blocks. Coverage's SQLite data file exceeds
+# 1 MiB for the full unit suite, so retain a per-file ceiling with enough room
+# for that verifier-owned artifact. The separately mounted 512 MiB volume is
+# still the non-bypassable aggregate quota for every PR-visible write.
+_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 131_072
 _HOST_VERIFICATION_CPU_MAX_S = 240
 _HOST_VERIFICATION_PROCESS_HEADROOM = 64
 _HOST_VERIFICATION_POLL_S = 0.05

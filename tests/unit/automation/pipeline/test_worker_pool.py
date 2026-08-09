@@ -47,6 +47,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _confirmed_pytest_failure,
     _hdiutil_create_argv,
     _host_validation_failure_kind,
+    _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
     _prepare_host_output_aliases,
@@ -1137,6 +1138,34 @@ class TestWorkerPoolSubmitComplete:
 
         assert argv[:6] == ("/usr/bin/hdiutil", "create", "-size", "512m", "-fs", "HFS+")
         assert "-format" not in argv
+
+    def test_host_verification_allows_coverage_database_within_volume_quota(
+        self, tmp_path: Path
+    ) -> None:
+        """The per-file limit leaves headroom for coverage's SQLite database."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        runtime = tmp_path / "runtime"
+        metadata = tmp_path / "metadata.git"
+        pi_smoke_logs = source / "pi-smoke-logs"
+        for directory in (source, scratch, runtime, metadata, pi_smoke_logs):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch(f"{_WP}.sys.platform", "darwin"),
+            patch.object(Path, "is_file", return_value=True),
+            patch(f"{_WP}.os.access", return_value=True),
+        ):
+            command = _host_verification_command(
+                argv=(sys.executable, "-m", "pytest"),
+                source=source,
+                scratch=scratch,
+                runtime_environment=runtime,
+                git_metadata=metadata,
+                pi_smoke_logs=pi_smoke_logs,
+            )
+
+        assert "limit -f 131072" in command[2]
 
     def test_quota_volume_retries_a_timed_out_detach(self, tmp_path: Path) -> None:
         """A transient forced-detach timeout cannot leak a verifier volume."""
