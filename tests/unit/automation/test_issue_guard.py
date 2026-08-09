@@ -163,6 +163,7 @@ def test_recovery_terminalizes_expired_acquiring_ref_without_guard_label() -> No
             raise OSError("simulated crash before label addition")
 
     store = LabelCrashStore()
+    store.labels[("Owner/Repo", 2404)] = {STATE_PLAN_GO}
     service = IssueGuard(store)
     with pytest.raises(OSError, match="simulated crash"):
         service.acquire("Owner/Repo", 2404, "planning")
@@ -182,6 +183,7 @@ def test_recovery_terminalizes_expired_acquiring_ref_without_guard_label() -> No
 
     assert recovered.record.phase is GuardPhase.RECOVERED
     assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+    assert store.labels[("Owner/Repo", 2404)] == {STATE_PLAN_GO}
 
 
 def test_guard_ref_readback_retries_eventually_consistent_store() -> None:

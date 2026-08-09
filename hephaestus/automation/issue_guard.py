@@ -532,7 +532,10 @@ class IssueGuard:
             raise GuardLostError("refusing to release a guard not owned by this run")
         if current.record.lease_expires_at <= _server_now(self.store):
             raise GuardLostError("expired guard requires operator recovery")
-        before_plan = set(labels.intersection(ALL_STATE_LABELS))
+        # A guarded stage may legitimately replace its plan label.  Compare
+        # the labels immediately before removing ownership, not the snapshot
+        # retained by the acquisition handle.
+        before_release_plan = set(labels.intersection(ALL_STATE_LABELS))
         if resuming_release:
             releasing = current.record
             releasing_snapshot = current
@@ -546,7 +549,10 @@ class IssueGuard:
             releasing_snapshot = self._child(repository, issue, current, releasing)
         self.store.remove_label(repository, issue, STATE_IN_PROGRESS)
         after = set(self.store.read_labels(repository, issue))
-        if STATE_IN_PROGRESS in after or set(after.intersection(ALL_STATE_LABELS)) != before_plan:
+        if (
+            STATE_IN_PROGRESS in after
+            or set(after.intersection(ALL_STATE_LABELS)) != before_release_plan
+        ):
             raise GuardLostError("guard release label read-back failed")
         released = replace_record(
             releasing,
@@ -589,7 +595,9 @@ class IssueGuard:
         now = _server_now(self.store)
         if now <= current.record.lease_expires_at + _RECOVERY_GRACE:
             raise GuardError("guard recovery grace period has not elapsed")
-        before_plan = set(labels.intersection(ALL_STATE_LABELS))
+        # An abandoned acquisition can be recovered before its guard label is
+        # added; preserve whatever plan-state label was live at recovery time.
+        before_recovery_plan = set(labels.intersection(ALL_STATE_LABELS))
         recovering = replace_record(
             current.record,
             phase=GuardPhase.RECOVERING,
@@ -600,7 +608,10 @@ class IssueGuard:
         if STATE_IN_PROGRESS in labels:
             self.store.remove_label(repository, issue, STATE_IN_PROGRESS)
         after = set(self.store.read_labels(repository, issue))
-        if STATE_IN_PROGRESS in after or set(after.intersection(ALL_STATE_LABELS)) != before_plan:
+        if (
+            STATE_IN_PROGRESS in after
+            or set(after.intersection(ALL_STATE_LABELS)) != before_recovery_plan
+        ):
             raise GuardLostError("recovery label read-back failed")
         recovered = replace_record(
             recovering,
