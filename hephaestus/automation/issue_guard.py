@@ -533,8 +533,6 @@ class IssueGuard:
         if current.record.lease_expires_at <= _server_now(self.store):
             raise GuardLostError("expired guard requires operator recovery")
         before_plan = set(labels.intersection(ALL_STATE_LABELS))
-        if handle.plan_labels and before_plan != set(handle.plan_labels):
-            raise GuardLostError("plan-state labels changed while guard was held")
         if resuming_release:
             releasing = current.record
             releasing_snapshot = current
@@ -591,8 +589,6 @@ class IssueGuard:
         now = _server_now(self.store)
         if now <= current.record.lease_expires_at + _RECOVERY_GRACE:
             raise GuardError("guard recovery grace period has not elapsed")
-        if STATE_IN_PROGRESS not in labels:
-            raise GuardError("guard ref and label are inconsistent")
         before_plan = set(labels.intersection(ALL_STATE_LABELS))
         recovering = replace_record(
             current.record,
@@ -601,7 +597,8 @@ class IssueGuard:
             reason=reason,
         )
         recovering_snapshot = self._child(repository, issue, current, recovering)
-        self.store.remove_label(repository, issue, STATE_IN_PROGRESS)
+        if STATE_IN_PROGRESS in labels:
+            self.store.remove_label(repository, issue, STATE_IN_PROGRESS)
         after = set(self.store.read_labels(repository, issue))
         if STATE_IN_PROGRESS in after or set(after.intersection(ALL_STATE_LABELS)) != before_plan:
             raise GuardLostError("recovery label read-back failed")

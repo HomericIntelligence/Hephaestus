@@ -138,6 +138,52 @@ def test_owner_can_renew_and_release_a_guard() -> None:
     assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
 
 
+def test_owner_release_preserves_plan_transition_made_while_guarded() -> None:
+    """A guarded stage may transition plan state before releasing ownership."""
+    store = InMemoryGuardStore()
+    store.labels[("Owner/Repo", 2404)] = {STATE_PLAN_BLOCKED}
+    service = IssueGuard(store)
+    handle = service.acquire("Owner/Repo", 2404, "plan-review")
+    assert handle is not None
+    labels = store.labels[("Owner/Repo", 2404)]
+    labels.remove(STATE_PLAN_BLOCKED)
+    labels.add(STATE_PLAN_GO)
+
+    service.release(handle, "plan approved")
+
+    assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
+    assert store.labels[("Owner/Repo", 2404)] == {STATE_PLAN_GO}
+
+
+def test_recovery_terminalizes_expired_acquiring_ref_without_guard_label() -> None:
+    """A crash between ref creation and label addition has a recovery path."""
+
+    class LabelCrashStore(InMemoryGuardStore):
+        def add_label(self, repository: str, issue: int, label: str) -> None:
+            raise OSError("simulated crash before label addition")
+
+    store = LabelCrashStore()
+    service = IssueGuard(store)
+    with pytest.raises(OSError, match="simulated crash"):
+        service.acquire("Owner/Repo", 2404, "planning")
+    abandoned = store.refs[("Owner/Repo", 2404)]
+    assert abandoned.record.phase is GuardPhase.ACQUIRING
+    assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+    store.now = abandoned.record.lease_expires_at + _RECOVERY_GRACE + timedelta(seconds=1)
+
+    recovered = service.recover(
+        "Owner/Repo",
+        2404,
+        expected_claim=abandoned.record.claim_id,
+        expected_oid=abandoned.oid,
+        reason="acquisition abandoned",
+        actor="operator",
+    )
+
+    assert recovered.record.phase is GuardPhase.RECOVERED
+    assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+
+
 def test_guard_ref_readback_retries_eventually_consistent_store() -> None:
     """A successful CAS tolerates one stale ref read without losing ownership."""
 
