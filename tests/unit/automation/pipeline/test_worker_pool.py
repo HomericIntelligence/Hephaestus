@@ -102,9 +102,9 @@ def test_trusted_git_executable_accepts_discovered_binary_in_fixed_root(
     """A directly discovered package-manager Git remains inside a fixed root."""
     executable = Path("/opt/homebrew/Cellar/git/test/bin/git")
     monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
-    monkeypatch.setattr(f"{_WP}.Path.resolve", lambda self, strict=True: self)
     monkeypatch.setattr(f"{_WP}.Path.stat", lambda _self: MagicMock(st_mode=0o100555))
     monkeypatch.setattr(f"{_WP}.Path.is_file", lambda _self: True)
+    monkeypatch.setattr(f"{_WP}.Path.is_symlink", lambda _self: False)
     monkeypatch.setattr(f"{_WP}.os.access", lambda _path, _mode: True)
 
     assert _trusted_git_executable() == str(executable)

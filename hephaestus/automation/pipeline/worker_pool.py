@@ -131,6 +131,11 @@ _TRUSTED_GIT_CANDIDATES = (
     Path("/usr/bin/git"),
 )
 _TRUSTED_GIT_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
+_TRUSTED_GIT_DISCOVERY_ROOTS = (
+    Path("/opt/homebrew/Cellar/git"),
+    Path("/usr/local/Cellar/git"),
+    Path("/usr/bin"),
+)
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
 _HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v6-shell-launchers"
 _HOST_RUNTIME_MANIFEST_HEADER = "sealed-runtime-file-manifest-v1"
@@ -1160,13 +1165,21 @@ def _trusted_uv_executable() -> str | None:
 def _trusted_git_executable() -> str | None:
     """Return an allowlisted, non-writable ``git`` binary for host checks."""
     discovered = shutil.which("git")
-    candidates = (
-        *((Path(discovered),) if discovered is not None else ()),
-        *_TRUSTED_GIT_CANDIDATES,
+    candidates: tuple[tuple[Path, bool], ...] = tuple(
+        (candidate, False) for candidate in _TRUSTED_GIT_CANDIDATES
     )
-    for candidate in candidates:
+    if discovered is not None:
+        candidates = ((Path(discovered), True), *candidates)
+    for candidate, is_discovered in candidates:
         try:
-            resolved = candidate.resolve(strict=True)
+            if is_discovered:
+                if not candidate.is_absolute() or candidate.is_symlink():
+                    continue
+                resolved = candidate
+                trusted_roots = _TRUSTED_GIT_DISCOVERY_ROOTS
+            else:
+                resolved = candidate.resolve(strict=True)
+                trusted_roots = _TRUSTED_GIT_ROOTS
             mode = resolved.stat().st_mode
         except OSError:
             continue
@@ -1174,7 +1187,7 @@ def _trusted_git_executable() -> str | None:
             continue
         if mode & 0o022:
             continue
-        if not any(resolved.is_relative_to(root) for root in _TRUSTED_GIT_ROOTS):
+        if not any(resolved.is_relative_to(root) for root in trusted_roots):
             continue
         return str(resolved)
     return None
