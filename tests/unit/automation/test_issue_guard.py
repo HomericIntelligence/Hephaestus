@@ -24,6 +24,7 @@ from hephaestus.automation.issue_guard import (
     InMemoryGuardStore,
     IssueGuard,
     assert_recovery_secret_absent,
+    replace_record,
 )
 from hephaestus.automation.pipeline.guarded_github import (
     GuardedStageGitHub,
@@ -132,6 +133,55 @@ def test_owner_can_renew_and_release_a_guard() -> None:
     renewed = service.renew(fresh, timedelta(hours=2))
     assert renewed.oid != fresh.oid
     service.release(renewed, "completed successfully")
+
+    assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
+    assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+
+
+def test_guard_ref_readback_retries_eventually_consistent_store() -> None:
+    """A successful CAS tolerates one stale ref read without losing ownership."""
+
+    class EventuallyConsistentStore(InMemoryGuardStore):
+        stale_snapshot: object | None = None
+
+        def update_ref(self, repository: str, issue: int, oid: str, expected_old_oid: str) -> None:
+            self.stale_snapshot = self.refs[(repository, issue)]
+            super().update_ref(repository, issue, oid, expected_old_oid)
+
+        def read_ref(self, repository: str, issue: int) -> Any:
+            if self.stale_snapshot is not None:
+                snapshot = self.stale_snapshot
+                self.stale_snapshot = None
+                return snapshot
+            return super().read_ref(repository, issue)
+
+    store = EventuallyConsistentStore()
+    service = IssueGuard(store)
+    handle = service.acquire("Owner/Repo", 2404, "implementation")
+    assert handle is not None
+
+    service.release(handle, "completed successfully")
+
+    assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
+    assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+
+
+def test_guard_release_resumes_owned_releasing_checkpoint() -> None:
+    """The same owner can finish a release whose first CAS already succeeded."""
+    store = InMemoryGuardStore()
+    service = IssueGuard(store)
+    handle = service.acquire("Owner/Repo", 2404, "implementation")
+    assert handle is not None
+    current = store.refs[("Owner/Repo", 2404)]
+    releasing = replace_record(
+        current.record,
+        phase=GuardPhase.RELEASING,
+        predecessor_oid=current.oid,
+        reason="completed successfully",
+    )
+    service._child("Owner/Repo", 2404, current, releasing)
+
+    service.release(handle, "completed successfully")
 
     assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
     assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]

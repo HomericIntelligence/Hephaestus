@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _REPOSITORY_RE = re.compile(r"[^/\s]+/[^/\s]+\Z")
 _GUARD_REASON_MAX = 512
 _GUARD_REF_PREFIX = "refs/heads/hephaestus/issue-guards/issue-"
+_REF_READBACK_ATTEMPTS = 4
+_REF_READBACK_DELAY_S = 0.25
 
 
 class GuardError(RuntimeError):
@@ -351,10 +354,13 @@ class IssueGuard:
             raise
         except Exception as exc:
             raise GuardConflictError("guard ref update lost its compare-and-swap") from exc
-        current = self.store.read_ref(repository, issue)
-        if current is None or current.oid != oid or current.record != record:
-            raise GuardLostError("guard ref read-back did not confirm the child record")
-        return current
+        for attempt in range(_REF_READBACK_ATTEMPTS):
+            current = self.store.read_ref(repository, issue)
+            if current is not None and current.oid == oid and current.record == record:
+                return current
+            if attempt + 1 < _REF_READBACK_ATTEMPTS:
+                time.sleep(_REF_READBACK_DELAY_S)
+        raise GuardLostError("guard ref read-back did not confirm the child record")
 
     def acquire(  # noqa: C901
         self, repository: str, issue: int, work_stage: str
@@ -511,10 +517,17 @@ class IssueGuard:
         labels = set(self.store.read_labels(repository, issue))
         if (
             current is None
-            or current.oid != handle.oid
-            or current.record.phase not in {GuardPhase.ACTIVE, GuardPhase.ACQUIRING}
             or not self._owns(current.record, handle.credential)
             or STATE_IN_PROGRESS not in labels
+        ):
+            raise GuardLostError("refusing to release a guard not owned by this run")
+        resuming_release = (
+            current.record.phase is GuardPhase.RELEASING
+            and current.record.predecessor_oid == handle.oid
+        )
+        if not resuming_release and (
+            current.oid != handle.oid
+            or current.record.phase not in {GuardPhase.ACTIVE, GuardPhase.ACQUIRING}
         ):
             raise GuardLostError("refusing to release a guard not owned by this run")
         if current.record.lease_expires_at <= _server_now(self.store):
@@ -522,13 +535,17 @@ class IssueGuard:
         before_plan = set(labels.intersection(ALL_STATE_LABELS))
         if handle.plan_labels and before_plan != set(handle.plan_labels):
             raise GuardLostError("plan-state labels changed while guard was held")
-        releasing = replace_record(
-            current.record,
-            phase=GuardPhase.RELEASING,
-            predecessor_oid=current.oid,
-            reason=reason,
-        )
-        releasing_snapshot = self._child(repository, issue, current, releasing)
+        if resuming_release:
+            releasing = current.record
+            releasing_snapshot = current
+        else:
+            releasing = replace_record(
+                current.record,
+                phase=GuardPhase.RELEASING,
+                predecessor_oid=current.oid,
+                reason=reason,
+            )
+            releasing_snapshot = self._child(repository, issue, current, releasing)
         self.store.remove_label(repository, issue, STATE_IN_PROGRESS)
         after = set(self.store.read_labels(repository, issue))
         if STATE_IN_PROGRESS in after or set(after.intersection(ALL_STATE_LABELS)) != before_plan:

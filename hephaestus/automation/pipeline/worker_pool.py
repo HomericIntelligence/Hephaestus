@@ -140,8 +140,8 @@ _HOST_VERIFICATION_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
 _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS = 20_000
 # Full unit coverage includes package-lifecycle tests that build wheels and
 # sdists alongside coverage data. Keep that bounded workload below a fixed
-# 128 MiB quota; 64 MiB cannot hold its legitimate peak on macOS HFS+.
-_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 128 * 1024 * 1024
+# 256 MiB quota; smaller HFS+ images cannot hold its legitimate peak.
+_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 256 * 1024 * 1024
 _HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 2_048  # POSIX ulimit -f units
 _HOST_VERIFICATION_CPU_MAX_S = 240
 _HOST_VERIFICATION_PROCESS_HEADROOM = 64

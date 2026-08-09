@@ -1135,7 +1135,7 @@ class TestWorkerPoolSubmitComplete:
         """The quota image uses the valid blank-HFS+ form accepted by macOS."""
         argv = _hdiutil_create_argv(tmp_path / "scratch.dmg")
 
-        assert argv[:6] == ("/usr/bin/hdiutil", "create", "-size", "128m", "-fs", "HFS+")
+        assert argv[:6] == ("/usr/bin/hdiutil", "create", "-size", "256m", "-fs", "HFS+")
         assert "-format" not in argv
 
     def test_quota_volume_retries_a_timed_out_detach(self, tmp_path: Path) -> None:
