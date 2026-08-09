@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from hephaestus.agents.pi_session import AgentSessionBinding
+
 from .routing import StageName, budget_keys
 
 #: Maximum retained history events per item (oldest dropped first).
@@ -82,6 +84,9 @@ class WorkItem:
     worktree: str = ""
     branch: str = ""
     session_ids: dict[str, str] = field(default_factory=dict)
+    # Pi bindings are deliberately separate from legacy raw session ids: they
+    # bind a provider session to its worktree, role, and model fingerprint.
+    session_bindings: dict[str, AgentSessionBinding] = field(default_factory=dict)
     labels_cache: dict[str, bool] = field(default_factory=dict)
     payload: dict[str, Any] = field(default_factory=dict)
     result: ItemResult | None = None

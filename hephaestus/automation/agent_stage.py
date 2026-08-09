@@ -10,6 +10,7 @@ from pathlib import Path
 
 from hephaestus.agents.runtime import (
     add_agent_argument,
+    agent_stage_execution_request,
     resolve_agent,
     run_agent_session,
     run_claude_text,
@@ -136,6 +137,7 @@ def run_direct_agent(
             model=args.model,
             sandbox=args.sandbox,
             approval=args.approval,
+            execution_request=agent_stage_execution_request(args.agent, args.stage),
         )
     except subprocess.TimeoutExpired as exc:
         write_log(log_file, str(exc))
@@ -233,7 +235,7 @@ def run_agent(args: argparse.Namespace) -> int:
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    agent = resolve_agent(args.agent)
+    agent = resolve_agent(args.agent, cwd=repo_root)
     args.agent = agent
 
     if args.athena_skill:

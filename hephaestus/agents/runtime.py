@@ -18,12 +18,27 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionPolicy,
+    ExecutionPolicyError,
+    ExecutionRequest,
+    SessionLifecycle,
+    resolve_policy,
+)
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     preflight_pi_environment,
     prove_athena_skill_command,
+)
+from hephaestus.agents.pi_session import (
+    AgentSessionBinding,
+    PiSessionBindingError,
+    create_pi_binding,
+    validate_pi_binding,
 )
 from hephaestus.constants import (
     agent_auth_status_timeout,
@@ -91,15 +106,19 @@ PI_AUTOMATION_PREFLIGHT_ERROR = (
     "Pi automation preflight is unavailable. Run "
     "`hephaestus-install-pi-plugins --dry-run --json` to inspect the required setup."
 )
-PI_SCOPE_LIFECYCLE_ERROR = (
-    "Pi package preflight passed, but normal automation remains unavailable until "
-    "#2518 enforces lifecycle and role-scoped tool contracts. Use Claude or Codex meanwhile."
-)
 REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
     "pi": (("pi", "--version"),),
+}
+
+_PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
+    "plan": (AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW),
+    "plan-review": (AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT),
+    "implement": (AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW),
+    "pr-review": (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT),
+    "learn": (AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW),
 }
 
 
@@ -117,10 +136,119 @@ class AgentRunResult:
     stdout: str
     stderr: str
     session_id: str | None = None
+    session_binding: AgentSessionBinding | None = None
 
 
 class AgentExecutionError(RuntimeError):
     """An agent CLI reported a fatal provider, sandbox, or tool failure."""
+
+
+class PiAutomationDisabledError(AgentExecutionError):
+    """The operator disabled Pi automation before any provider process started."""
+
+
+class PiIsolationUnavailableError(AgentExecutionError):
+    """No verified external OS-isolation adapter is available for Pi."""
+
+
+class PiIsolationAdapter(Protocol):
+    """A host-provided adapter that enforces a Pi execution policy externally.
+
+    Pi's native tool allowlist is model-visible only.  An implementation of
+    this protocol must enforce the filesystem mount and network relay named by
+    ``policy`` before it starts the provider process.
+    """
+
+    def invoke(
+        self,
+        *,
+        policy: ExecutionPolicy,
+        command: list[str],
+        prompt: str,
+        cwd: Path,
+        timeout: int,
+        model: str,
+        session_id: str | None,
+    ) -> AgentRunResult:
+        """Start Pi with externally enforced filesystem and network constraints."""
+        raise NotImplementedError
+
+
+def agent_stage_execution_request(agent: str, stage: str) -> ExecutionRequest | None:
+    """Return the provider policy request for a generic direct stage."""
+    if not is_pi(agent):
+        return None
+    try:
+        role, operation, lifecycle = _PI_AGENT_STAGE_REQUESTS[stage]
+    except KeyError as exc:
+        raise ValueError(f"Pi agent-stage operation is unsupported: {stage!r}") from exc
+    return ExecutionRequest(role, operation, lifecycle)
+
+
+def agent_compaction_resume(
+    agent: str,
+    *,
+    session_agent: str,
+    session_id: str | None,
+    session_binding: AgentSessionBinding | None,
+    execution_request: ExecutionRequest | None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Prepare a neutral resume id and provider-only compaction arguments."""
+    if is_pi(agent):
+        if session_binding is None:
+            return None
+        request = execution_request or ExecutionRequest(
+            _pi_role_for_session_agent(session_agent),
+            AgentOperation.COMPACT,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        return session_binding.session_id, {
+            "execution_request": request,
+            "resume_binding": session_binding,
+        }
+    if not session_id:
+        return None
+    return session_id, {}
+
+
+def _pi_role_for_session_agent(session_agent: str) -> AgentRole:
+    """Map pipeline session names to their policy role inside the adapter."""
+    if session_agent == "planner":
+        return AgentRole.PLANNER
+    if session_agent == "plan-reviewer":
+        return AgentRole.PLAN_REVIEWER
+    if session_agent in {"pr-reviewer", "comment-classifier"}:
+        return AgentRole.PR_REVIEWER
+    return AgentRole.IMPLEMENTER
+
+
+# Pi does not provide an operating-system sandbox.  No adapter is bundled with
+# Hephaestus, so Pi automation is explicitly N/A in a stock installation.
+# A host integration must register a reviewed adapter before selecting Pi; the
+# runtime never falls back to its model-visible ``--tools`` flags.
+_PI_ISOLATION_ADAPTER: PiIsolationAdapter | None = None
+
+
+def register_pi_isolation_adapter(adapter: PiIsolationAdapter) -> None:
+    """Register the host-owned Pi isolation broker for this process.
+
+    The host is responsible for verifying that ``adapter`` enforces every
+    filesystem and network grant before it starts Pi.  This explicit seam
+    keeps the base package Pi N/A without a deployed broker and lets an
+    integration opt in without exposing an unscoped provider runner.
+    """
+    global _PI_ISOLATION_ADAPTER
+    _PI_ISOLATION_ADAPTER = adapter
+
+
+def _require_pi_isolation_adapter() -> None:
+    """Fail at provider selection when this installation has no Pi broker."""
+    if _PI_ISOLATION_ADAPTER is None:
+        raise PiIsolationUnavailableError(
+            "Pi automation is N/A: this installation has no registered host "
+            "OS-isolation adapter. Select Claude or Codex; Pi remains limited "
+            "to the tool-free operator smoke command."
+        )
 
 
 class AgentCapability(StrEnum):
@@ -274,18 +402,17 @@ def _pi_models_configured() -> bool:
     return False
 
 
-def _require_pi_automation_admission(cwd: Path) -> None:
-    """Run package preflight, then retain the separate #2518 admission block.
-
-    Only the explicitly named ``run_pi_smoke_session`` helper remains the
-    fixed tool-free, non-interactive operator-smoke seam. #2516 replaces this
-    package/capability failures name the installer entry point. Passing that
-    gate is necessary but intentionally insufficient for normal automation.
-    """
+def _require_pi_automation_admission(cwd: Path) -> PiPreflightResult:
+    """Return verified Pi admission, honoring the emergency stop before probing."""
+    if os.environ.get("HEPH_DISABLE_PI_AUTOMATION") == "1":
+        raise PiAutomationDisabledError(
+            "Pi automation disabled by HEPH_DISABLE_PI_AUTOMATION=1; "
+            "no Pi or broker process was started"
+        )
     result = preflight_pi_environment(cwd)
     if not result.ready:
-        raise RuntimeError(f"{PI_AUTOMATION_PREFLIGHT_ERROR} {result.remediation_message()}")
-    raise RuntimeError(PI_SCOPE_LIFECYCLE_ERROR)
+        raise AgentExecutionError(f"{PI_AUTOMATION_PREFLIGHT_ERROR} {result.remediation_message()}")
+    return result
 
 
 def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
@@ -296,6 +423,7 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
             raise ValueError(f"Unsupported agent: {agent}")
         if agent == "pi":
             _require_pi_automation_admission(effective_cwd)
+            _require_pi_isolation_adapter()
         if not is_agent_authenticated(agent):
             if shutil.which(agent) is None:
                 raise RuntimeError(
@@ -346,6 +474,31 @@ def is_codex(agent: str) -> bool:
 def is_pi(agent: str) -> bool:
     """Return True when the selected provider is Pi."""
     return agent == "pi"
+
+
+def reject_pi_unsupported_surface(agent: str, reason: str) -> None:
+    """Fail before a legacy surface can run Pi outside its scoped policy.
+
+    Args:
+        agent: Selected provider name.
+        reason: Operator-facing N/A remediation that describes the supported
+            queue or wrapper to use instead.
+
+    """
+    if is_pi(agent):
+        raise AgentExecutionError(f"Pi is not supported by this surface: {reason}")
+
+
+def require_supported_direct_surface(
+    agent: str,
+    *,
+    surface: str,
+    pi_supported: bool,
+    reason: str,
+) -> None:
+    """Validate a direct entry point's explicit Pi support disposition."""
+    if is_pi(agent) and not pi_supported:
+        reject_pi_unsupported_surface(agent, f"{surface}: {reason}")
 
 
 def agent_supports_model_reasoning_effort(agent: str) -> bool:
@@ -1590,14 +1743,16 @@ def run_pi_text(
     sandbox: str = "workspace-write",
     approval: str = "never",
 ) -> subprocess.CompletedProcess[str]:
-    """Run Pi non-interactively and return a text completed process."""
-    del approval
-    result = run_pi_session(prompt, cwd=cwd, timeout=timeout, model=model, sandbox=sandbox)
-    return subprocess.CompletedProcess(
-        args=["pi", "--mode", "json"],
-        returncode=0,
-        stdout=result.stdout,
-        stderr=result.stderr,
+    """Reject the legacy raw Pi entry point.
+
+    Pi automation is dispatched only through :func:`run_agent_text`, which
+    resolves an immutable :class:`ExecutionRequest` before invoking the
+    provider.  Retaining this compatibility symbol as an executable runner
+    would let callers select an unscoped sandbox.
+    """
+    del prompt, cwd, timeout, model, sandbox, approval
+    raise AgentExecutionError(
+        "Unscoped run_pi_text is disabled; use run_agent_text with an ExecutionRequest"
     )
 
 
@@ -1655,16 +1810,15 @@ def run_pi_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
 ) -> AgentRunResult:
-    """Run a new Pi JSON-mode session and capture its id."""
-    _require_pi_automation_admission(cwd)
-    del approval
-    return _invoke_pi_session(
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        model=model,
-        sandbox=sandbox,
-        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
+    """Reject the legacy raw Pi session entry point.
+
+    New Pi sessions must begin via :func:`run_agent_session` with a resolved
+    execution policy.  A raw session cannot bind its tool, filesystem, and
+    network privileges to an operation.
+    """
+    del prompt, cwd, timeout, model, sandbox, approval
+    raise AgentExecutionError(
+        "Unscoped run_pi_session is disabled; use run_agent_session with an ExecutionRequest"
     )
 
 
@@ -1679,16 +1833,27 @@ def run_pi_athena_skill(
 ) -> AgentRunResult:
     """Run one receipt-proven Athena skill command through Pi."""
     _require_pi_automation_admission(cwd)
-    cmd = _pi_base_cmd()
-    cmd.extend(pi_athena_invocation_args(kind, preflight))
-    return _invoke_pi_session(
+    # Retain the receipt verification even though the policy owns the emitted
+    # command grant.  An Athena package that cannot prove this command is not
+    # admitted to the external isolation adapter.
+    pi_athena_invocation_args(kind, preflight)
+    try:
+        request = {
+            "advise": ExecutionRequest(
+                AgentRole.ADVISOR, AgentOperation.ADVISE, SessionLifecycle.ONE_SHOT
+            ),
+            "learn": ExecutionRequest(
+                AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
+            ),
+        }[kind]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Pi Athena skill kind: {kind}") from exc
+    return _run_pi_with_policy(
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
         model=model,
-        sandbox="workspace-write",
-        base_cmd=cmd,
-        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
+        policy=resolve_policy(request),
     )
 
 
@@ -1709,9 +1874,7 @@ def run_agent_athena_skill(
     """
     if not is_pi(agent):
         return None
-    preflight = preflight_pi_environment(cwd)
-    if not preflight.ready:
-        raise AgentExecutionError(preflight.remediation_message())
+    preflight = _require_pi_automation_admission(cwd)
     return run_pi_athena_skill(
         kind,
         prompt,
@@ -1759,17 +1922,72 @@ def resume_pi_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
 ) -> AgentRunResult:
-    """Resume a Pi JSON-mode session by id."""
-    _require_pi_automation_admission(cwd)
-    del approval
-    return _invoke_pi_session(
+    """Reject the legacy raw Pi resume entry point.
+
+    Resumption must use :func:`resume_agent_session`, which requires a
+    validated session binding and a resume-only execution request.
+    """
+    del session_id, prompt, cwd, timeout, model, sandbox, approval
+    raise AgentExecutionError(
+        "Unscoped resume_pi_session is disabled; use resume_agent_session with "
+        "an ExecutionRequest and AgentSessionBinding"
+    )
+
+
+def _require_pi_request(execution_request: ExecutionRequest | None) -> ExecutionPolicy:
+    """Resolve Pi's operation policy before constructing any provider command."""
+    if execution_request is None:
+        raise ExecutionPolicyError(
+            "Pi automation requires an ExecutionRequest; sandbox and allowed-tools "
+            "compatibility inputs cannot select or widen a Pi policy"
+        )
+    return resolve_policy(execution_request)
+
+
+def _pi_policy_args(policy: ExecutionPolicy) -> list[str]:
+    """Translate a reviewed policy to Pi's model-visible capability flags.
+
+    These flags are intentionally only a second layer.  The runtime's external
+    isolation adapter remains the authority for filesystem and network access.
+    """
+    args = ["--tools", ",".join(sorted(policy.builtins))]
+    if policy.skills:
+        commands = ",".join(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills)
+        args.extend(["--commands", commands])
+    return args
+
+
+def _run_pi_with_policy(
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    model: str,
+    policy: ExecutionPolicy,
+    session_id: str | None = None,
+) -> AgentRunResult:
+    """Run Pi through the verified OS-isolation adapter for ``policy``.
+
+    No fallback invokes Pi directly: its native ``--tools`` flags cannot
+    enforce the policy's filesystem mount or network-relay boundary.
+    """
+    command = _pi_base_cmd(session_id=session_id)
+    command.extend(_pi_policy_args(policy))
+    adapter = _PI_ISOLATION_ADAPTER
+    if adapter is None:
+        raise PiIsolationUnavailableError(
+            "Pi OS-isolation adapter is unavailable for "
+            f"filesystem={policy.filesystem.value} network={policy.network.value}; "
+            "no Pi provider process was started"
+        )
+    return adapter.invoke(
+        policy=policy,
+        command=command,
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,
         model=model,
-        sandbox=sandbox,
         session_id=session_id,
-        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
 
 
@@ -1782,10 +2000,17 @@ def run_agent_text(
     model: str = "",
     sandbox: str = "workspace-write",
     approval: str = "never",
+    execution_request: ExecutionRequest | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
+        policy = _require_pi_request(execution_request)
+        if (
+            execution_request is None
+            or execution_request.lifecycle is not SessionLifecycle.ONE_SHOT
+        ):
+            raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
     if is_codex(agent):
         return run_codex_text(
             prompt,
@@ -1796,13 +2021,17 @@ def run_agent_text(
             approval=approval,
         )
     if is_pi(agent):
-        return run_pi_text(
-            prompt,
+        if execution_request is None:
+            raise AssertionError("unreachable")
+        result = _run_pi_with_policy(
+            prompt=prompt,
             cwd=cwd,
             timeout=timeout,
             model=model,
-            sandbox=sandbox,
-            approval=approval,
+            policy=policy,
+        )
+        return subprocess.CompletedProcess(
+            args=["pi", "--mode", "json"], returncode=0, stdout=result.stdout, stderr=result.stderr
         )
     raise ValueError(f"Agent '{agent}' does not support direct text execution")
 
@@ -1817,10 +2046,25 @@ def run_agent_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    execution_request: ExecutionRequest | None = None,
+    resume_binding: AgentSessionBinding | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
+        policy = _require_pi_request(execution_request)
+        if execution_request is None:
+            raise AssertionError("unreachable")
+        if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+            if resume_binding is None:
+                raise PiSessionBindingError(
+                    "Pi resume-required execution is missing a session binding"
+                )
+            validate_pi_binding(resume_binding, cwd=cwd, role=execution_request.role, model=model)
+        elif resume_binding is not None:
+            raise PiSessionBindingError(
+                "Pi start-new or one-shot execution must not receive a session binding"
+            )
     if is_codex(agent):
         return run_codex_session(
             prompt,
@@ -1832,13 +2076,30 @@ def run_agent_session(
             process_tracker=process_tracker,
         )
     if is_pi(agent):
-        return run_pi_session(
-            prompt,
+        if execution_request is None:
+            raise AssertionError("unreachable")
+        result = _run_pi_with_policy(
+            prompt=prompt,
             cwd=cwd,
             timeout=timeout,
             model=model,
-            sandbox=sandbox,
-            approval=approval,
+            policy=policy,
+            session_id=resume_binding.session_id if resume_binding is not None else None,
+        )
+        if execution_request.lifecycle is SessionLifecycle.ONE_SHOT:
+            return AgentRunResult(stdout=result.stdout, stderr=result.stderr)
+        if not result.session_id:
+            raise PiSessionBindingError("Pi did not emit a session id for a resumable operation")
+        return AgentRunResult(
+            stdout=result.stdout,
+            stderr=result.stderr,
+            session_id=result.session_id,
+            session_binding=create_pi_binding(
+                session_id=result.session_id,
+                cwd=cwd,
+                role=execution_request.role,
+                model=model,
+            ),
         )
     raise ValueError(f"Agent '{agent}' does not support direct session execution")
 
@@ -1854,10 +2115,25 @@ def resume_agent_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    execution_request: ExecutionRequest | None = None,
+    resume_binding: AgentSessionBinding | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
+        policy = _require_pi_request(execution_request)
+        if (
+            execution_request is None
+            or execution_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED
+        ):
+            raise ExecutionPolicyError(
+                "Pi session resume requires a RESUME_REQUIRED ExecutionRequest"
+            )
+        if resume_binding is None:
+            raise PiSessionBindingError("Pi session resume requires a complete session binding")
+        validate_pi_binding(resume_binding, cwd=cwd, role=execution_request.role, model=model)
+        if session_id != resume_binding.session_id:
+            raise PiSessionBindingError("Pi raw session id does not match its session binding")
     if is_codex(agent):
         return resume_codex_session(
             session_id,
@@ -1870,14 +2146,27 @@ def resume_agent_session(
             process_tracker=process_tracker,
         )
     if is_pi(agent):
-        return resume_pi_session(
-            session_id,
-            prompt,
+        if execution_request is None or resume_binding is None:
+            raise AssertionError("unreachable")
+        result = _run_pi_with_policy(
+            prompt=prompt,
             cwd=cwd,
             timeout=timeout,
             model=model,
-            sandbox=sandbox,
-            approval=approval,
+            policy=policy,
+            session_id=resume_binding.session_id,
+        )
+        return AgentRunResult(
+            stdout=result.stdout,
+            stderr=result.stderr,
+            session_id=result.session_id or resume_binding.session_id,
+            session_binding=create_pi_binding(
+                session_id=result.session_id or resume_binding.session_id,
+                cwd=cwd,
+                role=execution_request.role,
+                model=model,
+                state_reference=resume_binding.state_reference,
+            ),
         )
     raise ValueError(f"Agent '{agent}' does not support direct session resume")
 

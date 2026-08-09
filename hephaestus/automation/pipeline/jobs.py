@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import ExecutionRequest
+from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.automation.pipeline.routing import StageName
 
 from .athena_skill_jobs import AthenaSkillJob
@@ -70,6 +72,10 @@ class AgentJob:
     # conservative default assigned by WorkerPool; the full PR-review skill
     # declares the additional read-only helper capabilities it needs.
     allowed_tools: str | None = None
+    # Pi uses this immutable operation request instead of inheriting the
+    # compatibility ``sandbox``/``allowed_tools`` inputs used by Claude/Codex.
+    execution_request: ExecutionRequest | None = None
+    resume_binding: AgentSessionBinding | None = None
     descr: str = ""
 
 
@@ -142,6 +148,8 @@ class CompactJob:
     # Direct-provider compaction only sends ``/compact`` and never needs write
     # access.  Keep the policy explicit so it cannot inherit user defaults.
     sandbox: str = "read-only"
+    execution_request: ExecutionRequest | None = None
+    session_binding: AgentSessionBinding | None = None
     descr: str = "compact_session"
 
 
@@ -158,6 +166,7 @@ class JobResult:
     duration_s: float = 0.0
     worker_id: str = ""
     session_id: str | None = None
+    session_binding: AgentSessionBinding | None = None
 
 
 @dataclass(frozen=True, eq=False)

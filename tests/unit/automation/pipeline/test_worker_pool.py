@@ -21,7 +21,14 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
-from hephaestus.agents.runtime import AgentExecutionError
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+from hephaestus.agents.pi_session import create_pi_binding
+from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
 from hephaestus.automation import git_utils, subprocess_registry
 from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -563,6 +570,8 @@ class TestWorkerPoolSubmitComplete:
             model="claude-haiku-4-5",
             session_id=None,
             sandbox="read-only",
+            execution_request=None,
+            session_binding=None,
         )
 
     def test_submit_and_complete_non_claude_agent_job(
@@ -591,6 +600,8 @@ class TestWorkerPoolSubmitComplete:
             sandbox="workspace-write",
             approval="never",
             process_tracker=subprocess_registry.track_process_group,
+            execution_request=None,
+            resume_binding=None,
         )
         assert result.ok is True
         assert result.value == "codex output"
@@ -623,11 +634,56 @@ class TestWorkerPoolSubmitComplete:
             sandbox="workspace-write",
             approval="never",
             process_tracker=subprocess_registry.track_process_group,
+            execution_request=None,
+            resume_binding=None,
         )
         run.assert_not_called()
         assert result.ok is True
         assert result.value == "continued"
         assert result.session_id == "saved-codex-session"
+
+    def test_pi_agent_job_uses_its_binding_instead_of_a_raw_resume_id(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """Worker dispatch preserves Pi's validated resume identity and request."""
+        request = ExecutionRequest(
+            AgentRole.PR_REVIEWER,
+            AgentOperation.PR_REVIEW,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        binding = create_pi_binding(
+            session_id="saved-pi-session",
+            cwd=Path("/tmp"),
+            role=AgentRole.PR_REVIEWER,
+            model="opus-4-8",
+        )
+        job = _agent_job(
+            agent="pi",
+            execution_request=request,
+            resume_binding=binding,
+        )
+        session_result = AgentRunResult(
+            stdout="continued",
+            stderr="",
+            session_id=binding.session_id,
+            session_binding=binding,
+        )
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="pi"),
+            patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
+            patch(f"{_WP}.run_agent_session") as run,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _handle, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert resume.call_args.kwargs["session_id"] == binding.session_id
+        assert resume.call_args.kwargs["execution_request"] == request
+        assert resume.call_args.kwargs["resume_binding"] == binding
+        run.assert_not_called()
 
     def test_resumed_read_only_agent_job_preserves_its_sandbox(
         self,

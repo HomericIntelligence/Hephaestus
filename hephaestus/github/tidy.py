@@ -26,6 +26,7 @@ from typing import Any
 from hephaestus.agents.runtime import (
     add_agent_argument,
     direct_agent_model,
+    reject_pi_unsupported_surface,
     resolve_agent,
     run_agent_text,
     uses_direct_agent_runner,
@@ -375,6 +376,10 @@ async def _dispatch_swarm(
 def _run_direct_rebase_agent(agent: str, prompt: str, branch: str, repo_path: Path) -> str:
     """Run one direct rebase-fix agent and return its status marker."""
     try:
+        reject_pi_unsupported_surface(
+            agent,
+            "tidy rebase agents are Pi N/A until Git mutation is host-owned",
+        )
         result = run_agent_text(
             agent=agent,
             prompt=prompt,

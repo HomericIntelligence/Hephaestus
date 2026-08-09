@@ -57,7 +57,7 @@ def _agents_authenticated_by_default(
     unauthenticated/uninstalled path can override with their own monkeypatch
     (last-writer-wins).
     """
-    if request.module.__name__.endswith("agents.test_runtime"):
+    if request.module.__name__.endswith(("agents.test_runtime", "agents.test_execution_policy")):
         return
     if request.node.get_closest_marker("contract"):
         return
@@ -66,7 +66,8 @@ def _agents_authenticated_by_default(
         lambda _agent: True,
     )
 
-    def _stub_resolve_agent(agent: str | None) -> str:
+    def _stub_resolve_agent(agent: str | None, *, cwd: Path | None = None) -> str:
+        del cwd
         return agent if agent is not None else "claude"
 
     # Patch at the runtime module and at every automation module that imported

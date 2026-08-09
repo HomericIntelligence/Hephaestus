@@ -4,6 +4,7 @@ from typing import Any, cast
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_sessions import store_agent_session_result
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
 from .guarded_github import guarded_pipeline_job, guarded_stage_context
@@ -741,13 +742,11 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._park_resumable(item)
             return
 
-        # Direct runners mint an opaque id on the first turn.  Keep it under
-        # the logical role rather than a round number so the next reviewer or
-        # writer turn resumes the same compacted conversation.
-        if isinstance(handle.job, AgentJob) and result.ok and result.session_id:
-            session_key = handle.job.session_agent or handle.job.agent
-            item.session_ids[session_key] = result.session_id
-
+        if isinstance(handle.job, AgentJob):
+            session_error = store_agent_session_result(item, handle.job, result)
+            if session_error is not None:
+                self._finish(item, passed=False, reason=session_error)
+                return
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         try:

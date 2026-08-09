@@ -9,6 +9,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
+    require_supported_direct_surface,
     run_agent_session,
     uses_direct_agent_runner,
 )
@@ -57,6 +58,12 @@ class CIFixFlow:
 
     def run_advise(self, issue_number: int) -> str:
         """Pull prior learnings from Mnemosyne before a CI-fix loop."""
+        require_supported_direct_surface(
+            self._options().agent,
+            surface="legacy-ci-fix",
+            pi_supported=False,
+            reason="use the queue-based drive-green wrapper for scoped Pi execution",
+        )
         issue_data = self._gh_issue_json(issue_number)
         issue_title = issue_data.get("title", f"Issue #{issue_number}")
         issue_body = issue_data.get("body", "")
