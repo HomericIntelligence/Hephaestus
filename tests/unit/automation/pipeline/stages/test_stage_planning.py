@@ -28,10 +28,9 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
-    archived_new_plan,
-    archived_old_plan,
     is_pending_review,
     journal_snapshot,
+    plan_fingerprint,
     render_current_plan,
     render_current_review,
 )
@@ -258,21 +257,28 @@ class TestPlanningStageEnter:
     ) -> None:
         """A forced revision resumes from an interrupted journal transaction."""
 
-        class FailReviewArchiveOnce(FakeStageGitHub):
+        class FailReviewUpsertOnce(FakeStageGitHub):
             failed = False
 
-            def append_issue_comment(
+            def upsert_issue_comment(
                 self,
                 issue_number: int,
                 marker: str,
                 body: str,
+                *,
+                legacy_marker: str | None = None,
             ) -> None:
-                if marker.endswith("kind=review -->") and not self.failed:
+                if marker == PLAN_REVIEW_CANONICAL_MARKER and not self.failed:
                     self.failed = True
-                    raise RuntimeError("injected review archive failure")
-                super().append_issue_comment(issue_number, marker, body)
+                    raise RuntimeError("injected review upsert failure")
+                super().upsert_issue_comment(
+                    issue_number,
+                    marker,
+                    body,
+                    legacy_marker=legacy_marker,
+                )
 
-        github = FailReviewArchiveOnce(
+        github = FailReviewUpsertOnce(
             labels=[STATE_PLAN_GO],
             open_pr=456,
             has_plan=True,
@@ -289,7 +295,7 @@ class TestPlanningStageEnter:
         assert stage.on_enter(first, ctx) is None
         first.state = "VERIFY"
         first.payload["plan_text"] = "Plan v2"
-        with pytest.raises(RuntimeError, match="injected review archive failure"):
+        with pytest.raises(RuntimeError, match="injected review upsert failure"):
             stage.step(first, ctx)
 
         restarted = make_work_item(issue=40, state="ENTER")
@@ -302,14 +308,9 @@ class TestPlanningStageEnter:
         assert snapshot.current_plan == "Plan v2"
         assert is_pending_review(snapshot.current_review, revision=2)
 
-        history = {
-            (artifact.revision, artifact.kind): artifact.body for artifact in snapshot.history
-        }
-        assert set(history) == {(1, "plan"), (1, "review")}
-        assert archived_old_plan(history[(1, "plan")]) == "Plan v1"
-        assert archived_new_plan(history[(1, "plan")]) == "Plan v2"
-        assert "Approved." in history[(1, "review")]
-        immutable_history = dict(history)
+        assert snapshot.history == ()
+        assert snapshot.prior_plan_fingerprints == (plan_fingerprint("Plan v1"),)
+        immutable_fingerprints = snapshot.prior_plan_fingerprints
 
         planning_outcome = stage.step(restarted, ctx)
         assert isinstance(planning_outcome, StageOutcome)
@@ -327,10 +328,9 @@ class TestPlanningStageEnter:
         assert isinstance(review_request.job, AgentJob)
         assert review_request.job.descr == "review"
         assert review_request.job.prompt_kwargs["plan_text"] == "Plan v2"
-        assert {
-            (artifact.revision, artifact.kind): artifact.body
-            for artifact in journal_snapshot(github.issue_comments(40)).history
-        } == immutable_history
+        final_snapshot = journal_snapshot(github.issue_comments(40))
+        assert final_snapshot.history == ()
+        assert final_snapshot.prior_plan_fingerprints == immutable_fingerprints
 
     def test_force_plan_go_without_canonical_plan_starts_initial_plan(
         self,
