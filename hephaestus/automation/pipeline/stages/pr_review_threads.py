@@ -509,7 +509,7 @@ def _normalize_remediation_threads(
         # defect rather than trying the original fix again.
         if isinstance(comments, list) and len(comments) > 1:
             rendered_comments: list[str] = []
-            for comment in comments:
+            for comment in comments[1:]:
                 if not isinstance(comment, dict):
                     continue
                 author = str(comment.get("author") or "unknown reviewer").strip()
