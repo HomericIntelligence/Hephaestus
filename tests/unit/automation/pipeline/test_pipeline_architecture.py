@@ -23,6 +23,8 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 
+import pytest
+
 import hephaestus
 import hephaestus.automation.github_api as github_api
 from hephaestus.automation.pipeline.github_jobs import (
@@ -268,20 +270,23 @@ def test_guard_scope_excludes_coordinator_neutral_stage_github_calls(
     assert _imported_mutators(path) == {"gh_issue_add_labels"}
 
 
-def test_legacy_auto_merge_coordinator_is_fail_closed() -> None:
-    """Compatibility drive-green code cannot bypass the queue review path (#2054)."""
-    path = _AUTOMATION / "auto_merge_coordinator.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    method = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "enable_auto_merge"
-    )
-    calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
-    assert not any(
-        isinstance(call.func, ast.Attribute) and call.func.attr == "_gh_call" for call in calls
-    )
-    assert any(isinstance(node, ast.Constant) and node.value is False for node in ast.walk(method))
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "_followup_phase.py",
+        "auto_merge_coordinator.py",
+        "ci_fix_contract.py",
+        "ci_fix_flow.py",
+        "ci_fix_orchestrator.py",
+        "ci_fix_push_guard.py",
+        "ci_fix_sessions.py",
+        "ci_run_coordinator.py",
+        "drive_green_state.py",
+    ],
+)
+def test_retired_pre_pipeline_coordinators_are_removed(module_name: str) -> None:
+    """Retired orchestration must not inflate coverage or revive obsolete behavior."""
+    assert not (_AUTOMATION / module_name).exists()
 
 
 def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:

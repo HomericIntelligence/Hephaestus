@@ -2,13 +2,10 @@
 
 The phase modules split into three categories:
 
-- **Self-agent phases** (`implementer`, `ci_driver`) own one long-lived
+- **Self-agent phases** (`implementer`) own one long-lived
   session identity — each passes its dedicated ``AGENT_*`` constant to
   ``invoke_claude_with_session`` so its session UUID is distinct from every
   other phase's AND stable across the stage (resumed, not recreated).
-  ``ci_driver`` owns Session 3 (``AGENT_CI_DRIVER``): drive-green polls CI,
-  runs its own fix sessions, and captures its own learnings on a transcript
-  independent of the implementer.
 These tests assert source-text properties (not runtime mock behavior)
 because constructing valid Options objects for every phase is brittle and
 orthogonal to what we want to guard: that the *wiring* is correct.
@@ -42,17 +39,6 @@ SELF_AGENT_PHASES: list[tuple[str, str, tuple[str, ...]]] = [
         "implementer.py",
         "AGENT_IMPLEMENTER",
         ("_implement_phase.py",),
-    ),
-    # ci_driver owns Session 3 (AGENT_CI_DRIVER): the live AGENT_CI_DRIVER
-    # imports moved into the extracted collaborators ci_fix_orchestrator (fix
-    # sessions) and post_merge_processor (post-green /learn + /compact) in the
-    # CIDriver decomposition (#1357 / refs #1179, #1289). ci_driver.py remains
-    # the orchestrating entry point; both run on a transcript independent of the
-    # implementer.
-    (
-        "ci_driver.py",
-        "AGENT_CI_DRIVER",
-        ("ci_fix_orchestrator.py", "post_merge_processor.py"),
     ),
 ]
 

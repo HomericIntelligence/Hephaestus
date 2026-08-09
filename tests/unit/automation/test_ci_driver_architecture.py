@@ -21,17 +21,7 @@ _BUDGETS = {
     # now lives in pipeline/stages/merge_wait.py, driven by run_pipeline. The
     # class body is docstring-only, with no methods.
     "hephaestus.automation.ci_driver.CIDriver": ClassBudget(20, 0, 0),
-    "hephaestus.automation.ci_run_coordinator.CIDriveRunCoordinator": ClassBudget(360, 8, 80),
-    "hephaestus.automation.ci_fix_flow.CIFixFlow": ClassBudget(260, 5, 80),
-    "hephaestus.automation.auto_merge_coordinator.AutoMergeCoordinator": ClassBudget(320, 8, 80),
-    "hephaestus.automation.drive_green_state.DriveGreenArmingCoordinator": ClassBudget(320, 7, 80),
-    "hephaestus.automation.drive_green_state.LastCIFixStore": ClassBudget(140, 4, 60),
     "hephaestus.automation.pr_discovery.PRDiscovery": ClassBudget(560, 14, 80),
-    # The façade is intentionally limited to construction and compatibility
-    # wiring. Session behavior and push safety live in the two collaborators.
-    "hephaestus.automation.ci_fix_orchestrator.CIFixOrchestrator": ClassBudget(320, 9, 60),
-    "hephaestus.automation.ci_fix_sessions.CIFixSessions": ClassBudget(420, 8, 80),
-    "hephaestus.automation.ci_fix_push_guard.CIFixPushGuard": ClassBudget(500, 9, 80),
 }
 
 

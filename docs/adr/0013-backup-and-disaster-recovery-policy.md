@@ -23,9 +23,9 @@ Concretely, the only durable local operational state the pipeline writes is the
 automation state directory `DEFAULT_STATE_DIR = "build/.issue_implementer"`
 (`hephaestus/automation/models.py:151`, created by `ensure_state_dir` at
 `hephaestus/automation/_review_utils.py:206-210`). It holds arming records
-`drive-green-armed-<issue>.json` (`hephaestus/automation/arming_state.py:67-68`)
-and CI-fix markers `last-ci-fix-<pr>.json`
-(`hephaestus/automation/drive_green_state.py:36-37`) plus per-stage logs.
+`drive-green-armed-<issue>.json` (`hephaestus/automation/arming_state.py`) plus
+per-stage logs. The retired pre-pipeline CI-fix marker store was removed when
+the queue became the sole orchestration path.
 Everything else is durable upstream on GitHub (issues, `state:*` labels, PRs,
 branches, signed tags — the automation loop already re-seeds from these, see
 [`../runbooks/automation-loop-crash.md`](../runbooks/automation-loop-crash.md))

@@ -11,7 +11,6 @@ _ISSUE_2371_FLOORS = {
     "automation/ci_driver.py",
     "automation/pr_discovery.py",
     "automation/ci_check_inspector.py",
-    "automation/ci_fix_orchestrator.py",
     "automation/post_merge_processor.py",
     "automation/loop_runner.py",
     "automation/loop_repo_manager.py",
