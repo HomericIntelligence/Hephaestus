@@ -206,6 +206,8 @@ def load_catalog(path: Path) -> PackageCatalog:
         )
         if tuple(athena.get("commands", ())) != REQUIRED_COMMANDS:
             raise ValueError("catalog Athena commands must preserve the accepted raw identifiers")
+        if _require_string(athena, "manifest_version", "catalog.packages.athena") != "0.4.0":
+            raise ValueError("catalog Athena manifest version must be 0.4.0")
     else:
         # Temporary compatibility for pre-#2516 acceptance evidence fixtures.
         package_data = _require_object(root.get("package"), "catalog.package")
