@@ -73,6 +73,65 @@ def test_delegation_is_na_until_a_child_policy_broker_is_available() -> None:
         intersect_child_policy(parent, requested)
 
 
+def test_child_policy_intersection_can_only_reduce_parent_capabilities() -> None:
+    """A brokered child keeps only capabilities granted by both policies."""
+    parent = ExecutionPolicy(
+        role=AgentRole.IMPLEMENTER,
+        operation=AgentOperation.ADDRESS_REVIEW,
+        permitted_lifecycles=frozenset({SessionLifecycle.START_NEW}),
+        filesystem=FilesystemMode.WORKTREE_RW,
+        builtins=frozenset({"read", "write"}),
+        skills=frozenset({"athena:pr-review", "shared"}),
+        subagent=True,
+        network=NetworkMode.CONSTRAINED_WEB_RELAY,
+    )
+    requested = ExecutionPolicy(
+        role=AgentRole.PR_REVIEWER,
+        operation=AgentOperation.PR_REVIEW,
+        permitted_lifecycles=frozenset({SessionLifecycle.ONE_SHOT}),
+        filesystem=FilesystemMode.CHECKOUT_RO,
+        builtins=frozenset({"read", "bash"}),
+        skills=frozenset({"athena:pr-review", "ungranted"}),
+        subagent=True,
+        network=NetworkMode.CONSTRAINED_WEB_RELAY,
+    )
+
+    child = intersect_child_policy(parent, requested)
+
+    assert child.filesystem is FilesystemMode.CHECKOUT_RO
+    assert child.builtins == frozenset({"read"})
+    assert child.skills == frozenset({"athena:pr-review"})
+    assert child.subagent is False
+    assert child.network is NetworkMode.CONSTRAINED_WEB_RELAY
+
+
+def test_child_policy_intersection_rejects_filesystem_widening() -> None:
+    """A child cannot exchange a writable worktree for another writable root."""
+    parent = ExecutionPolicy(
+        role=AgentRole.IMPLEMENTER,
+        operation=AgentOperation.IMPLEMENT,
+        permitted_lifecycles=frozenset({SessionLifecycle.START_NEW}),
+        filesystem=FilesystemMode.WORKTREE_RW,
+        builtins=frozenset({"read", "write"}),
+        skills=frozenset(),
+        subagent=True,
+        network=NetworkMode.PROVIDER_RELAY,
+    )
+    requested = ExecutionPolicy(
+        role=AgentRole.LEARNER,
+        operation=AgentOperation.LEARN,
+        permitted_lifecycles=frozenset({SessionLifecycle.START_NEW}),
+        filesystem=FilesystemMode.MNEMOSYNE_RW,
+        builtins=frozenset({"read", "write"}),
+        skills=frozenset(),
+        subagent=False,
+        network=NetworkMode.PROVIDER_RELAY,
+    )
+
+    with pytest.raises(ExecutionPolicyError, match="would widen parent"):
+        intersect_child_policy(parent, requested)
+
+
 def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool() -> None:
     """Provider-visible flags cannot create a child execution path."""
     policy = resolve_policy(
