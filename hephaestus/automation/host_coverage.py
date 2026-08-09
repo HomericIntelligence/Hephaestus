@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from hephaestus.utils.helpers import run_subprocess
 
-_FAILURE_OUTPUT_TAIL_CHARS = 12_000
+_FAILURE_OUTPUT_TAIL_CHARS = 64_000
 _UNIT_COVERAGE_ARGS: tuple[str, ...] = (
     "-m",
     "pytest",

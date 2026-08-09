@@ -140,8 +140,9 @@ _HOST_VERIFICATION_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
 _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS = 20_000
 # Full unit coverage includes package-lifecycle tests that build wheels and
 # sdists alongside coverage data. Keep that bounded workload below a fixed
-# 256 MiB quota; smaller HFS+ images cannot hold its legitimate peak.
-_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 256 * 1024 * 1024
+# 512 MiB quota; the measured nested-runtime fixture peaks near 234 MiB, so
+# smaller HFS+ images leave insufficient filesystem and SQLite headroom.
+_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
 _HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 2_048  # POSIX ulimit -f units
 _HOST_VERIFICATION_CPU_MAX_S = 240
 _HOST_VERIFICATION_PROCESS_HEADROOM = 64
