@@ -96,6 +96,33 @@ def test_trusted_gh_executable_accepts_explicit_extra_root(
     assert _trusted_gh_executable(gh_root) == str(executable)
 
 
+def test_trusted_git_executable_accepts_discovered_binary_in_fixed_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directly discovered package-manager Git remains inside a fixed root."""
+    executable = Path("/opt/homebrew/Cellar/git/test/bin/git")
+    monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
+    monkeypatch.setattr(f"{_WP}.Path.resolve", lambda self, strict=True: self)
+    monkeypatch.setattr(f"{_WP}.Path.stat", lambda _self: MagicMock(st_mode=0o100555))
+    monkeypatch.setattr(f"{_WP}.Path.is_file", lambda _self: True)
+    monkeypatch.setattr(f"{_WP}.os.access", lambda _path, _mode: True)
+
+    assert _trusted_git_executable() == str(executable)
+
+
+def test_trusted_git_executable_rejects_discovered_binary_outside_fixed_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller-controlled PATH cannot introduce an arbitrary Git executable."""
+    executable = tmp_path / "git"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o555)
+    monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
+    monkeypatch.setattr(f"{_WP}._TRUSTED_GIT_CANDIDATES", ())
+
+    assert _trusted_git_executable() is None
+
+
 @pytest.fixture
 def shutdown_event() -> threading.Event:
     """Fresh shutdown event for each test."""

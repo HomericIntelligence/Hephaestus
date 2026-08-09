@@ -130,6 +130,7 @@ _TRUSTED_GIT_CANDIDATES = (
     Path("/usr/local/bin/git"),
     Path("/usr/bin/git"),
 )
+_TRUSTED_GIT_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
 _HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v6-shell-launchers"
 _HOST_RUNTIME_MANIFEST_HEADER = "sealed-runtime-file-manifest-v1"
@@ -1158,7 +1159,12 @@ def _trusted_uv_executable() -> str | None:
 
 def _trusted_git_executable() -> str | None:
     """Return an allowlisted, non-writable ``git`` binary for host checks."""
-    for candidate in _TRUSTED_GIT_CANDIDATES:
+    discovered = shutil.which("git")
+    candidates = (
+        *((Path(discovered),) if discovered is not None else ()),
+        *_TRUSTED_GIT_CANDIDATES,
+    )
+    for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)
             mode = resolved.stat().st_mode
@@ -1167,6 +1173,8 @@ def _trusted_git_executable() -> str | None:
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             continue
         if mode & 0o022:
+            continue
+        if not any(resolved.is_relative_to(root) for root in _TRUSTED_GIT_ROOTS):
             continue
         return str(resolved)
     return None
