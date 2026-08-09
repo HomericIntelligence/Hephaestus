@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from hephaestus.utils.helpers import run_subprocess
 
+_FAILURE_OUTPUT_TAIL_CHARS = 12_000
 _UNIT_COVERAGE_ARGS: tuple[str, ...] = (
     "-m",
     "pytest",
@@ -31,12 +32,13 @@ _COVERAGE_POLICY_ARGS: tuple[str, ...] = (
 
 
 def _run(args: Sequence[str]) -> int:
-    """Run one fixed Python-module command and preserve its captured output."""
+    """Run one fixed command, emitting bounded diagnostics only on failure."""
     result = run_subprocess([sys.executable, *args], check=False)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        if result.stdout:
+            print(result.stdout[-_FAILURE_OUTPUT_TAIL_CHARS:], end="")
+        if result.stderr:
+            print(result.stderr[-_FAILURE_OUTPUT_TAIL_CHARS:], end="", file=sys.stderr)
     return result.returncode
 
 
