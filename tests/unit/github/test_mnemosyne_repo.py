@@ -1,202 +1,151 @@
-"""Tests for hephaestus.github.mnemosyne_repo.
-
-The resolver picks which ``owner/Mnemosyne`` to clone, push to, and PR
-against. All ``gh`` calls are mocked at the module namespace so no live network
-or ``gh`` auth is required.
-"""
+"""Tests for Athena-compatible Mnemosyne dependency resolution."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
-import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from hephaestus.github import mnemosyne_repo
 from hephaestus.github.mnemosyne_repo import (
+    LEGACY_OWNER_ENV_VAR,
+    OWNER_ENV_VAR,
     UPSTREAM_SLUG,
+    CurrentRepositoryMetadata,
+    MnemosyneResolutionError,
     MnemosyneTarget,
-    fork_upstream,
-    gh_authenticated_login,
-    remote_repo_exists,
+    MnemosyneTrustBasis,
+    RepositoryMetadata,
     resolve_mnemosyne_target,
+    validate_owner,
 )
 
-
-def _completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
-    m = MagicMock()
-    m.returncode = returncode
-    m.stdout = stdout
-    m.stderr = stderr
-    return m
+SHA = "a" * 40
+UPSTREAM_METADATA = RepositoryMetadata(
+    slug=UPSTREAM_SLUG,
+    default_branch="main",
+    head_sha=SHA,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clear_owner_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure the HEPH_MNEMOSYNE_OWNER override never leaks in from the host env."""
-    monkeypatch.delenv(mnemosyne_repo.OWNER_ENV_VAR, raising=False)
+    monkeypatch.delenv(OWNER_ENV_VAR, raising=False)
+    monkeypatch.delenv(LEGACY_OWNER_ENV_VAR, raising=False)
 
 
-class TestGhAuthenticatedLogin:
-    """Tests for gh_authenticated_login()."""
-
-    def test_returns_login(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(0, "mvillmow\n")):
-            assert gh_authenticated_login() == "mvillmow"
-
-    def test_nonzero_returns_none(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(1, "", "no auth")):
-            assert gh_authenticated_login() is None
-
-    def test_empty_stdout_returns_none(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(0, "   \n")):
-            assert gh_authenticated_login() is None
-
-    def test_exception_returns_none(self) -> None:
-        with patch.object(
-            mnemosyne_repo, "gh_call", side_effect=subprocess.TimeoutExpired("gh", 10)
-        ):
-            assert gh_authenticated_login() is None
+def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
+    del missing_ok
+    if slug == UPSTREAM_SLUG:
+        return UPSTREAM_METADATA
+    return RepositoryMetadata(
+        slug=slug,
+        default_branch="trunk",
+        head_sha="b" * 40,
+        is_fork=True,
+        parent_full_name=UPSTREAM_SLUG,
+    )
 
 
-class TestRemoteRepoExists:
-    """Tests for remote_repo_exists()."""
-
-    def test_exists(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(0, '{"name":"x"}')):
-            assert remote_repo_exists("me/Mnemosyne") is True
-
-    def test_missing(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(1, "", "not found")):
-            assert remote_repo_exists("me/Mnemosyne") is False
-
-    def test_exception_returns_false(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", side_effect=RuntimeError("boom")):
-            assert remote_repo_exists("me/Mnemosyne") is False
+def test_validate_owner_rejects_slugs_and_unsafe_names() -> None:
+    assert validate_owner("good-owner") == "good-owner"
+    for owner in ("bad/owner", "-bad", "bad-", "bad--owner", "", "with space"):
+        with pytest.raises(MnemosyneResolutionError):
+            validate_owner(owner)
 
 
-class TestForkUpstream:
-    """Tests for fork_upstream()."""
+def test_explicit_owner_uses_new_env_var_and_skips_current_repo_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(OWNER_ENV_VAR, "acme")
 
-    def test_success(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(0)) as gh:
-            assert fork_upstream("me") is True
-        args = gh.call_args[0][0]
-        assert args[:2] == ["repo", "fork"]
-        assert UPSTREAM_SLUG in args
-        assert "--clone=false" in args
+    with (
+        patch.object(mnemosyne_repo, "fetch_current_repository_metadata") as current,
+        patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
+    ):
+        target = resolve_mnemosyne_target()
 
-    def test_failure_returns_false(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", return_value=_completed(1, "", "denied")):
-            assert fork_upstream("me") is False
+    assert target == MnemosyneTarget(
+        owner="acme",
+        slug="acme/Mnemosyne",
+        is_fork_of_upstream=True,
+        default_branch="trunk",
+        head_sha="b" * 40,
+        trust_basis=MnemosyneTrustBasis.EXPLICIT_OVERRIDE,
+    )
+    current.assert_not_called()
 
-    def test_exception_returns_false(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_call", side_effect=OSError("boom")):
-            assert fork_upstream("me") is False
+
+def test_invalid_explicit_owner_is_fatal() -> None:
+    with pytest.raises(MnemosyneResolutionError, match="invalid Mnemosyne owner"):
+        resolve_mnemosyne_target(override_owner="bad/owner")
 
 
-class TestResolveMnemosyneTarget:
-    """Tests for resolve_mnemosyne_target() precedence ladder."""
+def test_maintained_organization_fork_wins_before_canonical_upstream() -> None:
+    current = CurrentRepositoryMetadata(
+        owner="HomericLab",
+        owner_type="Organization",
+        viewer_permission="WRITE",
+    )
 
-    def test_upstream_login_clones_upstream_no_fork(self) -> None:
-        with (
-            patch.object(
-                mnemosyne_repo, "gh_authenticated_login", return_value="HomericIntelligence"
-            ),
-            patch.object(mnemosyne_repo, "remote_repo_exists") as exists,
-            patch.object(mnemosyne_repo, "fork_upstream") as fork,
-        ):
-            target = resolve_mnemosyne_target()
-        assert target == MnemosyneTarget(
-            owner="HomericIntelligence",
-            slug=UPSTREAM_SLUG,
-            is_fork_of_upstream=False,
-        )
-        exists.assert_not_called()
-        fork.assert_not_called()
+    with (
+        patch.object(mnemosyne_repo, "fetch_current_repository_metadata", return_value=current),
+        patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
+    ):
+        target = resolve_mnemosyne_target()
 
-    def test_existing_user_fork_used_no_fork_created(self) -> None:
-        with (
-            patch.object(mnemosyne_repo, "gh_authenticated_login", return_value="mvillmow"),
-            patch.object(mnemosyne_repo, "remote_repo_exists", return_value=True),
-            patch.object(mnemosyne_repo, "fork_upstream") as fork,
-        ):
-            target = resolve_mnemosyne_target()
-        assert target.slug == "mvillmow/Mnemosyne"
-        assert target.is_fork_of_upstream is True
-        fork.assert_not_called()
+    assert target.slug == "HomericLab/Mnemosyne"
+    assert target.trust_basis == MnemosyneTrustBasis.MAINTAINED_ORGANIZATION_FORK
+    assert target.default_branch == "trunk"
+    assert target.head_sha == "b" * 40
 
-    def test_missing_fork_is_created(self) -> None:
-        with (
-            patch.object(mnemosyne_repo, "gh_authenticated_login", return_value="mvillmow"),
-            patch.object(mnemosyne_repo, "remote_repo_exists", return_value=False),
-            patch.object(mnemosyne_repo, "fork_upstream", return_value=True) as fork,
-        ):
-            target = resolve_mnemosyne_target()
-        assert target.slug == "mvillmow/Mnemosyne"
-        assert target.is_fork_of_upstream is True
-        fork.assert_called_once_with("mvillmow")
 
-    def test_fork_disabled_falls_back_to_upstream(self) -> None:
-        with (
-            patch.object(mnemosyne_repo, "gh_authenticated_login", return_value="mvillmow"),
-            patch.object(mnemosyne_repo, "remote_repo_exists", return_value=False),
-            patch.object(mnemosyne_repo, "fork_upstream") as fork,
-        ):
-            target = resolve_mnemosyne_target(allow_fork=False)
-        assert target.slug == UPSTREAM_SLUG
-        assert target.is_fork_of_upstream is False
-        fork.assert_not_called()
+@pytest.mark.parametrize(
+    "current",
+    [
+        CurrentRepositoryMetadata("mvillmow", "User", "ADMIN"),
+        CurrentRepositoryMetadata("HomericLab", "Organization", "READ"),
+    ],
+)
+def test_ineligible_current_owner_falls_back_to_canonical_upstream(
+    current: CurrentRepositoryMetadata,
+) -> None:
+    with (
+        patch.object(mnemosyne_repo, "fetch_current_repository_metadata", return_value=current),
+        patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
+    ):
+        target = resolve_mnemosyne_target()
 
-    def test_fork_failure_falls_back_to_upstream(self) -> None:
-        with (
-            patch.object(mnemosyne_repo, "gh_authenticated_login", return_value="mvillmow"),
-            patch.object(mnemosyne_repo, "remote_repo_exists", return_value=False),
-            patch.object(mnemosyne_repo, "fork_upstream", return_value=False),
-        ):
-            target = resolve_mnemosyne_target()
-        assert target.slug == UPSTREAM_SLUG
+    assert target.slug == UPSTREAM_SLUG
+    assert target.trust_basis == MnemosyneTrustBasis.CANONICAL_UPSTREAM
+    assert target.head_sha == SHA
 
-    def test_no_login_falls_back_to_upstream(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_authenticated_login", return_value=None):
-            target = resolve_mnemosyne_target()
-        assert target.slug == UPSTREAM_SLUG
-        assert target.is_fork_of_upstream is False
 
-    def test_explicit_override_owner_wins(self) -> None:
-        with (
-            patch.object(mnemosyne_repo, "gh_authenticated_login") as login,
-            patch.object(mnemosyne_repo, "remote_repo_exists") as exists,
-        ):
-            target = resolve_mnemosyne_target(override_owner="acme")
-        assert target == MnemosyneTarget(
-            owner="acme",
-            slug="acme/Mnemosyne",
-            is_fork_of_upstream=True,
-        )
-        login.assert_not_called()
-        exists.assert_not_called()
+def test_missing_or_unproven_organization_fork_falls_back_to_canonical_upstream() -> None:
+    current = CurrentRepositoryMetadata("HomericLab", "Organization", "MAINTAIN")
 
-    def test_env_override_owner_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(mnemosyne_repo.OWNER_ENV_VAR, "acme")
-        with patch.object(mnemosyne_repo, "gh_authenticated_login") as login:
-            target = resolve_mnemosyne_target()
-        assert target.slug == "acme/Mnemosyne"
-        login.assert_not_called()
+    def metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
+        if slug == "HomericLab/Mnemosyne":
+            assert missing_ok is True
+            return None
+        return UPSTREAM_METADATA
 
-    def test_override_equal_to_upstream_is_not_marked_fork(self) -> None:
-        target = resolve_mnemosyne_target(override_owner="HomericIntelligence")
-        assert target.slug == UPSTREAM_SLUG
-        assert target.is_fork_of_upstream is False
+    with (
+        patch.object(mnemosyne_repo, "fetch_current_repository_metadata", return_value=current),
+        patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=metadata),
+    ):
+        target = resolve_mnemosyne_target()
 
-    def test_invalid_override_is_ignored(self) -> None:
-        # An override that is already a slug (contains "/") is rejected; falls
-        # through to gh login resolution.
-        with patch.object(mnemosyne_repo, "gh_authenticated_login", return_value=None):
-            target = resolve_mnemosyne_target(override_owner="bad/owner")
-        assert target.slug == UPSTREAM_SLUG
+    assert target.slug == UPSTREAM_SLUG
+    assert target.trust_basis == MnemosyneTrustBasis.CANONICAL_UPSTREAM
 
-    def test_login_with_slash_is_ignored(self) -> None:
-        with patch.object(mnemosyne_repo, "gh_authenticated_login", return_value="weird/login"):
-            target = resolve_mnemosyne_target()
-        assert target.slug == UPSTREAM_SLUG
+
+def test_github_api_failure_is_fatal_when_trust_cannot_be_decided() -> None:
+    with patch.object(
+        mnemosyne_repo,
+        "fetch_current_repository_metadata",
+        side_effect=MnemosyneResolutionError("auth failed"),
+    ):
+        with pytest.raises(MnemosyneResolutionError, match="auth failed"):
+            resolve_mnemosyne_target()

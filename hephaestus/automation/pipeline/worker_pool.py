@@ -42,6 +42,10 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
+from hephaestus.automation.pipeline.athena_skill_jobs import (
+    AthenaSkillExecutor,
+    AthenaSkillJob,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     GitHubJobRunner,
@@ -1397,6 +1401,7 @@ class WorkerPool:
         lock_dir: Path | None = None,
         gh_extra_path_root: Path | None = None,
         github_job_runner: GitHubJobRunner | None = None,
+        athena_skill_executor: AthenaSkillExecutor | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1412,6 +1417,7 @@ class WorkerPool:
             gh_extra_path_root: Explicit CLI-provided root that may supply
                 only ``bin/gh`` for checkout synchronization.
             github_job_runner: Closed worker-side GitHub operation runner.
+            athena_skill_executor: Closed host-owned Athena skill executor.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1427,6 +1433,7 @@ class WorkerPool:
         self._lock_dir = lock_dir
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
+        self._athena_skill_executor = athena_skill_executor
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
@@ -1467,7 +1474,13 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | GuardedGitHubJob | CompactJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | GuardedGitHubJob
+        | CompactJob
+        | AthenaSkillJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -1578,7 +1591,13 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | GuardedGitHubJob | CompactJob,
+        job: AgentJob
+        | BuildTestJob
+        | GitJob
+        | GitHubJob
+        | GuardedGitHubJob
+        | CompactJob
+        | AthenaSkillJob,
         claim_key: str = "",
         claim_stage: str = "",
     ) -> JobResult:
@@ -1612,7 +1631,9 @@ class WorkerPool:
             )
         else:
             try:
-                if isinstance(job, AgentJob):
+                if isinstance(job, AthenaSkillJob):
+                    result = self._run_athena_skill(job)
+                elif isinstance(job, AgentJob):
                     result = self._run_agent(job)
                 elif isinstance(job, BuildTestJob):
                     result = self._run_build_test(job)
@@ -1668,6 +1689,15 @@ class WorkerPool:
         with self._repo_lock(operation.repo):
             receipt = self._github_job_runner.run(job)
         return JobResult(ok=True, value=receipt)
+
+    def _run_athena_skill(self, job: AthenaSkillJob) -> JobResult:
+        """Execute a host-owned Athena skill job through the injected executor."""
+        if self._athena_skill_executor is None:
+            raise RuntimeError("AthenaSkillJob submitted without an AthenaSkillExecutor")
+        result = self._athena_skill_executor.execute(job.request)
+        if not result.ok:
+            return JobResult(ok=False, value=result, error=result.error)
+        return JobResult(ok=True, value=result)
 
     def _run_agent(self, job: AgentJob) -> JobResult:
         """Run an agent job (Claude or other runtime).

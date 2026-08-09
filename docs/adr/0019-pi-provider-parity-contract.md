@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-07-29
 - Tracks: #2514
+- Supersession note: ADR-0025 records the implemented Athena/Mnemosyne receipt,
+  resolver, corpus, learning-delivery, and Pi skill-command details.
 
 ## Context
 

@@ -86,10 +86,8 @@ def _parse_included_http_response(
 ) -> tuple[int | None, dict[str, Any] | None, bool]:
     """Parse the final status and JSON object from ``gh api --include`` output.
 
-    A missing HTTP status means the CLI did not provide enough evidence to
-    classify the request. A received non-object or invalid body is explicitly
-    malformed so callers fail closed rather than treating it as transport
-    ambiguity.
+    A missing HTTP status is ambiguous. Malformed or non-object JSON is
+    fail-closed instead of being treated as transport ambiguity.
     """
     matches = list(_HTTP_STATUS_RE.finditer(stdout))
     if not matches:
@@ -211,8 +209,10 @@ def _has_no_explicit_pull_request_bypasses(protection: dict[str, Any]) -> bool:
 
 
 def _compat(name: str) -> Any:
-    """Resolve a patchable façade dependency at call time."""
-    return getattr(sys.modules["hephaestus.automation.pipeline_github"], name)
+    facade = sys.modules.get("hephaestus.automation.pipeline_github")
+    return getattr(
+        facade or __import__("hephaestus.automation.pipeline_github", fromlist=["*"]), name
+    )
 
 
 class _CompatCallable:

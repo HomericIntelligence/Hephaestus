@@ -18,9 +18,12 @@ DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
         "__pycache__",
         ".tox",
         ".venv",
+        ".pixi",
         ".pytest_cache",
+        ".tmp",
         "dist",
         "build",
+        "fixtures",
         ".mypy_cache",
         ".eggs",
     }

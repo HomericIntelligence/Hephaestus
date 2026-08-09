@@ -106,6 +106,9 @@ from hephaestus.automation.issue_waves import (
     wave_entry_from_facts,
 )
 from hephaestus.automation.models import IssueInfo
+from hephaestus.automation.pipeline.athena_executor_scope import (
+    pipeline_requires_athena_executor,
+)
 from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
@@ -320,23 +323,18 @@ class PipelineConfig:
     # Per-budget overrides applied on top of the ROUTES defaults by the
     # coordinator's budget accessor.
     budget_overrides: dict[str, int] = field(default_factory=dict)
-    # Configurable argv for the optional pre-PR test gate. The
-    # implementation stage reads this vector instead of hardcoding the test
-    # command so repositories with non-standard test layouts can opt in.
+    # Optional pre-PR test gate argv; repositories can opt into custom layouts.
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     run_pre_pr_tests: bool = False
     serialize_file_overlap: bool = True
-    # Zero disables the optional local observability server. Values are
-    # validated at the CLI boundary and again by MetricsHTTPServer on use.
+    # Zero disables the optional local observability server.
     metrics_port: int = 0
-    # Alerts are emitted only from measured queue depths and circuit-breaker
-    # snapshots. Keep the threshold explicit and non-negative.
+    # Alerts are emitted only from measured queue depths and breaker snapshots.
     alert_queue_depth_threshold: int = 100
-    # A product-layer caller supplies the library breaker snapshot reader. The
-    # coordinator remains a zero-I/O pipeline module and never imports the
-    # resilience capability directly.
+    # Product-layer breaker snapshot reader; keeps this module zero-I/O.
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
+    athena_receipt_dir: Path | None = None
     # Recent local diagnostic retention.  These limits intentionally do not
     # alter the GitHub journal or restart behavior.
     event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY
@@ -361,6 +359,7 @@ class PipelineConfig:
     # the historical fields so existing positional construction keeps its
     # third argument as ``repo_source_factory``.
     issue_limit: int | None = None
+    enable_learn: bool = True
 
 
 def _work_window(config: PipelineConfig) -> int:
@@ -496,5 +495,5 @@ __all__ = [
     'OrderedDict', 'Path', 'PipelineConfig', 'PipelineScope', 'PlanReviewStage', 'PlanningStage', 'PrReviewStage', 'PreservedWorktree', 'PromptCatalog', 'RepoIssueSource', 'RepoStage', 'Route', 'RunStats', 'Stage', 'StageContext', 'StageEvent', 'StageGitHub', 'StageName',  # noqa: E501
     'StageOutcome', 'StageQueue', 'StageQueueLease', 'StageStepResult', 'TemplateNotFound', 'TerminalSummary', 'WaveLease', 'WorkItem', '_ActiveRepoIssueSource', '_DirectIssueSource', '_DirectPrSource', '_Paths', '_PendingHandoff', '_RepoEntrySource', '_StageRunConfig',  # noqa: E501
     '_admission', '_budget_lookup', '_effective_repo_root', '_json_safe', '_preflight_prompt_catalog', '_seeding', '_work_window', 'annotations', 'dataclass', 'deque', 'encode_stage_event', 'field', 'heapq', 'is_epic', 'is_full_commit_sha', 'is_inspection_only_detached_push_failure', 'json',  # noqa: E501
-    'latest_logical_items', 'list_direct_review_recovery_paths', 'logger', 'logging', 'print_summary', 'product_to_work_item', 'queue_mod', 'replace', 'signal', 'suppress', 'threading', 'time', 'uuid', 'wave_entry_from_facts']  # noqa: E501
+    'latest_logical_items', 'list_direct_review_recovery_paths', 'logger', 'logging', 'pipeline_requires_athena_executor', 'print_summary', 'product_to_work_item', 'queue_mod', 'replace', 'signal', 'suppress', 'threading', 'time', 'uuid', 'wave_entry_from_facts']  # noqa: E501
 # fmt: on

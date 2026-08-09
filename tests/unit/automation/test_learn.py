@@ -64,28 +64,30 @@ class TestRunLearn:
             "mnemosyne_update_pr_numbers": [],
         }
 
-    def test_mnemosyne_update_evidence_extracts_pr_url_and_ref(self) -> None:
+    def test_mnemosyne_update_evidence_ignores_pr_like_model_text(self) -> None:
         evidence = mnemosyne_update_evidence(
             "Opened https://github.com/HomericIntelligence/Mnemosyne/pull/45 "
             "and referenced HomericIntelligence/Mnemosyne#46"
         )
 
-        assert evidence["mnemosyne_update_status"] == "confirmed"
-        assert evidence["mnemosyne_update_urls"] == [
-            "https://github.com/HomericIntelligence/Mnemosyne/pull/45"
-        ]
-        assert evidence["mnemosyne_update_pr_numbers"] == [46]
+        assert evidence["mnemosyne_update_status"] == "unverified"
+        assert evidence["mnemosyne_update_urls"] == []
+        assert evidence["mnemosyne_update_pr_numbers"] == []
 
-    def test_mnemosyne_update_evidence_recognizes_fork_owner(self) -> None:
-        """A push to a user's fork (<login>/Mnemosyne) still counts."""
+    def test_mnemosyne_update_evidence_confirms_delivery_receipt(self) -> None:
         evidence = mnemosyne_update_evidence(
-            "Opened https://github.com/mvillmow/Mnemosyne/pull/7 "
-            "and referenced mvillmow/Mnemosyne#8"
+            {
+                "commit_sha": "a" * 40,
+                "readback_head_sha": "a" * 40,
+                "pr_url": "https://github.com/acme/Mnemosyne/pull/7",
+                "pr_number": 7,
+                "local_only": False,
+            }
         )
 
         assert evidence["mnemosyne_update_status"] == "confirmed"
-        assert evidence["mnemosyne_update_urls"] == ["https://github.com/mvillmow/Mnemosyne/pull/7"]
-        assert evidence["mnemosyne_update_pr_numbers"] == [8]
+        assert evidence["mnemosyne_update_urls"] == ["https://github.com/acme/Mnemosyne/pull/7"]
+        assert evidence["mnemosyne_update_pr_numbers"] == [7]
 
     def test_build_learn_prompt_uses_user_facing_command(self) -> None:
         prompt = build_learn_prompt("Capture what happened.")

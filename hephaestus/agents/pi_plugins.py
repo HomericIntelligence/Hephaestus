@@ -1086,11 +1086,19 @@ class PiPreflightResult:
     remediation: str
     detail: str = ""
     inventory: InventoryResult | None = None
+    athena_command_receipts: tuple[PiAthenaCommandReceipt, ...] = ()
 
     @classmethod
     def ready_result(cls, inventory: InventoryResult | None = None) -> PiPreflightResult:
         """Construct the successful package-preflight result."""
-        return cls(True, "ready", "", inventory=inventory)
+        catalog = load_pi_package_catalog()
+        return cls(
+            True,
+            "ready",
+            "",
+            inventory=inventory,
+            athena_command_receipts=athena_command_receipts(catalog, inventory),
+        )
 
     def remediation_message(self) -> str:
         """Return an actionable operator-facing failure description."""
@@ -1098,6 +1106,54 @@ class PiPreflightResult:
             return "Pi package preflight is ready"
         detail = f" ({self.detail})" if self.detail else ""
         return f"Pi package preflight failed: {self.status}{detail}. {self.remediation}".strip()
+
+
+@dataclass(frozen=True)
+class PiAthenaCommandReceipt:
+    """Receipt proving one Athena command originates in the pinned package."""
+
+    command: str
+    package_key: str
+    package_root: str
+    repository: str
+    commit: str
+
+
+def athena_command_receipts(
+    catalog: PiPackageCatalog,
+    inventory: InventoryResult | None,
+) -> tuple[PiAthenaCommandReceipt, ...]:
+    """Return command receipts for the catalog-pinned Athena package."""
+    package = next((item for item in catalog.packages if item.key == "athena"), None)
+    if package is None or inventory is None or not inventory.ready:
+        return ()
+    root = inventory.roots.get("athena")
+    if root is None:
+        return ()
+    return tuple(
+        PiAthenaCommandReceipt(
+            command=command,
+            package_key="athena",
+            package_root=str(root),
+            repository=package.identity,
+            commit=package.pin,
+        )
+        for command in package.commands
+    )
+
+
+def prove_athena_skill_command(
+    command: str, preflight: PiPreflightResult
+) -> PiAthenaCommandReceipt:
+    """Return a receipt for one supported Athena command or fail closed."""
+    if not preflight.ready:
+        raise ValueError(preflight.remediation_message())
+    matches = [
+        receipt for receipt in preflight.athena_command_receipts if receipt.command == command
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"Athena command {command!r} is not proven by Pi preflight")
+    return matches[0]
 
 
 def _preflight_failure(

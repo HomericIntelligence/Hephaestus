@@ -20,7 +20,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from hephaestus.agents.pi_plugins import preflight_pi_environment
+from hephaestus.agents.pi_plugins import (
+    PiPreflightResult,
+    preflight_pi_environment,
+    prove_athena_skill_command,
+)
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -66,6 +70,10 @@ PI_SMOKE_LOG_DIR_PREFIX = "pi-smoke-"
 PI_RUNTIME_TEMP_ROOT_NAME = "hephaestus-pi-runtime"
 _PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
+PI_ATHENA_SKILL_COMMANDS = {
+    "advise": "skill:advise",
+    "learn": "skill:learn",
+}
 PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
     "--mode",
     "json",
@@ -1410,6 +1418,18 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
 
 
+def pi_athena_invocation_args(kind: str, preflight: PiPreflightResult) -> tuple[str, ...]:
+    """Return explicit Pi grants for one receipt-proven Athena skill command."""
+    try:
+        command = PI_ATHENA_SKILL_COMMANDS[kind]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Pi Athena skill kind: {kind}") from exc
+    receipt = prove_athena_skill_command(command, preflight)
+    if receipt.package_key != "athena":
+        raise ValueError(f"Athena command {command!r} was not proven from Athena")
+    return ("--tools", PI_READ_ONLY_TOOLS, "--commands", command)
+
+
 def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
     """Return the minimized, privacy-enforcing environment for Pi subprocesses."""
     # The public smoke sentinel is only input to Hephaestus validation and
@@ -1644,6 +1664,30 @@ def run_pi_session(
         timeout=timeout,
         model=model,
         sandbox=sandbox,
+        _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
+    )
+
+
+def run_pi_athena_skill(
+    kind: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    preflight: PiPreflightResult,
+    model: str = "",
+) -> AgentRunResult:
+    """Run one receipt-proven Athena skill command through Pi."""
+    _require_pi_automation_admission(cwd)
+    cmd = _pi_base_cmd()
+    cmd.extend(pi_athena_invocation_args(kind, preflight))
+    return _invoke_pi_session(
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox="workspace-write",
+        base_cmd=cmd,
         _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
 

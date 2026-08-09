@@ -85,7 +85,6 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.commit_policy import normalize_strict_conventional_title
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
-from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.implementation import (
     get_dirty_reused_worktree_decision_prompt,
     get_impl_resume_feedback_prompt,
@@ -93,7 +92,6 @@ from hephaestus.automation.prompts.implementation import (
 )
 from hephaestus.automation.prompts.pr_review import get_pr_description
 from hephaestus.automation.session_naming import (
-    AGENT_ADVISE,
     AGENT_IMPLEMENTER,
     issue_auto_impl_branch_name,
 )
@@ -135,6 +133,9 @@ from ..scope_retraction import is_safe_scope_retraction_path, scope_retraction_p
 from .base import (
     GIT_JOB_TIMEOUT_S,
     AgentJob,
+    AthenaSkillJob,
+    AthenaSkillRequest,
+    AthenaSkillResult,
     BuildTestJob,
     Continue,
     Disposition,
@@ -697,30 +698,30 @@ class ImplementationStage(Stage):
             logger.info("implementation:%d: advise disabled; skipping", issue)
             return Continue(next_state=IMPLEMENT_WAIT)
         logger.info("implementation:%d: requesting advise job", issue)
-        job = AgentJob(
-            repo=item.repo,
-            issue=issue,
-            agent=agent_provider(ctx),
-            model=stage_model(ctx, "advise", advise_model),
-            prompt_builder=get_advise_prompt_builder(ctx.config.agent),
-            cwd=_worktree_path(item, ctx),
-            timeout_s=advise_claude_timeout(),
-            sandbox="read-only",
-            allowed_tools="Read,Glob,Grep",
-            session_agent=AGENT_ADVISE,
-            prompt_kwargs={
-                "issue_number": item.issue,
-                "issue_title": item.payload.get("issue_title", ""),
-                "issue_body": item.payload.get("issue_body", ""),
-                "marketplace_path": item.payload.get("marketplace_path", ""),
-            },
+        job = AthenaSkillJob(
+            request=AthenaSkillRequest(
+                kind="advise",
+                repo=item.repo,
+                issue=issue,
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "advise", advise_model),
+                cwd=_worktree_path(item, ctx),
+                timeout_s=advise_claude_timeout(),
+                payload={
+                    "issue_number": item.issue,
+                    "issue_title": item.payload.get("issue_title", ""),
+                    "issue_body": item.payload.get("issue_body", ""),
+                },
+            ),
             descr="advise",
         )
         return JobRequest(job, on_done_state=IMPLEMENT_WAIT)
 
-    def _implement_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _implement_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """IMPLEMENT_WAIT submits the implementation job when budget remains."""
         issue = _issue_number(item)
+        if item.payload.get("athena_advise_error"):
+            return StageOutcome(Disposition.FINISH_FAIL, "athena_advise_failed")
         entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
         if entry_outcome is not None:
             return entry_outcome
@@ -1175,8 +1176,15 @@ class ImplementationStage(Stage):
             return
 
         if item.state == ADVISE_WAIT:
-            if result.ok and result.value:
-                item.payload["advise_findings"] = result.value
+            if not result.ok:
+                item.payload["athena_advise_error"] = result.error or "advise failed"
+                return
+            if result.value:
+                if not isinstance(result.value, AthenaSkillResult) or not result.value.ok:
+                    item.payload["athena_advise_error"] = "invalid Athena advise result"
+                    return
+                item.payload["advise_findings"] = result.value.context
+                item.payload["athena_advise_receipt"] = result.value.receipt
             return
 
         if item.state == IMPLEMENT_WAIT:
