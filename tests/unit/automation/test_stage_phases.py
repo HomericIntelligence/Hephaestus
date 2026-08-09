@@ -23,6 +23,7 @@ from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advi
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
 from hephaestus.automation._stage_context import StageContext, StageMixin
+from hephaestus.automation.models import ImplementationPhase
 
 
 def _make_ctx(tmp_path: Path, **option_overrides: Any) -> StageContext:
@@ -336,3 +337,138 @@ def test_followup_cannot_resume_missing_provider_metadata(tmp_path: Path) -> Non
     state = SimpleNamespace(session_id="s", session_agent=None, issue_number=7)
 
     assert phase._can_resume_state_session(cast(Any, state)) is False
+
+
+def _followup_state(**overrides: Any) -> SimpleNamespace:
+    """Return mutable persisted-state data used by follow-up tests."""
+    values = {
+        "issue_number": 7,
+        "session_id": "session-7",
+        "session_agent": "claude",
+        "learn_completed": False,
+        "phase": ImplementationPhase.CREATING_PR,
+        "completed_at": None,
+        "worktree_path": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_followup_runs_learn_compaction_and_issue_discovery(tmp_path: Path) -> None:
+    """A resumable Claude session completes every enabled post-PR action."""
+    ctx = _make_ctx(tmp_path)
+    ctx.impl._save_state = mock.MagicMock()
+    ctx.runner._can_resume_state_session = mock.MagicMock(return_value=True)
+    ctx.runner._run_learn = mock.MagicMock(return_value=True)
+    ctx.runner._compact_implementer_session = mock.MagicMock()
+    ctx.runner._run_follow_up_issues = mock.MagicMock()
+    state = _followup_state()
+
+    FollowUpPhase(ctx)._run_post_pr_followup(7, tmp_path, cast(Any, state), slot_id=2)
+
+    ctx.runner._run_learn.assert_called_once_with(
+        "session-7", tmp_path, 7, 2, session_agent="claude"
+    )
+    ctx.runner._compact_implementer_session.assert_called_once_with(7, tmp_path)
+    ctx.runner._run_follow_up_issues.assert_called_once_with(
+        "session-7", tmp_path, 7, 2, session_agent="claude"
+    )
+    assert state.learn_completed is True
+    assert state.phase is ImplementationPhase.COMPLETED
+    assert state.completed_at is not None
+
+
+def test_followup_direct_agent_skips_claude_compaction(tmp_path: Path) -> None:
+    """Direct-agent sessions learn successfully without Claude compaction."""
+    ctx = _make_ctx(tmp_path, agent="codex", enable_follow_up=False)
+    ctx.impl._save_state = mock.MagicMock()
+    ctx.runner._can_resume_state_session = mock.MagicMock(return_value=True)
+    ctx.runner._run_learn = mock.MagicMock(return_value=True)
+    ctx.runner._compact_implementer_session = mock.MagicMock()
+    state = _followup_state(session_agent="codex")
+
+    FollowUpPhase(ctx)._run_post_pr_followup(7, tmp_path, cast(Any, state), slot_id=None)
+
+    ctx.runner._compact_implementer_session.assert_not_called()
+    assert state.phase is ImplementationPhase.COMPLETED
+
+
+def test_followup_completes_when_session_cannot_resume(tmp_path: Path) -> None:
+    """Missing resume authority skips optional agent calls but persists completion."""
+    ctx = _make_ctx(tmp_path)
+    ctx.impl._save_state = mock.MagicMock()
+    ctx.runner._can_resume_state_session = mock.MagicMock(return_value=False)
+    ctx.runner._run_learn = mock.MagicMock()
+    ctx.runner._run_follow_up_issues = mock.MagicMock()
+    state = _followup_state()
+
+    FollowUpPhase(ctx)._run_post_pr_followup(7, tmp_path, cast(Any, state), slot_id=None)
+
+    ctx.runner._run_learn.assert_not_called()
+    ctx.runner._run_follow_up_issues.assert_not_called()
+    assert state.phase is ImplementationPhase.COMPLETED
+
+
+def test_followup_helpers_delegate_configuration(tmp_path: Path) -> None:
+    """Follow-up wrappers forward provider, timeout, state, and dry-run settings."""
+    ctx = _make_ctx(tmp_path, dry_run=True)
+    ctx.options.follow_up_timeout = 41
+    ctx.options.learn_timeout = 43
+    phase = FollowUpPhase(ctx)
+    with (
+        mock.patch(
+            "hephaestus.automation._followup_phase.parse_follow_up_items", return_value=[{"x": 1}]
+        ) as parse,
+        mock.patch("hephaestus.automation._followup_phase.run_follow_up_issues") as follow,
+        mock.patch(
+            "hephaestus.automation._followup_phase.learn_needs_rerun", return_value=True
+        ) as needs,
+        mock.patch("hephaestus.automation._followup_phase.run_learn", return_value=True) as learn,
+    ):
+        assert phase._parse_follow_up_items("payload") == [{"x": 1}]
+        phase._run_follow_up_issues("s", tmp_path, 7, 2, session_agent="claude")
+        assert phase._learn_needs_rerun(7) is True
+        assert phase._run_learn("s", tmp_path, 7, 2, session_agent="claude") is True
+
+    parse.assert_called_once_with("payload")
+    assert follow.call_args.kwargs["dry_run"] is True
+    assert follow.call_args.kwargs["timeout"] == 41
+    needs.assert_called_once_with(7, tmp_path)
+    assert learn.call_args.kwargs["timeout"] == 43
+
+
+def test_followup_reruns_only_eligible_failed_learns(tmp_path: Path) -> None:
+    """The recovery sweep ignores ineligible states and persists attempted learns."""
+    existing = tmp_path / "worktree"
+    existing.mkdir()
+    eligible = _followup_state(
+        phase=ImplementationPhase.COMPLETED,
+        worktree_path=str(existing),
+    )
+    ctx = _make_ctx(tmp_path)
+    ctx.impl.state_mgr.states = {
+        7: eligible,
+        8: _followup_state(issue_number=8, phase=ImplementationPhase.IMPLEMENTING),
+        9: _followup_state(
+            issue_number=9, phase=ImplementationPhase.COMPLETED, learn_completed=True
+        ),
+        10: _followup_state(issue_number=10, phase=ImplementationPhase.COMPLETED),
+        11: _followup_state(
+            issue_number=11,
+            phase=ImplementationPhase.COMPLETED,
+            worktree_path=str(tmp_path / "missing"),
+        ),
+    }
+    ctx.impl._learn_needs_rerun = mock.MagicMock(return_value=True)
+    ctx.impl._run_learn = mock.MagicMock(return_value=False)
+    ctx.impl._save_state = mock.MagicMock()
+    phase = FollowUpPhase(ctx)
+
+    results = phase._rerun_failed_learns()
+
+    assert results == {7: False}
+    assert eligible.learn_completed is False
+    ctx.impl._run_learn.assert_called_once_with(
+        "session-7", existing, 7, slot_id=None, session_agent="claude"
+    )
+    ctx.impl._save_state.assert_called_once_with(eligible)
