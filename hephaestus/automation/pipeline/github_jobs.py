@@ -244,6 +244,12 @@ def github_request_issue(request: GitHubRequest) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def github_request_pr(request: GitHubRequest) -> int | None:
+    """Return the pull-request target carried by a closed request, if present."""
+    value = getattr(request, "pr_number", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 @dataclass(frozen=True)
 class GuardedGitHubJob:
     """Worker-only envelope pairing an operation with its issue authority."""
@@ -263,16 +269,20 @@ class GuardedGitHubJob:
         guard: GuardCredential,
         *,
         org: str,
+        linked_pr: int | None = None,
     ) -> Self:
-        """Bind a stage-created operation to an exact repository and issue."""
+        """Bind an operation to its issue guard and verified linked PR."""
         expected_repo = f"{org}/{operation.repo}"
         if guard.repository != expected_repo:
             raise ValueError("guard repository differs from job repository")
         issue_number = github_request_issue(operation.request)
         if issue_number is None:
             raise ValueError("GitHub job has no issue target")
-        if guard.issue != issue_number:
-            raise ValueError("guard issue differs from job issue")
+        if issue_number not in {guard.issue, linked_pr}:
+            raise ValueError("job target differs from guard issue or linked PR")
+        request_pr = github_request_pr(operation.request)
+        if request_pr is not None and linked_pr is not None and request_pr != linked_pr:
+            raise ValueError("job PR differs from linked PR")
         return cls(operation=operation, guard=guard)
 
 

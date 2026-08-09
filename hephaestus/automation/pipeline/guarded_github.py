@@ -61,6 +61,7 @@ def guarded_pipeline_job(host: Any, item: Any, job: Any) -> Any:
             job,
             host._guard_for_item(item).credential,
             org=host.config.org,
+            linked_pr=item.pr,
         )
     return job
 
