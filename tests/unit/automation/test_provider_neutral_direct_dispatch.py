@@ -761,7 +761,6 @@ def test_direct_agent_dispatch_guard_discovers_all_current_runtime_callers() -> 
     relative_paths = _provider_neutral_runtime_files()
 
     assert relative_paths
-    assert "hephaestus/automation/ci_fix_flow.py" in relative_paths
     assert "hephaestus/automation/pipeline/worker_pool.py" in relative_paths
 
 

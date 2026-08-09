@@ -1681,13 +1681,10 @@ collaborators have one-way dependencies and own explicit responsibilities:
 | [`pipeline/coordinator.py`](../hephaestus/automation/pipeline/coordinator.py) | `coordinator_contract.py`, `coordinator_types.py`, `coordinator_runtime.py`, `coordinator_sources.py`, `coordinator_dispatch.py` | static host contract; configuration/types; event-loop runtime; source cursors; implementation admission |
 | [`pipeline_github.py`](../hephaestus/automation/pipeline_github.py) | `pipeline_github_contract.py`, `pipeline_github_transport.py`, `pipeline_github_queries.py`, `pipeline_github_reviews.py`, `pipeline_github_mutations.py` | static host contract; adapter construction; transport; reads; review evidence; non-review mutations |
 | [`pipeline/stages/pr_review.py`](../hephaestus/automation/pipeline/stages/pr_review.py) | `pr_review_threads.py`, `pr_review_verification.py`, `pr_review_diagnostics.py`, `pr_review_jobs.py`, `pr_review_gate.py` | public stage surface; thread parsing; host verification and diagnostics; jobs/worktrees; GO/NO-GO gate |
-| [`ci_fix_orchestrator.py`](../hephaestus/automation/ci_fix_orchestrator.py) | `ci_fix_contract.py`, [`ci_fix_sessions.py`](../hephaestus/automation/ci_fix_sessions.py), [`ci_fix_push_guard.py`](../hephaestus/automation/ci_fix_push_guard.py) | static host contract; provider/session lifecycle; head/test/metadata/push safety |
 
 The source budgets are executable in
 [`test_automation_hotspot_architecture.py`](../tests/unit/automation/test_automation_hotspot_architecture.py)
-and are strictly below the pre-decomposition hotspot sizes. The CI-fix
-façade also has a class budget of 320 lines, 9 methods, and 60 lines per
-method in [`test_ci_driver_architecture.py`](../tests/unit/automation/test_ci_driver_architecture.py).
+and are strictly below the pre-decomposition hotspot sizes.
 Collaborators must not import their façades; the façade is the only place
 that assembles them. This keeps compatibility seams patchable while making
 responsibility growth visible in review.
