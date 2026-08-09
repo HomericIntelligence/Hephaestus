@@ -208,7 +208,7 @@ def load_pi_package_catalog(path: Path = CATALOG_PATH) -> PiPackageCatalog:
             identity=_text(athena, "repository", "catalog.packages.athena"),
             pin=athena_commit,
             manifest_name=_text(athena, "name", "catalog.packages.athena"),
-            manifest_version=_text(athena, "version", "catalog.packages.athena"),
+            manifest_version=_text(athena, "manifest_version", "catalog.packages.athena"),
             commands=_strings(athena, "commands", "catalog.packages.athena"),
         )
     ]
@@ -907,25 +907,6 @@ def _default_git_head(root: Path) -> str:
     return result.stdout.strip()
 
 
-def _resolve_global_npm_root(runner: CommandRunner | None = None) -> Path:
-    """Return npm's configured global package root without loading Pi packages."""
-    command_runner = run_bounded_command if runner is None else runner
-    try:
-        result = command_runner(("npm", "root", "-g"), timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError(f"cannot resolve global npm root: {exc}") from exc
-    if result.returncode != 0 or result.timed_out or result.output_overflow:
-        detail = (result.stderr or result.stdout or "npm root -g failed").strip()
-        raise ValueError(f"cannot resolve global npm root: {detail[:1000]}")
-    lines = result.stdout.splitlines()
-    if len(lines) != 1 or not lines[0].strip():
-        raise ValueError("cannot resolve global npm root: malformed npm output")
-    root = Path(lines[0].strip()).expanduser()
-    if not root.is_absolute():
-        raise ValueError("cannot resolve global npm root: npm returned a relative path")
-    return root
-
-
 def inspect_pi_package_inventory(
     cwd: Path,
     catalog: PiPackageCatalog,
@@ -947,7 +928,6 @@ def inspect_pi_package_inventory(
         return InventoryResult(False, "package_settings_invalid", {}, {}, str(exc))
     roots: dict[str, Path] = {}
     scopes: dict[str, str] = {}
-    global_npm_root: Path | None = None
     for package in catalog.packages:
         matches_user = [
             source
@@ -966,12 +946,7 @@ def inspect_pi_package_inventory(
         scope_root = project_root if matches_project else user_root
         try:
             if package.kind == "npm":
-                if scope == "project":
-                    install_root = project_root / "npm" / "node_modules"
-                else:
-                    if global_npm_root is None:
-                        global_npm_root = _resolve_global_npm_root(runner)
-                    install_root = global_npm_root
+                install_root = scope_root / "npm" / "node_modules"
                 candidate = install_root / package.identity
             else:
                 install_root = scope_root
