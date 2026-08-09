@@ -2986,6 +2986,32 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "rebase conflict resolution changed paths outside host scope"
 
+    def test_rebase_conflict_scope_allows_host_staged_nonconflict_paths(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Clean paths staged by the paused rebase are host state, not agent edits."""
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="conflict.py\0")
+            if argv == ["git", "diff", "--cached", "--name-only", "-z"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout="conflict.py\0host-staged.py\0",
+                )
+            if argv == ["git", "ls-files", "--others", "--exclude-standard", "-z"]:
+                return MagicMock(returncode=0, stdout="")
+            raise AssertionError(f"unexpected git probe: {argv!r}")
+
+        with patch(f"{_WP}.git_utils.run", side_effect=fake_run):
+            result = pool._rebase_conflict_edit_scope_error(
+                tmp_path,
+                conflict_paths=("conflict.py",),
+                timeout=1,
+            )
+
+        assert result is None
+
     def test_continue_rebase_rejects_mutated_conflict_index(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -3096,7 +3122,6 @@ class TestGitOps:
         ):
             run.side_effect = [
                 MagicMock(returncode=0, stdout="x.py\0"),
-                MagicMock(returncode=0, stdout="x.py\0"),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
@@ -3133,7 +3158,6 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
                 MagicMock(returncode=0, stdout="x.py\0"),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
@@ -3173,7 +3197,6 @@ class TestGitOps:
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
-                MagicMock(returncode=0, stdout="x.py\0"),
                 MagicMock(returncode=0, stdout="x.py\0"),
                 MagicMock(returncode=0, stdout=""),
                 MagicMock(returncode=0, stdout=""),
