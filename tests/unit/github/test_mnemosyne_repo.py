@@ -17,6 +17,8 @@ from hephaestus.github.mnemosyne_repo import (
     MnemosyneTarget,
     MnemosyneTrustBasis,
     RepositoryMetadata,
+    fetch_current_repository_metadata,
+    fetch_repository_metadata,
     resolve_mnemosyne_target,
     validate_owner,
 )
@@ -53,6 +55,55 @@ def test_validate_owner_rejects_slugs_and_unsafe_names() -> None:
     for owner in ("bad/owner", "-bad", "bad-", "bad--owner", "", "with space"):
         with pytest.raises(MnemosyneResolutionError):
             validate_owner(owner)
+
+
+def test_current_repository_metadata_reads_owner_type_when_repo_view_omits_it() -> None:
+    with (
+        patch.object(
+            mnemosyne_repo,
+            "_repo_view_json",
+            return_value={
+                "owner": {"login": "HomericIntelligence"},
+                "viewerPermission": "ADMIN",
+            },
+        ),
+        patch.object(
+            mnemosyne_repo,
+            "_gh_json",
+            return_value={"type": "Organization"},
+        ) as gh_json,
+    ):
+        metadata = fetch_current_repository_metadata()
+
+    assert metadata == CurrentRepositoryMetadata(
+        owner="HomericIntelligence",
+        owner_type="Organization",
+        viewer_permission="ADMIN",
+    )
+    gh_json.assert_called_once_with(["api", "users/HomericIntelligence"])
+
+
+def test_repository_metadata_reads_default_head_ref_when_repo_view_omits_oid() -> None:
+    with (
+        patch.object(
+            mnemosyne_repo,
+            "_repo_view_json",
+            return_value={
+                "defaultBranchRef": {"name": "main"},
+                "isFork": False,
+                "parent": None,
+            },
+        ),
+        patch.object(
+            mnemosyne_repo,
+            "_gh_json",
+            return_value={"object": {"sha": SHA}},
+        ) as gh_json,
+    ):
+        metadata = fetch_repository_metadata(UPSTREAM_SLUG)
+
+    assert metadata == UPSTREAM_METADATA
+    gh_json.assert_called_once_with(["api", f"repos/{UPSTREAM_SLUG}/git/ref/heads/main"])
 
 
 def test_explicit_owner_uses_new_env_var_and_skips_current_repo_probe(
