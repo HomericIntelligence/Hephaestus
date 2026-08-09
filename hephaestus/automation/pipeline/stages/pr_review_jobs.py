@@ -1345,6 +1345,8 @@ class PrReviewJobs(_PrReviewHost):
         item.payload["direct_pr_worktree_generation"] = generation + 1
         item.session_ids.pop(AGENT_PR_REVIEWER, None)
         item.session_ids.pop(AGENT_ADDRESS_REVIEW, None)
+        item.session_bindings.pop(AGENT_PR_REVIEWER, None)
+        item.session_bindings.pop(AGENT_ADDRESS_REVIEW, None)
         _clear_round_review_state(item)
         return None
 

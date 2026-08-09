@@ -35,7 +35,7 @@ def test_pr_review_one_shot_uses_the_read_only_review_policy() -> None:
     assert policy.filesystem is FilesystemMode.CHECKOUT_RO
     assert policy.builtins == frozenset({"read", "grep", "find", "ls", "bash"})
     assert policy.skills == frozenset({"athena:pr-review"})
-    assert policy.subagent is True
+    assert policy.subagent is False
     assert policy.network is NetworkMode.CONSTRAINED_WEB_RELAY
 
 
@@ -51,8 +51,8 @@ def test_unknown_lifecycle_fails_closed() -> None:
         )
 
 
-def test_child_policy_is_a_strict_intersection() -> None:
-    """Delegation cannot restore write or web capabilities absent from its parent."""
+def test_delegation_is_na_until_a_child_policy_broker_is_available() -> None:
+    """Pi never exposes a child launch that bypasses policy intersection."""
     parent = resolve_policy(
         ExecutionRequest(
             AgentRole.IMPLEMENTER,
@@ -68,13 +68,59 @@ def test_child_policy_is_a_strict_intersection() -> None:
         )
     )
 
-    child = intersect_child_policy(parent, requested)
+    assert parent.subagent is False
+    with pytest.raises(ExecutionPolicyError, match="does not permit subagent"):
+        intersect_child_policy(parent, requested)
 
-    assert child.filesystem is FilesystemMode.CHECKOUT_RO
-    assert child.builtins == frozenset({"read", "grep", "find", "ls", "bash"})
-    assert child.skills == frozenset()
-    assert child.network is NetworkMode.PROVIDER_RELAY
-    assert child.subagent is False
+
+def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool() -> None:
+    """Provider-visible flags cannot create a child execution path."""
+    policy = resolve_policy(
+        ExecutionRequest(
+            AgentRole.PR_REVIEWER,
+            AgentOperation.PR_REVIEW,
+            SessionLifecycle.ONE_SHOT,
+        )
+    )
+
+    assert "subagent" not in agent_runtime._pi_policy_args(policy)[1].split(",")
+
+
+def test_ready_pi_is_explicitly_na_without_a_registered_isolation_adapter(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stock installations reject Pi before a queue or wrapper can start it."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    monkeypatch.setattr(
+        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+    )
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent: True)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+
+    with pytest.raises(agent_runtime.PiIsolationUnavailableError, match="Pi automation is N/A"):
+        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+
+
+def test_registered_host_adapter_admits_pi_selection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host integration has one explicit registration path before Pi is selected."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    class Adapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            raise AssertionError("selection must not invoke the adapter")
+
+    monkeypatch.setattr(
+        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+    )
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent: True)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+
+    agent_runtime.register_pi_isolation_adapter(Adapter())
+
+    assert agent_runtime.resolve_agent("pi", cwd=tmp_path) == "pi"
 
 
 def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(

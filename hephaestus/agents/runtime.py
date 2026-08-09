@@ -106,10 +106,6 @@ PI_AUTOMATION_PREFLIGHT_ERROR = (
     "Pi automation preflight is unavailable. Run "
     "`hephaestus-install-pi-plugins --dry-run --json` to inspect the required setup."
 )
-PI_SCOPE_LIFECYCLE_ERROR = (
-    "Pi package preflight passed, but normal automation remains unavailable until "
-    "#2518 enforces lifecycle and role-scoped tool contracts. Use Claude or Codex meanwhile."
-)
 REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
@@ -170,10 +166,33 @@ class PiIsolationAdapter(Protocol):
         raise NotImplementedError
 
 
-# Pi does not provide an operating-system sandbox.  A deployment may install a
-# reviewed adapter through the runtime integration seam; until then policy
-# execution is deliberately unavailable rather than relying on ``--tools``.
+# Pi does not provide an operating-system sandbox.  No adapter is bundled with
+# Hephaestus, so Pi automation is explicitly N/A in a stock installation.
+# A host integration must register a reviewed adapter before selecting Pi; the
+# runtime never falls back to its model-visible ``--tools`` flags.
 _PI_ISOLATION_ADAPTER: PiIsolationAdapter | None = None
+
+
+def register_pi_isolation_adapter(adapter: PiIsolationAdapter) -> None:
+    """Register the host-owned Pi isolation broker for this process.
+
+    The host is responsible for verifying that ``adapter`` enforces every
+    filesystem and network grant before it starts Pi.  This explicit seam
+    keeps the base package Pi N/A without a deployed broker and lets an
+    integration opt in without exposing an unscoped provider runner.
+    """
+    global _PI_ISOLATION_ADAPTER
+    _PI_ISOLATION_ADAPTER = adapter
+
+
+def _require_pi_isolation_adapter() -> None:
+    """Fail at provider selection when this installation has no Pi broker."""
+    if _PI_ISOLATION_ADAPTER is None:
+        raise PiIsolationUnavailableError(
+            "Pi automation is N/A: this installation has no registered host "
+            "OS-isolation adapter. Select Claude or Codex; Pi remains limited "
+            "to the tool-free operator smoke command."
+        )
 
 
 class AgentCapability(StrEnum):
@@ -348,6 +367,7 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
             raise ValueError(f"Unsupported agent: {agent}")
         if agent == "pi":
             _require_pi_automation_admission(effective_cwd)
+            _require_pi_isolation_adapter()
         if not is_agent_authenticated(agent):
             if shutil.which(agent) is None:
                 raise RuntimeError(
@@ -1876,8 +1896,7 @@ def _pi_policy_args(policy: ExecutionPolicy) -> list[str]:
     These flags are intentionally only a second layer.  The runtime's external
     isolation adapter remains the authority for filesystem and network access.
     """
-    tools = policy.builtins | ({"subagent"} if policy.subagent else frozenset())
-    args = ["--tools", ",".join(sorted(tools))]
+    args = ["--tools", ",".join(sorted(policy.builtins))]
     if policy.skills:
         commands = ",".join(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills)
         args.extend(["--commands", commands])

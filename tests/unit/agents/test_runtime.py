@@ -2326,8 +2326,8 @@ def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> Non
     preflight.assert_called_once_with(tmp_path)
 
 
-def test_resolve_pi_accepts_ready_authenticated_provider(tmp_path: Path) -> None:
-    """Provider selection succeeds before execution enforces its scoped request."""
+def test_resolve_pi_is_na_without_a_host_isolation_adapter(tmp_path: Path) -> None:
+    """Provider selection cannot expose Pi without an OS-isolation broker."""
     from hephaestus.agents.pi_plugins import PiPreflightResult
 
     with (
@@ -2336,8 +2336,10 @@ def test_resolve_pi_accepts_ready_authenticated_provider(tmp_path: Path) -> None
             return_value=PiPreflightResult.ready_result(),
         ),
         patch("hephaestus.agents.runtime.is_agent_authenticated", return_value=True),
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", None),
     ):
-        assert agent_runtime.resolve_agent("pi", cwd=tmp_path) == "pi"
+        with pytest.raises(agent_runtime.PiIsolationUnavailableError, match="Pi automation is N/A"):
+            agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
 
 def test_pi_models_configured_honors_pi_coding_agent_dir(

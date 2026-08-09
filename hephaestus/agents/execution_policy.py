@@ -195,7 +195,10 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
         FilesystemMode.WORKTREE_RW,
         _WRITE,
         frozenset(),
-        True,
+        # Pi delegation stays unavailable until the isolation broker can
+        # resolve and enforce each child request.  A provider-visible
+        # ``subagent`` tool alone cannot apply ``intersect_child_policy``.
+        False,
         NetworkMode.PROVIDER_RELAY,
     ),
     (AgentRole.IMPLEMENTER, AgentOperation.GIT_MESSAGE): ExecutionPolicy(
@@ -241,7 +244,8 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
         FilesystemMode.CHECKOUT_RO,
         _READ_SHELL,
         frozenset({"athena:pr-review"}),
-        True,
+        # See ADDRESS_REVIEW: do not advertise unenforceable delegation.
+        False,
         NetworkMode.CONSTRAINED_WEB_RELAY,
     ),
     (AgentRole.PR_REVIEWER, AgentOperation.REVIEW_VALIDATE): ExecutionPolicy(
