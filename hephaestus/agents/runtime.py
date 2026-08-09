@@ -1874,9 +1874,7 @@ def run_agent_athena_skill(
     """
     if not is_pi(agent):
         return None
-    preflight = preflight_pi_environment(cwd)
-    if not preflight.ready:
-        raise AgentExecutionError(preflight.remediation_message())
+    preflight = _require_pi_automation_admission(cwd)
     return run_pi_athena_skill(
         kind,
         prompt,

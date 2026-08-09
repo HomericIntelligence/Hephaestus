@@ -235,7 +235,7 @@ def run_agent(args: argparse.Namespace) -> int:
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    agent = resolve_agent(args.agent)
+    agent = resolve_agent(args.agent, cwd=repo_root)
     args.agent = agent
 
     if args.athena_skill:

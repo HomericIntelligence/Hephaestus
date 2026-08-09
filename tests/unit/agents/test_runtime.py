@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -121,6 +121,26 @@ def test_run_agent_athena_skill_routes_pi_through_the_runtime_adapter(
         preflight=preflight,
         model="pi-model",
     )
+
+
+def test_run_agent_athena_skill_stop_flag_blocks_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The emergency stop must prevent every Pi package probe."""
+    preflight = Mock(side_effect=AssertionError("preflight must not run"))
+    monkeypatch.setenv("HEPH_DISABLE_PI_AUTOMATION", "1")
+    monkeypatch.setattr(agent_runtime, "preflight_pi_environment", preflight)
+
+    with pytest.raises(agent_runtime.PiAutomationDisabledError, match="disabled"):
+        agent_runtime.run_agent_athena_skill(
+            "advise",
+            "prompt",
+            agent="pi",
+            cwd=tmp_path,
+            timeout=60,
+        )
+
+    preflight.assert_not_called()
 
 
 def test_parse_codex_json_events_extracts_session_id_and_messages() -> None:
