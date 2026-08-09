@@ -1,8 +1,6 @@
 import sys
 from contextlib import nullcontext
-from typing import Any
-
-from hephaestus.automation.pipeline.guarded_github import GuardTargetError
+from typing import Any, cast
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
@@ -481,12 +479,8 @@ class SourceCoordinator(_CoordinatorHost):
         overlap_enabled: bool,
     ) -> tuple[WorkItem | None, bool]:
         """Classify one source issue and snapshot its overlap reservation."""
-        raw_github = self._ctx_for_repo(source.repo).github
-        existing_pr = raw_github.find_pr_for_issue(issue)
-        guard_branch = (
-            raw_github.get_pr_head_branch(existing_pr)
-            if existing_pr
-            else f"{issue}-auto-impl-direct-{source.run_nonce}"
+        existing_pr, guard_branch, guard_active = self._direct_issue_guard_identity(
+            source.repo, issue, source.run_nonce
         )
         with self._claim_source_issue(
             source.repo, issue, "direct-issue-source", branch=guard_branch
@@ -494,6 +488,8 @@ class SourceCoordinator(_CoordinatorHost):
             if claim is None:
                 source.issues.append(issue)
                 return None, False
+            if guard_active:
+                self._verify_issue_source_guard(source.repo, issue, existing_pr, guard_branch)
             if source.wave_lease is None:
                 entry = self._seed_direct_issue_entry(source.repo, issue, github=claim.github)
             else:
@@ -608,7 +604,7 @@ class SourceCoordinator(_CoordinatorHost):
                 if self._guard_enabled and not self.config.dry_run
                 else None
             )
-            guard_branch = raw_github.get_pr_head_branch(pr) if linked_issue is not None else None
+            guard_branch = self._guard_branch_for_pr(source.repo, pr) if linked_issue else None
             claim = (
                 self._claim_source_issue(
                     source.repo, linked_issue, "direct-pr-source", branch=guard_branch
@@ -621,8 +617,10 @@ class SourceCoordinator(_CoordinatorHost):
                     source.pending_pr = pr
                     break
                 github = owned.github if owned is not None else raw_github
-                if claim is not None and github.find_issue_for_pr(pr) != linked_issue:
-                    raise GuardTargetError("PR-to-issue association changed during admission")
+                if claim is not None and claim.handle is not None:
+                    self._verify_pr_source_guard(
+                        source.repo, pr, cast(int, linked_issue), cast(str, guard_branch)
+                    )
                 entry = self._seed_direct_pr_scope(source.repo, (pr,), github=github)[0]
                 if entry.stage is None:
                     logger.info("seed excluded: %s", entry.reason)

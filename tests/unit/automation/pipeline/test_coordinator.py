@@ -15,12 +15,14 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
+from hephaestus.automation.issue_guard import GuardLostError, InMemoryGuardStore, IssueGuard
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     _FAIL_BACK_CAP,
@@ -32,6 +34,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     ReplyJournalAppended,
 )
+from hephaestus.automation.pipeline.guarded_github import GuardTargetError
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -174,6 +177,75 @@ class TestCoordinatorHealth:
 
         coordinator.shutdown.set()
         assert coordinator._health_snapshot()["status"] == "stopping"
+
+
+class TestIssueGuardBranchIdentity:
+    """Guard admission and dispatch remain bound to the production branch."""
+
+    def test_fork_pr_is_rejected_before_guard_branch_resolution(self, tmp_path: Path) -> None:
+        """A fork head cannot cause a same-named base-repository branch."""
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
+            github=FakeStageGitHub(
+                open_pr=812,
+                pr_head_branch="fork-feature",
+                pr_head_writable=False,
+            ),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+
+        with pytest.raises(GuardTargetError, match="writable production branch"):
+            coordinator._guard_branch_for_issue("repo-a", 617)
+
+    def test_dispatch_rejects_item_branch_drift(self, tmp_path: Path) -> None:
+        """A queued item cannot dispatch against a branch different from its claim."""
+        store = InMemoryGuardStore(branch="production")
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            guard_store_factory=lambda _repository: store,
+            install_signals=False,
+        )
+        handle = IssueGuard(store, run_id=coordinator.run_id, branch="production").acquire(
+            "org/repo-a", 617, "implementation"
+        )
+        assert handle is not None
+        item = _issue_item(617, StageName.IMPLEMENTATION)
+        item.branch = "replacement-branch"
+        item.payload["_issue_guard_handle"] = handle
+        item.payload["_issue_guard_branch"] = "production"
+        coordinator._issue_guards[("org/repo-a", 617)] = handle
+
+        with pytest.raises(GuardLostError, match="branch differs"):
+            coordinator._confirm_item_guard(item, timedelta(0))
+
+    def test_dispatch_rejects_pr_head_drift(self, tmp_path: Path) -> None:
+        """A PR head replacement is rejected before a guarded job dispatch."""
+        store = InMemoryGuardStore(branch="production")
+        config = PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path)
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(pr_head_branch="replacement-branch"),
+            pool=FakeWorkerPool(),
+            guard_store_factory=lambda _repository: store,
+            install_signals=False,
+        )
+        handle = IssueGuard(store, run_id=coordinator.run_id, branch="production").acquire(
+            "org/repo-a", 617, "implementation"
+        )
+        assert handle is not None
+        item = _issue_item(617, StageName.IMPLEMENTATION)
+        item.pr = 812
+        item.branch = "production"
+        item.payload["_issue_guard_handle"] = handle
+        item.payload["_issue_guard_branch"] = "production"
+        coordinator._issue_guards[("org/repo-a", 617)] = handle
+
+        with pytest.raises(GuardLostError, match="PR head branch changed"):
+            coordinator._confirm_item_guard(item, timedelta(0))
 
     @pytest.mark.parametrize("condition", ["queue_depth", "open_breaker", "stalled_ticks"])
     def test_health_snapshot_reports_each_defined_degradation(

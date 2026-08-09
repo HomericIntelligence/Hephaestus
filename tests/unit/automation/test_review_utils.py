@@ -24,6 +24,7 @@ from hephaestus.automation._review_utils import (
     load_state_file,
     log_file_path,
     parse_json_block,
+    pr_head_is_writable,
     print_worker_summary,
     save_state_file,
 )
@@ -621,6 +622,47 @@ class TestGetPrHeadBranch:
             side_effect=RuntimeError("gh boom"),
         ):
             assert get_pr_head_branch(996) is None
+
+
+class TestPrHeadIsWritable:
+    """PR head ownership is required before binding a production guard."""
+
+    def test_accepts_same_repository_head(self) -> None:
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result(
+                {
+                    "headRepository": {"name": "Repo"},
+                    "headRepositoryOwner": {"login": "Owner"},
+                }
+            ),
+        ) as gh_call:
+            assert pr_head_is_writable(812, ("Owner", "Repo")) is True
+
+        args = gh_call.call_args.args[0]
+        assert "--repo" in args
+        assert "Owner/Repo" in args
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "headRepository": {"name": "Repo"},
+                "headRepositoryOwner": {"login": "Contributor"},
+            },
+            {"headRepository": None, "headRepositoryOwner": None},
+            {},
+        ],
+    )
+    def test_rejects_foreign_or_missing_head_identity(self, payload: dict[str, Any]) -> None:
+        with patch(
+            "hephaestus.automation._review_utils._gh_call",
+            return_value=_make_gh_result(payload),
+        ):
+            assert pr_head_is_writable(812, ("Owner", "Repo")) is False
+
+    def test_rejects_missing_target_repository(self) -> None:
+        assert pr_head_is_writable(812, None) is False
 
 
 # ---------------------------------------------------------------------------

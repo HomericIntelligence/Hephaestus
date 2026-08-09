@@ -577,10 +577,10 @@ class IssueGuard:
             current.record.phase is GuardPhase.RELEASING
             and current.record.predecessor_oid == handle.oid
         )
-        if not resuming_release and (
-            current.oid != handle.oid
-            or current.record.phase not in {GuardPhase.ACTIVE, GuardPhase.ACQUIRING}
-        ):
+        if not resuming_release and current.record.phase not in {
+            GuardPhase.ACTIVE,
+            GuardPhase.ACQUIRING,
+        }:
             raise GuardLostError("refusing to release a guard not owned by this run")
         if current.record.lease_expires_at <= _server_now(self.store):
             raise GuardLostError("expired guard requires operator recovery")

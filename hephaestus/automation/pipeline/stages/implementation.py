@@ -416,7 +416,7 @@ class ImplementationStage(Stage):
         """ENTER advances to GATE."""
         return Continue(next_state=GATE)
 
-    def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _worktree_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """WORKTREE_WAIT submits the create-worktree git job."""
         issue = _issue_number(item)
         if (
@@ -438,7 +438,10 @@ class ImplementationStage(Stage):
         logger.info("implementation:%d: requesting worktree job", issue)
         adopted = bool(item.payload.get("existing_pr"))
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
-        guard_managed_branch = item.payload.get("_issue_guard_branch") == item.branch
+        guard_branch = item.payload.get("_issue_guard_branch")
+        if guard_branch is not None and guard_branch != item.branch:
+            return StageOutcome(Disposition.FINISH_FAIL, "issue_guard_branch_changed")
+        guard_managed_branch = guard_branch == item.branch
         if not adopted and direct_base_sha is not None and not is_full_commit_sha(direct_base_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs: dict[str, object] = {
@@ -1762,8 +1765,13 @@ class ImplementationStage(Stage):
         if external_arm is not None:
             return external_arm
         head_branch = ctx.github.get_pr_head_branch(existing_pr)
-        if head_branch:
-            item.branch = head_branch
+        guard_branch = item.payload.get("_issue_guard_branch")
+        if not isinstance(head_branch, str) or not head_branch.strip():
+            return StageOutcome(Disposition.FINISH_FAIL, "pr_head_branch_unavailable")
+        head_branch = head_branch.strip()
+        if guard_branch is not None and guard_branch != head_branch:
+            return StageOutcome(Disposition.FINISH_FAIL, "issue_guard_branch_changed")
+        item.branch = head_branch
         impl_go_route = self._impl_go_route(item, existing_pr, pr_implementation_state)
         if impl_go_route is not None:
             return impl_go_route

@@ -20,6 +20,7 @@ from hephaestus.automation.issue_guard import (
     GuardLostError,
     GuardPhase,
     GuardRecord,
+    GuardSnapshot,
     GuardUnavailableError,
     InMemoryGuardStore,
     IssueGuard,
@@ -136,6 +137,27 @@ def test_owner_can_renew_and_release_a_guard() -> None:
     renewed = service.renew(fresh, timedelta(hours=2))
     assert renewed.oid != fresh.oid
     service.release(renewed, "completed successfully")
+
+    assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
+    assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+
+
+def test_owner_can_release_after_ordinary_implementation_commit() -> None:
+    """A shared production branch may advance between work and release."""
+    store = InMemoryGuardStore()
+    service = IssueGuard(store)
+    handle = service.acquire("Owner/Repo", 2404, "implementation")
+    assert handle is not None
+
+    current = store.refs[("Owner/Repo", 2404)]
+    store.refs[("Owner/Repo", 2404)] = GuardSnapshot(
+        oid="f" * 40,
+        record=current.record,
+        tree=current.tree,
+        server_time=store.now,
+    )
+
+    service.release(handle, "completed after implementation commit")
 
     assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
     assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]

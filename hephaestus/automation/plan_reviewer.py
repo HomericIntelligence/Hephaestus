@@ -32,6 +32,7 @@ from hephaestus.automation._review_utils import (
     drain_completed_futures,
     find_pr_for_issue,
     get_pr_head_branch,
+    pr_head_is_writable,
     print_worker_summary,
     work_report_context,
 )
@@ -729,7 +730,14 @@ class PlanReviewer:
             branch = issue_auto_impl_branch_name(issue)
             existing_pr = find_pr_for_issue(issue)
             if existing_pr is not None:
-                branch = get_pr_head_branch(existing_pr) or branch
+                if not pr_head_is_writable(existing_pr, self.repo_target):
+                    raise RuntimeError(
+                        f"PR #{existing_pr} does not have a writable production branch"
+                    )
+                branch = get_pr_head_branch(existing_pr)
+                if not isinstance(branch, str) or not branch.strip():
+                    raise RuntimeError(f"PR #{existing_pr} has no verified production branch")
+                branch = branch.strip()
         if branch is not None:
             service.bind_branch(branch)
         service.run_id = self.run_id
