@@ -156,6 +156,7 @@ def test_real_worker_saturation_is_durable_resumable_and_recoverable(
         stages={StageName.PLANNING: _OneBlockingJobStage(tmp_path)},
         install_signals=False,
     )
+    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     item = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=71, stage=StageName.PLANNING)
     coordinator._push_item(item, StageName.PLANNING, enter=True)
     coordinator._drain_queues()

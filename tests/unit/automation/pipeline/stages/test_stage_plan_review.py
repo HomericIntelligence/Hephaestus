@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, plan_review
@@ -51,6 +52,16 @@ def _verdict(kind: str) -> ReviewVerdict:
     if token:
         raw = f"{raw}\n\n{token}"
     return ReviewVerdict(grade=None, verdict=kind, raw=raw)
+
+
+def _valid_delivery_receipt() -> dict[str, object]:
+    return {
+        "commit_sha": "a" * 40,
+        "readback_head_sha": "a" * 40,
+        "pr_url": "https://github.com/acme/Mnemosyne/pull/1",
+        "pr_number": 1,
+        "local_only": False,
+    }
 
 
 def _fence_present(prompt: str, label: str) -> bool:
@@ -737,16 +748,18 @@ class TestPlanReviewStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert isinstance(result.job, AthenaSkillJob)  # narrow the job union
         assert result.on_done_state == PLAN_FINISH
         assert result.job.descr == "learn"
-        assert result.job.prompt_kwargs == {"context": "# My Plan\n..."}
+        assert result.job.request.kind == "learn"
+        assert result.job.request.payload == {"context": "# My Plan\n..."}
 
     def test_finish_advances(self, make_ctx: Any, make_work_item: Any) -> None:
         """PLAN_FINISH advances only while the live GO label remains exclusive."""
         stage = PlanReviewStage()
         ctx = make_ctx(github=FakeStageGitHub(labels=[STATE_PLAN_GO]))
         item = make_work_item(issue=12, state=PLAN_FINISH)
+        item.payload["athena_learn_delivery_receipt"] = _valid_delivery_receipt()
 
         result = stage.step(item, ctx)
 
@@ -761,6 +774,7 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=120, state=PLAN_FINISH)
+        item.payload["athena_learn_delivery_receipt"] = _valid_delivery_receipt()
 
         result = stage.step(item, ctx)
 
@@ -776,6 +790,7 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub(labels=[STATE_PLAN_GO, STATE_PLAN_NO_GO])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=121, state=PLAN_FINISH)
+        item.payload["athena_learn_delivery_receipt"] = _valid_delivery_receipt()
 
         result = stage.step(item, ctx)
 

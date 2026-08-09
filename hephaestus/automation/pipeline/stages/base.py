@@ -60,6 +60,7 @@ from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reason
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import STATE_SKIP
 
+from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
 from ..events import StageEvent
 from ..github_jobs import GitHubJob
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
@@ -69,6 +70,9 @@ from ..work_item import ItemKind, WorkItem
 __all__ = [
     "GIT_JOB_TIMEOUT_S",
     "AgentJob",
+    "AthenaSkillJob",
+    "AthenaSkillRequest",
+    "AthenaSkillResult",
     "BuildTestJob",
     "CompactJob",
     "ConditionalMergeResult",
@@ -511,7 +515,7 @@ class JobRequest:
 
     """
 
-    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob
+    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob
     on_done_state: str
 
 

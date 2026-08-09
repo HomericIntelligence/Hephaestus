@@ -63,6 +63,7 @@ from hephaestus.automation.pipeline.stages.pr_review import (
     _validation_thread_snapshots,
     _without_duplicate_live_findings,
 )
+from hephaestus.automation.pipeline.stages.pr_review_threads import _scope_retraction_paths
 from hephaestus.automation.pipeline.stages.pr_review_verification import (
     _FULL_UNIT_COVERAGE_SPEC,
 )
@@ -2998,6 +2999,30 @@ class TestReviewThreadLifecycle:
         assert len(normalized) == 1
         assert "guard None first" in normalized[0]["body"]
         assert "Thread conversation:" in normalized[0]["body"]
+
+    def test_remediation_conversation_does_not_duplicate_scope_manifest(self) -> None:
+        """A submitted reply keeps one parseable scope-retraction manifest."""
+        thread = self._thread(
+            "thread-1",
+            3,
+            (
+                "Remove this unrelated file.\n"
+                '<!-- hephaestus-scope-retraction-paths: ["out-of-scope.py"] -->'
+            ),
+        )
+        thread["path"] = "out-of-scope.py"
+        thread["comments"].append(
+            {
+                "id": "implementation-reply",
+                "author": "implementer",
+                "body": "[Response] Removed the unrelated file.",
+            }
+        )
+
+        normalized = _normalize_remediation_threads([thread])
+
+        assert _scope_retraction_paths(normalized) == ("out-of-scope.py",)
+        assert normalized[0]["body"].count("hephaestus-scope-retraction-paths:") == 1
 
     def test_partial_reconciliation_restarts_fresh_review_without_stale_receipts(
         self, make_ctx: Any, make_work_item: Any

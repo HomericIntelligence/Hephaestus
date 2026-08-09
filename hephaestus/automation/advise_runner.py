@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.automation.mnemosyne_binding import default_mnemosyne_root as binding_mnemosyne_root
 from hephaestus.constants import agent_clone_timeout, agent_git_timeout
 from hephaestus.github.client import gh_call
 from hephaestus.github.mnemosyne_repo import resolve_mnemosyne_target
@@ -80,7 +81,7 @@ def advise_skipped(reason: str) -> str:
 
 def default_mnemosyne_root() -> Path:
     """Return the shared Mnemosyne checkout root."""
-    return Path.home() / ".agent-brain" / "Mnemosyne"
+    return binding_mnemosyne_root()
 
 
 def _clone_mnemosyne(mnemosyne_root: Path) -> bool:

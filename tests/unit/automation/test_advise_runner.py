@@ -37,7 +37,7 @@ class TestAdviseSkipped:
 
     def test_default_mnemosyne_root_uses_agent_brain(self, tmp_path: Path) -> None:
         with patch.object(Path, "home", return_value=tmp_path):
-            assert advise_runner.default_mnemosyne_root() == tmp_path / ".agent-brain" / "Mnemosyne"
+            assert advise_runner.default_mnemosyne_root() == tmp_path / ".agent_brain" / "knowledge"
 
 
 # ---------------------------------------------------------------------------

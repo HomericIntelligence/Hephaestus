@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ from hephaestus.agents.runtime import (
     uses_direct_agent_runner,
 )
 from hephaestus.automation.agent_config import normalize_claude_model
+from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
+from hephaestus.automation.pipeline.athena_skill_jobs import build_athena_skill_request
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
@@ -30,6 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True, help="Where to write the agent's final response")
     parser.add_argument("--log-file", help="Where to write combined agent stdout/stderr")
     parser.add_argument("--skill-file", help="Optional skill instructions to prepend to the prompt")
+    parser.add_argument(
+        "--athena-skill",
+        choices=["advise", "learn"],
+        help="Run a host-owned Athena skill request instead of a generic agent prompt",
+    )
+    parser.add_argument(
+        "--athena-delivery-file",
+        help="JSON host-owned delivery request required when --athena-skill=learn",
+    )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
     parser.add_argument("--model", default="", help="Optional agent model override")
@@ -223,6 +235,32 @@ def run_agent(args: argparse.Namespace) -> int:
 
     agent = resolve_agent(args.agent)
     args.agent = agent
+
+    if args.athena_skill:
+        payload: dict[str, object] = {"context": prompt}
+        delivery_file = getattr(args, "athena_delivery_file", None)
+        if delivery_file:
+            try:
+                delivery = json.loads(Path(delivery_file).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"cannot read Athena learning delivery file: {exc}") from exc
+            if not isinstance(delivery, dict):
+                raise ValueError("Athena learning delivery file must contain a JSON object")
+            payload["learn_delivery"] = delivery
+        request = build_athena_skill_request(
+            kind=args.athena_skill,
+            repo=repo_root.name,
+            issue=args.stage,
+            agent=agent,
+            model=args.model,
+            cwd=repo_root,
+            timeout_s=args.timeout,
+            payload=payload,
+        )
+        result = MnemosyneSkillHost().execute(request)
+        write_secure(output_file, json.dumps(result.__dict__, indent=2, sort_keys=True) + "\n")
+        write_log(log_file, result.context or result.error or "")
+        return 0 if result.ok else 1
 
     if agent == "claude":
         return run_claude(args, prompt, repo_root, output_file, log_file)

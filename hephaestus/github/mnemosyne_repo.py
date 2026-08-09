@@ -1,68 +1,86 @@
-"""Resolve which Mnemosyne repository to clone, push to, and PR against.
+"""Resolve the trusted Mnemosyne repository under Athena's contract.
 
-Historically every path that touched Mnemosyne hardcoded
-``HomericIntelligence/Mnemosyne`` as the remote, which meant only
-members of that org could use the ``/advise`` and ``/learn`` skills (and the
-automation pipeline) against a knowledge base.
+Mnemosyne is a repository dependency, not a Pi package.  Resolution follows
+Athena's dependency-resolution contract:
 
-This module makes the target portable. The resolution ladder is:
-
-1. An ``override_owner`` (explicit arg or the ``HEPH_MNEMOSYNE_OWNER`` env var)
-   always wins.
-2. Otherwise use the ``gh``-authenticated login. If that login *is*
-   ``HomericIntelligence`` (the upstream itself), clone upstream directly — you
-   cannot fork a repo into its own org. If ``<login>/Mnemosyne`` already
-   exists on GitHub, use it. Otherwise fork
-   ``HomericIntelligence/Mnemosyne`` into the login's namespace and use
-   the resulting fork.
-3. If the login cannot be determined, fall back to the upstream slug.
-
-``/learn`` pushes branches and opens PRs against the *resolved* slug (the fork
-itself), making each user's knowledge base self-contained.
-
-All ``gh`` invocations route through :func:`hephaestus.github.client.gh_call`
-so they stay behind the rate-limit / circuit-breaker adapter. The resolver is
-the single source of truth shared by ``hephaestus.automation.advise_runner`` and
-mirrored (in bash) by the ``advise``/``learn`` skill definitions.
+1. ``HOMERIC_INTELLIGENCE_MNEMOSYNE_OWNER`` or an explicit ``override_owner``
+   is an explicit trust decision.  Invalid explicit owners are fatal.
+2. Without an override, a same-owner ``Mnemosyne`` repository is used only when
+   the current repository owner is an organization, the viewer can write, and
+   GitHub proves it is a fork of ``HomericIntelligence/Mnemosyne``.
+3. Otherwise the canonical upstream is selected.  API/auth failures that
+   prevent a trustworthy decision are fatal.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
 
 from hephaestus.github.client import gh_call
-from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
+from hephaestus.utils.helpers import METADATA_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
 UPSTREAM_OWNER = "HomericIntelligence"
 MNEMOSYNE_REPO = "Mnemosyne"
 UPSTREAM_SLUG = f"{UPSTREAM_OWNER}/{MNEMOSYNE_REPO}"
+OWNER_ENV_VAR = "HOMERIC_INTELLIGENCE_MNEMOSYNE_OWNER"
+LEGACY_OWNER_ENV_VAR = "HEPH_MNEMOSYNE_OWNER"
 
-#: Environment variable that overrides the resolved owner. Mirrored by the
-#: skill bash blocks so interactive and automated paths agree.
-OWNER_ENV_VAR = "HEPH_MNEMOSYNE_OWNER"
+_OWNER_RE = re.compile(r"(?=.{1,39}\Z)[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*")
+_WRITE_PERMISSIONS = frozenset({"WRITE", "MAINTAIN", "ADMIN"})
+_NOT_FOUND_MARKERS = ("not found", "could not resolve", "404")
+
+
+class MnemosyneResolutionError(RuntimeError):
+    """Raised when a trustworthy Mnemosyne target cannot be selected."""
+
+
+class MnemosyneTrustBasis(StrEnum):
+    """Trust basis reported by the dependency resolver."""
+
+    EXPLICIT_OVERRIDE = "explicit override"
+    MAINTAINED_ORGANIZATION_FORK = "maintained organization fork"
+    CANONICAL_UPSTREAM = "canonical upstream"
+
+
+@dataclass(frozen=True)
+class CurrentRepositoryMetadata:
+    """GitHub facts for the repository running Hephaestus automation."""
+
+    owner: str
+    owner_type: str
+    viewer_permission: str
+
+
+@dataclass(frozen=True)
+class RepositoryMetadata:
+    """GitHub facts for one ``owner/Mnemosyne`` candidate."""
+
+    slug: str
+    default_branch: str
+    head_sha: str
+    is_fork: bool = False
+    parent_full_name: str = ""
 
 
 @dataclass(frozen=True)
 class MnemosyneTarget:
-    """The resolved Mnemosyne repository to clone, push to, and PR against.
-
-    Attributes:
-        owner: The resolved owner (the ``gh`` login, an override, or
-            ``HomericIntelligence`` when falling back to upstream).
-        slug: ``owner/Mnemosyne`` — the clone / push / PR target.
-        is_fork_of_upstream: True when ``owner`` is a fork of the upstream repo
-            (i.e. not ``HomericIntelligence`` itself).
-
-    """
+    """Resolved Mnemosyne repository identity and immutable branch facts."""
 
     owner: str
     slug: str
     is_fork_of_upstream: bool
+    default_branch: str = ""
+    head_sha: str = ""
+    trust_basis: MnemosyneTrustBasis = MnemosyneTrustBasis.CANONICAL_UPSTREAM
 
 
 def _slug_for(owner: str) -> str:
@@ -70,109 +88,164 @@ def _slug_for(owner: str) -> str:
     return f"{owner}/{MNEMOSYNE_REPO}"
 
 
-def gh_authenticated_login(*, timeout: int = METADATA_TIMEOUT) -> str | None:
-    """Return the ``gh``-authenticated user's login, or None on failure.
+def validate_owner(owner: str) -> str:
+    """Return a validated GitHub owner or raise for unsafe explicit input."""
+    candidate = owner.strip()
+    if _OWNER_RE.fullmatch(candidate) is None:
+        raise MnemosyneResolutionError(
+            f"invalid Mnemosyne owner {owner!r}; expected a GitHub owner name"
+        )
+    return candidate
 
-    Args:
-        timeout: Per-call timeout for the ``gh api user`` probe.
 
-    Returns:
-        The login string (e.g. ``"mvillmow"``), or None if ``gh`` is not
-        authenticated or the call fails.
-
-    """
+def _gh_json(args: list[str], *, timeout: int = METADATA_TIMEOUT) -> dict[str, Any]:
     try:
         result = gh_call(
-            ["api", "user", "--jq", ".login"],
-            check=False,
-            timeout=timeout,
-        )
-    except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
-        logger.warning("Failed to determine gh-authenticated login: %s", exc)
-        return None
-    if result.returncode != 0:
-        logger.warning(
-            "gh api user failed (rc=%s); cannot determine login: %s",
-            result.returncode,
-            (result.stderr or "").strip(),
-        )
-        return None
-    login = (result.stdout or "").strip()
-    return login or None
-
-
-def remote_repo_exists(slug: str, *, timeout: int = METADATA_TIMEOUT) -> bool:
-    """Return True when ``slug`` (``owner/repo``) exists on GitHub.
-
-    Args:
-        slug: The ``owner/repo`` slug to probe.
-        timeout: Per-call timeout for the ``gh repo view`` probe.
-
-    Returns:
-        True if the repo is visible to the authenticated user, else False.
-
-    """
-    try:
-        result = gh_call(
-            ["repo", "view", slug, "--json", "name"],
+            args,
             check=False,
             log_on_error=False,
             timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
-        logger.warning("Failed to check existence of %s: %s", slug, exc)
-        return False
-    return result.returncode == 0
-
-
-def fork_upstream(owner: str, *, timeout: int = NETWORK_TIMEOUT) -> bool:
-    """Fork ``HomericIntelligence/Mnemosyne`` into the gh user's namespace.
-
-    ``gh repo fork`` always forks into the *authenticated* user's account, so
-    ``owner`` is used only for logging/sanity — the caller is expected to pass
-    the gh-authenticated login.
-
-    Args:
-        owner: The login the fork is expected to land under (for logging).
-        timeout: Per-call timeout for the fork operation.
-
-    Returns:
-        True if the fork was created (or already existed), else False.
-
-    """
-    try:
-        logger.info("Forking %s into %s...", UPSTREAM_SLUG, owner)
-        result = gh_call(
-            ["repo", "fork", UPSTREAM_SLUG, "--clone=false"],
-            check=False,
-            timeout=timeout,
-        )
-    except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
-        logger.warning("Failed to fork %s: %s", UPSTREAM_SLUG, exc)
-        return False
+        raise MnemosyneResolutionError(
+            f"GitHub query failed for gh {' '.join(args)}: {exc}"
+        ) from exc
     if result.returncode != 0:
-        logger.warning(
-            "gh repo fork %s failed (rc=%s): %s",
-            UPSTREAM_SLUG,
-            result.returncode,
-            (result.stderr or "").strip(),
+        detail = (result.stderr or result.stdout or "").strip()
+        raise MnemosyneResolutionError(
+            f"GitHub query failed for gh {' '.join(args)}: {detail or result.returncode}"
         )
-        return False
-    logger.info("Fork of %s available under %s", UPSTREAM_SLUG, owner)
-    return True
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise MnemosyneResolutionError("GitHub query returned malformed JSON") from exc
+    if not isinstance(data, dict):
+        raise MnemosyneResolutionError("GitHub query returned non-object JSON")
+    return data
 
 
-def _validate_owner(owner: str) -> str | None:
-    """Return ``owner`` if it is a plausible GitHub login, else None.
+def _repo_view_json(slug: str | None = None) -> dict[str, Any]:
+    args = ["repo", "view"]
+    if slug is not None:
+        args.append(slug)
+    args.extend(["--json", "owner,viewerPermission,defaultBranchRef,isFork,parent"])
+    return _gh_json(args)
 
-    Guards against an override or login that contains a slash (already a slug)
-    or whitespace, which would corrupt the constructed clone/push slug.
+
+def fetch_current_repository_metadata() -> CurrentRepositoryMetadata:
+    """Return current repository owner and viewer-permission facts."""
+    data = _repo_view_json()
+    owner = data.get("owner")
+    if not isinstance(owner, dict):
+        raise MnemosyneResolutionError("current repository metadata lacks owner")
+    login = owner.get("login")
+    owner_type = owner.get("type")
+    permission = data.get("viewerPermission")
+    if not isinstance(login, str) or not login:
+        raise MnemosyneResolutionError("current repository metadata is incomplete")
+    if not isinstance(owner_type, str) or not owner_type:
+        raise MnemosyneResolutionError("current repository metadata is incomplete")
+    if not isinstance(permission, str) or not permission:
+        raise MnemosyneResolutionError("current repository metadata is incomplete")
+    return CurrentRepositoryMetadata(
+        owner=validate_owner(login),
+        owner_type=owner_type,
+        viewer_permission=permission,
+    )
+
+
+def _default_branch_and_head(data: dict[str, Any], slug: str) -> tuple[str, str]:
+    default_branch_ref = data.get("defaultBranchRef")
+    if not isinstance(default_branch_ref, dict):
+        raise MnemosyneResolutionError(f"{slug} metadata lacks defaultBranchRef")
+    branch = default_branch_ref.get("name")
+    target = default_branch_ref.get("target")
+    head = ""
+    if isinstance(target, dict):
+        raw_head = target.get("oid") or target.get("sha")
+        if isinstance(raw_head, str):
+            head = raw_head
+    raw_oid = default_branch_ref.get("oid")
+    if not head and isinstance(raw_oid, str):
+        head = raw_oid
+    if not isinstance(branch, str) or not branch or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise MnemosyneResolutionError(f"{slug} metadata lacks a default branch head SHA")
+    return branch, head
+
+
+def fetch_repository_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
+    """Return GitHub metadata for one candidate dependency repository."""
+    try:
+        data = _repo_view_json(slug)
+    except MnemosyneResolutionError as exc:
+        if missing_ok and any(marker in str(exc).casefold() for marker in _NOT_FOUND_MARKERS):
+            return None
+        raise
+    default_branch, head_sha = _default_branch_and_head(data, slug)
+    parent = data.get("parent")
+    parent_full_name = ""
+    if isinstance(parent, dict) and isinstance(parent.get("nameWithOwner"), str):
+        parent_full_name = parent["nameWithOwner"]
+    return RepositoryMetadata(
+        slug=slug,
+        default_branch=default_branch,
+        head_sha=head_sha,
+        is_fork=bool(data.get("isFork")),
+        parent_full_name=parent_full_name,
+    )
+
+
+def _target_from_metadata(
+    owner: str,
+    metadata: RepositoryMetadata,
+    trust_basis: MnemosyneTrustBasis,
+) -> MnemosyneTarget:
+    return MnemosyneTarget(
+        owner=owner,
+        slug=metadata.slug,
+        is_fork_of_upstream=owner != UPSTREAM_OWNER,
+        default_branch=metadata.default_branch,
+        head_sha=metadata.head_sha,
+        trust_basis=trust_basis,
+    )
+
+
+def _canonical_target() -> MnemosyneTarget:
+    metadata = fetch_repository_metadata(UPSTREAM_SLUG)
+    if metadata is None:  # pragma: no cover - missing_ok is false above
+        raise MnemosyneResolutionError(f"{UPSTREAM_SLUG} metadata unavailable")
+    return _target_from_metadata(
+        UPSTREAM_OWNER,
+        metadata,
+        MnemosyneTrustBasis.CANONICAL_UPSTREAM,
+    )
+
+
+def gh_authenticated_login(*, timeout: int = METADATA_TIMEOUT) -> str | None:
+    """Return the authenticated login for legacy diagnostics.
+
+    The Athena resolver no longer selects user forks based on login, but this
+    helper remains for callers and tests that display ``gh`` identity.
     """
-    candidate = owner.strip()
-    if not candidate or "/" in candidate or any(c.isspace() for c in candidate):
-        logger.warning("Ignoring invalid Mnemosyne owner %r", owner)
+    del timeout
+    try:
+        current = fetch_current_repository_metadata()
+    except MnemosyneResolutionError:
         return None
-    return candidate
+    return current.owner
+
+
+def remote_repo_exists(slug: str, *, timeout: int = METADATA_TIMEOUT) -> bool:
+    """Return True when ``slug`` exists and its metadata is readable."""
+    del timeout
+    return fetch_repository_metadata(slug, missing_ok=True) is not None
+
+
+def fork_upstream(owner: str, *, timeout: int = METADATA_TIMEOUT) -> bool:
+    """Reject automatic fork creation under Athena's resolution contract."""
+    del owner, timeout
+    logger.warning("Automatic Mnemosyne fork creation is not permitted")
+    return False
 
 
 def resolve_mnemosyne_target(
@@ -180,67 +253,41 @@ def resolve_mnemosyne_target(
     override_owner: str | None = None,
     allow_fork: bool = True,
 ) -> MnemosyneTarget:
-    """Decide which Mnemosyne repository to clone, push to, and PR against.
-
-    See the module docstring for the full precedence ladder.
-
-    Args:
-        override_owner: Explicit owner to use. Falls back to the
-            ``HEPH_MNEMOSYNE_OWNER`` env var when None. An override that resolves
-            to ``HomericIntelligence`` (or any owner) is used verbatim, with no
-            fork attempt.
-        allow_fork: When True (default), fork the upstream repo if the gh user
-            has no existing ``<login>/Mnemosyne``. When False, skip
-            forking and fall back to upstream.
-
-    Returns:
-        The resolved :class:`MnemosyneTarget`.
-
-    """
+    """Resolve Mnemosyne with Athena's explicit trust and fallback rules."""
+    del allow_fork
     raw_override = override_owner if override_owner is not None else os.environ.get(OWNER_ENV_VAR)
     if raw_override:
-        owner = _validate_owner(raw_override)
-        if owner:
-            return MnemosyneTarget(
-                owner=owner,
-                slug=_slug_for(owner),
-                is_fork_of_upstream=owner != UPSTREAM_OWNER,
+        owner = validate_owner(raw_override)
+        metadata = fetch_repository_metadata(_slug_for(owner))
+        if metadata is None:  # pragma: no cover - missing_ok is false above
+            raise MnemosyneResolutionError(f"{owner}/Mnemosyne metadata unavailable")
+        return _target_from_metadata(owner, metadata, MnemosyneTrustBasis.EXPLICIT_OVERRIDE)
+
+    if legacy := os.environ.get(LEGACY_OWNER_ENV_VAR):
+        logger.warning(
+            "%s is ignored; use %s=%s to make an explicit Mnemosyne trust decision",
+            LEGACY_OWNER_ENV_VAR,
+            OWNER_ENV_VAR,
+            legacy,
+        )
+
+    current = fetch_current_repository_metadata()
+    if (
+        current.owner_type == "Organization"
+        and current.viewer_permission in _WRITE_PERMISSIONS
+        and current.owner != UPSTREAM_OWNER
+    ):
+        candidate_slug = _slug_for(current.owner)
+        candidate = fetch_repository_metadata(candidate_slug, missing_ok=True)
+        if (
+            candidate is not None
+            and candidate.is_fork
+            and candidate.parent_full_name == UPSTREAM_SLUG
+        ):
+            return _target_from_metadata(
+                current.owner,
+                candidate,
+                MnemosyneTrustBasis.MAINTAINED_ORGANIZATION_FORK,
             )
 
-    login = gh_authenticated_login()
-    if login:
-        login = _validate_owner(login)
-
-    if not login:
-        logger.info("gh login unavailable; defaulting Mnemosyne target to %s", UPSTREAM_SLUG)
-        return MnemosyneTarget(
-            owner=UPSTREAM_OWNER,
-            slug=UPSTREAM_SLUG,
-            is_fork_of_upstream=False,
-        )
-
-    if login == UPSTREAM_OWNER:
-        # Cannot fork a repo into its own org; clone upstream directly.
-        return MnemosyneTarget(
-            owner=UPSTREAM_OWNER,
-            slug=UPSTREAM_SLUG,
-            is_fork_of_upstream=False,
-        )
-
-    user_slug = _slug_for(login)
-    if remote_repo_exists(user_slug):
-        return MnemosyneTarget(owner=login, slug=user_slug, is_fork_of_upstream=True)
-
-    if allow_fork and fork_upstream(login):
-        return MnemosyneTarget(owner=login, slug=user_slug, is_fork_of_upstream=True)
-
-    logger.info(
-        "No %s and fork unavailable; defaulting Mnemosyne target to %s",
-        user_slug,
-        UPSTREAM_SLUG,
-    )
-    return MnemosyneTarget(
-        owner=UPSTREAM_OWNER,
-        slug=UPSTREAM_SLUG,
-        is_fork_of_upstream=False,
-    )
+    return _canonical_target()

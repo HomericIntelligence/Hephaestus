@@ -153,9 +153,13 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
+            from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
             from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
+            athena_executor = (
+                MnemosyneSkillHost() if pipeline_requires_athena_executor(config) else None
+            )
             pool = WorkerPool(
                 size=work_window,
                 shutdown=self.shutdown,
@@ -166,6 +170,7 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
                     dry_run=config.dry_run,
                     guard_store_factory=self.guard_store_factory,
                 ),
+                athena_skill_executor=athena_executor,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected
@@ -301,6 +306,7 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self._seen_item_ids: set[int] = set()
         self._stage_config = _StageRunConfig(
             enable_advise=not config.no_advise,
+            enable_learn=config.enable_learn,
             agent=config.agent,
             model=config.model,
             planner_model=config.planner_model,

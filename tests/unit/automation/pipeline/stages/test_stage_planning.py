@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-import queue
 import re
-import threading
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
-from hephaestus.automation.pipeline.queues import CompletionQueue
-from hephaestus.automation.pipeline.routing import Disposition, StageName
+from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     build_plan_prompt,
 )
-from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import (
@@ -554,16 +549,16 @@ class TestPlanningStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AgentJob)  # narrow the job union
+        assert isinstance(result.job, AthenaSkillJob)  # narrow the job union
         assert result.on_done_state == "PLAN_WAIT"
         assert result.job.descr == "advise"
-        assert result.job.sandbox == "read-only"
-        assert result.job.prompt_kwargs["issue_number"] == 3
+        assert result.job.request.kind == "advise"
+        assert result.job.request.payload["issue_number"] == 3
 
     def test_codex_advise_job_is_provider_neutral_read_only(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Codex advise turns must receive a runtime read-only sandbox."""
+        """Codex advise turns keep provider identity in the host-owned request."""
         stage = PlanningStage()
         ctx = make_ctx()
         ctx.config.agent = "codex"
@@ -572,18 +567,16 @@ class TestPlanningStageStep:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AgentJob)
-        assert result.job.agent == "codex"
-        assert result.job.sandbox == "read-only"
-        assert result.job.allowed_tools == "Read,Glob,Grep"
+        assert isinstance(result.job, AthenaSkillJob)
+        assert result.job.request.agent == "codex"
+        assert result.job.request.kind == "advise"
 
-    def test_codex_advise_job_reaches_direct_runner_as_read_only(
+    def test_codex_advise_job_builds_same_typed_request_shape(
         self,
         make_ctx: Any,
         make_work_item: Any,
-        tmp_path: Path,
     ) -> None:
-        """The planning job's read-only contract reaches the Codex runtime."""
+        """The planning job now uses the provider-neutral Athena request contract."""
         stage = PlanningStage()
         ctx = make_ctx()
         ctx.config.agent = "codex"
@@ -591,36 +584,13 @@ class TestPlanningStageStep:
         request = stage.step(item, ctx)
 
         assert isinstance(request, JobRequest)
-        assert isinstance(request.job, AgentJob)
-
-        completion_q: CompletionQueue = queue.Queue()
-        pool = WorkerPool(
-            size=1,
-            shutdown=threading.Event(),
-            completion_q=completion_q,
-            lock_dir=tmp_path / "locks",
-        )
-        session_result = MagicMock(stdout="advice", session_id="codex-session")
-        try:
-            with (
-                patch(
-                    "hephaestus.automation.pipeline.worker_pool.resolve_agent",
-                    return_value="codex",
-                ),
-                patch(
-                    "hephaestus.automation.pipeline.worker_pool.run_agent_session",
-                    return_value=session_result,
-                ) as direct_runner,
-            ):
-                pool.submit(request.job, StageName.PLANNING)
-                _handle, result = completion_q.get(timeout=10)
-        finally:
-            pool.shutdown()
-
-        assert result.ok is True
-        direct_runner.assert_called_once()
-        assert direct_runner.call_args.kwargs["sandbox"] == "read-only"
-        assert direct_runner.call_args.kwargs["approval"] == "never"
+        assert isinstance(request.job, AthenaSkillJob)
+        assert request.job.request.agent == "codex"
+        assert request.job.request.payload == {
+            "issue_number": 3,
+            "issue_title": "",
+            "issue_body": "",
+        }
 
     def test_plan_wait_requests_plan_job(self, make_ctx: Any, make_work_item: Any) -> None:
         """PLAN_WAIT submits the plan job (planner session) and lands in VERIFY."""
@@ -1067,11 +1037,19 @@ class TestPlanningStageOnJobDone:
         stage = PlanningStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, state="ADVISE_WAIT")
-        result = JobResult(ok=True, value="advise findings here")
+        result = JobResult(
+            ok=True,
+            value=AthenaSkillResult(
+                kind="advise",
+                context="advise findings here",
+                receipt={"binding": "ok"},
+            ),
+        )
 
         stage.on_job_done(item, result, ctx)
 
         assert item.payload["advise_findings"] == "advise findings here"
+        assert item.payload["athena_advise_receipt"] == {"binding": "ok"}
 
     def test_plan_result_stored_in_payload(self, make_ctx: Any, make_work_item: Any) -> None:
         """The plan job's text is stored on the payload."""

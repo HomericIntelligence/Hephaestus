@@ -31,6 +31,7 @@ from ._review_utils import log_file_path
 from .agent_config import DEFAULT_AGENT_TIMEOUT, learn_claude_timeout
 from .claude_models import learn_model
 from .git_utils import run
+from .mnemosyne_delivery import LearnDeliveryReceipt, valid_delivery_receipt
 from .session_naming import session_uuid
 
 logger = logging.getLogger(__name__)
@@ -54,21 +55,36 @@ _MNEMOSYNE_URL_RE = re.compile(
 _MNEMOSYNE_PR_REF_RE = re.compile(r"\b[A-Za-z0-9._-]+/Mnemosyne#(?P<number>\d+)\b")
 
 
-def mnemosyne_update_evidence(output: str) -> dict[str, Any]:
+def mnemosyne_update_evidence(
+    output: str | LearnDeliveryReceipt | dict[str, Any],
+) -> dict[str, Any]:
     """Extract Mnemosyne update evidence from a ``/learn`` response.
 
-    A successful agent turn is not proof that Mnemosyne changed. Treat
-    concrete Mnemosyne PR/commit URLs or owner/repo issue-style PR refs
-    as confirmation; otherwise mark the update as unverified.
+    A successful agent turn or PR-looking text is not proof that Mnemosyne
+    changed. Only a host-owned :class:`LearnDeliveryReceipt` with PR readback
+    evidence is authoritative.
     """
+    receipt: dict[str, Any] | None = None
+    if isinstance(output, LearnDeliveryReceipt) and valid_delivery_receipt(output):
+        receipt = output.to_dict()
+    elif isinstance(output, dict) and valid_delivery_receipt(output):
+        receipt = output
+    if receipt is not None:
+        pr_number = int(receipt["pr_number"])
+        return {
+            "mnemosyne_update_status": "confirmed",
+            "mnemosyne_update_urls": [str(receipt["pr_url"])],
+            "mnemosyne_update_pr_numbers": [pr_number],
+        }
     text = output if isinstance(output, str) else str(output or "")
-    urls = sorted(set(_MNEMOSYNE_URL_RE.findall(text)))
-    pr_numbers = sorted({int(m.group("number")) for m in _MNEMOSYNE_PR_REF_RE.finditer(text)})
-    status = "confirmed" if urls or pr_numbers else "unverified"
+    # Keep the regex references alive for compatibility diagnostics while
+    # deliberately refusing to treat model prose as durable evidence.
+    _MNEMOSYNE_URL_RE.findall(text)
+    tuple(_MNEMOSYNE_PR_REF_RE.finditer(text))
     return {
-        "mnemosyne_update_status": status,
-        "mnemosyne_update_urls": urls,
-        "mnemosyne_update_pr_numbers": pr_numbers,
+        "mnemosyne_update_status": "unverified",
+        "mnemosyne_update_urls": [],
+        "mnemosyne_update_pr_numbers": [],
     }
 
 

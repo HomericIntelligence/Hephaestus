@@ -64,6 +64,7 @@ EXCLUDED_PARTS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".tmp",
     ".venv",
     "build",
 }
@@ -104,20 +105,21 @@ def test_only_explicit_compatibility_and_history_references_remain() -> None:
     test_file = Path(__file__).resolve()
     unexpected: list[str] = []
 
-    for path in REPO_ROOT.rglob("*"):
-        if not path.is_file() or path.resolve() == test_file:
-            continue
-        relative = path.relative_to(REPO_ROOT)
-        if any(part in EXCLUDED_PARTS for part in relative.parts):
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
-            continue
+    for root, dirnames, filenames in os.walk(REPO_ROOT):
+        dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_PARTS]
+        for filename in filenames:
+            path = Path(root) / filename
+            if path.resolve() == test_file:
+                continue
+            relative = path.relative_to(REPO_ROOT)
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
 
-        allowed = ALLOWED_CLAUDE_REFERENCE_LINES.get(relative, set())
-        for number, line in enumerate(lines, 1):
-            if "CLAUDE.md" in line and line.strip() not in allowed:
-                unexpected.append(f"{relative}:{number}: {line.strip()}")
+            allowed = ALLOWED_CLAUDE_REFERENCE_LINES.get(relative, set())
+            for number, line in enumerate(lines, 1):
+                if "CLAUDE.md" in line and line.strip() not in allowed:
+                    unexpected.append(f"{relative}:{number}: {line.strip()}")
 
     assert unexpected == []

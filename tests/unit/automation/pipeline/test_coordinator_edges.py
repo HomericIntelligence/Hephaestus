@@ -135,12 +135,14 @@ class TestWiring:
                 completion_q: Any,
                 gh_extra_path_root: Path | None = None,
                 github_job_runner: Any = None,
+                athena_skill_executor: Any = None,
             ) -> None:
                 created["size"] = size
                 created["shutdown"] = shutdown
                 created["completion_q"] = completion_q
                 created["gh_extra_path_root"] = gh_extra_path_root
                 created["github_job_runner"] = github_job_runner
+                created["athena_skill_executor"] = athena_skill_executor
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
         gh_root = tmp_path / "custom-gh"
@@ -159,6 +161,7 @@ class TestWiring:
         assert created["completion_q"] is coordinator.completion_q
         assert created["gh_extra_path_root"] == gh_root
         assert created["github_job_runner"] is not None
+        assert created["athena_skill_executor"] is not None
 
     def test_run_pipeline_wires_accessor_and_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

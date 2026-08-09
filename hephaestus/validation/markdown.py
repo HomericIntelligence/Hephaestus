@@ -264,7 +264,7 @@ def find_readmes(directory: Path) -> list[Path]:
         List of README.md file paths
 
     """
-    return list(directory.rglob("README.md"))
+    return [path for path in find_markdown_files(directory) if path.name == "README.md"]
 
 
 def extract_sections(content: str) -> list[str]:
@@ -360,6 +360,7 @@ class ReadmeValidationResult:
 def validate_readme(
     file_path: Path,
     required_sections: list[str] | None = None,
+    check_formatting: bool = True,
 ) -> ReadmeValidationResult:
     """Validate a single README file for required sections and formatting.
 
@@ -372,6 +373,7 @@ def validate_readme(
         file_path: Path to the README.md file.
         required_sections: Required section headings.  Defaults to
             ``["Overview", "Installation", "Usage"]`` when *None*.
+        check_formatting: Whether to run simplified markdown formatting checks.
 
     Returns:
         :class:`ReadmeValidationResult` with pass/fail and details.
@@ -397,10 +399,10 @@ def validate_readme(
         if missing:
             passed = False
 
-        # Check markdown formatting issues.
-        formatting = check_markdown_formatting(content)
-        if formatting:
-            passed = False
+        if check_formatting:
+            formatting = check_markdown_formatting(content)
+            if formatting:
+                passed = False
 
         # Files should end with a trailing newline.
         if not content.endswith("\n"):
@@ -422,6 +424,7 @@ def validate_readme(
 def validate_all_readmes(
     directory: Path,
     required_sections: list[str] | None = None,
+    check_formatting: bool = True,
 ) -> list[ReadmeValidationResult]:
     """Validate all README.md files in a directory tree.
 
@@ -432,13 +435,21 @@ def validate_all_readmes(
         directory: Root directory to scan.
         required_sections: Required section headings passed through to
             :func:`validate_readme`.  Uses default sections when *None*.
+        check_formatting: Whether to run simplified markdown formatting checks.
 
     Returns:
         List of :class:`ReadmeValidationResult` for each README found.
 
     """
     readmes = find_readmes(directory)
-    return [validate_readme(readme, required_sections) for readme in readmes]
+    return [
+        validate_readme(
+            readme,
+            required_sections=required_sections,
+            check_formatting=check_formatting,
+        )
+        for readme in readmes
+    ]
 
 
 def _print_readme_summary(results: list[ReadmeValidationResult]) -> None:
@@ -509,9 +520,13 @@ def check_readmes_main() -> int:
         print(f"ERROR: Directory not found: {directory}", file=sys.stderr)
         return 1
 
-    required_sections: list[str] | None = args.required_sections or None
+    required_sections: list[str] = args.required_sections or []
 
-    results = validate_all_readmes(directory, required_sections)
+    results = validate_all_readmes(
+        directory,
+        required_sections=required_sections,
+        check_formatting=args.required_sections is not None,
+    )
 
     if not results:
         if args.json:
