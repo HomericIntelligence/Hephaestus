@@ -186,3 +186,30 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
 
     assert received["session_id"] == binding.session_id
     assert result.session_id == binding.session_id
+
+
+def test_pi_session_start_dispatches_without_resume_binding(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A START_NEW request reaches the adapter without an inherited session id."""
+    received: dict[str, object] = {}
+
+    class Adapter:
+        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
+            received.update(kwargs)
+            return agent_runtime.AgentRunResult(
+                stdout="planned", stderr="", session_id="pi-session-new"
+            )
+
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
+
+    result = agent_runtime.run_agent_session(
+        "pi", "plan", cwd=tmp_path, timeout=30, model="model", execution_request=request
+    )
+
+    assert received["session_id"] is None
+    assert result.session_id == "pi-session-new"
+    assert result.session_binding is not None
+    assert result.session_binding.session_id == "pi-session-new"

@@ -1727,7 +1727,9 @@ class WorkerPool:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
 
-    def _run_agent(self, job: AgentJob) -> JobResult:
+    def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
+        self, job: AgentJob
+    ) -> JobResult:
         """Run an agent job (Claude or other runtime).
 
         Retry tradeoff: the whole agent invocation is wrapped in
@@ -1831,10 +1833,12 @@ class WorkerPool:
             stdout, session_id, session_binding = resilient_call(
                 _invoke,
                 circuit_breaker_name=f"agent:{agent}",
-                retry_predicate=lambda exc: not self._shutdown.is_set()
-                and not isinstance(
-                    exc,
-                    (AgentExecutionError, ExecutionPolicyError, PiSessionBindingError),
+                retry_predicate=lambda exc: (
+                    not self._shutdown.is_set()
+                    and not isinstance(
+                        exc,
+                        (AgentExecutionError, ExecutionPolicyError, PiSessionBindingError),
+                    )
                 ),
             )
 

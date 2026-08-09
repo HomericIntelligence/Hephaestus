@@ -2326,16 +2326,18 @@ def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> Non
     preflight.assert_called_once_with(tmp_path)
 
 
-def test_resolve_pi_ready_still_fails_for_2518(tmp_path: Path) -> None:
-    """Package readiness does not bypass lifecycle and role-scope admission."""
+def test_resolve_pi_accepts_ready_authenticated_provider(tmp_path: Path) -> None:
+    """Provider selection succeeds before execution enforces its scoped request."""
     from hephaestus.agents.pi_plugins import PiPreflightResult
 
-    with patch(
-        "hephaestus.agents.runtime.preflight_pi_environment",
-        return_value=PiPreflightResult.ready_result(),
+    with (
+        patch(
+            "hephaestus.agents.runtime.preflight_pi_environment",
+            return_value=PiPreflightResult.ready_result(),
+        ),
+        patch("hephaestus.agents.runtime.is_agent_authenticated", return_value=True),
     ):
-        with pytest.raises(RuntimeError, match="#2518"):
-            agent_runtime.resolve_agent("pi", cwd=tmp_path)
+        assert agent_runtime.resolve_agent("pi", cwd=tmp_path) == "pi"
 
 
 def test_pi_models_configured_honors_pi_coding_agent_dir(

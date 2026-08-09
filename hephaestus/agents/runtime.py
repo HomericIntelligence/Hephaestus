@@ -167,7 +167,7 @@ class PiIsolationAdapter(Protocol):
         session_id: str | None,
     ) -> AgentRunResult:
         """Start Pi with externally enforced filesystem and network constraints."""
-        ...
+        raise NotImplementedError
 
 
 # Pi does not provide an operating-system sandbox.  A deployment may install a
@@ -1948,6 +1948,8 @@ def run_agent_text(
             approval=approval,
         )
     if is_pi(agent):
+        if execution_request is None:
+            raise AssertionError("unreachable")
         result = _run_pi_with_policy(
             prompt=prompt,
             cwd=cwd,
@@ -2001,6 +2003,8 @@ def run_agent_session(
             process_tracker=process_tracker,
         )
     if is_pi(agent):
+        if execution_request is None:
+            raise AssertionError("unreachable")
         result = _run_pi_with_policy(
             prompt=prompt,
             cwd=cwd,
@@ -2069,6 +2073,8 @@ def resume_agent_session(
             process_tracker=process_tracker,
         )
     if is_pi(agent):
+        if execution_request is None or resume_binding is None:
+            raise AssertionError("unreachable")
         result = _run_pi_with_policy(
             prompt=prompt,
             cwd=cwd,

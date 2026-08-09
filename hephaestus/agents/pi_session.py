@@ -140,6 +140,7 @@ def validate_pi_binding(
         cwd: Requested worktree path.
         role: Requested execution role.
         model: Operator-selected model, compared only by fingerprint.
+
     """
     if binding.provider != "pi" or binding.schema_version != _SCHEMA_VERSION:
         raise PiSessionBindingError("Pi session binding provider or schema is unsupported")

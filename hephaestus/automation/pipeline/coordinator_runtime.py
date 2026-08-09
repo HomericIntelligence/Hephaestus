@@ -681,7 +681,9 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._completion_wakeup.wait(timeout=timeout)
         self._drain_completions()
 
-    def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
+    def _handle_completion(  # noqa: C901 - completion routing spans the fixed job protocol
+        self, handle: JobHandle, result: JobResult
+    ) -> None:
         """Route one completed job back to its item.
 
         Interrupted results park the item RESUMABLE — they never advance and
@@ -748,7 +750,11 @@ class CoordinatorRuntime(_CoordinatorHost):
             session_key = handle.job.session_agent or handle.job.agent
             binding = result.session_binding
             if handle.job.execution_request is None:
-                self._finish(item, passed=False, reason="Pi binding returned without execution request")
+                self._finish(
+                    item,
+                    passed=False,
+                    reason="Pi binding returned without execution request",
+                )
                 return
             from hephaestus.agents.pi_session import validate_pi_binding
 

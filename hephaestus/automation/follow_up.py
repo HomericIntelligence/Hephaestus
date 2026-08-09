@@ -368,10 +368,6 @@ def _persist_rejected(
     """Write rejected items to a JSON file for offline inspection / PR-body rendering."""
     if not rejected:
         return
-    reject_pi_unsupported_surface(
-        agent,
-        "legacy cross-role follow-up resume is N/A; no prompt or agent process was started",
-    )
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / f"follow-up-rejected-{issue_number}.json"
     payload = [{"title": r.title, "reason": r.reason} for r in rejected]
@@ -418,6 +414,11 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
         logger.warning("Follow-up skipped for issue #%d: %s", issue_number, message)
         write_secure(follow_up_log, f"FAILED: {message}\n")
         return None
+
+    reject_pi_unsupported_surface(
+        agent,
+        "legacy cross-role follow-up resume is N/A; no prompt or agent process was started",
+    )
 
     prompt_file = worktree_path / f".claude-followup-{issue_number}.md"
     write_secure(prompt_file, get_follow_up_prompt(issue_number))

@@ -27,7 +27,12 @@ def test_binding_round_trip_and_identity_validation(tmp_path) -> None:
 
     assert restored == binding
     assert "private-model-alias" not in binding.to_json()
-    validate_pi_binding(restored, cwd=tmp_path, role=AgentRole.IMPLEMENTER, model="private-model-alias")
+    validate_pi_binding(
+        restored,
+        cwd=tmp_path,
+        role=AgentRole.IMPLEMENTER,
+        model="private-model-alias",
+    )
 
 
 def test_binding_rejects_cross_worktree_and_role(tmp_path) -> None:

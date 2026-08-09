@@ -9,10 +9,11 @@ allowlist therefore cannot widen Pi's operating-system boundary.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Final
 
 
 class AgentRole(StrEnum):
@@ -302,6 +303,7 @@ def resolve_policy(request: ExecutionRequest) -> ExecutionPolicy:
     Raises:
         ExecutionPolicyError: If the request is unknown or its lifecycle is
             not explicitly permitted.
+
     """
     try:
         policy = POLICIES[(request.role, request.operation)]
@@ -318,9 +320,7 @@ def resolve_policy(request: ExecutionRequest) -> ExecutionPolicy:
     return policy
 
 
-def _filesystem_intersection(
-    parent: FilesystemMode, requested: FilesystemMode
-) -> FilesystemMode:
+def _filesystem_intersection(parent: FilesystemMode, requested: FilesystemMode) -> FilesystemMode:
     """Return a child filesystem mode only when it is no broader than parent."""
     if parent is FilesystemMode.WORKTREE_RW and requested is FilesystemMode.CHECKOUT_RO:
         return requested
