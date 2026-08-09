@@ -36,6 +36,7 @@ def test_packaged_catalog_is_the_exact_pin_authority() -> None:
     }
     assert catalog["packages"]["athena"]["commit"] == ("496815b00f6fb4c8e97466489371b364d52588b5")
     assert catalog["packages"]["athena"]["name"] == "@homericintelligence/athena"
+    assert catalog["packages"]["athena"]["manifest_version"] == "0.4.0"
     assert catalog["packages"]["pi-subagents"]["version"] == "0.37.2"
     assert catalog["packages"]["pi-web-access"]["version"] == "0.15.0"
 
@@ -46,6 +47,7 @@ def test_catalog_builds_only_immutable_native_install_specs() -> None:
 
     catalog = load_pi_package_catalog()
 
+    assert catalog.packages[0].manifest_version == "0.4.0"
     assert catalog.install_specs == (
         "git:github.com/HomericIntelligence/Athena@496815b00f6fb4c8e97466489371b364d52588b5",
         "npm:pi-subagents@0.37.2",
@@ -183,9 +185,8 @@ def _write_package(root: Path, name: str, version: str) -> None:
 
 def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
     tmp_path: Path,
-    monkeypatch: Any,
 ) -> None:
-    """Global npm packages resolve through npm rather than the Pi settings root."""
+    """User-scoped npm packages resolve beneath the admitted Pi settings root."""
     from hephaestus.agents import pi_plugins
 
     pi_dir = tmp_path / "pi-home"
@@ -197,12 +198,10 @@ def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
         json.dumps({"packages": list(catalog.install_specs)}), encoding="utf-8"
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
-    global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
-    _write_package(global_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
-    _write_package(global_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
-    npm_root = Mock(return_value=pi_plugins.ProcessResult(0, f"{global_npm_root}\n", ""))
-    monkeypatch.setattr(pi_plugins, "run_bounded_command", npm_root)
+    user_npm_root = pi_dir / "npm" / "node_modules"
+    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(user_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(user_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
     result = pi_plugins.inspect_pi_package_inventory(
         cwd,
@@ -214,9 +213,8 @@ def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
     assert result.ready is True
     assert result.status == "ready"
     assert result.roots["athena"] == athena_root.resolve()
-    assert result.roots["pi-subagents"] == (global_npm_root / "pi-subagents").resolve()
+    assert result.roots["pi-subagents"] == (user_npm_root / "pi-subagents").resolve()
     assert set(result.scopes.values()) == {"user"}
-    npm_root.assert_called_once_with(("npm", "root", "-g"), timeout=30)
 
 
 def test_project_inventory_uses_pi_npm_node_modules_layout(tmp_path: Path) -> None:
@@ -232,7 +230,7 @@ def test_project_inventory_uses_pi_npm_node_modules_layout(tmp_path: Path) -> No
     )
     athena_root = project_root / "git" / "github.com" / "HomericIntelligence" / "Athena"
     project_npm_root = project_root / "npm" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
+    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
     _write_package(project_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
     _write_package(project_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
@@ -385,10 +383,10 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
-    global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
-    _write_package(global_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
-    _write_package(global_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
+    user_npm_root = pi_dir / "npm" / "node_modules"
+    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(user_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(user_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
     rpc_calls: list[tuple[str, ...]] = []
     ambient_sentinel = tmp_path / "ambient-extension-loaded"
     ambient_extensions = pi_dir / "extensions"
@@ -401,8 +399,8 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     def source_info(package: str, leaf: str) -> dict[str, str]:
         root = {
             "athena": athena_root,
-            "pi-subagents": global_npm_root / "pi-subagents",
-            "pi-web-access": global_npm_root / "pi-web-access",
+            "pi-subagents": user_npm_root / "pi-subagents",
+            "pi-web-access": user_npm_root / "pi-web-access",
         }[package]
         return {
             "origin": "package",
@@ -424,8 +422,6 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     def runner(argv: tuple[str, ...], **kwargs: Any) -> ProcessResult:
         if argv[-1] == "--version":
             return ProcessResult(0, "0.80.2\n", "")
-        if argv == ("npm", "root", "-g"):
-            return ProcessResult(0, f"{global_npm_root}\n", "")
         rpc_calls.append(argv)
         probe_env = kwargs["env"]
         probe_cwd = kwargs["cwd"]
@@ -438,8 +434,8 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         configured = json.loads((isolated_agent_dir / "settings.json").read_text(encoding="utf-8"))
         assert configured["packages"] == [
             str(athena_root.resolve()),
-            str((global_npm_root / "pi-subagents").resolve()),
-            str((global_npm_root / "pi-web-access").resolve()),
+            str((user_npm_root / "pi-subagents").resolve()),
+            str((user_npm_root / "pi-web-access").resolve()),
         ]
         assert not (isolated_agent_dir / "extensions").exists()
         assert not (probe_cwd / ".pi").exists()
@@ -902,10 +898,10 @@ def test_global_no_approve_inventory_ignores_project_package_shadow(tmp_path: Pa
         json.dumps({"packages": ["npm:pi-subagents@9.9.9"]}), encoding="utf-8"
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
-    global_npm_root = tmp_path / "npm-global" / "lib" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "v0.4.0")
-    _write_package(global_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
-    _write_package(global_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
+    user_npm_root = pi_dir / "npm" / "node_modules"
+    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(user_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(user_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
     result = pi_plugins.inspect_pi_package_inventory(
         cwd,
@@ -913,7 +909,6 @@ def test_global_no_approve_inventory_ignores_project_package_shadow(tmp_path: Pa
         pi_dir=pi_dir,
         git_head=lambda _root: catalog.packages[0].pin,
         include_project=False,
-        runner=Mock(return_value=pi_plugins.ProcessResult(0, f"{global_npm_root}\n", "")),
     )
 
     assert result.ready is True
