@@ -34,7 +34,8 @@ def test_run_uses_current_interpreter_and_bounds_failure_output(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The runner forwards bounded failure tails and the return code."""
-    stdout = "x" * (host_coverage._FAILURE_OUTPUT_TAIL_CHARS + 1)
+    failure = "FAILED tests/unit/test_example.py::test_failure - assertion failed"
+    stdout = failure + "\n" + "x" * (host_coverage._FAILURE_OUTPUT_TAIL_CHARS + 1)
     stderr = "y" * (host_coverage._FAILURE_OUTPUT_TAIL_CHARS + 1)
     result = subprocess.CompletedProcess(args=[], returncode=4, stdout=stdout, stderr=stderr)
     with patch.object(host_coverage, "run_subprocess", return_value=result) as run:
@@ -43,7 +44,12 @@ def test_run_uses_current_interpreter_and_bounds_failure_output(
     run.assert_called_once_with([sys.executable, "-m", "example"], check=False)
     captured = capsys.readouterr()
     assert captured.out == stdout[-host_coverage._FAILURE_OUTPUT_TAIL_CHARS :]
-    assert captured.err == stderr[-host_coverage._FAILURE_OUTPUT_TAIL_CHARS :]
+    assert captured.err == (
+        stderr[-host_coverage._FAILURE_OUTPUT_TAIL_CHARS :]
+        + "\nHost coverage failure index:\n"
+        + failure
+        + "\n"
+    )
 
 
 def test_run_is_silent_on_success(capsys: pytest.CaptureFixture[str]) -> None:
