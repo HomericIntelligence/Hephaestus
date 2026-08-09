@@ -1078,6 +1078,10 @@ class TestWorkerPoolSubmitComplete:
 
         with (
             patch(
+                f"{_WP}._verifier_owned_runtime_environment",
+                return_value=Path(sys.prefix),
+            ),
+            patch(
                 f"{_WP}._host_verification_command",
                 side_effect=lambda **kwargs: kwargs["argv"],
             ),
@@ -1113,6 +1117,10 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
+            patch(
+                f"{_WP}._verifier_owned_runtime_environment",
+                return_value=Path(sys.prefix),
+            ),
             patch(f"{_WP}._bounded_git_archive", return_value=(b"", "")),
             patch(f"{_WP}._extract_immutable_archive"),
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata.git"),
