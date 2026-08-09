@@ -17,14 +17,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hephaestus.agents.execution_policy import (
-    AgentOperation,
-    AgentRole,
-    ExecutionRequest,
-    SessionLifecycle,
-)
+from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import (
+    agent_compaction_resume,
     direct_agent_model,
     resume_agent_session,
     session_agent_matches,
@@ -504,48 +500,34 @@ def compact_agent_session(
     """
     if provider == "claude":
         return compact_session(repo, issue, session_agent, cwd, timeout, model)
-    if provider == "pi" and session_binding is None:
-        logger.warning(
-            "Issue #%s: Pi /compact requires a session binding for agent=%s; skipping",
-            issue,
-            session_agent,
-        )
-        return False
-    if not session_id and session_binding is None:
+    resume = agent_compaction_resume(
+        provider,
+        session_agent=session_agent,
+        session_id=session_id,
+        session_binding=session_binding,
+        execution_request=execution_request,
+    )
+    if resume is None:
         logger.debug(
-            "Issue #%s: no %s session id to compact for agent=%s; skipping",
+            "Issue #%s: no resumable %s session to compact for agent=%s; skipping",
             issue,
             provider,
             session_agent,
         )
         return False
+    resume_session_id, resume_options = resume
     timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
         resume_agent_session(
             agent=provider,
-            session_id=(
-                session_binding.session_id if session_binding is not None else session_id or ""
-            ),
+            session_id=resume_session_id,
             prompt="/compact",
             cwd=cwd,
             timeout=timeout_s,
             model=model or "",
             sandbox=sandbox,
             approval="never",
-            execution_request=(
-                execution_request
-                if execution_request is not None
-                else (
-                    ExecutionRequest(
-                        _pi_role_for_session_agent(session_agent),
-                        AgentOperation.COMPACT,
-                        SessionLifecycle.RESUME_REQUIRED,
-                    )
-                    if provider == "pi"
-                    else None
-                )
-            ),
-            resume_binding=session_binding,
+            **resume_options,
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:
         logger.warning(
@@ -563,14 +545,3 @@ def compact_agent_session(
         session_agent,
     )
     return True
-
-
-def _pi_role_for_session_agent(session_agent: str) -> AgentRole:
-    """Map the pipeline's logical session names to the Pi policy role."""
-    if session_agent in {"planner"}:
-        return AgentRole.PLANNER
-    if session_agent in {"plan-reviewer"}:
-        return AgentRole.PLAN_REVIEWER
-    if session_agent in {"pr-reviewer", "comment-classifier"}:
-        return AgentRole.PR_REVIEWER
-    return AgentRole.IMPLEMENTER

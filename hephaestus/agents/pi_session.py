@@ -11,6 +11,7 @@ from typing import Any
 from hephaestus.agents.execution_policy import AgentRole
 
 _SCHEMA_VERSION = 1
+_PROVIDER = "pi"
 
 
 class PiSessionBindingError(ValueError):
@@ -49,7 +50,7 @@ class AgentSessionBinding:
     role: AgentRole
     model_fingerprint: str
     state_reference: str = ""
-    provider: str = "pi"
+    provider: str = _PROVIDER
     schema_version: int = _SCHEMA_VERSION
 
     def to_json(self) -> str:
@@ -90,7 +91,7 @@ class AgentSessionBinding:
             raise PiSessionBindingError("Pi session binding has an unsupported schema")
         if payload["schema_version"] != _SCHEMA_VERSION:
             raise PiSessionBindingError("Pi session binding schema version is unsupported")
-        if payload["provider"] != "pi":
+        if payload["provider"] != _PROVIDER:
             raise PiSessionBindingError("Pi session binding provider must be 'pi'")
         try:
             role = AgentRole(_require_text(payload["role"], "role"))
@@ -142,7 +143,7 @@ def validate_pi_binding(
         model: Operator-selected model, compared only by fingerprint.
 
     """
-    if binding.provider != "pi" or binding.schema_version != _SCHEMA_VERSION:
+    if binding.provider != _PROVIDER or binding.schema_version != _SCHEMA_VERSION:
         raise PiSessionBindingError("Pi session binding provider or schema is unsupported")
     if binding.canonical_cwd != _canonical_cwd(cwd):
         raise PiSessionBindingError("Pi session binding worktree does not match cwd")

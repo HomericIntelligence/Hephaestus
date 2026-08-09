@@ -8,14 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from hephaestus.agents.execution_policy import (
-    AgentOperation,
-    AgentRole,
-    ExecutionRequest,
-    SessionLifecycle,
-)
 from hephaestus.agents.runtime import (
     add_agent_argument,
+    agent_stage_execution_request,
     resolve_agent,
     run_agent_session,
     run_claude_text,
@@ -28,14 +23,6 @@ from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
 from hephaestus.io.utils import write_secure
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 from hephaestus.utils.terminal import install_sigtstp_only, terminal_guard
-
-_PI_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
-    "plan": (AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW),
-    "plan-review": (AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT),
-    "implement": (AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW),
-    "pr-review": (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT),
-    "learn": (AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW),
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -142,15 +129,6 @@ def run_direct_agent(
         print(f"Running: {args.agent} direct session", file=sys.stderr)
 
     try:
-        execution_request = None
-        if args.agent == "pi":
-            try:
-                role, operation, lifecycle = _PI_STAGE_REQUESTS[args.stage]
-            except KeyError as exc:
-                raise ValueError(
-                    f"Pi agent-stage operation is unsupported: {args.stage!r}"
-                ) from exc
-            execution_request = ExecutionRequest(role, operation, lifecycle)
         result = run_agent_session(
             agent=args.agent,
             prompt=prompt,
@@ -159,7 +137,7 @@ def run_direct_agent(
             model=args.model,
             sandbox=args.sandbox,
             approval=args.approval,
-            execution_request=execution_request,
+            execution_request=agent_stage_execution_request(args.agent, args.stage),
         )
     except subprocess.TimeoutExpired as exc:
         write_log(log_file, str(exc))

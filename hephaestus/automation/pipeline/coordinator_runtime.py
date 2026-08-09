@@ -4,6 +4,7 @@ from typing import Any, cast
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_sessions import store_agent_session_result
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
 from .guarded_github import guarded_pipeline_job, guarded_stage_context
@@ -681,9 +682,7 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._completion_wakeup.wait(timeout=timeout)
         self._drain_completions()
 
-    def _handle_completion(  # noqa: C901 - completion routing spans the fixed job protocol
-        self, handle: JobHandle, result: JobResult
-    ) -> None:
+    def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
         """Route one completed job back to its item.
 
         Interrupted results park the item RESUMABLE — they never advance and
@@ -743,36 +742,11 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._park_resumable(item)
             return
 
-        # Direct runners mint an opaque id on the first turn.  Keep it under
-        # the logical role rather than a round number so the next reviewer or
-        # writer turn resumes the same compacted conversation.
-        if isinstance(handle.job, AgentJob) and result.ok and result.session_binding is not None:
-            session_key = handle.job.session_agent or handle.job.agent
-            binding = result.session_binding
-            if handle.job.execution_request is None:
-                self._finish(
-                    item,
-                    passed=False,
-                    reason="Pi binding returned without execution request",
-                )
+        if isinstance(handle.job, AgentJob):
+            session_error = store_agent_session_result(item, handle.job, result)
+            if session_error is not None:
+                self._finish(item, passed=False, reason=session_error)
                 return
-            from hephaestus.agents.pi_session import validate_pi_binding
-
-            try:
-                validate_pi_binding(
-                    binding,
-                    cwd=handle.job.cwd,
-                    role=handle.job.execution_request.role,
-                    model=handle.job.model,
-                )
-            except ValueError as exc:
-                self._finish(item, passed=False, reason=f"invalid Pi session binding: {exc}")
-                return
-            item.session_bindings[session_key] = binding
-        elif isinstance(handle.job, AgentJob) and result.ok and result.session_id:
-            session_key = handle.job.session_agent or handle.job.agent
-            item.session_ids[session_key] = result.session_id
-
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         try:

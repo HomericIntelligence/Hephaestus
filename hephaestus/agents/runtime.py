@@ -113,6 +113,14 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "pi": (("pi", "--version"),),
 }
 
+_PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
+    "plan": (AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW),
+    "plan-review": (AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT),
+    "implement": (AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW),
+    "pr-review": (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT),
+    "learn": (AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW),
+}
+
 
 def missing_pi_alias_env(
     required: tuple[str, ...] = REQUIRED_ALIAS_ENVS,
@@ -164,6 +172,54 @@ class PiIsolationAdapter(Protocol):
     ) -> AgentRunResult:
         """Start Pi with externally enforced filesystem and network constraints."""
         raise NotImplementedError
+
+
+def agent_stage_execution_request(agent: str, stage: str) -> ExecutionRequest | None:
+    """Return the provider policy request for a generic direct stage."""
+    if not is_pi(agent):
+        return None
+    try:
+        role, operation, lifecycle = _PI_AGENT_STAGE_REQUESTS[stage]
+    except KeyError as exc:
+        raise ValueError(f"Pi agent-stage operation is unsupported: {stage!r}") from exc
+    return ExecutionRequest(role, operation, lifecycle)
+
+
+def agent_compaction_resume(
+    agent: str,
+    *,
+    session_agent: str,
+    session_id: str | None,
+    session_binding: AgentSessionBinding | None,
+    execution_request: ExecutionRequest | None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Prepare a neutral resume id and provider-only compaction arguments."""
+    if is_pi(agent):
+        if session_binding is None:
+            return None
+        request = execution_request or ExecutionRequest(
+            _pi_role_for_session_agent(session_agent),
+            AgentOperation.COMPACT,
+            SessionLifecycle.RESUME_REQUIRED,
+        )
+        return session_binding.session_id, {
+            "execution_request": request,
+            "resume_binding": session_binding,
+        }
+    if not session_id:
+        return None
+    return session_id, {}
+
+
+def _pi_role_for_session_agent(session_agent: str) -> AgentRole:
+    """Map pipeline session names to their policy role inside the adapter."""
+    if session_agent == "planner":
+        return AgentRole.PLANNER
+    if session_agent == "plan-reviewer":
+        return AgentRole.PLAN_REVIEWER
+    if session_agent in {"pr-reviewer", "comment-classifier"}:
+        return AgentRole.PR_REVIEWER
+    return AgentRole.IMPLEMENTER
 
 
 # Pi does not provide an operating-system sandbox.  No adapter is bundled with
