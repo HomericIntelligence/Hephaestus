@@ -35,14 +35,12 @@ from typing import TypeGuard, cast
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.pi_plugins import preflight_pi_environment
 from hephaestus.agents.runtime import (
     AgentExecutionError,
-    is_pi,
     resolve_agent,
     resume_agent_session,
+    run_agent_athena_skill,
     run_agent_session,
-    run_pi_athena_skill,
 )
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
@@ -1714,18 +1712,14 @@ class WorkerPool:
         """Run Pi's proven command, then retain host-owned skill enforcement."""
         if self._athena_skill_executor is None:
             raise RuntimeError("AthenaSkillJob submitted without an AthenaSkillExecutor")
-        if is_pi(job.request.agent):
-            preflight = preflight_pi_environment(job.request.cwd)
-            if not preflight.ready:
-                return JobResult(ok=False, error=preflight.remediation_message())
-            run_pi_athena_skill(
-                str(job.request.kind),
-                _pi_athena_skill_prompt(job),
-                cwd=job.request.cwd,
-                timeout=job.request.timeout_s,
-                preflight=preflight,
-                model=job.request.model,
-            )
+        run_agent_athena_skill(
+            str(job.request.kind),
+            _pi_athena_skill_prompt(job),
+            agent=job.request.agent,
+            cwd=job.request.cwd,
+            timeout=job.request.timeout_s,
+            model=job.request.model,
+        )
         result = self._athena_skill_executor.execute(job.request)
         if not result.ok:
             return JobResult(ok=False, value=result, error=result.error)

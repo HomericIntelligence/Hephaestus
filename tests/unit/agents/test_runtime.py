@@ -11,6 +11,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -92,6 +93,34 @@ def _write_pi_models_config(home: Path) -> None:
     config_path = home / ".pi" / "agent" / "models.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text('{"models": {"local-test": {}}}', encoding="utf-8")
+
+
+def test_run_agent_athena_skill_routes_pi_through_the_runtime_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi Athena commands remain behind the provider-neutral runtime seam."""
+    preflight = SimpleNamespace(ready=True)
+    expected = agent_runtime.AgentRunResult(stdout="completed", stderr="")
+    monkeypatch.setattr(agent_runtime, "preflight_pi_environment", lambda _cwd: preflight)
+    with patch.object(agent_runtime, "run_pi_athena_skill", return_value=expected) as run_skill:
+        result = agent_runtime.run_agent_athena_skill(
+            "advise",
+            "prompt",
+            agent="pi",
+            cwd=tmp_path,
+            timeout=60,
+            model="pi-model",
+        )
+
+    assert result == expected
+    run_skill.assert_called_once_with(
+        "advise",
+        "prompt",
+        cwd=tmp_path,
+        timeout=60,
+        preflight=preflight,
+        model="pi-model",
+    )
 
 
 def test_parse_codex_json_events_extracts_session_id_and_messages() -> None:

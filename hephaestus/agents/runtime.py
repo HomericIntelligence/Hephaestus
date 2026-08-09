@@ -1692,6 +1692,36 @@ def run_pi_athena_skill(
     )
 
 
+def run_agent_athena_skill(
+    kind: str,
+    prompt: str,
+    *,
+    agent: str,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+) -> AgentRunResult | None:
+    """Run the provider-specific Athena command required by an admitted agent.
+
+    Athena's host-owned executor remains authoritative for contract binding,
+    corpus retrieval, and learning delivery. Pi additionally runs its pinned
+    package command; other providers have no provider-local command to invoke.
+    """
+    if not is_pi(agent):
+        return None
+    preflight = preflight_pi_environment(cwd)
+    if not preflight.ready:
+        raise AgentExecutionError(preflight.remediation_message())
+    return run_pi_athena_skill(
+        kind,
+        prompt,
+        cwd=cwd,
+        timeout=timeout,
+        preflight=preflight,
+        model=model,
+    )
+
+
 def run_pi_smoke_session(
     prompt: str,
     *,

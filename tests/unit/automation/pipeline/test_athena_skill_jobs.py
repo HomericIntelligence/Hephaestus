@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.pi_plugins import PiPreflightResult
 from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
@@ -106,11 +105,7 @@ def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
     try:
         with (
             patch(
-                "hephaestus.automation.pipeline.worker_pool.preflight_pi_environment",
-                return_value=PiPreflightResult.ready_result(),
-            ) as preflight,
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.run_pi_athena_skill",
+                "hephaestus.automation.pipeline.worker_pool.run_agent_athena_skill",
                 return_value=AgentRunResult(stdout="Pi skill completed", stderr=""),
             ) as run_skill,
         ):
@@ -120,13 +115,12 @@ def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
 
     assert result.ok is True
     assert calls == [request]
-    preflight.assert_called_once_with(request.cwd)
     run_skill.assert_called_once()
     assert run_skill.call_args.args[0] == "advise"
+    assert run_skill.call_args.kwargs["agent"] == "pi"
     assert run_skill.call_args.kwargs["cwd"] == request.cwd
     assert run_skill.call_args.kwargs["timeout"] == request.timeout_s
     assert run_skill.call_args.kwargs["model"] == request.model
-    assert run_skill.call_args.kwargs["preflight"] == preflight.return_value
 
 
 def test_worker_converts_athena_executor_failure_to_bounded_job_error(tmp_path: Path) -> None:
