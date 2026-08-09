@@ -15,6 +15,7 @@ needs hands-on recovery.
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
 | [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0012). |
+| [Recovering an issue work guard](issue-work-guard-recovery.md) | An issue retains `state:in-progress` after an owner lease and recovery grace have expired. |
 
 ## Before you start
 
@@ -39,3 +40,4 @@ copy — the module is the source of truth.
 | `state:implementation-go` | Applied only after a structural audit and fresh GitHub facts confirm the exact open, unarmed reviewed head, complete thread state, and exclusive-label readback. Review prose, grades, and GO-shaped output are non-authoritative; merge-wait also requires the current-process reviewed-head proof. |
 | `state:implementation-no-go` | Implementation reviewed and rejected; needs re-work. |
 | `state:skip` | Work item taken out of the loop entirely — operator-applied, auto-applied when the review loop exhausts its budget without a GO, or applied to epics before exclusion. Independent of all other state labels. See [Reviving a state:skip-labeled issue](state-skip-revival.md) to safely clear it. |
+| `state:in-progress` | Orthogonal automation ownership guard. Its ref-backed claim must be confirmed before issue mutations; recovery is explicit and operator-controlled. |

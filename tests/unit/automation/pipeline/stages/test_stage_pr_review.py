@@ -1441,11 +1441,7 @@ class TestPrReviewStageStep:
             ),
             (
                 "review_full_unit_coverage",
-                (
-                    "/bin/sh",
-                    "-c",
-                    _FULL_UNIT_COVERAGE_SPEC.argv[2],
-                ),
+                _FULL_UNIT_COVERAGE_SPEC.argv,
             ),
         )
         receipts: list[dict[str, object]] = []

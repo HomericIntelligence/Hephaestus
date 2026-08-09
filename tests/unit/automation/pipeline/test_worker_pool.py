@@ -28,6 +28,7 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
+    GuardedGitHubJob,
     ReplyJournalAppended,
 )
 from hephaestus.automation.pipeline.jobs import (
@@ -46,6 +47,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _confirmed_pytest_failure,
     _hdiutil_create_argv,
     _host_validation_failure_kind,
+    _host_verification_command,
     _host_verification_env,
     _host_verification_profile,
     _prepare_host_output_aliases,
@@ -53,6 +55,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _repo_lock_path,
     _run_bounded_host_command,
     _trusted_gh_executable,
+    _trusted_git_executable,
     _unsafe_local_git_config_key,
     _verifier_owned_runtime_environment,
 )
@@ -91,6 +94,33 @@ def test_trusted_gh_executable_accepts_explicit_extra_root(
     monkeypatch.setattr(f"{_WP}._TRUSTED_GH_CANDIDATES", ())
 
     assert _trusted_gh_executable(gh_root) == str(executable)
+
+
+def test_trusted_git_executable_accepts_discovered_binary_in_fixed_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directly discovered package-manager Git remains inside a fixed root."""
+    executable = Path("/opt/homebrew/Cellar/git/test/bin/git")
+    monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
+    monkeypatch.setattr(f"{_WP}.Path.stat", lambda _self: MagicMock(st_mode=0o100555))
+    monkeypatch.setattr(f"{_WP}.Path.is_file", lambda _self: True)
+    monkeypatch.setattr(f"{_WP}.Path.is_symlink", lambda _self: False)
+    monkeypatch.setattr(f"{_WP}.os.access", lambda _path, _mode: True)
+
+    assert _trusted_git_executable() == str(executable)
+
+
+def test_trusted_git_executable_rejects_discovered_binary_outside_fixed_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller-controlled PATH cannot introduce an arbitrary Git executable."""
+    executable = tmp_path / "git"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o555)
+    monkeypatch.setattr(f"{_WP}.shutil.which", lambda _name: str(executable))
+    monkeypatch.setattr(f"{_WP}._TRUSTED_GIT_CANDIDATES", ())
+
+    assert _trusted_git_executable() is None
 
 
 @pytest.fixture
@@ -168,7 +198,8 @@ def test_github_job_dispatches_once_through_injected_typed_runner(
     calls: list[GitHubJob] = []
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
+            assert isinstance(submitted, GitHubJob)
             calls.append(submitted)
             return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
 
@@ -207,8 +238,9 @@ def test_same_repo_github_jobs_are_serialized(
     guard = threading.Lock()
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
             nonlocal active, max_active
+            assert isinstance(submitted, GitHubJob)
             with guard:
                 active += 1
                 max_active = max(max_active, active)
@@ -263,8 +295,9 @@ def test_different_repo_github_jobs_may_run_concurrently(
     guard = threading.Lock()
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
             nonlocal active, max_active
+            assert isinstance(submitted, GitHubJob)
             with guard:
                 active += 1
                 max_active = max(max_active, active)
@@ -309,8 +342,9 @@ def test_failing_github_job_is_not_replayed_by_worker_pool(
     calls = 0
 
     class Runner:
-        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
             nonlocal calls
+            assert isinstance(submitted, GitHubJob)
             del submitted
             calls += 1
             raise OSError("ambiguous transport")
@@ -1044,6 +1078,10 @@ class TestWorkerPoolSubmitComplete:
 
         with (
             patch(
+                f"{_WP}._verifier_owned_runtime_environment",
+                return_value=Path(sys.prefix),
+            ),
+            patch(
                 f"{_WP}._host_verification_command",
                 side_effect=lambda **kwargs: kwargs["argv"],
             ),
@@ -1079,6 +1117,10 @@ class TestWorkerPoolSubmitComplete:
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
+            patch(
+                f"{_WP}._verifier_owned_runtime_environment",
+                return_value=Path(sys.prefix),
+            ),
             patch(f"{_WP}._bounded_git_archive", return_value=(b"", "")),
             patch(f"{_WP}._extract_immutable_archive"),
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata.git"),
@@ -1130,8 +1172,36 @@ class TestWorkerPoolSubmitComplete:
         """The quota image uses the valid blank-HFS+ form accepted by macOS."""
         argv = _hdiutil_create_argv(tmp_path / "scratch.dmg")
 
-        assert argv[:6] == ("/usr/bin/hdiutil", "create", "-size", "64m", "-fs", "HFS+")
+        assert argv[:6] == ("/usr/bin/hdiutil", "create", "-size", "512m", "-fs", "HFS+")
         assert "-format" not in argv
+
+    def test_host_verification_allows_coverage_database_within_volume_quota(
+        self, tmp_path: Path
+    ) -> None:
+        """The per-file limit leaves headroom for coverage's SQLite database."""
+        source = tmp_path / "source"
+        scratch = tmp_path / "scratch"
+        runtime = tmp_path / "runtime"
+        metadata = tmp_path / "metadata.git"
+        pi_smoke_logs = source / "pi-smoke-logs"
+        for directory in (source, scratch, runtime, metadata, pi_smoke_logs):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch(f"{_WP}.sys.platform", "darwin"),
+            patch.object(Path, "is_file", return_value=True),
+            patch(f"{_WP}.os.access", return_value=True),
+        ):
+            command = _host_verification_command(
+                argv=(sys.executable, "-m", "pytest"),
+                source=source,
+                scratch=scratch,
+                runtime_environment=runtime,
+                git_metadata=metadata,
+                pi_smoke_logs=pi_smoke_logs,
+            )
+
+        assert "limit -f 131072" in command[2]
 
     def test_quota_volume_retries_a_timed_out_detach(self, tmp_path: Path) -> None:
         """A transient forced-detach timeout cannot leak a verifier volume."""
@@ -4310,7 +4380,15 @@ class TestGitOps:
             "https_proxy",
         ):
             assert key not in fetch_env
-        assert fetch_env["PATH"] == os.defpath
+        trusted_git = _trusted_git_executable()
+        expected_path_entries = os.defpath.split(os.pathsep)
+        if trusted_git is not None:
+            trusted_parent = str(Path(trusted_git).parent)
+            expected_path_entries = [
+                trusted_parent,
+                *(entry for entry in expected_path_entries if entry != trusted_parent),
+            ]
+        assert fetch_env["PATH"] == os.pathsep.join(expected_path_entries)
         assert fetch_env["GIT_CONFIG_GLOBAL"] == os.devnull
         assert fetch_env["GIT_CONFIG_NOSYSTEM"] == "1"
         assert fetch_env["GIT_NO_REPLACE_OBJECTS"] == "1"

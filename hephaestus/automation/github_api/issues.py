@@ -75,7 +75,10 @@ def _check_graphql_errors(data: dict[str, Any], context: str) -> None:
     raise RuntimeError(f"GraphQL {context} failed: {errors!r}")
 
 
-def gh_issue_json(issue_number: int) -> dict[str, Any]:
+def gh_issue_json(
+    issue_number: int,
+    repo: tuple[str, str] | None = None,
+) -> dict[str, Any]:
     """Fetch issue data as JSON.
 
     Args:
@@ -90,7 +93,14 @@ def gh_issue_json(issue_number: int) -> dict[str, Any]:
     """
     try:
         result = _api._gh_call(
-            ["issue", "view", str(issue_number), "--json", "number,title,state,labels,body"],
+            [
+                "issue",
+                "view",
+                str(issue_number),
+                "--json",
+                "number,title,state,labels,body",
+                *_repo_args(repo),
+            ],
         )
         data = cast(dict[str, Any], json.loads(result.stdout))
         # Strip stray NUL bytes at the source so downstream prompt assembly never

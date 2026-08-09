@@ -36,3 +36,4 @@ numbered, and listed here.
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Accepted |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
+| [0024](0024-issue-work-ownership-guard.md) | Ref-backed issue work-ownership guard | Accepted |

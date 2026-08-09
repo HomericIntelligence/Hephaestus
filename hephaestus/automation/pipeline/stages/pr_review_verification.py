@@ -59,11 +59,11 @@ _PYTHON_VALIDATION_CONFIG_PATHS = frozenset(
 _FULL_UNIT_COVERAGE_SPEC = _HostVerificationSpec(
     changed_path="coverage.toml",
     argv=(
-        "/bin/sh",
-        "-c",
-        "set -e; uv run pytest tests/unit --override-ini=addopts= -v --strict-markers -m "
-        "'not nightly' --cov=hephaestus --cov-report=term-missing --cov-report=xml && "
-        "uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml",
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "hephaestus.automation.host_coverage",
     ),
     descr="review_full_unit_coverage",
 )

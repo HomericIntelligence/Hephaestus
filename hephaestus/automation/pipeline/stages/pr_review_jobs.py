@@ -1238,8 +1238,8 @@ class PrReviewJobs(_PrReviewHost):
                         item.payload["review_audit_failure"] = True
                         return Continue(next_state=EVAL)
                     feedback[thread_id] = detail
-
         request = ReconcilePrReviewRequest(
+            issue_number=item.issue,
             pr_number=item.pr,
             reviewed_head_sha=reviewed_head,
             validated_receipt_fingerprints=(
