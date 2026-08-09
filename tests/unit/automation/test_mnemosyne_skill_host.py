@@ -12,6 +12,7 @@ import pytest
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_corpus import (
+    MnemosyneCorpusError,
     MnemosyneCorpusResult,
     MnemosyneSkillBlock,
     SkillSelection,
@@ -163,6 +164,74 @@ def test_default_reader_selects_ranked_bound_skills_for_pipeline_advise_payload(
     assert result.receipt["corpus"]["selected_paths"] == ["skills/debugging.md"]
 
 
+def test_default_reader_reads_committed_git_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Committed corpus reads return stdout from a successful Git command."""
+
+    def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout="skills/debugging.md\n", stderr="")
+
+    monkeypatch.setattr("hephaestus.automation.mnemosyne_skill_host.subprocess.run", run)
+
+    output = DefaultCorpusReader._subprocess_git_output(
+        tmp_path, ("ls-tree", "-r", "--name-only", "b" * 40)
+    )
+
+    assert output == "skills/debugging.md\n"
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (SimpleNamespace(returncode=1, stdout="", stderr="bad object"), "bad object"),
+        (OSError("git unavailable"), "git unavailable"),
+    ],
+)
+def test_default_reader_reports_committed_git_read_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result: SimpleNamespace | OSError,
+    message: str,
+) -> None:
+    """Committed corpus reads preserve bounded command and process failures."""
+
+    def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        if isinstance(result, OSError):
+            raise result
+        return result
+
+    monkeypatch.setattr("hephaestus.automation.mnemosyne_skill_host.subprocess.run", run)
+
+    with pytest.raises(MnemosyneCorpusError, match=message):
+        DefaultCorpusReader._subprocess_git_output(
+            tmp_path, ("show", f"{'b' * 40}:skills/debugging.md")
+        )
+
+
+def test_default_reader_accepts_valid_explicit_selection() -> None:
+    """Closed callers may provide a fully typed explicit skill selection."""
+    selections = DefaultCorpusReader()._explicit_selections(
+        [{"name": "debugging", "source": "skills/debugging.md", "reason": "failure match"}]
+    )
+
+    assert selections == (SkillSelection("debugging", "skills/debugging.md", "failure match"),)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ({}, "must be a list"),
+        (["debugging"], "non-object selection"),
+        ([{"name": "debugging", "source": "skills/debugging.md"}], "require string"),
+    ],
+)
+def test_default_reader_rejects_malformed_explicit_selections(raw: object, message: str) -> None:
+    """Explicit selections fail closed when their shape or fields are malformed."""
+    with pytest.raises(MnemosyneCorpusError, match=message):
+        DefaultCorpusReader()._explicit_selections(raw)
+
+
 def test_learn_without_closed_delivery_payload_fails_closed(tmp_path: Path) -> None:
     host = MnemosyneSkillHost(contract_loader=_contract, binding_service=Binding())
 
@@ -221,6 +290,120 @@ def test_default_host_constructs_and_uses_concrete_delivery_backend(
     assert result.ok is True
     assert result.delivery_receipt is not None
     assert result.delivery_receipt["pr_number"] == 8
+
+
+def test_github_delivery_adapter_creates_pr_and_returns_server_number() -> None:
+    """PR creation returns the number parsed from the server-issued URL."""
+    calls: list[list[str]] = []
+
+    def gh(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout="https://github.com/acme/Mnemosyne/pull/8\n",
+        )
+
+    number = GitHubLearnDeliveryAdapter(gh=gh).create_pr(
+        repository="acme/Mnemosyne",
+        head="skill/example",
+        base="main",
+        title="docs(skills): capture reusable workflow",
+        body="Summary.\n",
+    )
+
+    assert number == 8
+    assert calls == [
+        [
+            "pr",
+            "create",
+            "--repo",
+            "acme/Mnemosyne",
+            "--head",
+            "skill/example",
+            "--base",
+            "main",
+            "--title",
+            "docs(skills): capture reusable workflow",
+            "--body",
+            "Summary.\n",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "message"),
+    [
+        (1, "", "permission denied", "PR creation failed: permission denied"),
+        (0, "created without a URL", "", "PR creation returned no PR URL"),
+    ],
+)
+def test_github_delivery_adapter_rejects_failed_or_unbound_pr_creation(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    message: str,
+) -> None:
+    """PR creation fails closed on command failure or absent server identity."""
+
+    def gh(_argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    with pytest.raises(LearnDeliveryError, match=message):
+        GitHubLearnDeliveryAdapter(gh=gh).create_pr(
+            repository="acme/Mnemosyne",
+            head="skill/example",
+            base="main",
+            title="title",
+            body="body",
+        )
+
+
+def test_github_delivery_adapter_reads_back_pr_head() -> None:
+    """PR readback returns the server URL and immutable head SHA."""
+
+    def gh(_argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {
+                    "url": "https://github.com/acme/Mnemosyne/pull/8",
+                    "headRefOid": "a" * 40,
+                }
+            ),
+        )
+
+    url, head_sha = GitHubLearnDeliveryAdapter(gh=gh).read_pr_head(
+        repository="acme/Mnemosyne", number=8
+    )
+
+    assert url == "https://github.com/acme/Mnemosyne/pull/8"
+    assert head_sha == "a" * 40
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "message"),
+    [
+        (1, "", "not found", "PR readback failed: not found"),
+        (0, "not-json", "", "PR readback returned malformed JSON"),
+        (0, "[]", "", "PR readback returned non-object JSON"),
+        (0, '{"url": "https://example.test/8"}', "", "PR readback lacks URL or head SHA"),
+    ],
+)
+def test_github_delivery_adapter_rejects_invalid_pr_readback(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    message: str,
+) -> None:
+    """PR readback rejects command, JSON, shape, and identity failures."""
+
+    def gh(_argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    with pytest.raises(LearnDeliveryError, match=message):
+        GitHubLearnDeliveryAdapter(gh=gh).read_pr_head(repository="acme/Mnemosyne", number=8)
 
 
 def test_github_delivery_adapter_binds_existing_pr_source_fields() -> None:

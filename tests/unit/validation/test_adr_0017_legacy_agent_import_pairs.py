@@ -12,16 +12,11 @@ _LEGACY_MODULES = frozenset({"claude_invoke", "claude_models", "claude_timeouts"
 
 _APPROVED_DIRECT_IMPORTS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("_followup_phase.py", "claude_models"),
         ("_implement_phase.py", "claude_invoke"),
         ("_implement_phase.py", "claude_models"),
         ("advise_runner.py", "claude_invoke"),
         ("audit_reviewer.py", "claude_invoke"),
         ("audit_reviewer.py", "claude_models"),
-        ("ci_fix_flow.py", "claude_invoke"),
-        ("ci_fix_flow.py", "claude_models"),
-        ("ci_fix_orchestrator.py", "claude_invoke"),
-        ("ci_fix_orchestrator.py", "claude_models"),
         ("comment_difficulty.py", "claude_invoke"),
         ("comment_difficulty.py", "claude_models"),
         ("learn.py", "claude_models"),

@@ -14,7 +14,6 @@ _PREDECOMPOSITION_LINES = {
     "hephaestus/automation/pipeline/coordinator.py": 3_325,
     "hephaestus/automation/pipeline_github.py": 2_790,
     "hephaestus/automation/pipeline/stages/pr_review.py": 2_861,
-    "hephaestus/automation/ci_fix_orchestrator.py": 1_207,
 }
 
 _FILE_BUDGETS = {
@@ -36,10 +35,6 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/stages/pr_review_verification.py": 250,
     "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_400,
     "hephaestus/automation/pipeline/stages/pr_review_gate.py": 700,
-    "hephaestus/automation/ci_fix_orchestrator.py": 520,
-    "hephaestus/automation/ci_fix_contract.py": 75,
-    "hephaestus/automation/ci_fix_push_guard.py": 550,
-    "hephaestus/automation/ci_fix_sessions.py": 450,
 }
 
 _COLLABORATOR_MODULES = frozenset(
@@ -58,9 +53,6 @@ _COLLABORATOR_MODULES = frozenset(
         "pr_review_verification",
         "pr_review_jobs",
         "pr_review_gate",
-        "ci_fix_push_guard",
-        "ci_fix_contract",
-        "ci_fix_sessions",
     }
 )
 
@@ -72,7 +64,6 @@ _SHARED_NAMESPACE_MODULES = (
 )
 
 _CONTRACT_MODULES = (
-    "hephaestus/automation/ci_fix_contract.py",
     "hephaestus/automation/pipeline/coordinator_contract.py",
     "hephaestus/automation/pipeline_github_contract.py",
 )
@@ -104,7 +95,6 @@ def test_collaborators_do_not_import_their_facades() -> None:
             if node.module in {
                 "hephaestus.automation.pipeline.coordinator",
                 "hephaestus.automation.pipeline_github",
-                "hephaestus.automation.ci_fix_orchestrator",
                 "hephaestus.automation.pipeline.stages.pr_review",
             }:
                 violations.append(f"{path}: imports {node.module}")
