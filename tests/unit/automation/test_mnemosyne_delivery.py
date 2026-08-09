@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.automation.mnemosyne_delivery import (
+    ExistingPullRequest,
     LearnDeliveryError,
     LearnDeliveryRequest,
     LearnDeliveryService,
@@ -35,6 +36,19 @@ class FakeGitHub:
         self.read.append(number)
         return self.create_url, HEAD
 
+    def read_existing_pr(self, *, repository: str, number: int) -> ExistingPullRequest:
+        self.read.append(number)
+        return ExistingPullRequest(
+            repository=repository,
+            number=number,
+            url=f"https://github.com/{repository}/pull/{number}",
+            state="OPEN",
+            base_ref="main",
+            source_repository=repository,
+            source_ref="skill/example",
+            head_sha=HEAD,
+        )
+
 
 class FakeGit:
     """Command recorder for delivery git operations."""
@@ -54,7 +68,12 @@ class FakeGit:
         self.calls.append(argv)
         if argv == ("diff", "--name-only", "HEAD"):
             return _completed(stdout=self.diff)
-        if argv == ("rev-parse", "HEAD"):
+        if argv == ("remote", "get-url", "origin"):
+            return _completed(stdout="git@github.com:acme/Mnemosyne.git\n")
+        if argv in {
+            ("rev-parse", "HEAD"),
+            ("rev-parse", "refs/remotes/origin/skill/example"),
+        }:
             return _completed(stdout=f"{self.head}\n")
         return _completed()
 
@@ -150,4 +169,65 @@ def test_existing_pr_mode_pushes_bound_branch_without_creating_competing_pr(tmp_
 
     assert receipt.pr_number == 12
     assert github.created == []
-    assert github.read == [12]
+    assert github.read == [12, 12]
+    assert git.calls[:4] == [
+        ("fetch", "origin", "skill/example"),
+        ("remote", "get-url", "origin"),
+        ("rev-parse", "refs/remotes/origin/skill/example"),
+        ("rev-parse", "HEAD"),
+    ]
+    assert (
+        "push",
+        f"--force-with-lease=refs/heads/skill/example:{HEAD}",
+        "--force-if-includes",
+        "origin",
+        "HEAD:refs/heads/skill/example",
+    ) in git.calls
+
+
+@pytest.mark.parametrize(
+    ("binding", "match"),
+    [
+        (
+            ExistingPullRequest(
+                repository="acme/Mnemosyne",
+                number=12,
+                url="https://github.com/acme/Mnemosyne/pull/12",
+                state="CLOSED",
+                base_ref="main",
+                source_repository="acme/Mnemosyne",
+                source_ref="skill/example",
+                head_sha=HEAD,
+            ),
+            "not open",
+        ),
+        (
+            ExistingPullRequest(
+                repository="acme/Mnemosyne",
+                number=12,
+                url="https://github.com/acme/Mnemosyne/pull/12",
+                state="OPEN",
+                base_ref="main",
+                source_repository="acme/Mnemosyne",
+                source_ref="other-branch",
+                head_sha=HEAD,
+            ),
+            "source ref",
+        ),
+    ],
+)
+def test_existing_pr_binding_rejects_mismatch_before_mutation(
+    tmp_path: Path, binding: ExistingPullRequest, match: str
+) -> None:
+    class BoundGitHub(FakeGitHub):
+        def read_existing_pr(self, *, repository: str, number: int) -> ExistingPullRequest:
+            del repository, number
+            return binding
+
+    git = FakeGit()
+    service = LearnDeliveryService(git=git, github=BoundGitHub())
+
+    with pytest.raises(LearnDeliveryError, match=match):
+        service.deliver(_request(tmp_path, existing_pr_number=12))
+
+    assert not any(call[0] in {"add", "commit", "push"} for call in git.calls)

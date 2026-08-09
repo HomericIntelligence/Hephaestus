@@ -113,6 +113,90 @@ def test_binding_success_reports_target_revision_and_contract(tmp_path: Path) ->
     assert receipt.athena_contract["athena_commit"] == "a" * 40
 
 
+def test_binding_bootstraps_missing_checkout_then_binds_it(tmp_path: Path) -> None:
+    root = tmp_path / ".agent_brain" / "knowledge"
+
+    class CloningGit(FakeGit):
+        def __call__(
+            self,
+            cwd: Path,
+            argv: tuple[str, ...],
+            timeout_s: int,
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "clone":
+                assert cwd == root.parent
+                assert argv == (
+                    "clone",
+                    "--origin",
+                    "origin",
+                    "--branch",
+                    "main",
+                    "https://github.com/HomericIntelligence/Mnemosyne.git",
+                    str(root),
+                )
+                root.mkdir()
+                self.calls.append(argv)
+                return _completed()
+            return super().__call__(cwd, argv, timeout_s)
+
+    git = CloningGit()
+    receipt = MnemosyneBindingService(root=root, resolver=_target, git=git).bind(
+        contract=_contract()
+    )
+
+    assert root.parent.is_dir()
+    assert receipt.commit_sha == SHA
+    assert git.calls[0][0] == "clone"
+
+
+def test_binding_rejects_symlinked_checkout_parent_before_clone(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real-agent-brain"
+    real_parent.mkdir()
+    parent = tmp_path / ".agent_brain"
+    parent.symlink_to(real_parent, target_is_directory=True)
+    root = parent / "knowledge"
+    git = FakeGit()
+
+    with pytest.raises(MnemosyneBindingError, match="parent must not be a symlink"):
+        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+
+    assert git.calls == []
+
+
+def test_binding_fails_closed_when_checkout_clone_fails(tmp_path: Path) -> None:
+    root = tmp_path / ".agent_brain" / "knowledge"
+
+    class FailingCloneGit(FakeGit):
+        def __call__(
+            self,
+            cwd: Path,
+            argv: tuple[str, ...],
+            timeout_s: int,
+        ) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "clone":
+                self.calls.append(argv)
+                return _completed(returncode=128, stderr="access denied")
+            return super().__call__(cwd, argv, timeout_s)
+
+    git = FailingCloneGit()
+    with pytest.raises(MnemosyneBindingError, match="clone failed: access denied"):
+        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+
+    assert root.parent.is_dir()
+    assert root.exists() is False
+    assert git.calls == [
+        (
+            "clone",
+            "--origin",
+            "origin",
+            "--branch",
+            "main",
+            "https://github.com/HomericIntelligence/Mnemosyne.git",
+            str(root),
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("override", "match"),
     [

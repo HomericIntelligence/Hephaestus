@@ -25,6 +25,9 @@ class LearnGitHub(Protocol):
     def read_pr_head(self, *, repository: str, number: int) -> tuple[str, str]:
         """Return ``(url, head_sha)`` for a PR number."""
 
+    def read_existing_pr(self, *, repository: str, number: int) -> ExistingPullRequest:
+        """Return the immutable source binding for an existing open PR."""
+
 
 GitRunner = Callable[[Path, tuple[str, ...], int], subprocess.CompletedProcess[str]]
 
@@ -44,6 +47,20 @@ class LearnDeliveryRequest:
     disposition: str
     validation_evidence: tuple[str, ...]
     existing_pr_number: int | None = None
+
+
+@dataclass(frozen=True)
+class ExistingPullRequest:
+    """Fresh GitHub identity and source-ref facts for an existing PR."""
+
+    repository: str
+    number: int
+    url: str
+    state: str
+    base_ref: str
+    source_repository: str
+    source_ref: str
+    head_sha: str
 
 
 @dataclass(frozen=True)
@@ -97,6 +114,16 @@ def _validate_delivery_text(text: str, field: str) -> None:
         raise LearnDeliveryError(f"{field} contains sensitive material")
 
 
+def _origin_matches_repository(origin: str, repository: str) -> bool:
+    """Return whether a Git remote URL identifies an expected repository slug."""
+    normalized = origin.strip().removesuffix(".git")
+    return (
+        normalized == repository
+        or normalized.endswith(f"/{repository}")
+        or normalized.endswith(f":{repository}")
+    )
+
+
 class LearnDeliveryService:
     """Commit, push, open/read back a PR, and return a delivery receipt."""
 
@@ -118,6 +145,7 @@ class LearnDeliveryService:
         _validate_delivery_text(request.commit_message, "commit message")
         _validate_delivery_text(request.pr_title, "PR title")
         _validate_delivery_text(request.pr_body, "PR body")
+        existing_pr = self._bind_existing_pr_worktree(request)
         changed_paths = self._changed_paths(request.worktree_path)
         outside = sorted(set(changed_paths).difference(request.allowed_paths))
         if outside:
@@ -143,20 +171,7 @@ class LearnDeliveryService:
         ).strip()
         if re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None:
             raise LearnDeliveryError(f"invalid commit SHA: {commit_sha}")
-        _require_success(
-            self.git(
-                request.worktree_path,
-                (
-                    "push",
-                    "--force-with-lease",
-                    "--force-if-includes",
-                    "origin",
-                    request.branch,
-                ),
-                self.timeout_s,
-            ),
-            "git push",
-        )
+        self._push(request, existing_pr)
 
         if request.existing_pr_number is None:
             pr_number = self.github.create_pr(
@@ -167,7 +182,9 @@ class LearnDeliveryService:
                 body=request.pr_body,
             )
         else:
-            pr_number = request.existing_pr_number
+            if existing_pr is None:
+                raise LearnDeliveryError("existing PR binding was not established")
+            pr_number = existing_pr.number
         pr_url, readback_head = self.github.read_pr_head(
             repository=request.repository,
             number=pr_number,
@@ -187,6 +204,95 @@ class LearnDeliveryService:
             validation_evidence=request.validation_evidence,
             final_disposition=request.disposition,
         )
+
+    def _bind_existing_pr_worktree(
+        self, request: LearnDeliveryRequest
+    ) -> ExistingPullRequest | None:
+        """Bind an existing PR and require its worktree to start at its live head.
+
+        Existing-PR writers must create their isolated worktree from this bound
+        ``head_sha`` before they edit it.  This delivery boundary rechecks that
+        invariant before staging any path, so a stale number, a different
+        source ref, or a moved remote is never published.
+        """
+        if request.existing_pr_number is None:
+            return None
+        binding = self.github.read_existing_pr(
+            repository=request.repository,
+            number=request.existing_pr_number,
+        )
+        if binding.repository != request.repository or binding.number != request.existing_pr_number:
+            raise LearnDeliveryError("existing PR identity does not match delivery request")
+        if binding.state != "OPEN":
+            raise LearnDeliveryError(f"existing PR is not open: {binding.state or '<unknown>'}")
+        if binding.base_ref != request.base_branch:
+            raise LearnDeliveryError("existing PR base ref does not match delivery request")
+        if binding.source_ref != request.branch:
+            raise LearnDeliveryError("existing PR source ref does not match delivery request")
+        _validate_branch(binding.source_ref)
+        if not binding.source_repository:
+            raise LearnDeliveryError("existing PR lacks source repository")
+        if re.fullmatch(r"[0-9a-f]{40}", binding.head_sha) is None:
+            raise LearnDeliveryError("existing PR lacks a valid source head SHA")
+
+        _require_success(
+            self.git(
+                request.worktree_path,
+                ("fetch", "origin", binding.source_ref),
+                self.timeout_s,
+            ),
+            "existing PR source fetch",
+        )
+        origin = _require_success(
+            self.git(request.worktree_path, ("remote", "get-url", "origin"), self.timeout_s),
+            "existing PR source origin read",
+        )
+        if not _origin_matches_repository(origin, binding.source_repository):
+            raise LearnDeliveryError("existing PR source repository does not match worktree origin")
+        remote_head = _require_success(
+            self.git(
+                request.worktree_path,
+                ("rev-parse", f"refs/remotes/origin/{binding.source_ref}"),
+                self.timeout_s,
+            ),
+            "existing PR source ref read",
+        ).strip()
+        if remote_head != binding.head_sha:
+            raise LearnDeliveryError("existing PR source ref moved before mutation")
+        worktree_head = _require_success(
+            self.git(request.worktree_path, ("rev-parse", "HEAD"), self.timeout_s),
+            "existing PR worktree HEAD read",
+        ).strip()
+        if worktree_head != binding.head_sha:
+            raise LearnDeliveryError(
+                "existing PR worktree was not created from the bound source head"
+            )
+        return binding
+
+    def _push(
+        self,
+        request: LearnDeliveryRequest,
+        existing_pr: ExistingPullRequest | None,
+    ) -> None:
+        """Push a new branch or a bound existing source ref with a strict lease."""
+        if existing_pr is None:
+            argv = (
+                "push",
+                "--force-with-lease",
+                "--force-if-includes",
+                "origin",
+                request.branch,
+            )
+        else:
+            ref = f"refs/heads/{existing_pr.source_ref}"
+            argv = (
+                "push",
+                f"--force-with-lease={ref}:{existing_pr.head_sha}",
+                "--force-if-includes",
+                "origin",
+                f"HEAD:{ref}",
+            )
+        _require_success(self.git(request.worktree_path, argv, self.timeout_s), "git push")
 
     def _changed_paths(self, worktree_path: Path) -> tuple[str, ...]:
         output = _require_success(

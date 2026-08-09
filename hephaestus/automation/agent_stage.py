@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["advise", "learn"],
         help="Run a host-owned Athena skill request instead of a generic agent prompt",
     )
+    parser.add_argument(
+        "--athena-delivery-file",
+        help="JSON host-owned delivery request required when --athena-skill=learn",
+    )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
     parser.add_argument("--model", default="", help="Optional agent model override")
@@ -233,6 +237,16 @@ def run_agent(args: argparse.Namespace) -> int:
     args.agent = agent
 
     if args.athena_skill:
+        payload: dict[str, object] = {"context": prompt}
+        delivery_file = getattr(args, "athena_delivery_file", None)
+        if delivery_file:
+            try:
+                delivery = json.loads(Path(delivery_file).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"cannot read Athena learning delivery file: {exc}") from exc
+            if not isinstance(delivery, dict):
+                raise ValueError("Athena learning delivery file must contain a JSON object")
+            payload["learn_delivery"] = delivery
         request = build_athena_skill_request(
             kind=args.athena_skill,
             repo=repo_root.name,
@@ -241,7 +255,7 @@ def run_agent(args: argparse.Namespace) -> int:
             model=args.model,
             cwd=repo_root,
             timeout_s=args.timeout,
-            payload={"context": prompt},
+            payload=payload,
         )
         result = MnemosyneSkillHost().execute(request)
         write_secure(output_file, json.dumps(result.__dict__, indent=2, sort_keys=True) + "\n")

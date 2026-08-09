@@ -121,15 +121,15 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
     assert result.delivery_receipt["pr_url"].endswith("/2")
 
 
-def test_unavailable_backend_and_trust_failure_fail_closed(tmp_path: Path) -> None:
-    unavailable = MnemosyneSkillHost(contract_loader=_contract, binding_service=Binding())
+def test_missing_delivery_request_and_trust_failure_fail_closed(tmp_path: Path) -> None:
+    missing_delivery = MnemosyneSkillHost(contract_loader=_contract, binding_service=Binding())
     trust_failure = MnemosyneSkillHost(
         contract_loader=_contract, binding_service=Binding(fail=True)
     )
 
     assert (
-        unavailable.execute(_request("learn", tmp_path)).error
-        == "learn delivery backend unavailable"
+        missing_delivery.execute(_request("learn", tmp_path)).error
+        == "learn delivery payload is required"
     )
     assert trust_failure.execute(_request("advise", tmp_path)).error == "trust failure"
 

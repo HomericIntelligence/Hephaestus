@@ -184,6 +184,64 @@ def test_run_agent_dispatches_athena_skill_request(
     assert request.agent == "pi"
 
 
+def test_run_agent_forwards_closed_learn_delivery_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct learn mode supplies its delivery request to the default host path."""
+    from hephaestus.automation.pipeline.athena_skill_jobs import (
+        AthenaSkillRequest,
+        AthenaSkillResult,
+    )
+
+    captured: dict[str, AthenaSkillRequest] = {}
+
+    class Host:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            captured["request"] = request
+            return AthenaSkillResult(
+                kind="learn",
+                receipt={"binding": "ok"},
+                delivery_receipt={
+                    "commit_sha": "a" * 40,
+                    "readback_head_sha": "a" * 40,
+                    "pr_url": "https://github.com/acme/Mnemosyne/pull/1",
+                    "pr_number": 1,
+                    "local_only": False,
+                },
+            )
+
+    delivery_file = tmp_path / "delivery.json"
+    delivery_file.write_text(
+        json.dumps(
+            {
+                "repository": "acme/Mnemosyne",
+                "worktree_path": str(tmp_path),
+                "branch": "skill/example",
+                "base_branch": "main",
+                "allowed_paths": ["skills/example.md"],
+                "commit_message": "docs(skills): capture reusable workflow",
+                "pr_title": "docs(skills): capture reusable workflow",
+                "pr_body": "Summary.\n",
+                "disposition": "create",
+                "validation_evidence": ["pytest"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+
+    args = _args(tmp_path, agent="pi")
+    args.athena_skill = "learn"
+    args.athena_delivery_file = str(delivery_file)
+
+    assert agent_stage.run_agent(args) == 0
+    assert captured["request"].payload["learn_delivery"] == json.loads(
+        delivery_file.read_text(encoding="utf-8")
+    )
+
+
 def test_run_agent_dispatches_pi_and_logs_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

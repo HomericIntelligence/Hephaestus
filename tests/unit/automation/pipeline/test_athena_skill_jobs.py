@@ -7,9 +7,12 @@ import queue
 import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.pi_plugins import PiPreflightResult
+from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
@@ -20,12 +23,12 @@ from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 
 
-def _request(kind: str = "advise") -> AthenaSkillRequest:
+def _request(kind: str = "advise", *, agent: str = "claude") -> AthenaSkillRequest:
     return AthenaSkillRequest(
         kind=kind,
         repo="HomericIntelligence/Hephaestus",
         issue=42,
-        agent="pi",
+        agent=agent,
         model="default",
         cwd=Path("/tmp/worktree"),
         timeout_s=60,
@@ -75,6 +78,55 @@ def test_worker_dispatches_athena_skill_job_to_injected_executor(tmp_path: Path)
         receipt={"ok": True},
     )
     assert calls == [_request()]
+
+
+def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
+    tmp_path: Path,
+) -> None:
+    """Pi jobs invoke their proven skill command while the host owns enforcement."""
+    calls: list[AthenaSkillRequest] = []
+
+    class Executor:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            calls.append(request)
+            return AthenaSkillResult(
+                kind=request.kind,
+                context="selected skills",
+                receipt={"ok": True},
+            )
+
+    request = _request(agent="pi")
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+        athena_skill_executor=Executor(),
+    )
+    try:
+        with (
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.preflight_pi_environment",
+                return_value=PiPreflightResult.ready_result(),
+            ) as preflight,
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.run_pi_athena_skill",
+                return_value=AgentRunResult(stdout="Pi skill completed", stderr=""),
+            ) as run_skill,
+        ):
+            result = pool._run(AthenaSkillJob(request=request, descr="advise"))
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.ok is True
+    assert calls == [request]
+    preflight.assert_called_once_with(request.cwd)
+    run_skill.assert_called_once()
+    assert run_skill.call_args.args[0] == "advise"
+    assert run_skill.call_args.kwargs["cwd"] == request.cwd
+    assert run_skill.call_args.kwargs["timeout"] == request.timeout_s
+    assert run_skill.call_args.kwargs["model"] == request.model
+    assert run_skill.call_args.kwargs["preflight"] == preflight.return_value
 
 
 def test_worker_converts_athena_executor_failure_to_bounded_job_error(tmp_path: Path) -> None:

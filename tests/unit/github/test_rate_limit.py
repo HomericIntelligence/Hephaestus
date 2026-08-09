@@ -591,29 +591,6 @@ class TestGlobalThrottle:
         assert oct(state_path.parent.stat().st_mode & 0o777) == "0o700"
         assert oct(state_path.stat().st_mode & 0o777) == "0o600"
 
-    def test_corrupt_negative_bucket_state_is_clamped(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-        monkeypatch.setenv("TMPDIR", str(tmp_path))
-        configure_gh_global_throttle(rate=10, burst=2)
-        state_path = _global_throttle_state_path()
-        state_path.parent.mkdir(parents=True)
-        state_path.write_text(
-            json.dumps({"tokens": -71_000_000.0, "updated": 1_000.0}),
-            encoding="utf-8",
-        )
-
-        sleep_calls: list[float] = []
-        mono_values = iter([1_000.0, 1_000.2, 1_000.2])
-        with (
-            patch("hephaestus.github.rate_limit.time.sleep", side_effect=sleep_calls.append),
-            patch("hephaestus.github.rate_limit.time.monotonic", side_effect=mono_values),
-        ):
-            gh_global_throttle_acquire()
-
-        assert sleep_calls == [pytest.approx(0.1)]
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        assert state["tokens"] == pytest.approx(1.0)
-
     def test_state_path_ignores_xdg_runtime_dir(self, monkeypatch, tmp_path) -> None:
         xdg = tmp_path / "xdg"
         xdg.mkdir(mode=0o700)

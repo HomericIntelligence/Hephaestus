@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from hephaestus.automation.mnemosyne_delivery import (
+    ExistingPullRequest,
     LearnDeliveryError,
     LearnDeliveryRequest,
     LearnDeliveryService,
@@ -40,6 +41,9 @@ class FakeGitHub:
 
     def read_pr_head(self, **_kwargs: object) -> tuple[str, str]:
         return "https://github.com/acme/Mnemosyne/pull/1", "a" * 40
+
+    def read_existing_pr(self, **_kwargs: object) -> ExistingPullRequest:
+        raise AssertionError("existing PR binding is not expected for this test")
 
 
 def _request(tmp_path: Path, **overrides: object) -> LearnDeliveryRequest:

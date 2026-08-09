@@ -99,10 +99,12 @@ class MnemosyneBindingService:
         """Return a binding receipt or fail closed before corpus read/write."""
         target = self.resolver()
         root = self.root
-        if root.exists() and root.is_symlink():
+        if root.is_symlink():
             raise MnemosyneBindingError(f"Mnemosyne checkout must not be a symlink: {root}")
         if not root.exists():
-            raise MnemosyneBindingError(f"Mnemosyne checkout missing at {root}")
+            self._clone_missing_checkout(root, target)
+        if root.is_symlink() or not root.is_dir():
+            raise MnemosyneBindingError(f"Mnemosyne checkout must be a directory: {root}")
         self._validate_git_checkout(root)
         self._validate_origin(root, target)
         self._validate_safe_config(root)
@@ -125,6 +127,37 @@ class MnemosyneBindingService:
 
     def _git(self, root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
         return self.git(root, tuple(argv), self.timeout_s)
+
+    def _clone_missing_checkout(self, root: Path, target: MnemosyneTarget) -> None:
+        """Create the canonical parent and clone the already-resolved target.
+
+        The clone remains untrusted until the normal origin, config, cleanliness,
+        fast-forward, and revision checks in :meth:`bind` complete.
+        """
+        parent = root.parent
+        try:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise MnemosyneBindingError(
+                f"cannot create Mnemosyne checkout parent: {parent}"
+            ) from exc
+        if parent.is_symlink() or not parent.is_dir():
+            raise MnemosyneBindingError(
+                f"Mnemosyne checkout parent must not be a symlink: {parent}"
+            )
+        _require_success(
+            self._git(
+                parent,
+                "clone",
+                "--origin",
+                "origin",
+                "--branch",
+                target.default_branch,
+                f"https://github.com/{target.slug}.git",
+                str(root),
+            ),
+            "clone",
+        )
 
     def _validate_git_checkout(self, root: Path) -> None:
         output = _require_success(

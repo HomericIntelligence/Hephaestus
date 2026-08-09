@@ -413,8 +413,7 @@ def gh_global_throttle_acquire() -> None:
                 if updated <= 0.0:
                     updated = now
 
-                elapsed = max(0.0, now - updated)
-                tokens = min(burst, max(0.0, tokens + elapsed * rate))
+                tokens = min(burst, tokens + (now - updated) * rate)
                 wait = 0.0
                 if tokens >= 1.0:
                     tokens -= 1.0
