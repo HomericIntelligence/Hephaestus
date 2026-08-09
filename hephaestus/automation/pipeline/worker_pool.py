@@ -2264,7 +2264,7 @@ class WorkerPool:
             if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
                 return JobResult(ok=False, error="paused rebase conflict paths invalid")
             index_result = git_utils.run(
-                ["git", "ls-files", "--unmerged", "-z", "--", *paths],
+                ["git", "ls-files", "--stage", "-z"],
                 cwd=cwd,
                 timeout=timeout,
             )
@@ -2487,11 +2487,16 @@ class WorkerPool:
     def _rebase_conflict_edit_scope_error(
         cwd: Path, *, conflict_paths: tuple[str, ...], timeout: int
     ) -> JobResult | None:
-        """Reject tracked, staged, or untracked changes outside conflicts."""
+        """Reject unstaged tracked or untracked changes outside conflicts.
+
+        The caller already proves that the complete index is byte-for-byte
+        unchanged from the host-owned paused-rebase snapshot.  Inspecting the
+        cached diff here would misclassify clean paths staged by Git before the
+        agent turn as agent edits.
+        """
         allowed = set(conflict_paths)
         probes = (
             ["git", "diff", "--name-only", "-z"],
-            ["git", "diff", "--cached", "--name-only", "-z"],
             ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         )
         try:
