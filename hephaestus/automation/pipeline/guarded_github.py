@@ -98,6 +98,13 @@ class GuardedStageGitHub:
         self._issue(issue)
         return issue
 
+    def _conversation(self, issue_or_pr_number: int) -> None:
+        """Confirm an issue or its freshly linked PR conversation target."""
+        if issue_or_pr_number == self.credential.issue:
+            self._issue(issue_or_pr_number)
+            return
+        self._pr(issue_or_pr_number)
+
     def __getattr__(self, name: str) -> Any:
         """Delegate read-only methods while keeping explicit mutator gates below."""
         return getattr(self.raw, name)
@@ -137,11 +144,11 @@ class GuardedStageGitHub:
         *,
         legacy_marker: str | None = None,
     ) -> None:
-        self._issue(issue_number)
+        self._conversation(issue_number)
         self.raw.upsert_issue_comment(issue_number, marker, body, legacy_marker=legacy_marker)
 
     def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-        self._issue(issue_number)
+        self._conversation(issue_number)
         self.raw.append_issue_comment(issue_number, marker, body)
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:

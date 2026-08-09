@@ -281,6 +281,8 @@ def test_guarded_proxy_covers_issue_and_pr_mutation_surface() -> None:
     proxy.close_issue_as_covered(2404, 7)
     proxy.upsert_issue_comment(2404, "marker", "body")
     proxy.append_issue_comment(2404, "marker", "body")
+    proxy.upsert_issue_comment(2686, "pr-marker", "pr-body")
+    proxy.append_issue_comment(2686, "pr-marker", "pr-body")
     proxy.upsert_plan_comment(2404, "plan")
     proxy.post_implementation_thread_replies(
         7, expected_head_sha="a" * 40, threads=[], replies={}, batch_nonce="nonce"
@@ -300,6 +302,23 @@ def test_guarded_proxy_covers_issue_and_pr_mutation_surface() -> None:
     proxy.skip_epics({2404: []})
     with pytest.raises(GuardTargetError):
         proxy.ensure_state_labels()
+
+
+def test_guarded_proxy_rejects_unlinked_pr_conversation_comment() -> None:
+    """A conversation comment may target only the issue or its freshly linked PR."""
+
+    class UnlinkedFakeGitHub(_FakeGitHub):
+        def find_issue_for_pr(self, pr_number: int) -> int:
+            return 2405
+
+    store = InMemoryGuardStore()
+    handle = IssueGuard(store).acquire("Owner/Repo", 2404, "pr_review")
+    assert handle is not None
+    raw = UnlinkedFakeGitHub()
+    proxy = GuardedStageGitHub(raw, store, handle.credential)
+
+    with pytest.raises(GuardTargetError, match="PR-to-issue association"):
+        proxy.upsert_issue_comment(2686, "marker", "body")
 
 
 def test_recovery_cli_inspects_without_recovery_credentials(
