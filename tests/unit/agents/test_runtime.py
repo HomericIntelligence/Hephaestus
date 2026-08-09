@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -121,6 +121,26 @@ def test_run_agent_athena_skill_routes_pi_through_the_runtime_adapter(
         preflight=preflight,
         model="pi-model",
     )
+
+
+def test_run_agent_athena_skill_stop_flag_blocks_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The emergency stop must prevent every Pi package probe."""
+    preflight = Mock(side_effect=AssertionError("preflight must not run"))
+    monkeypatch.setenv("HEPH_DISABLE_PI_AUTOMATION", "1")
+    monkeypatch.setattr(agent_runtime, "preflight_pi_environment", preflight)
+
+    with pytest.raises(agent_runtime.PiAutomationDisabledError, match="disabled"):
+        agent_runtime.run_agent_athena_skill(
+            "advise",
+            "prompt",
+            agent="pi",
+            cwd=tmp_path,
+            timeout=60,
+        )
+
+    preflight.assert_not_called()
 
 
 def test_parse_codex_json_events_extracts_session_id_and_messages() -> None:
@@ -1127,7 +1147,7 @@ def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_pat
 
 
 def test_run_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
-    """A public Pi session runner cannot bypass the automation admission gate."""
+    """The legacy public Pi session runner cannot bypass scoped dispatch."""
     with patch("subprocess.run") as run:
         run.return_value = subprocess.CompletedProcess(
             ["pi", "--mode", "json"],
@@ -1135,16 +1155,16 @@ def test_run_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
             stdout='{"type":"session","id":"pi-session-789"}',
             stderr="",
         )
-        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped run_pi_session"):
             agent_runtime.run_pi_session("prompt", cwd=tmp_path, timeout=30)
 
     run.assert_not_called()
 
 
 def test_run_pi_text_rejects_unadmitted_execution(tmp_path: Path) -> None:
-    """A public Pi text runner cannot bypass the automation admission gate."""
+    """The legacy public Pi text runner cannot bypass scoped dispatch."""
     with patch("hephaestus.agents.runtime._run_pi_command") as run:
-        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped run_pi_text"):
             agent_runtime.run_pi_text("prompt", cwd=tmp_path, timeout=30)
 
     run.assert_not_called()
@@ -1174,7 +1194,7 @@ def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
 
 
 def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
-    """A public Pi resume runner cannot bypass the automation admission gate."""
+    """The legacy public Pi resume runner cannot bypass scoped dispatch."""
     with patch("subprocess.run") as run:
         run.return_value = subprocess.CompletedProcess(
             ["pi", "--mode", "json", "--session", "pi-session-789"],
@@ -1182,7 +1202,7 @@ def test_resume_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
             stdout='{"type":"session","id":"pi-session-789"}',
             stderr="",
         )
-        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped resume_pi_session"):
             agent_runtime.resume_pi_session(
                 "pi-session-789",
                 "prompt",
@@ -1988,52 +2008,20 @@ def test_run_pi_smoke_session_disables_tools(
     assert "review prompt" not in captured_cmd
 
 
-def test_resume_pi_session_passes_resume_id_without_alias_argv_leak(
-    tmp_path: Path,
-    private_pi_temp: Path,
-) -> None:
-    """Pi feedback loops should resume the captured session id."""
-    captured: dict[str, Any] = {}
-    stdout = "\n".join(
-        [
-            '{"type":"session","id":"pi-session-789"}',
-            '{"type":"turn_end","message":{"role":"assistant","content":"resumed"}}',
-        ]
-    )
+def test_resume_pi_session_rejects_raw_resume_even_after_admission(tmp_path: Path) -> None:
+    """A raw session id cannot select a writable Pi resume path."""
+    with patch("hephaestus.agents.runtime._invoke_pi_session") as invoke:
+        with pytest.raises(agent_runtime.AgentExecutionError, match="Unscoped resume_pi_session"):
+            agent_runtime.resume_pi_session(
+                "pi-session-789",
+                "private feedback content",
+                cwd=tmp_path,
+                timeout=30,
+                model="private-alias",
+                sandbox="read-only",
+            )
 
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        prompt_arg = next(arg for arg in cmd if arg.startswith("@"))
-        captured["prompt_text"] = Path(prompt_arg[1:]).read_text(encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-
-    with (
-        patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
-        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
-        patch("subprocess.run", side_effect=fake_run),
-    ):
-        result = agent_runtime.resume_pi_session(
-            "pi-session-789",
-            "private feedback content",
-            cwd=tmp_path,
-            timeout=30,
-            model="private-alias",
-            sandbox="read-only",
-        )
-
-    tools_index = captured["cmd"].index("--tools")
-    assert captured["cmd"][:tools_index] == ["pi", "--mode", "json", "--session", "pi-session-789"]
-    assert captured["cmd"][tools_index + 1] == agent_runtime.PI_READ_ONLY_TOOLS
-    assert captured["cmd"][-1].startswith("@")
-    assert "--model" not in captured["cmd"]
-    assert "private-alias" not in captured["cmd"]
-    assert "private feedback content" not in captured["cmd"]
-    assert captured["prompt_text"] == "private feedback content"
-    assert "HEPH_PI_MODEL" not in captured["kwargs"]["env"]
-    assert "private-alias" not in captured["kwargs"]["env"].values()
-    assert result.stdout == "resumed"
-    assert result.session_id == "pi-session-789"
+    invoke.assert_not_called()
 
 
 def test_direct_agent_model_uses_operator_pi_alias_and_codex_default() -> None:
@@ -2358,15 +2346,19 @@ def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> Non
     preflight.assert_called_once_with(tmp_path)
 
 
-def test_resolve_pi_ready_still_fails_for_2518(tmp_path: Path) -> None:
-    """Package readiness does not bypass lifecycle and role-scope admission."""
+def test_resolve_pi_is_na_without_a_host_isolation_adapter(tmp_path: Path) -> None:
+    """Provider selection cannot expose Pi without an OS-isolation broker."""
     from hephaestus.agents.pi_plugins import PiPreflightResult
 
-    with patch(
-        "hephaestus.agents.runtime.preflight_pi_environment",
-        return_value=PiPreflightResult.ready_result(),
+    with (
+        patch(
+            "hephaestus.agents.runtime.preflight_pi_environment",
+            return_value=PiPreflightResult.ready_result(),
+        ),
+        patch("hephaestus.agents.runtime.is_agent_authenticated", return_value=True),
+        patch("hephaestus.agents.runtime._PI_ISOLATION_ADAPTER", None),
     ):
-        with pytest.raises(RuntimeError, match="#2518"):
+        with pytest.raises(agent_runtime.PiIsolationUnavailableError, match="Pi automation is N/A"):
             agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
 

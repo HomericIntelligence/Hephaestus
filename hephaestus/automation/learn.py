@@ -17,7 +17,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import ExecutionRequest
+from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import (
+    agent_compaction_resume,
     direct_agent_model,
     resume_agent_session,
     session_agent_matches,
@@ -485,6 +488,8 @@ def compact_agent_session(
     model: str | None = None,
     session_id: str | None = None,
     sandbox: str = "read-only",
+    execution_request: ExecutionRequest | None = None,
+    session_binding: AgentSessionBinding | None = None,
 ) -> bool:
     """Compact a persisted provider session without making it a hard gate.
 
@@ -495,25 +500,34 @@ def compact_agent_session(
     """
     if provider == "claude":
         return compact_session(repo, issue, session_agent, cwd, timeout, model)
-    if not session_id:
+    resume = agent_compaction_resume(
+        provider,
+        session_agent=session_agent,
+        session_id=session_id,
+        session_binding=session_binding,
+        execution_request=execution_request,
+    )
+    if resume is None:
         logger.debug(
-            "Issue #%s: no %s session id to compact for agent=%s; skipping",
+            "Issue #%s: no resumable %s session to compact for agent=%s; skipping",
             issue,
             provider,
             session_agent,
         )
         return False
+    resume_session_id, resume_options = resume
     timeout_s = learn_claude_timeout() if timeout is None else timeout
     try:
         resume_agent_session(
             agent=provider,
-            session_id=session_id,
+            session_id=resume_session_id,
             prompt="/compact",
             cwd=cwd,
             timeout=timeout_s,
             model=model or "",
             sandbox=sandbox,
             approval="never",
+            **resume_options,
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:
         logger.warning(

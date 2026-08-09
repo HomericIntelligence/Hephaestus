@@ -344,8 +344,10 @@ through Pi's native provider/model contract. Run
 `hephaestus-install-pi-plugins --dry-run --json` to inspect the exact package
 plan and `hephaestus-install-pi-plugins --global --yes --no-approve` to install
 the safe global defaults. Passing package preflight does not admit normal Pi
-automation: `--agent pi` remains fail-closed until #2518 enforces native
-selection, lifecycle, and tool scopes. The local setup also supports the
+automation: in a standard installation, `--agent pi` fails before stage or
+wrapper dispatch because no OS-isolation adapter is bundled. A trusted host
+integration must explicitly register an adapter that enforces the resolved
+filesystem and network policy; the local setup otherwise supports only the
 explicit adapter-smoke seam.
 
 #### Running the automation loop from a source checkout (macOS / Codex)

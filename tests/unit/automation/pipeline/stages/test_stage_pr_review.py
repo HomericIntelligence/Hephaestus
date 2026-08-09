@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.agents.execution_policy import AgentRole
+from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.automation.pipeline.github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -4541,6 +4543,25 @@ class TestEvalVerdicts:
         assert isinstance(restart.job, GitJob)
         assert restart.job.op == "verify_pr_review_checkout"
         assert restart.on_done_state == REVIEW_CHECKOUT_WAIT
+
+    def test_direct_pr_drift_restart_clears_pi_bound_review_sessions(
+        self, make_work_item: Any
+    ) -> None:
+        """A recreated checkout cannot resume a binding from the old worktree."""
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="PUSH_WAIT")
+        item.worktree = "/tmp/review-pr-1001"
+        item.session_ids["pr-reviewer"] = "saved-pi-session"
+        item.session_bindings["pr-reviewer"] = create_pi_binding(
+            session_id="saved-pi-session",
+            cwd=Path(item.worktree),
+            role=AgentRole.PR_REVIEWER,
+            model="pi-reviewer",
+        )
+
+        assert PrReviewStage._restart_direct_pr_review(item) is None
+
+        assert "pr-reviewer" not in item.session_ids
+        assert "pr-reviewer" not in item.session_bindings
 
     def test_detached_push_without_a_durable_recovery_receipt_preserves_the_checkout(
         self, make_ctx: Any, make_work_item: Any

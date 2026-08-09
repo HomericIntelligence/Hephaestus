@@ -72,6 +72,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
     _parse_addressed_block,
@@ -576,6 +582,16 @@ class ImplementationStage(Stage):
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT_INSPECT,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_IMPLEMENTER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "branch_name": item.branch,
                 "status_text": item.payload.get("worktree_status", ""),
@@ -784,6 +800,16 @@ class ImplementationStage(Stage):
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_IMPLEMENTER,
                 resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+                execution_request=ExecutionRequest(
+                    AgentRole.IMPLEMENTER,
+                    AgentOperation.ADDRESS_REVIEW,
+                    (
+                        SessionLifecycle.RESUME_REQUIRED
+                        if AGENT_IMPLEMENTER in item.session_bindings
+                        else SessionLifecycle.START_NEW
+                    ),
+                ),
+                resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
                 prompt_kwargs={
                     "pr_number": item.pr,
                     "issue_number": issue,
@@ -817,6 +843,16 @@ class ImplementationStage(Stage):
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_IMPLEMENTER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "issue_title": item.payload.get("issue_title", ""),
@@ -876,6 +912,16 @@ class ImplementationStage(Stage):
             allowed_tools="Read,Write,Edit,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.IMPLEMENT,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_IMPLEMENTER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "issue_title": item.payload.get("issue_title", ""),
@@ -938,6 +984,12 @@ class ImplementationStage(Stage):
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.TEST_FIX,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+            resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={
                 "issue_number": item.issue,
                 "prev_iteration": item.attempts.get("test_fix", 0),

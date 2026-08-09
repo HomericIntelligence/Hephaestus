@@ -85,8 +85,10 @@ prints matched values or source lines.
 
 This configuration supports explicit local adapter-smoke validation. Normal
 Hephaestus automation runs package/capability preflight for `--agent pi`, then
-continues to reject normal execution until #2518 enforces lifecycle and tool
-scopes. Do not treat a local model configuration, package readiness, or a
+rejects stage and wrapper execution unless the host has explicitly registered
+a reviewed OS-isolation adapter. The base package does not ship that adapter;
+its model-visible tool flags cannot enforce the resolved filesystem or network
+policy. Do not treat a local model configuration, package readiness, or a
 successful smoke command as automation admission evidence.
 
 ## Athena package acceptance

@@ -34,6 +34,7 @@ from typing import Any
 from hephaestus.agents.runtime import (
     agent_json_stdout,
     direct_agent_model,
+    reject_pi_unsupported_surface,
     resume_agent_session,
     session_agent_matches,
     uses_direct_agent_runner,
@@ -413,6 +414,11 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
         logger.warning("Follow-up skipped for issue #%d: %s", issue_number, message)
         write_secure(follow_up_log, f"FAILED: {message}\n")
         return None
+
+    reject_pi_unsupported_surface(
+        agent,
+        "legacy cross-role follow-up resume is N/A; no prompt or agent process was started",
+    )
 
     prompt_file = worktree_path / f".claude-followup-{issue_number}.md"
     write_secure(prompt_file, get_follow_up_prompt(issue_number))

@@ -16,6 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.agents.runtime import (
     agent_display_name,
     direct_agent_model,
@@ -327,6 +333,9 @@ def _invoke_git_message_agent(
             prompt=prompt,
             cwd=worktree_path,
             timeout=timeout,
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER, AgentOperation.GIT_MESSAGE, SessionLifecycle.ONE_SHOT
+            ),
             model=model,
             sandbox="read-only",
         )

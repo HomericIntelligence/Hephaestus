@@ -29,6 +29,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
@@ -612,6 +618,9 @@ class PlanningStage(Stage):
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,
+                execution_request=ExecutionRequest(
+                    AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW
+                ),
                 # build_plan_prompt composes get_plan_prompt with the issue
                 # title/body and advise findings in-worker, mirroring the
                 # Preserve the cached advisory context through the plan job.

@@ -35,6 +35,8 @@ from typing import TypeGuard, cast
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
+from hephaestus.agents.execution_policy import ExecutionPolicyError
+from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
     resolve_agent,
@@ -1725,7 +1727,9 @@ class WorkerPool:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
 
-    def _run_agent(self, job: AgentJob) -> JobResult:
+    def _run_agent(  # noqa: C901 - provider and session dispatch are one atomic boundary
+        self, job: AgentJob
+    ) -> JobResult:
         """Run an agent job (Claude or other runtime).
 
         Retry tradeoff: the whole agent invocation is wrapped in
@@ -1751,7 +1755,7 @@ class WorkerPool:
             session_agent = job.session_agent or job.agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
-            def _invoke() -> tuple[str, str | None]:
+            def _invoke() -> tuple[str, str | None, AgentSessionBinding | None]:
                 if is_claude:
                     # Scope priority: an explicit per-job grant (a stage that
                     # knows its exact needs, e.g. pr_review) wins; a read-only
@@ -1776,8 +1780,22 @@ class WorkerPool:
                         permission_mode=scope.permission_mode,
                         input_via_stdin=True,
                     )
-                    return stdout, None
-                if job.resume_session_id:
+                    return stdout, None, None
+                if job.resume_binding is not None:
+                    agent_result = resume_agent_session(
+                        agent=agent,
+                        session_id=job.resume_binding.session_id,
+                        prompt=prompt,
+                        cwd=job.cwd,
+                        timeout=job.timeout_s,
+                        model=job.model,
+                        sandbox=job.sandbox,
+                        approval="never",
+                        process_tracker=subprocess_registry.track_process_group,
+                        execution_request=job.execution_request,
+                        resume_binding=job.resume_binding,
+                    )
+                elif job.resume_session_id:
                     agent_result = resume_agent_session(
                         agent=agent,
                         session_id=job.resume_session_id,
@@ -1788,6 +1806,8 @@ class WorkerPool:
                         sandbox=job.sandbox,
                         approval="never",
                         process_tracker=subprocess_registry.track_process_group,
+                        execution_request=job.execution_request,
+                        resume_binding=job.resume_binding,
                     )
                 else:
                     agent_result = run_agent_session(
@@ -1799,15 +1819,27 @@ class WorkerPool:
                         sandbox=job.sandbox,
                         approval="never",
                         process_tracker=subprocess_registry.track_process_group,
+                        execution_request=job.execution_request,
+                        resume_binding=job.resume_binding,
                     )
                 # A resumed command may not repeat the session-start event;
                 # retain the known id in that case.
-                return agent_result.stdout or "", agent_result.session_id or job.resume_session_id
+                return (
+                    agent_result.stdout or "",
+                    agent_result.session_id or job.resume_session_id,
+                    agent_result.session_binding,
+                )
 
-            stdout, session_id = resilient_call(
+            stdout, session_id, session_binding = resilient_call(
                 _invoke,
                 circuit_breaker_name=f"agent:{agent}",
-                retry_predicate=lambda _exc: not self._shutdown.is_set(),
+                retry_predicate=lambda exc: (
+                    not self._shutdown.is_set()
+                    and not isinstance(
+                        exc,
+                        (AgentExecutionError, ExecutionPolicyError, PiSessionBindingError),
+                    )
+                ),
             )
 
             value = None
@@ -1827,6 +1859,7 @@ class WorkerPool:
                 value=value if value is not None else stdout,
                 stdout_tail=stdout[-_TAIL:],
                 session_id=session_id,
+                session_binding=session_binding,
             )
 
         except CircuitBreakerOpenError:
@@ -1856,6 +1889,8 @@ class WorkerPool:
             model=job.model,
             session_id=job.session_id,
             sandbox=job.sandbox,
+            execution_request=job.execution_request,
+            session_binding=job.session_binding,
         )
         # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.

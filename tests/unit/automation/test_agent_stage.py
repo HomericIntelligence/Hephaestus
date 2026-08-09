@@ -117,7 +117,7 @@ def test_run_agent_normalizes_claude_model_alias(
         return subprocess.CompletedProcess(["claude"], 0, stdout="claude output", stderr="")
 
     monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "claude")
 
     args = _args(tmp_path, agent="claude")
     args.model = "mythos"
@@ -139,7 +139,7 @@ def test_run_agent_dispatches_codex_and_logs_session(
     monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
     # resolve_agent now pre-flights install+auth (#1175); codex is not on PATH in
     # CI, so stub the resolution like the other codex stage tests below.
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "codex")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "codex")
 
     args = _args(tmp_path, agent="codex")
     rc = agent_stage.run_agent(args)
@@ -169,7 +169,7 @@ def test_run_agent_dispatches_athena_skill_request(
             return AthenaSkillResult(kind="advise", context="selected", receipt={"ok": True})
 
     monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "pi")
 
     args = _args(tmp_path, agent="pi")
     args.athena_skill = "advise"
@@ -230,7 +230,7 @@ def test_run_agent_forwards_closed_learn_delivery_file(
         encoding="utf-8",
     )
     monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "pi")
 
     args = _args(tmp_path, agent="pi")
     args.athena_skill = "learn"
@@ -253,7 +253,7 @@ def test_run_agent_dispatches_pi_and_logs_session(
         return AgentRunResult(stdout="pi output", stderr="", session_id="pi-session-123")
 
     monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "pi")
 
     args = _args(tmp_path, agent="pi")
     rc = agent_stage.run_agent(args)
@@ -263,6 +263,36 @@ def test_run_agent_dispatches_pi_and_logs_session(
     assert Path(args.log_file).read_text(encoding="utf-8") == (
         "SESSION_ID: pi-session-123\n\npi output"
     )
+
+
+def test_run_agent_resolves_pi_against_repo_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project-local Pi admission uses --repo-root, not the launcher cwd."""
+    repo_root = tmp_path / "project"
+    repo_root.mkdir()
+    launcher_cwd = tmp_path / "launcher"
+    launcher_cwd.mkdir()
+    seen: dict[str, object] = {}
+
+    def fake_resolve(agent: str | None, *, cwd: Path | None = None) -> str:
+        seen["agent"] = agent
+        seen["cwd"] = cwd
+        return "pi"
+
+    monkeypatch.chdir(launcher_cwd)
+    monkeypatch.setattr(agent_stage, "resolve_agent", fake_resolve)
+    monkeypatch.setattr(
+        agent_stage,
+        "run_agent_session",
+        lambda *args, **kwargs: AgentRunResult(stdout="ok", stderr=""),
+    )
+
+    args = _args(repo_root, agent="pi")
+
+    assert agent_stage.run_agent(args) == 0
+    assert seen == {"agent": "pi", "cwd": repo_root.resolve()}
 
 
 def test_run_agent_rejects_unsupported_direct_agent_value(tmp_path: Path) -> None:
@@ -337,7 +367,7 @@ def test_main_allows_enforced_read_only_policy_with_claude_agent(
         return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "claude")
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("p", encoding="utf-8")
     argv = [
@@ -376,7 +406,7 @@ def test_run_agent_propagates_claude_read_only_policy_rejection(
         )
 
     monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda agent: "claude")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda agent, **_kwargs: "claude")
     args = _args(tmp_path, agent="claude")
     args.sandbox = "read-only"
 
@@ -393,7 +423,7 @@ def test_main_allows_default_flags_with_claude_agent(
         return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "claude")
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("p", encoding="utf-8")
     argv = [
@@ -422,7 +452,7 @@ def test_main_allows_approval_with_codex_agent(
         return AgentRunResult(stdout="ok", stderr="", session_id=None)
 
     monkeypatch.setattr(agent_stage, "run_agent_session", fake_run_agent_session)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "codex")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "codex")
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("p", encoding="utf-8")
     argv = [
@@ -458,7 +488,7 @@ def test_main_installs_sigtstp_only_not_cooperative_sigint_handler(
         return subprocess.CompletedProcess(["claude"], 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(agent_stage, "run_claude_text", fake_run_claude_text)
-    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "claude")
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x, **_kwargs: "claude")
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("p", encoding="utf-8")
     argv = [

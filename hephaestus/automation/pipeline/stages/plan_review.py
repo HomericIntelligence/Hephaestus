@@ -56,6 +56,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
 from hephaestus.automation.agent_config import (
     learn_claude_timeout,
     plan_reviewer_claude_timeout,
@@ -438,6 +444,11 @@ class PlanReviewStage(Stage):
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLAN_REVIEWER,
+                execution_request=ExecutionRequest(
+                    AgentRole.PLAN_REVIEWER,
+                    AgentOperation.PLAN_REVIEW,
+                    SessionLifecycle.ONE_SHOT,
+                ),
                 # get_plan_loop_review_prompt takes a 0-based iteration index
                 # (full-sweep suffix on the final iteration). Issue title/body
                 # are seeded into item.payload by the coordinator (#1817).
@@ -479,6 +490,10 @@ class PlanReviewStage(Stage):
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,
+                execution_request=ExecutionRequest(
+                    AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
+                ),
+                resume_binding=item.session_bindings.get(AGENT_PLANNER),
                 # build_amend_prompt composes get_plan_prompt with the
                 # reviewer feedback block in-worker (doc: "resume planner
                 # session with feedback block"). The worker resumes the planner

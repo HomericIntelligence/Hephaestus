@@ -2,6 +2,13 @@
 # ruff: noqa: F403, F405
 from pathlib import Path
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -11,6 +18,7 @@ from ..github_jobs import (
     ReplyHandoffAttempted,
 )
 from .pr_review_diagnostics import publish_host_verification_failure
+from .pr_review_recovery import consume_reply_handoff_receipt, restart_direct_pr_review
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -366,6 +374,16 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.PR_REVIEW,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_PR_REVIEWER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             # The normal $athena:pr-review skill is read-only, but its
             # declared workflow uses local Bash helpers and review subagents.
@@ -529,6 +547,16 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.REVIEW_VALIDATE,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_PR_REVIEWER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             prompt_kwargs={
@@ -684,6 +712,12 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=pr_reviewer_claude_timeout(),
             session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.COMPACT,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+            session_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
         )
         return JobRequest(job, on_done_state=COMPACT_WRITER_WAIT)
 
@@ -704,6 +738,12 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=implementer_claude_timeout(),
             session_id=item.session_ids.get(session_agent),
             sandbox="read-only",
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.COMPACT,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+            session_binding=item.session_bindings.get(session_agent),
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 
@@ -1294,20 +1334,8 @@ class PrReviewJobs(_PrReviewHost):
     @staticmethod
     def _restart_direct_pr_review(item: WorkItem) -> StageOutcome | None:
         """Preserve a drifted checkout and route the PR through a fresh review."""
-        if not item.worktree:
-            return StageOutcome(Disposition.FINISH_FAIL, "detached_push_recovery_worktree_missing")
-        generation = item.payload.get("direct_pr_worktree_generation", 0)
-        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
-            return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_worktree_generation_invalid")
-        item.worktree = ""
-        item.payload["existing_pr"] = True
-        item.payload.pop("direct_pr_worktree", None)
-        item.payload.pop("direct_pr_worktree_dirty", None)
-        item.payload["direct_pr_worktree_generation"] = generation + 1
-        item.session_ids.pop(AGENT_PR_REVIEWER, None)
-        item.session_ids.pop(AGENT_ADDRESS_REVIEW, None)
-        _clear_round_review_state(item)
-        return None
+        reason = restart_direct_pr_review(item)
+        return StageOutcome(Disposition.FINISH_FAIL, reason) if reason is not None else None
 
     def _recovery_reply_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Dispatch one exact recovery-only reply handoff to a worker."""
@@ -1366,35 +1394,4 @@ class PrReviewJobs(_PrReviewHost):
     @staticmethod
     def _consume_reply_handoff_receipt(item: WorkItem) -> str:
         """Apply a correlated immutable recovery receipt to local payload."""
-        if not item.payload.get(_PENDING_IMPLEMENTATION_REPLY_HANDOFF):
-            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
-            item.payload.pop(_REPLY_HANDOFF_RECEIPT, None)
-            item.payload.pop(_REPLY_HANDOFF_RECEIPT_ERROR, None)
-            return "completed"
-        error = item.payload.pop(_REPLY_HANDOFF_RECEIPT_ERROR, None)
-        if error is not None:
-            item.payload.pop(_PENDING_GITHUB_REQUEST, None)
-            return "retry" if error == "retry" else "invalid"
-        receipt = item.payload.pop(_REPLY_HANDOFF_RECEIPT, None)
-        if not isinstance(receipt, ReplyHandoffAttempted) or receipt.request != item.payload.get(
-            _PENDING_GITHUB_REQUEST
-        ):
-            return "invalid"
-        item.payload.pop(_PENDING_GITHUB_REQUEST, None)
-        remaining = (
-            receipt.remaining_handoff.thaw() if receipt.remaining_handoff is not None else None
-        )
-        if remaining is not None and not isinstance(remaining, dict):
-            return "invalid"
-        if remaining is None:
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
-        else:
-            item.payload[_PENDING_IMPLEMENTATION_REPLY_HANDOFF] = remaining
-        item.payload[_REPLY_VISIBILITY_RETRIES] = receipt.visibility_retries
-        if receipt.retry_delay_s is None:
-            item.payload.pop("retry_delay_s", None)
-        else:
-            item.payload["retry_delay_s"] = receipt.retry_delay_s
-        if receipt.status in {"completed", "stale"}:
-            item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
-        return receipt.status
+        return consume_reply_handoff_receipt(item, _PENDING_GITHUB_REQUEST)
