@@ -2264,7 +2264,7 @@ class WorkerPool:
             if not paths or any(not is_safe_scope_retraction_path(path) for path in paths):
                 return JobResult(ok=False, error="paused rebase conflict paths invalid")
             index_result = git_utils.run(
-                ["git", "ls-files", "--unmerged", "-z", "--", *paths],
+                ["git", "ls-files", "--stage", "-z"],
                 cwd=cwd,
                 timeout=timeout,
             )

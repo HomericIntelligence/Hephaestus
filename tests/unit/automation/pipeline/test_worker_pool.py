@@ -2856,9 +2856,13 @@ class TestGitOps:
     def test_conflict_receipt_binds_index_head_base_and_remote_head(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """The host captures all immutable inputs before agent file editing."""
+        """The host captures the complete index before agent file editing."""
         (tmp_path / "x.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> topic\n")
-        index_state = "100644 blob 1\tx.py\0100644 blob 2\tx.py\0"
+        index_state = (
+            "100644 host-blob 0\thost-staged.py\0"
+            "100644 ours-blob 1\tx.py\0"
+            "100644 theirs-blob 2\tx.py\0"
+        )
         with patch(f"{_WP}.git_utils.run") as run:
             run.side_effect = [
                 MagicMock(returncode=0, stdout="x.py\0"),
@@ -2883,6 +2887,12 @@ class TestGitOps:
         assert receipt["paused_head_sha"] == "c" * 40
         assert receipt["base_sha"] == "b" * 40
         assert receipt["expected_remote_sha"] == "a" * 40
+        assert run.call_args_list[1].args[0] == [
+            "git",
+            "ls-files",
+            "--stage",
+            "-z",
+        ]
 
     @staticmethod
     def _continue_rebase_job(tmp_path: Path) -> GitJob:
@@ -3051,6 +3061,30 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.error == "conflict index was mutated outside host ownership"
+
+    def test_continue_rebase_rejects_agent_staged_nonconflict_path(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A stage-0 mutation outside the conflict paths cannot enter continuation."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            # The complete index changed after the agent staged outside.py.
+            "conflict_index_snapshot": "2" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}.git_utils.run") as run,
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.error == "conflict index was mutated outside host ownership"
+        run.assert_not_called()
 
     def test_continue_rebase_rejects_changed_paused_head(
         self, pool: WorkerPool, tmp_path: Path
