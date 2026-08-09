@@ -42,7 +42,11 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
-from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
+from hephaestus.automation.pipeline.github_jobs import (
+    GitHubJob,
+    GitHubJobRunner,
+    GuardedGitHubJob,
+)
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
     AgentJob,
@@ -126,6 +130,12 @@ _TRUSTED_GIT_CANDIDATES = (
     Path("/usr/local/bin/git"),
     Path("/usr/bin/git"),
 )
+_TRUSTED_GIT_ROOTS = (Path("/opt/homebrew"), Path("/usr/local"), Path("/usr"))
+_TRUSTED_GIT_DISCOVERY_ROOTS = (
+    Path("/opt/homebrew/Cellar/git"),
+    Path("/usr/local/Cellar/git"),
+    Path("/usr/bin"),
+)
 _HOST_RUNTIME_CACHE_DIRNAME = "hephaestus-host-validation-runtime"
 _HOST_RUNTIME_CACHE_FORMAT = b"sealed-runtime-v6-shell-launchers"
 _HOST_RUNTIME_MANIFEST_HEADER = "sealed-runtime-file-manifest-v1"
@@ -134,8 +144,16 @@ _HOST_RUNTIME_MANIFEST_HEADER = "sealed-runtime-file-manifest-v1"
 # the Git archive before extraction and bound every child output/write path.
 _HOST_VERIFICATION_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
 _HOST_VERIFICATION_ARCHIVE_MAX_MEMBERS = 20_000
-_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 64 * 1024 * 1024
-_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 2_048  # POSIX ulimit -f units
+# Full unit coverage includes package-lifecycle tests that build wheels and
+# sdists alongside coverage data. Keep that bounded workload below a fixed
+# 512 MiB quota; the measured nested-runtime fixture peaks near 234 MiB, so
+# smaller HFS+ images leave insufficient filesystem and SQLite headroom.
+_HOST_VERIFICATION_SCRATCH_MAX_BYTES = 512 * 1024 * 1024
+# macOS ``ulimit -f`` uses 512-byte blocks. Coverage's SQLite data file exceeds
+# 1 MiB for the full unit suite, so retain a per-file ceiling with enough room
+# for that verifier-owned artifact. The separately mounted 512 MiB volume is
+# still the non-bypassable aggregate quota for every PR-visible write.
+_HOST_VERIFICATION_OUTPUT_FILE_MAX_BLOCKS = 131_072
 _HOST_VERIFICATION_CPU_MAX_S = 240
 _HOST_VERIFICATION_PROCESS_HEADROOM = 64
 _HOST_VERIFICATION_POLL_S = 0.05
@@ -1108,7 +1126,15 @@ def _controlled_git_env() -> dict[str, str]:
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    env["PATH"] = os.defpath
+    trusted_git = _trusted_git_executable()
+    path_entries = os.defpath.split(os.pathsep)
+    if trusted_git is not None:
+        trusted_parent = str(Path(trusted_git).parent)
+        path_entries = [
+            trusted_parent,
+            *(entry for entry in path_entries if entry != trusted_parent),
+        ]
+    env["PATH"] = os.pathsep.join(path_entries)
     env["GIT_PAGER"] = "cat"
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
@@ -1138,15 +1164,30 @@ def _trusted_uv_executable() -> str | None:
 
 def _trusted_git_executable() -> str | None:
     """Return an allowlisted, non-writable ``git`` binary for host checks."""
-    for candidate in _TRUSTED_GIT_CANDIDATES:
+    discovered = shutil.which("git")
+    candidates: tuple[tuple[Path, bool], ...] = tuple(
+        (candidate, False) for candidate in _TRUSTED_GIT_CANDIDATES
+    )
+    if discovered is not None:
+        candidates = ((Path(discovered), True), *candidates)
+    for candidate, is_discovered in candidates:
         try:
-            resolved = candidate.resolve(strict=True)
+            if is_discovered:
+                if not candidate.is_absolute() or candidate.is_symlink():
+                    continue
+                resolved = candidate
+                trusted_roots = _TRUSTED_GIT_DISCOVERY_ROOTS
+            else:
+                resolved = candidate.resolve(strict=True)
+                trusted_roots = _TRUSTED_GIT_ROOTS
             mode = resolved.stat().st_mode
         except OSError:
             continue
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             continue
         if mode & 0o022:
+            continue
+        if not any(resolved.is_relative_to(root) for root in trusted_roots):
             continue
         return str(resolved)
     return None
@@ -1426,7 +1467,7 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | GuardedGitHubJob | CompactJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -1537,7 +1578,7 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | GuardedGitHubJob | CompactJob,
         claim_key: str = "",
         claim_stage: str = "",
     ) -> JobResult:
@@ -1577,7 +1618,7 @@ class WorkerPool:
                     result = self._run_build_test(job)
                 elif isinstance(job, GitJob):
                     result = self._run_git(job)
-                elif isinstance(job, GitHubJob):
+                elif isinstance(job, (GitHubJob, GuardedGitHubJob)):
                     result = self._run_github(job)
                 elif isinstance(job, CompactJob):
                     result = self._run_compact(job)
@@ -1619,11 +1660,12 @@ class WorkerPool:
             worker_id=worker_id,
         )
 
-    def _run_github(self, job: GitHubJob) -> JobResult:
+    def _run_github(self, job: GitHubJob | GuardedGitHubJob) -> JobResult:
         """Execute one closed GitHub operation exactly once per submission."""
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
-        with self._repo_lock(job.repo):
+        operation = job.operation if isinstance(job, GuardedGitHubJob) else job
+        with self._repo_lock(operation.repo):
             receipt = self._github_job_runner.run(job)
         return JobResult(ok=True, value=receipt)
 

@@ -6,14 +6,17 @@ import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 
+from hephaestus.automation.issue_guard import GuardCredential
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
+    GuardedGitHubJob,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
@@ -28,6 +31,48 @@ from hephaestus.automation.pipeline.reply_handoff import (
     implementation_reply_handoff_journal_entry,
 )
 from hephaestus.automation.review_journal import IssueComment
+
+
+def test_guarded_job_binding_accepts_freshly_verified_linked_pr_conversation(
+    tmp_path: Path,
+) -> None:
+    """A guard may authorize journal I/O on its coordinator-verified linked PR."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    operation = GitHubJob(
+        repo="repo",
+        repo_root=tmp_path.resolve(),
+        request=AppendReplyJournalRequest(7, marker, f'{marker}\n<!-- {{"format":1}} -->'),
+        descr="append PR journal",
+    )
+    guard = GuardCredential("org/repo", 3, uuid4(), uuid4())
+
+    bound = GuardedGitHubJob.bind(operation, guard, org="org", linked_pr=7)
+
+    assert bound.operation is operation
+    assert bound.guard is guard
+
+
+def test_guarded_job_binding_rejects_unrelated_conversation(tmp_path: Path) -> None:
+    """A PR conversation target must equal the freshly verified linked PR."""
+    marker = (
+        f"<!-- hephaestus-implementation-reply-handoff:pr=7:head={'a' * 40}:batch={'b' * 32} -->"
+    )
+    operation = GitHubJob(
+        repo="repo",
+        repo_root=tmp_path.resolve(),
+        request=AppendReplyJournalRequest(7, marker, f'{marker}\n<!-- {{"format":1}} -->'),
+        descr="append PR journal",
+    )
+
+    with pytest.raises(ValueError, match="guard issue or linked PR"):
+        GuardedGitHubJob.bind(
+            operation,
+            GuardCredential("org/repo", 3, uuid4(), uuid4()),
+            org="org",
+            linked_pr=8,
+        )
 
 
 def test_frozen_json_is_detached_from_sources_and_thawed_values() -> None:
