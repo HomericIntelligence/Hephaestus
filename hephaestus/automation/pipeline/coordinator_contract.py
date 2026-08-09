@@ -138,7 +138,9 @@ if TYPE_CHECKING:
         def _release_all_guards(self, reason: str) -> None:
             pass
 
-        def _claim_source_issue(self, repo: str, issue: int, stage: str) -> Any:
+        def _claim_source_issue(
+            self, repo: str, issue: int, stage: str, *, branch: str | None = None
+        ) -> Any:
             pass
 
         def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
@@ -220,6 +222,4 @@ if TYPE_CHECKING:
             pass
 
 else:
-
-    class _CoordinatorHost:
-        """Runtime-empty base for the statically checked host contract."""
+    _CoordinatorHost = object

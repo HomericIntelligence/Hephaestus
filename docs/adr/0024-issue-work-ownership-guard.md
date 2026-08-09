@@ -17,16 +17,20 @@ without an ownership check could clear a live run or alter the independent
 Use `state:in-progress` as an orthogonal, visible contention label. It is not
 part of the plan-state or implementation-state tuples and never authorizes a
 stage transition. The authoritative ownership record is canonical version-one
-JSON in the per-issue ref
-`refs/heads/hephaestus/issue-guards/issue-<N>`.
+JSON in a no-tree-change commit on the exact implementation branch for the
+issue. The branch is carried in the guard credential, so the guard and
+production writer share one ref: `refs/heads/<implementation-branch>`. A
+branch tip may contain ordinary implementation commits; readers walk
+first-parent history to find the newest guard record, while every guard child
+still advances that same branch with a non-forced compare-and-swap update.
 
 An automation run reads labels, refuses a live guard, creates an acquiring
 record, installs it with a non-forced ref operation, and reads it back before
 adding the label. It then records an active child and confirms both the
 record identity and label before dispatching work. Every issue mutation uses
 the target-bound guarded GitHub proxy, which re-confirms the claim immediately
-before the mutation. Claims carry repository, issue, claim UUID, and run UUID
-across worker boundaries.
+before the mutation. Claims carry repository, issue, branch, claim UUID, and
+run UUID across worker boundaries.
 
 Active claims use a four-hour lease. Renewal is owner-only and extends the
 lease through a ref child. Normal completion writes releasing/released
@@ -54,7 +58,8 @@ recovery credential if it is present.
 
 ## Consequences
 
-- GitHub receives one orthogonal label and one auditable ref history per issue.
+- GitHub receives one orthogonal label and one auditable history on the
+  implementation branch; no guard-only ref or branch is created.
 - All issue-bearing worker jobs must be bound to a matching guard credential;
   repository-wide label provisioning remains outside an issue guard.
 - A crashed process can leave visible, recoverable state. Operators must use

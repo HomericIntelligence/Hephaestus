@@ -438,6 +438,7 @@ class ImplementationStage(Stage):
         logger.info("implementation:%d: requesting worktree job", issue)
         adopted = bool(item.payload.get("existing_pr"))
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
+        guard_managed_branch = item.payload.get("_issue_guard_branch") == item.branch
         if not adopted and direct_base_sha is not None and not is_full_commit_sha(direct_base_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_scope_base_pin_invalid")
         kwargs: dict[str, object] = {
@@ -449,9 +450,11 @@ class ImplementationStage(Stage):
             # remote head instead (the anti-clobber reset of
             # _prepare_worktree_for_existing_pr :649/:693, so re-running
             # never discards pushed commits). Values coordinator-vetted.
-            "refresh_base": not adopted and direct_base_sha is None,
+            "refresh_base": not adopted and direct_base_sha is None and not guard_managed_branch,
             "repo_root": str(ctx.paths.repo_root),
         }
+        if guard_managed_branch:
+            kwargs["guard_managed_branch"] = True
         direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
         direct_branch_prefix = f"{issue}-auto-impl-direct-"
         direct_branch_nonce = (
@@ -967,7 +970,9 @@ class ImplementationStage(Stage):
         # require a new receipt nor lease-push against the unrelated trunk
         # SHA.
         requires_fresh_direct_reservation = (
-            not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+            not bool(item.payload.get("existing_pr"))
+            and direct_base_sha is not None
+            and item.payload.get("_issue_guard_branch") != item.branch
         )
         if requires_fresh_direct_reservation:
             if not is_full_commit_sha(direct_base_sha):
@@ -1535,7 +1540,9 @@ class ImplementationStage(Stage):
                 item.worktree = ""
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
-                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+                not bool(item.payload.get("existing_pr"))
+                and direct_base_sha is not None
+                and item.payload.get("_issue_guard_branch") != item.branch
             )
             reservation = (
                 result.value.get("direct_scope_reservation")
@@ -1573,7 +1580,9 @@ class ImplementationStage(Stage):
             item.payload["worktree_diff"] = str(value.get("diff", ""))
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
-                not bool(item.payload.get("existing_pr")) and direct_base_sha is not None
+                not bool(item.payload.get("existing_pr"))
+                and direct_base_sha is not None
+                and item.payload.get("_issue_guard_branch") != item.branch
             )
             if requires_fresh_direct_reservation:
                 reservation = value.get("direct_scope_reservation")

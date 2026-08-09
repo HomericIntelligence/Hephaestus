@@ -46,7 +46,7 @@ def test_guarded_job_binding_accepts_freshly_verified_linked_pr_conversation(
         request=AppendReplyJournalRequest(7, marker, f'{marker}\n<!-- {{"format":1}} -->'),
         descr="append PR journal",
     )
-    guard = GuardCredential("org/repo", 3, uuid4(), uuid4())
+    guard = GuardCredential("org/repo", 3, uuid4(), uuid4(), "3-auto-impl")
 
     bound = GuardedGitHubJob.bind(operation, guard, org="org", linked_pr=7)
 
@@ -69,7 +69,7 @@ def test_guarded_job_binding_rejects_unrelated_conversation(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="guard issue or linked PR"):
         GuardedGitHubJob.bind(
             operation,
-            GuardCredential("org/repo", 3, uuid4(), uuid4()),
+            GuardCredential("org/repo", 3, uuid4(), uuid4(), "3-auto-impl"),
             org="org",
             linked_pr=8,
         )

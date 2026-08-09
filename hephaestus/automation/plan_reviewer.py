@@ -30,6 +30,8 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation._review_utils import (
     build_automation_parser,
     drain_completed_futures,
+    find_pr_for_issue,
+    get_pr_head_branch,
     print_worker_summary,
     work_report_context,
 )
@@ -40,7 +42,13 @@ from hephaestus.utils.terminal import terminal_guard
 from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
-from .git_utils import get_repo_info, get_repo_root, get_repo_slug, issue_ref
+from .git_utils import (
+    get_repo_info,
+    get_repo_root,
+    get_repo_slug,
+    issue_auto_impl_branch_name,
+    issue_ref,
+)
 from .github_api import (
     fetch_issue_comments_metadata,
     gh_current_login,
@@ -214,7 +222,7 @@ class PlanReviewer:
                 if self._guard_factory is not None and not self.options.dry_run:
                     if self.repository is None:
                         raise RuntimeError("standalone plan reviewer repository is unavailable")
-                    guard_service = self._new_guard_service(self.repository)
+                    guard_service = self._new_guard_service(self.repository, issue=issue_number)
                     guard_handle = guard_service.acquire(
                         self.repository, issue_number, "plan-review"
                     )
@@ -706,11 +714,24 @@ class PlanReviewer:
         """Return explicit repository arguments for the guarded path."""
         return {"repo": self.repo_target} if self.repo_target is not None else {}
 
-    def _new_guard_service(self, repository: str) -> IssueGuard:
+    def _new_guard_service(
+        self,
+        repository: str,
+        *,
+        issue: int | None = None,
+        branch: str | None = None,
+    ) -> IssueGuard:
         """Create a guard service carrying this reviewer run identity."""
         if self._guard_factory is None:
             raise RuntimeError("standalone guard factory is unavailable")
         service = self._guard_factory(repository)
+        if branch is None and issue is not None:
+            branch = issue_auto_impl_branch_name(issue)
+            existing_pr = find_pr_for_issue(issue)
+            if existing_pr is not None:
+                branch = get_pr_head_branch(existing_pr) or branch
+        if branch is not None:
+            service.bind_branch(branch)
         service.run_id = self.run_id
         return service
 
@@ -718,7 +739,10 @@ class PlanReviewer:
         """Confirm a standalone claim immediately before a durable write."""
         if handle is None or self._guard_factory is None:
             return
-        service = self._new_guard_service(handle.credential.repository)
+        service = self._new_guard_service(
+            handle.credential.repository,
+            branch=handle.credential.branch,
+        )
         service.confirm(handle.credential, timedelta(0))
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:

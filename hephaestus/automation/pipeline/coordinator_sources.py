@@ -481,7 +481,16 @@ class SourceCoordinator(_CoordinatorHost):
         overlap_enabled: bool,
     ) -> tuple[WorkItem | None, bool]:
         """Classify one source issue and snapshot its overlap reservation."""
-        with self._claim_source_issue(source.repo, issue, "direct-issue-source") as claim:
+        raw_github = self._ctx_for_repo(source.repo).github
+        existing_pr = raw_github.find_pr_for_issue(issue)
+        guard_branch = (
+            raw_github.get_pr_head_branch(existing_pr)
+            if existing_pr
+            else f"{issue}-auto-impl-direct-{source.run_nonce}"
+        )
+        with self._claim_source_issue(
+            source.repo, issue, "direct-issue-source", branch=guard_branch
+        ) as claim:
             if claim is None:
                 source.issues.append(issue)
                 return None, False
@@ -502,7 +511,6 @@ class SourceCoordinator(_CoordinatorHost):
                     claim.github.skip_epics({entry.skip_tag_obligation.issue: []})
                 logger.info("seed excluded: %s", entry.reason)
                 return None, False
-
             item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
             if source.wave_lease is not None:
                 item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
@@ -513,7 +521,6 @@ class SourceCoordinator(_CoordinatorHost):
                 if item_claims and item_claims.intersection(active_claims):
                     return None, True
                 item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
-
             claim.transfer_to(item)
             return item, False
 
@@ -530,13 +537,11 @@ class SourceCoordinator(_CoordinatorHost):
         source = self._direct_issue_source
         if source is None:
             return 0
-
         active_claims = frozenset(self._active_implementation_file_claims())
         overlap_enabled = self._overlap_serialization_enabled()
         if overlap_enabled and source.overlap_blocked_claims == active_claims:
             return 0
         source.overlap_blocked_claims = None
-
         pushed = 0
         scanned = 0
         scan_limit = len(source.issues)
@@ -544,7 +549,6 @@ class SourceCoordinator(_CoordinatorHost):
         while self._direct_issue_queues_can_accept() and source.issues and scanned < scan_limit:
             issue = source.issues.popleft()
             scanned += 1
-
             item, overlaps = self._prepare_direct_issue_item(
                 source,
                 issue,
@@ -598,17 +602,17 @@ class SourceCoordinator(_CoordinatorHost):
                     self._direct_pr_source = None
                     break
 
-            # The compatibility helper returns exactly one entry here; unlike
-            # the legacy call over ``config.prs`` it cannot retain a source
-            # sized list while waiting for capacity.
             raw_github = self._ctx_for_repo(source.repo).github
             linked_issue = (
                 raw_github.find_issue_for_pr(pr)
                 if self._guard_enabled and not self.config.dry_run
                 else None
             )
+            guard_branch = raw_github.get_pr_head_branch(pr) if linked_issue is not None else None
             claim = (
-                self._claim_source_issue(source.repo, linked_issue, "direct-pr-source")
+                self._claim_source_issue(
+                    source.repo, linked_issue, "direct-pr-source", branch=guard_branch
+                )
                 if linked_issue is not None
                 else None
             )
