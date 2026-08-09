@@ -143,12 +143,16 @@ def fetch_current_repository_metadata() -> CurrentRepositoryMetadata:
     permission = data.get("viewerPermission")
     if not isinstance(login, str) or not login:
         raise MnemosyneResolutionError("current repository metadata is incomplete")
+    login = validate_owner(login)
+    if not isinstance(owner_type, str) or not owner_type:
+        owner_metadata = _gh_json(["api", f"users/{login}"])
+        owner_type = owner_metadata.get("type")
     if not isinstance(owner_type, str) or not owner_type:
         raise MnemosyneResolutionError("current repository metadata is incomplete")
     if not isinstance(permission, str) or not permission:
         raise MnemosyneResolutionError("current repository metadata is incomplete")
     return CurrentRepositoryMetadata(
-        owner=validate_owner(login),
+        owner=login,
         owner_type=owner_type,
         viewer_permission=permission,
     )
@@ -168,7 +172,14 @@ def _default_branch_and_head(data: dict[str, Any], slug: str) -> tuple[str, str]
     raw_oid = default_branch_ref.get("oid")
     if not head and isinstance(raw_oid, str):
         head = raw_oid
-    if not isinstance(branch, str) or not branch or not re.fullmatch(r"[0-9a-f]{40}", head):
+    if not isinstance(branch, str) or not branch:
+        raise MnemosyneResolutionError(f"{slug} metadata lacks a default branch name")
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        ref = _gh_json(["api", f"repos/{slug}/git/ref/heads/{branch}"])
+        obj = ref.get("object")
+        raw_head = obj.get("sha") if isinstance(obj, dict) else None
+        head = raw_head if isinstance(raw_head, str) else ""
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
         raise MnemosyneResolutionError(f"{slug} metadata lacks a default branch head SHA")
     return branch, head
 
