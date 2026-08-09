@@ -55,6 +55,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _repo_lock_path,
     _run_bounded_host_command,
     _trusted_gh_executable,
+    _trusted_git_executable,
     _unsafe_local_git_config_key,
     _verifier_owned_runtime_environment,
 )
@@ -4344,7 +4345,15 @@ class TestGitOps:
             "https_proxy",
         ):
             assert key not in fetch_env
-        assert fetch_env["PATH"] == os.defpath
+        trusted_git = _trusted_git_executable()
+        expected_path_entries = os.defpath.split(os.pathsep)
+        if trusted_git is not None:
+            trusted_parent = str(Path(trusted_git).parent)
+            expected_path_entries = [
+                trusted_parent,
+                *(entry for entry in expected_path_entries if entry != trusted_parent),
+            ]
+        assert fetch_env["PATH"] == os.pathsep.join(expected_path_entries)
         assert fetch_env["GIT_CONFIG_GLOBAL"] == os.devnull
         assert fetch_env["GIT_CONFIG_NOSYSTEM"] == "1"
         assert fetch_env["GIT_NO_REPLACE_OBJECTS"] == "1"

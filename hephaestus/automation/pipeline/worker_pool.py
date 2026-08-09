@@ -1120,7 +1120,15 @@ def _controlled_git_env() -> dict[str, str]:
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    env["PATH"] = os.defpath
+    trusted_git = _trusted_git_executable()
+    path_entries = os.defpath.split(os.pathsep)
+    if trusted_git is not None:
+        trusted_parent = str(Path(trusted_git).parent)
+        path_entries = [
+            trusted_parent,
+            *(entry for entry in path_entries if entry != trusted_parent),
+        ]
+    env["PATH"] = os.pathsep.join(path_entries)
     env["GIT_PAGER"] = "cat"
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
