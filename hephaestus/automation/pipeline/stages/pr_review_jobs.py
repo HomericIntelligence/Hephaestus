@@ -2,6 +2,13 @@
 # ruff: noqa: F403, F405
 from pathlib import Path
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -366,6 +373,16 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.PR_REVIEW,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_PR_REVIEWER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             # The normal $athena:pr-review skill is read-only, but its
             # declared workflow uses local Bash helpers and review subagents.
@@ -529,6 +546,16 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=pr_reviewer_claude_timeout(),
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.REVIEW_VALIDATE,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_PR_REVIEWER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
+            ),
+            resume_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             prompt_kwargs={
@@ -684,6 +711,12 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=pr_reviewer_claude_timeout(),
             session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER,
+                AgentOperation.COMPACT,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+            session_binding=item.session_bindings.get(AGENT_PR_REVIEWER),
         )
         return JobRequest(job, on_done_state=COMPACT_WRITER_WAIT)
 
@@ -704,6 +737,12 @@ class PrReviewJobs(_PrReviewHost):
             timeout_s=implementer_claude_timeout(),
             session_id=item.session_ids.get(session_agent),
             sandbox="read-only",
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.COMPACT,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+            session_binding=item.session_bindings.get(session_agent),
         )
         return JobRequest(job, on_done_state=REVIEW_WAIT)
 

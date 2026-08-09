@@ -27,6 +27,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from hephaestus.agents.runtime import (
     direct_agent_model,
     run_agent_text,
@@ -176,6 +183,9 @@ def _invoke_and_parse_review_session(
             prompt=active_prompt,
             cwd=worktree_path,
             timeout=timeout,
+            execution_request=ExecutionRequest(
+                AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+            ),
             model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
             sandbox="read-only",
         )

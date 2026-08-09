@@ -23,6 +23,13 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from hephaestus.agents.runtime import (
     direct_agent_model,
     run_agent_text,
@@ -131,6 +138,11 @@ def _run_classifier_session(
                 prompt=prompt,
                 cwd=worktree_path,
                 timeout=advise_timeout,
+                execution_request=ExecutionRequest(
+                    AgentRole.PR_REVIEWER,
+                    AgentOperation.COMMENT_CLASSIFY,
+                    SessionLifecycle.ONE_SHOT,
+                ),
                 model=direct_agent_model(agent, "HEPH_ADVISE_MODEL"),
                 sandbox="read-only",
             )

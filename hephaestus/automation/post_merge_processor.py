@@ -12,6 +12,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from hephaestus.agents.runtime import (
     direct_agent_model,
     run_agent_session,
@@ -153,6 +160,9 @@ class PostMergeProcessor:
                     prompt=prompt,
                     cwd=cwd,
                     timeout=options.learn_timeout,
+                    execution_request=ExecutionRequest(
+                        AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
+                    ),
                     model=direct_agent_model(options.agent, "HEPH_LEARN_MODEL"),
                     sandbox="workspace-write",
                 )

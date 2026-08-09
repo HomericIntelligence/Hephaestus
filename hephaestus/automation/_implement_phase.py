@@ -20,6 +20,13 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from hephaestus.agents.runtime import (
     direct_agent_model,
     run_agent_session,
@@ -91,6 +98,9 @@ class ImplementPhase(StageMixin):
                     prompt=prompt,
                     cwd=self.repo_root,
                     timeout=self.options.advise_timeout,
+                    execution_request=ExecutionRequest(
+                        AgentRole.ADVISOR, AgentOperation.ADVISE, SessionLifecycle.ONE_SHOT
+                    ),
                     model=direct_agent_model(
                         self.options.agent,
                         "HEPH_ADVISE_MODEL",
@@ -277,6 +287,9 @@ class ImplementPhase(StageMixin):
                 prompt=prompt,
                 cwd=worktree_path,
                 timeout=self.options.agent_timeout,
+                execution_request=ExecutionRequest(
+                    AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW
+                ),
                 model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
                 sandbox="workspace-write",
             )

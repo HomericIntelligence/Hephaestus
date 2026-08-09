@@ -744,7 +744,26 @@ class CoordinatorRuntime(_CoordinatorHost):
         # Direct runners mint an opaque id on the first turn.  Keep it under
         # the logical role rather than a round number so the next reviewer or
         # writer turn resumes the same compacted conversation.
-        if isinstance(handle.job, AgentJob) and result.ok and result.session_id:
+        if isinstance(handle.job, AgentJob) and result.ok and result.session_binding is not None:
+            session_key = handle.job.session_agent or handle.job.agent
+            binding = result.session_binding
+            if handle.job.execution_request is None:
+                self._finish(item, passed=False, reason="Pi binding returned without execution request")
+                return
+            from hephaestus.agents.pi_session import validate_pi_binding
+
+            try:
+                validate_pi_binding(
+                    binding,
+                    cwd=handle.job.cwd,
+                    role=handle.job.execution_request.role,
+                    model=handle.job.model,
+                )
+            except ValueError as exc:
+                self._finish(item, passed=False, reason=f"invalid Pi session binding: {exc}")
+                return
+            item.session_bindings[session_key] = binding
+        elif isinstance(handle.job, AgentJob) and result.ok and result.session_id:
             session_key = handle.job.session_agent or handle.job.agent
             item.session_ids[session_key] = result.session_id
 

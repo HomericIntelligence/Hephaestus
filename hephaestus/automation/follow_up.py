@@ -34,6 +34,7 @@ from typing import Any
 from hephaestus.agents.runtime import (
     agent_json_stdout,
     direct_agent_model,
+    reject_pi_unsupported_surface,
     resume_agent_session,
     session_agent_matches,
     uses_direct_agent_runner,
@@ -367,6 +368,10 @@ def _persist_rejected(
     """Write rejected items to a JSON file for offline inspection / PR-body rendering."""
     if not rejected:
         return
+    reject_pi_unsupported_surface(
+        agent,
+        "legacy cross-role follow-up resume is N/A; no prompt or agent process was started",
+    )
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / f"follow-up-rejected-{issue_number}.json"
     payload = [{"title": r.title, "reason": r.reason} for r in rejected]

@@ -25,6 +25,7 @@ from typing import Any
 
 from hephaestus.agents.runtime import (
     direct_agent_model,
+    reject_pi_unsupported_surface,
     resume_agent_session,
     run_agent_session,
     uses_direct_agent_runner,
@@ -196,6 +197,10 @@ def _run_fresh_direct_agent(
     worktree_path: Path,
 ) -> subprocess.CompletedProcess[str]:
     try:
+        reject_pi_unsupported_surface(
+            options.agent,
+            "legacy CI-fix raw session resume is N/A; Pi never falls back to a fresh session",
+        )
         result = run_agent_session(
             agent=options.agent,
             prompt=prompt,
@@ -219,6 +224,10 @@ def _invoke_direct_agent_session(
     pr_number: int,
 ) -> subprocess.CompletedProcess[str]:
     options = orchestrator._options()
+    reject_pi_unsupported_surface(
+        options.agent,
+        "legacy CI-fix raw session resume is N/A; Pi never falls back to a fresh session",
+    )
     if not session_id:
         return _run_fresh_direct_agent(options, prompt=prompt, worktree_path=worktree_path)
     try:

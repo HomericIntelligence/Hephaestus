@@ -21,6 +21,13 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
@@ -573,6 +580,9 @@ class PlanReviewer:
                 prompt=prompt,
                 cwd=Path.cwd(),
                 timeout=self.options.agent_timeout,
+                execution_request=ExecutionRequest(
+                    AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT
+                ),
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )

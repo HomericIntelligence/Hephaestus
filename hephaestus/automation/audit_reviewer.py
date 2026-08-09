@@ -20,6 +20,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionRequest,
+    SessionLifecycle,
+)
+
 from hephaestus.agents.runtime import (
     direct_agent_model,
     resolve_agent,
@@ -147,6 +154,9 @@ def run_audit_coordinator(
                 prompt=prompt,
                 cwd=get_repo_root(),
                 timeout=timeout,
+                execution_request=ExecutionRequest(
+                    AgentRole.PR_REVIEWER, AgentOperation.AUDIT_REVIEW, SessionLifecycle.ONE_SHOT
+                ),
                 model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
                 sandbox="read-only",
             )
