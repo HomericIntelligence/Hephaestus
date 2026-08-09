@@ -27,6 +27,7 @@ class _RecordingWorkerPool:
         lock_dir: Path | None = None,
         gh_extra_path_root: Path | None = None,
         github_job_runner: Any = None,
+        athena_skill_executor: Any = None,
     ) -> None:
         del lock_dir
         self.size = size
@@ -34,6 +35,7 @@ class _RecordingWorkerPool:
         self.completion_q = completion_q
         self.gh_extra_path_root = gh_extra_path_root
         self.github_job_runner = github_job_runner
+        self.athena_skill_executor = athena_skill_executor
 
 
 def _config(
@@ -72,6 +74,7 @@ def test_coordinator_uses_one_capacity_for_all_queues_and_worker_pool(
     assert coordinator.pool.completion_q is coordinator.completion_q
     assert coordinator.pool.gh_extra_path_root is None
     assert coordinator.pool.github_job_runner is not None
+    assert coordinator.pool.athena_skill_executor is not None
 
 
 def test_coordinator_passes_extra_gh_root_to_worker_pool(

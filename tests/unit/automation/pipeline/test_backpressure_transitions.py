@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.github_jobs import GitHubJob
 from hephaestus.automation.pipeline.jobs import (
@@ -110,7 +111,7 @@ class _PendingPool(FakeWorkerPool):
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -151,6 +152,7 @@ def test_full_next_stage_retains_completed_transition_until_retry(tmp_path: Path
         },
         install_signals=False,
     )
+    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     source = _issue(1, StageName.PLANNING)
     blocker = _issue(2, StageName.PLAN_REVIEW)
     coordinator.queues[StageName.PLAN_REVIEW] = StageQueue(capacity=1)
@@ -209,6 +211,7 @@ def test_stage_leases_allow_parallel_worker_submissions_up_to_capacity(tmp_path:
         stages={StageName.PLANNING: _AlwaysJob(tmp_path)},
         install_signals=False,
     )
+    coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     first = _issue(1, StageName.PLANNING)
     second = _issue(2, StageName.PLANNING)
     coordinator._push_item(first, StageName.PLANNING, enter=True)

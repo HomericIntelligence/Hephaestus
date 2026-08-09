@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.automation.address_review_core import _parse_addressed_block
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -1621,11 +1622,25 @@ class TestWorktreeAndAdvise:
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AthenaSkillJob)
         assert result.job.descr == "advise"
+        assert result.job.request.kind == "advise"
         assert result.on_done_state == "IMPLEMENT_WAIT"
 
-        stage.on_job_done(item, JobResult(ok=True, value="prior learnings"), ctx)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=AthenaSkillResult(
+                    kind="advise",
+                    context="prior learnings",
+                    receipt={"binding": "ok"},
+                ),
+            ),
+            ctx,
+        )
         assert item.payload["advise_findings"] == "prior learnings"
+        assert item.payload["athena_advise_receipt"] == {"binding": "ok"}
 
 
 class TestImplementBudget:

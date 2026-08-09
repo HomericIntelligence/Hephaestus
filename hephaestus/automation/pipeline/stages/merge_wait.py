@@ -36,9 +36,7 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
     WaveLease,
 )
-from hephaestus.automation.learn import build_learn_prompt
-from hephaestus.automation.session_naming import AGENT_LEARNINGS
-from hephaestus.prompts import PromptCatalog
+from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 
 from ..github_jobs import (
     GitHubJob,
@@ -46,7 +44,9 @@ from ..github_jobs import (
     RunMergeWaitCycleRequest,
 )
 from .base import (
-    AgentJob,
+    AthenaSkillJob,
+    AthenaSkillRequest,
+    AthenaSkillResult,
     Continue,
     Disposition,
     JobRequest,
@@ -93,15 +93,6 @@ _DECLINED_READINESS_FINGERPRINT = "merge_readiness_declined_fingerprint"
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _MERGE_CYCLE_RECEIPT = "_merge_wait_cycle_receipt"
 _MERGE_CYCLE_RECEIPT_ERROR = "_merge_wait_cycle_receipt_error"
-
-
-def build_drive_green_learn_prompt(issue_number: int, pr_number: int) -> str:
-    """Compose the post-merge learning prompt in the worker."""
-    return build_learn_prompt(
-        PromptCatalog.current().render(
-            "learn/drive_green_context.j2", issue_number=issue_number, pr_number=pr_number
-        )
-    )
 
 
 class MergeWaitStage(Stage):
@@ -645,17 +636,17 @@ class MergeWaitStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "learn_claim_failed")
         if not claimed:
             return StageOutcome(Disposition.FINISH_FAIL, "learn_outcome_unknown")
-        job = AgentJob(
-            repo=item.repo,
-            issue=item.issue,
-            agent=agent_provider(ctx),
-            model=stage_model(ctx, "implementer", implementer_model),
-            prompt_builder=build_drive_green_learn_prompt,
-            cwd=_worktree_path(item, ctx),
-            timeout_s=learn_claude_timeout(),
-            allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
-            session_agent=AGENT_LEARNINGS,
-            prompt_kwargs={"issue_number": item.issue, "pr_number": item.pr},
+        job = AthenaSkillJob(
+            request=AthenaSkillRequest(
+                kind="learn",
+                repo=item.repo,
+                issue=item.issue,
+                agent=agent_provider(ctx),
+                model=stage_model(ctx, "implementer", implementer_model),
+                cwd=_worktree_path(item, ctx),
+                timeout_s=learn_claude_timeout(),
+                payload={"issue_number": item.issue, "pr_number": item.pr},
+            ),
             descr="drive_green_learn",
         )
         return JobRequest(job, on_done_state=MW_FINISH)
@@ -676,8 +667,18 @@ class MergeWaitStage(Stage):
             return
         if item.state != LEARN_WAIT or item.issue is None:
             return
+        if not (
+            result.ok
+            and isinstance(result.value, AthenaSkillResult)
+            and result.value.ok
+            and valid_delivery_receipt(result.value.delivery_receipt)
+        ):
+            item.payload["athena_learn_error"] = result.error or "invalid Athena learn result"
+            return
+        item.payload["athena_learn_receipt"] = result.value.receipt
+        item.payload["athena_learn_delivery_receipt"] = result.value.delivery_receipt
         try:
-            ctx.github.mark_drive_green_learn_result(item.issue, succeeded=bool(result.ok))
+            ctx.github.mark_drive_green_learn_result(item.issue, succeeded=True)
         except Exception as exc:
             logger.error("merge_wait:%d: failed to persist /learn result: %s", item.issue, exc)
             item.payload["learn_result_persistence_failed"] = True

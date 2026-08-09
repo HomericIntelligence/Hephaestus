@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared markdown file discovery utilities."""
 
+import os
 from pathlib import Path
 
 from hephaestus.constants import DEFAULT_EXCLUDE_DIRS
@@ -22,6 +23,10 @@ def find_markdown_files(
     if exclude_dirs is None:
         exclude_dirs = set(DEFAULT_EXCLUDE_DIRS)
 
-    return sorted(
-        f for f in directory.rglob("*.md") if not any(part in exclude_dirs for part in f.parts)
-    )
+    files: list[Path] = []
+    for root, dirs, filenames in os.walk(directory):
+        dirs[:] = sorted(dirname for dirname in dirs if dirname not in exclude_dirs)
+        root_path = Path(root)
+        files.extend(root_path / name for name in filenames if name.endswith(".md"))
+
+    return sorted(files)

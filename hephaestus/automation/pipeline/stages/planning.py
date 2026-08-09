@@ -36,7 +36,6 @@ from hephaestus.automation.agent_config import (
     planner_model,
 )
 from hephaestus.automation.prompts._shared import fence_content
-from hephaestus.automation.prompts.advise import get_advise_prompt_builder
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX
 from hephaestus.automation.review_journal import (
@@ -48,7 +47,7 @@ from hephaestus.automation.review_journal import (
     render_current_plan,
     render_current_review,
 )
-from hephaestus.automation.session_naming import AGENT_ADVISE, AGENT_PLANNER
+from hephaestus.automation.session_naming import AGENT_PLANNER
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
@@ -68,6 +67,9 @@ from ..plan_journal import (
 )
 from .base import (
     AgentJob,
+    AthenaSkillJob,
+    AthenaSkillRequest,
+    AthenaSkillResult,
     Continue,
     Disposition,
     JobRequest,
@@ -576,31 +578,28 @@ class PlanningStage(Stage):
 
         if item.state == "ADVISE_WAIT":
             logger.info("planning:%d: requesting advise job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "advise", advise_model),
-                prompt_builder=get_advise_prompt_builder(ctx.config.agent),
-                cwd=ctx.paths.worktree,
-                timeout_s=advise_claude_timeout(),
-                sandbox="read-only",
-                allowed_tools="Read,Glob,Grep",
-                session_agent=AGENT_ADVISE,
-                # Issue title/body and the Mnemosyne marketplace path are
-                # seeded into item.payload by the coordinator (#1817), which
-                # owns issue fetching and advise_runner setup.
-                prompt_kwargs={
-                    "issue_number": item.issue,
-                    "issue_title": item.payload.get("issue_title", ""),
-                    "issue_body": item.payload.get("issue_body", ""),
-                    "marketplace_path": item.payload.get("marketplace_path", ""),
-                },
+            advise_job = AthenaSkillJob(
+                request=AthenaSkillRequest(
+                    kind="advise",
+                    repo=item.repo,
+                    issue=item.issue,
+                    agent=agent_provider(ctx),
+                    model=stage_model(ctx, "advise", advise_model),
+                    cwd=ctx.paths.worktree,
+                    timeout_s=advise_claude_timeout(),
+                    payload={
+                        "issue_number": item.issue,
+                        "issue_title": item.payload.get("issue_title", ""),
+                        "issue_body": item.payload.get("issue_body", ""),
+                    },
+                ),
                 descr="advise",
             )
-            return JobRequest(job, on_done_state="PLAN_WAIT")
+            return JobRequest(advise_job, on_done_state="PLAN_WAIT")
 
         if item.state == "PLAN_WAIT":
+            if item.payload.get("athena_advise_error"):
+                return StageOutcome(Disposition.FINISH_FAIL, "athena_advise_failed")
             logger.info("planning:%d: requesting plan job", item.issue)
             job = AgentJob(
                 repo=item.repo,
@@ -643,12 +642,21 @@ class PlanningStage(Stage):
             ctx: Stage context.
 
         """
+        if item.state == "ADVISE_WAIT" and not result.ok:
+            item.payload["athena_advise_error"] = result.error or "advise failed"
+            logger.warning("planning:%s: advise failed: %s", item.issue, result.error)
+            return
+
         if not result.ok:
             logger.warning("planning:%s: job failed: %s", item.issue, result.error)
             return
 
         if result.value is not None:
             if item.state == "ADVISE_WAIT":
-                item.payload["advise_findings"] = result.value
+                if not isinstance(result.value, AthenaSkillResult) or not result.value.ok:
+                    item.payload["athena_advise_error"] = "invalid Athena advise result"
+                    return
+                item.payload["advise_findings"] = result.value.context
+                item.payload["athena_advise_receipt"] = result.value.receipt
             elif item.state == "PLAN_WAIT":
                 item.payload["plan_text"] = result.value

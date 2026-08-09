@@ -13,6 +13,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
     from .coordinator import PipelineConfig, run_pipeline
     from .jobs import GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
@@ -31,6 +32,9 @@ __all__ = [
     "GIT_OPS",
     "ROUTES",
     "AgentJob",
+    "AthenaSkillJob",
+    "AthenaSkillRequest",
+    "AthenaSkillResult",
     "BuildTestJob",
     "CompactJob",
     "CompletionQueue",
@@ -54,6 +58,9 @@ __all__ = [
 
 _LAZY_EXPORTS: dict[str, str] = {
     "AgentJob": "hephaestus.automation.pipeline.jobs",
+    "AthenaSkillJob": "hephaestus.automation.pipeline.athena_skill_jobs",
+    "AthenaSkillRequest": "hephaestus.automation.pipeline.athena_skill_jobs",
+    "AthenaSkillResult": "hephaestus.automation.pipeline.athena_skill_jobs",
     "BuildTestJob": "hephaestus.automation.pipeline.jobs",
     "CompactJob": "hephaestus.automation.pipeline.jobs",
     "CompletionQueue": "hephaestus.automation.pipeline.queues",

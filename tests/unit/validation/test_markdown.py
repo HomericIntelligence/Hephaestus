@@ -177,6 +177,23 @@ class TestCheckReadmesMain:
         rc = check_readmes_main()
         assert rc == 1, "subproject_b is missing required sections; must fail"
 
+    def test_check_readmes_default_cli_does_not_require_project_template(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Default CLI mode does not impose generic sections on every README."""
+        (tmp_path / "README.md").write_text(
+            "# Catalog\n\nPurpose only.\n- historical list style\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sys, "argv", ["hephaestus-check-readmes", "--directory", str(tmp_path)])
+
+        rc = check_readmes_main()
+
+        assert rc == 0
+
     def test_check_readmes_passing_readme_returns_0(
         self,
         readme_dir: Path,

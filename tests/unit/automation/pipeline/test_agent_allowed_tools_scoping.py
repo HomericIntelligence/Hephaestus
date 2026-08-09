@@ -27,20 +27,13 @@ READ_ONLY_SCOPES = frozenset({READ_ONLY, PR_REVIEW})
 # The primary PR review retains the additional read-only helper capabilities
 # required by the normal review workflow; it does not grant write tools.
 EXPECTED_SCOPES = {
-    ("stages/planning.py", "step", "get_advise_prompt_builder(ctx.config.agent)"): READ_ONLY,
     ("stages/planning.py", "step", "build_plan_prompt"): READ_ONLY,
     ("stages/plan_review.py", "step", "get_plan_loop_review_prompt"): READ_ONLY,
     ("stages/plan_review.py", "step", "build_amend_prompt"): READ_ONLY,
-    ("stages/plan_review.py", "step", "build_learn_prompt"): ADDRESS,
     (
         "stages/implementation.py",
         "_dirty_decision_wait",
         "get_dirty_reused_worktree_decision_prompt",
-    ): READ_ONLY,
-    (
-        "stages/implementation.py",
-        "_advise_wait",
-        "get_advise_prompt_builder(ctx.config.agent)",
     ): READ_ONLY,
     ("stages/implementation.py", "_implement_wait", "get_address_review_prompt"): ADDRESS,
     ("stages/implementation.py", "_implement_wait", "build_implementation_prompt"): WRITE,
@@ -52,7 +45,16 @@ EXPECTED_SCOPES = {
     ("stages/implementation.py", "_testfix_wait", "build_test_fix_prompt"): WRITE,
     ("stages/pr_review_jobs.py", "_submit_review_job", "get_pr_review_analysis_prompt"): PR_REVIEW,
     ("stages/pr_review_jobs.py", "_validate_wait", "get_review_validation_prompt"): READ_ONLY,
-    ("stages/merge_wait.py", "_request_learn", "build_drive_green_learn_prompt"): ADDRESS,
+}
+
+# Athena advise/learn calls are host-owned typed jobs, not prompt-only AgentJobs.
+# They intentionally have no direct agent tool scope; the runtime adapter maps
+# their closed request kind to the minimal provider-specific capability grants.
+EXPECTED_ATHENA_SKILLS = {
+    ("stages/planning.py", "step", "advise"),
+    ("stages/implementation.py", "_advise_wait", "advise"),
+    ("stages/plan_review.py", "step", "learn"),
+    ("stages/merge_wait.py", "_request_learn", "learn"),
 }
 
 
@@ -179,6 +181,59 @@ def _discover_agent_job_sandboxes() -> dict[tuple[str, str, str], str | None]:
     return discovered
 
 
+def _discover_athena_skill_jobs() -> set[tuple[str, str, str]]:
+    """Discover typed Athena skill jobs by source location and request kind."""
+    discovered: set[tuple[str, str, str]] = set()
+
+    for path in sorted(PIPELINE_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+
+        class _Visitor(ast.NodeVisitor):
+            def __init__(self, relative_path: str) -> None:
+                self.relative_path = relative_path
+                self.function_stack: list[str] = []
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self.function_stack.append(node.name)
+                self.generic_visit(node)
+                self.function_stack.pop()
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self.function_stack.append(node.name)
+                self.generic_visit(node)
+                self.function_stack.pop()
+
+            def visit_Call(self, node: ast.Call) -> None:
+                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if name == "AthenaSkillJob":
+                    self._record(node)
+                self.generic_visit(node)
+
+            def _record(self, node: ast.Call) -> None:
+                function = self.function_stack[-1] if self.function_stack else "<module>"
+                kwargs = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
+                request = kwargs.get("request")
+                if not isinstance(request, ast.Call):
+                    pytest.fail(
+                        f"{self.relative_path}:{node.lineno}: AthenaSkillJob in {function}() "
+                        "must build an AthenaSkillRequest directly"
+                    )
+                request_kwargs = {
+                    keyword.arg: keyword.value for keyword in request.keywords if keyword.arg
+                }
+                kind = request_kwargs.get("kind")
+                if not isinstance(kind, ast.Constant) or kind.value not in {"advise", "learn"}:
+                    pytest.fail(
+                        f"{self.relative_path}:{node.lineno}: AthenaSkillJob in {function}() "
+                        "must declare a literal advise/learn kind"
+                    )
+                discovered.add((self.relative_path, function, str(kind.value)))
+
+        _Visitor(path.relative_to(PIPELINE_DIR).as_posix()).visit(tree)
+
+    return discovered
+
+
 def test_every_pipeline_agent_job_matches_expected_scope() -> None:
     """Every current pipeline job is registered with its exact tool scope."""
     discovered = _discover_agent_jobs()
@@ -195,6 +250,17 @@ def test_every_pipeline_agent_job_matches_expected_scope() -> None:
         if discovered[key] != EXPECTED_SCOPES[key]
     }
     assert not mismatched, f"AgentJob scope drift (actual, expected): {mismatched}"
+
+
+def test_every_pipeline_athena_skill_job_is_registered() -> None:
+    """Typed Athena skill jobs must stay explicit and enumerable."""
+    discovered = _discover_athena_skill_jobs()
+
+    missing = sorted(EXPECTED_ATHENA_SKILLS - discovered)
+    assert not missing, f"expected AthenaSkillJob call sites not found: {missing}"
+
+    extra = sorted(discovered - EXPECTED_ATHENA_SKILLS)
+    assert not extra, f"unregistered pipeline AthenaSkillJob call sites: {extra}"
 
 
 def test_every_read_only_pipeline_agent_job_declares_read_only_sandbox() -> None:

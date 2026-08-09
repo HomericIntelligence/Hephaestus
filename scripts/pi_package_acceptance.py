@@ -38,6 +38,11 @@ ATHENA_REMOTE = "https://github.com/HomericIntelligence/Athena.git"
 HEPHAESTUS_REMOTE = "https://github.com/HomericIntelligence/Hephaestus.git"
 ATHENA_ISSUE_URL = "https://github.com/HomericIntelligence/Athena/issues/61"
 REQUIRED_COMMANDS = ("skill:advise", "skill:learn", "skill:pr-review")
+CONTRACT_FILES = {
+    "advise_sha256": PurePosixPath("skills/advise/SKILL.md"),
+    "learn_sha256": PurePosixPath("skills/learn/SKILL.md"),
+    "dependency_resolution_sha256": PurePosixPath("docs/dependency-resolution.md"),
+}
 PI_RESOURCE_FIELD = "".join(("p", "i"))
 PI_TEST_DIRECTORY = ("tests", PI_RESOURCE_FIELD)
 FORBIDDEN_MANIFEST_FIELDS = frozenset(
@@ -131,6 +136,7 @@ class DiscoveryEvidence:
 
     installed_commit: str
     commands: tuple[str, ...]
+    contract_hashes: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -160,7 +166,7 @@ class AcceptanceEvidence:
     compatibility: dict[str, str]
     upstream: dict[str, str]
     implementation: dict[str, str | int]
-    discovery: dict[str, str | list[str]]
+    discovery: dict[str, str | list[str] | dict[str, str]]
     archive: dict[str, str | int]
     required_check: dict[str, str]
 
@@ -407,6 +413,19 @@ def _parse_rpc_commands(output: str, package_root: Path) -> tuple[str, ...]:
     return tuple(sorted(set(REQUIRED_COMMANDS)))
 
 
+def _contract_hashes(package_root: Path) -> dict[str, str]:
+    """Return SHA-256 evidence for Athena's authoritative skill contracts."""
+    hashes: dict[str, str] = {}
+    for name, relative in CONTRACT_FILES.items():
+        path = package_root / Path(relative.as_posix())
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"installed Athena package lacks contract file {relative}") from exc
+        hashes[name] = hashlib.sha256(content).hexdigest()
+    return hashes
+
+
 def install_and_discover(catalog: PackageCatalog, pi_bin: Path) -> DiscoveryEvidence:
     """Install the exact package ref in a clean Pi directory and query RPC commands."""
     agent_directory = Path(tempfile.mkdtemp(prefix="hephaestus-athena-pi-acceptance-"))
@@ -437,7 +456,11 @@ def install_and_discover(catalog: PackageCatalog, pi_bin: Path) -> DiscoveryEvid
             input_text='{"id":"skills","type":"get_commands"}\n',
         )
         commands = _parse_rpc_commands(rpc.stdout, package_root)
-        return DiscoveryEvidence(installed_commit=installed_commit, commands=commands)
+        return DiscoveryEvidence(
+            installed_commit=installed_commit,
+            commands=commands,
+            contract_hashes=_contract_hashes(package_root),
+        )
     finally:
         shutil.rmtree(agent_directory, ignore_errors=True)
 
@@ -685,6 +708,7 @@ def collect_acceptance(
         discovery={
             "installed_commit": discovery.installed_commit,
             "commands": list(discovery.commands),
+            "contract_hashes": discovery.contract_hashes,
         },
         archive={"sha256": archive.sha256, "members": archive.members},
         required_check={"name": catalog.upstream.required_check, "url": receipts.check_url},

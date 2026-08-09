@@ -63,7 +63,7 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.learn import build_learn_prompt
+from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
@@ -95,6 +95,9 @@ from hephaestus.prompts import PromptCatalog
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
 from .base import (
     AgentJob,
+    AthenaSkillJob,
+    AthenaSkillRequest,
+    AthenaSkillResult,
     Continue,
     Disposition,
     JobRequest,
@@ -494,20 +497,20 @@ class PlanReviewStage(Stage):
 
         if item.state == "LEARN_WAIT":
             logger.info("plan_review:%d: requesting learn job", item.issue)
-            job = AgentJob(
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "planner", planner_model),
-                prompt_builder=build_learn_prompt,
-                cwd=ctx.paths.worktree,
-                timeout_s=learn_claude_timeout(),
-                allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
-                session_agent=AGENT_PLANNER,  # resume planner session (legacy parity)
-                prompt_kwargs={"context": item.payload.get("plan_text", "")},
+            learn_job = AthenaSkillJob(
+                request=AthenaSkillRequest(
+                    kind="learn",
+                    repo=item.repo,
+                    issue=item.issue,
+                    agent=agent_provider(ctx),
+                    model=stage_model(ctx, "planner", planner_model),
+                    cwd=ctx.paths.worktree,
+                    timeout_s=learn_claude_timeout(),
+                    payload={"context": item.payload.get("plan_text", "")},
+                ),
                 descr="learn",
             )
-            return JobRequest(job, on_done_state=PLAN_FINISH)
+            return JobRequest(learn_job, on_done_state=PLAN_FINISH)
 
         if item.state == PLAN_FINISH:
             return self._finish_after_learning(item, ctx)
@@ -518,6 +521,8 @@ class PlanReviewStage(Stage):
     @staticmethod
     def _finish_after_learning(item: WorkItem, ctx: StageContext) -> StageOutcome:
         """Advance only while the approved label remains live and exclusive."""
+        if not valid_delivery_receipt(item.payload.get("athena_learn_delivery_receipt")):
+            return StageOutcome(Disposition.FINISH_FAIL, "learn_delivery_missing")
         live_labels = _require_issue_labels(item, ctx)
         if not is_exclusive_plan_state(live_labels, STATE_PLAN_GO):
             return StageOutcome(
@@ -744,6 +749,11 @@ class PlanReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if item.state == "LEARN_WAIT" and not result.ok:
+            item.payload["athena_learn_error"] = result.error or "learn failed"
+            logger.warning("plan_review:%s: learn failed: %s", item.issue, result.error)
+            return
+
         if not result.ok:
             reason = _safe_agent_failure_reason(result.error)
             diagnostic = _safe_agent_failure_diagnostic(result.stderr_tail)
@@ -756,6 +766,14 @@ class PlanReviewStage(Stage):
                 )
             else:
                 logger.warning("plan_review:%s: job failed: %s", item.issue, reason)
+            return
+
+        if item.state == "LEARN_WAIT":
+            if not isinstance(result.value, AthenaSkillResult) or not result.value.ok:
+                item.payload["athena_learn_error"] = "invalid Athena learn result"
+                return
+            item.payload["athena_learn_receipt"] = result.value.receipt
+            item.payload["athena_learn_delivery_receipt"] = result.value.delivery_receipt
             return
 
         if result.value is not None:

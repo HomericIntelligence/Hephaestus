@@ -4,6 +4,8 @@
 - Date: 2026-07-29
 - Tracks: #2514
 - Extends: ADR-0019
+- Supersession note: ADR-0025 records the implemented stage-scope
+  AthenaSkillJob receipt handling for `advise` and `learn`.
 
 ## Context
 

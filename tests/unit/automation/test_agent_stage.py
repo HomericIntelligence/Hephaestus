@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +26,7 @@ def _args(tmp_path: Path, *, agent: str = "claude") -> argparse.Namespace:
         output=str(tmp_path / "out.txt"),
         log_file=str(tmp_path / "agent.log"),
         skill_file=None,
+        athena_skill=None,
         model="",
         sandbox="workspace-write",
         approval="never",
@@ -146,6 +148,97 @@ def test_run_agent_dispatches_codex_and_logs_session(
     assert Path(args.output).read_text(encoding="utf-8") == "codex output"
     assert (
         Path(args.log_file).read_text(encoding="utf-8") == "SESSION_ID: session-123\n\ncodex output"
+    )
+
+
+def test_run_agent_dispatches_athena_skill_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct athena-skill mode writes the typed receipt schema."""
+    from hephaestus.automation.pipeline.athena_skill_jobs import (
+        AthenaSkillRequest,
+        AthenaSkillResult,
+    )
+
+    captured: dict[str, AthenaSkillRequest] = {}
+
+    class Host:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            captured["request"] = request
+            return AthenaSkillResult(kind="advise", context="selected", receipt={"ok": True})
+
+    monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+
+    args = _args(tmp_path, agent="pi")
+    args.athena_skill = "advise"
+    rc = agent_stage.run_agent(args)
+
+    assert rc == 0
+    output = json.loads(Path(args.output).read_text(encoding="utf-8"))
+    assert output["kind"] == "advise"
+    assert output["receipt"] == {"ok": True}
+    request = captured["request"]
+    assert request.kind == "advise"
+    assert request.agent == "pi"
+
+
+def test_run_agent_forwards_closed_learn_delivery_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct learn mode supplies its delivery request to the default host path."""
+    from hephaestus.automation.pipeline.athena_skill_jobs import (
+        AthenaSkillRequest,
+        AthenaSkillResult,
+    )
+
+    captured: dict[str, AthenaSkillRequest] = {}
+
+    class Host:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            captured["request"] = request
+            return AthenaSkillResult(
+                kind="learn",
+                receipt={"binding": "ok"},
+                delivery_receipt={
+                    "commit_sha": "a" * 40,
+                    "readback_head_sha": "a" * 40,
+                    "pr_url": "https://github.com/acme/Mnemosyne/pull/1",
+                    "pr_number": 1,
+                    "local_only": False,
+                },
+            )
+
+    delivery_file = tmp_path / "delivery.json"
+    delivery_file.write_text(
+        json.dumps(
+            {
+                "repository": "acme/Mnemosyne",
+                "worktree_path": str(tmp_path),
+                "branch": "skill/example",
+                "base_branch": "main",
+                "allowed_paths": ["skills/example.md"],
+                "commit_message": "docs(skills): capture reusable workflow",
+                "pr_title": "docs(skills): capture reusable workflow",
+                "pr_body": "Summary.\n",
+                "disposition": "create",
+                "validation_evidence": ["pytest"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_stage, "MnemosyneSkillHost", lambda: Host())
+    monkeypatch.setattr(agent_stage, "resolve_agent", lambda x: "pi")
+
+    args = _args(tmp_path, agent="pi")
+    args.athena_skill = "learn"
+    args.athena_delivery_file = str(delivery_file)
+
+    assert agent_stage.run_agent(args) == 0
+    assert captured["request"].payload["learn_delivery"] == json.loads(
+        delivery_file.read_text(encoding="utf-8")
     )
 
 

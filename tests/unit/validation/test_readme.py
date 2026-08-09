@@ -66,6 +66,18 @@ class TestFindReadmes:
         result = find_readmes(tmp_path)
         assert result == []
 
+    def test_excludes_non_source_readmes(self, tmp_path: Path) -> None:
+        """Default README discovery skips transient and fixture directories."""
+        (tmp_path / "README.md").write_text("# Root\n")
+        for dirname in (".tmp", ".pixi", "build", ".venv", "fixtures"):
+            nested = tmp_path / dirname
+            nested.mkdir()
+            (nested / "README.md").write_text("# Generated\n")
+
+        result = find_readmes(tmp_path)
+
+        assert result == [tmp_path / "README.md"]
+
 
 # ---------------------------------------------------------------------------
 # validate_readme

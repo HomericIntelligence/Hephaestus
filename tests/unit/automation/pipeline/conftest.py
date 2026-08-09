@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.github_jobs import GitHubJob, GitHubJobRunner
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
@@ -90,7 +91,7 @@ class FakeWorkerPool:
 
     def submit(
         self,
-        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -127,14 +128,67 @@ class FakeWorkerPool:
                 ok=False,
                 error=f"{type(outcome).__name__}: {outcome!s}",
             )
+        elif (
+            isinstance(job, AthenaSkillJob)
+            and outcome.ok
+            and not isinstance(outcome.value, AthenaSkillResult)
+        ):
+            if job.request.kind == "learn":
+                outcome = JobResult(
+                    ok=True,
+                    value=AthenaSkillResult(
+                        kind="learn",
+                        receipt={"fake": True},
+                        delivery_receipt={
+                            "commit_sha": "a" * 40,
+                            "readback_head_sha": "a" * 40,
+                            "pr_url": "https://github.com/acme/Mnemosyne/pull/1",
+                            "pr_number": 1,
+                            "local_only": False,
+                        },
+                    ),
+                )
+            else:
+                outcome = JobResult(
+                    ok=True,
+                    value=AthenaSkillResult(
+                        kind="advise",
+                        context=str(outcome.value or ""),
+                        receipt={"fake": True},
+                    ),
+                )
         self.completion_q.put((handle, outcome))
         return handle
 
     @staticmethod
     def _default_result(
-        job: AgentJob | BuildTestJob | GitJob | CompactJob,
+        job: AgentJob | BuildTestJob | GitJob | CompactJob | AthenaSkillJob,
     ) -> JobResult:
         """Synthesize a per-job-type ok result when nothing is scripted."""
+        if isinstance(job, AthenaSkillJob):
+            if job.request.kind == "learn":
+                return JobResult(
+                    ok=True,
+                    value=AthenaSkillResult(
+                        kind="learn",
+                        receipt={"fake": True},
+                        delivery_receipt={
+                            "commit_sha": "a" * 40,
+                            "readback_head_sha": "a" * 40,
+                            "pr_url": "https://github.com/acme/Mnemosyne/pull/1",
+                            "pr_number": 1,
+                            "local_only": False,
+                        },
+                    ),
+                )
+            return JobResult(
+                ok=True,
+                value=AthenaSkillResult(
+                    kind="advise",
+                    context="fake agent output",
+                    receipt={"fake": True},
+                ),
+            )
         if isinstance(job, AgentJob):
             return JobResult(ok=True, value="fake agent output")
         if isinstance(job, BuildTestJob):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -155,6 +156,19 @@ def test_rpc_discovery_requires_package_origin_and_exact_installed_head(
     catalog = acceptance_module.load_catalog(catalog_path)
     installed_root = tmp_path / "agent" / "git" / "github.com" / "HomericIntelligence" / "Athena"
     (installed_root / "skills").mkdir(parents=True)
+    (installed_root / "skills" / "advise").mkdir()
+    (installed_root / "skills" / "learn").mkdir()
+    (installed_root / "docs").mkdir()
+    contract_files = {
+        "advise_sha256": (installed_root / "skills" / "advise" / "SKILL.md", b"advise\n"),
+        "learn_sha256": (installed_root / "skills" / "learn" / "SKILL.md", b"learn\n"),
+        "dependency_resolution_sha256": (
+            installed_root / "docs" / "dependency-resolution.md",
+            b"dependency\n",
+        ),
+    }
+    for path, content in contract_files.values():
+        path.write_bytes(content)
     (installed_root / "package.json").write_text(
         json.dumps({"pi": {"skills": ["./skills"]}}), encoding="utf-8"
     )
@@ -192,6 +206,10 @@ def test_rpc_discovery_requires_package_origin_and_exact_installed_head(
 
     assert discovered.installed_commit == ATHENA_REF
     assert discovered.commands == ("skill:advise", "skill:learn", "skill:pr-review")
+    assert discovered.contract_hashes == {
+        name: hashlib.sha256(content).hexdigest()
+        for name, (_path, content) in contract_files.items()
+    }
     assert calls[0][0] == ["/usr/bin/pi", "install", catalog.install_spec, "--no-approve"]
     child_env = calls[0][1]["env"]
     assert child_env["PI_CODING_AGENT_DIR"].endswith("agent")
