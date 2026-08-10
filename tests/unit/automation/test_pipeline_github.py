@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from multiprocessing import get_context
 from pathlib import Path
 from time import sleep
@@ -23,6 +24,11 @@ import hephaestus.automation.pipeline_github as pg
 import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
+)
+from hephaestus.automation.merge_authorization import (
+    MERGE_AUTHORIZATION_MARKER,
+    MergeAuthorization,
+    canonical_body_digest,
 )
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import (
@@ -47,6 +53,24 @@ from hephaestus.github.client import GitHubRateLimitError
 from hephaestus.utils.file_lock import LockUnavailableError
 
 _BATCH_NONCE = "b" * 32
+
+
+def _authorization(pr_number: int = 7, head_sha: str = "a" * 40) -> MergeAuthorization:
+    """Return a valid test-only exact-head merge capability."""
+    return MergeAuthorization(
+        repository="org/repo",
+        pr_number=pr_number,
+        head_sha=head_sha,
+        review_id="R1",
+        review_database_id=1,
+        author_login="operator",
+        author_permission="WRITE",
+        submitted_at="2026-08-08T00:00:00Z",
+        updated_at="2026-08-08T00:00:00Z",
+        includes_created_edit=False,
+        last_edited_at=None,
+        body_digest=canonical_body_digest(MERGE_AUTHORIZATION_MARKER),
+    )
 
 
 class PipelineGitHubForTest(pg.PipelineGitHub):
@@ -2222,7 +2246,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
 
         assert result.status == 200
         assert result.body == {"merged": True}
@@ -2264,7 +2288,7 @@ class TestConditionalMerge:
         )
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
 
         assert result.status == 409
         assert result.body == {"message": "head changed"}
@@ -2278,7 +2302,7 @@ class TestConditionalMerge:
         call_mock = MagicMock(side_effect=OSError("connection reset"))
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = adapter.merge_pr_if_head(7, "a" * 40)
+        result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
 
         assert result.transport_error is True
         assert result.status is None
@@ -2292,10 +2316,209 @@ class TestConditionalMerge:
         call_mock = MagicMock()
         monkeypatch.setattr(pg, "gh_call", call_mock)
 
-        result = dry_adapter.merge_pr_if_head(7, "a" * 40)
+        result = dry_adapter.merge_pr_if_head(7, "a" * 40, _authorization())
 
         assert result.dry_run is True
         call_mock.assert_not_called()
+
+
+def _authorization_review_node(
+    review_id: str = "R1",
+    *,
+    database_id: int | str | None = 1,
+    body: str = MERGE_AUTHORIZATION_MARKER,
+) -> dict[str, object]:
+    """Build one GraphQL PullRequestReview node for adapter tests."""
+    return {
+        "id": review_id,
+        "fullDatabaseId": database_id,
+        "body": body,
+        "state": "APPROVED",
+        "submittedAt": "2026-08-08T00:00:00Z",
+        "updatedAt": "2026-08-08T00:00:00Z",
+        "includesCreatedEdit": False,
+        "lastEditedAt": None,
+        "viewerDidAuthor": False,
+        "author": {"login": "operator", "__typename": "User"},
+        "commit": {"oid": "a" * 40},
+    }
+
+
+def _authorization_review_page(
+    nodes: list[dict[str, object]],
+    *,
+    total_count: int,
+    has_next_page: bool = False,
+    end_cursor: str | None = None,
+) -> dict[str, object]:
+    """Build one complete repository-scoped review page."""
+    return {
+        "data": {
+            "repository": {
+                "id": "repo-node",
+                "name": "repo",
+                "owner": {"login": "org"},
+                "pullRequest": {
+                    "id": "pr-node",
+                    "number": 7,
+                    "headRefOid": "a" * 40,
+                    "reviews": {
+                        "totalCount": total_count,
+                        "pageInfo": {
+                            "hasNextPage": has_next_page,
+                            "endCursor": end_cursor,
+                        },
+                        "nodes": nodes,
+                    },
+                },
+            }
+        }
+    }
+
+
+class TestMergeAuthorizationQueries:
+    """Repository-scoped review pagination and permission reads fail closed."""
+
+    def test_complete_pagination_is_read_twice_and_normalizes_bigint(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        page_one = _authorization_review_page(
+            [_authorization_review_node()],
+            total_count=2,
+            has_next_page=True,
+            end_cursor="cursor-1",
+        )
+        page_two = _authorization_review_page(
+            [_authorization_review_node("R2", database_id="2")], total_count=2
+        )
+        responses = iter([page_one, page_two, page_one, page_two])
+        calls: list[dict[str, str | int]] = []
+
+        def graphql(_query: str, **fields: str | int) -> dict[str, object]:
+            calls.append(fields)
+            return next(responses)
+
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "_graphql", graphql)
+
+        reviews = adapter.merge_authorization_reviews(7)
+
+        assert [review["id"] for review in reviews] == ["R1", "R2"]
+        assert reviews[1]["fullDatabaseId"] == 2
+        assert calls[1]["after"] == "cursor-1"
+        assert len(calls) == 4
+
+    def test_stable_read_drift_is_unavailable(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = _authorization_review_page([_authorization_review_node()], total_count=1)
+        changed = _authorization_review_page(
+            [_authorization_review_node(body="changed")], total_count=1
+        )
+        responses = iter([first, changed])
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+
+        with pytest.raises(RuntimeError, match="snapshot changed"):
+            adapter.merge_authorization_reviews(7)
+
+    @pytest.mark.parametrize(
+        ("page", "message"),
+        [
+            (
+                _authorization_review_page([_authorization_review_node()], total_count=2),
+                "truncated",
+            ),
+            (
+                _authorization_review_page(
+                    [_authorization_review_node()],
+                    total_count=1,
+                    has_next_page=True,
+                    end_cursor="cursor-1",
+                ),
+                "cursor loop",
+            ),
+        ],
+    )
+    def test_incomplete_pagination_is_rejected(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        page: dict[str, object],
+        message: str,
+    ) -> None:
+        adapter.repo = "repo"
+        if message == "truncated":
+            responses = iter([page])
+        else:
+            repeated = _authorization_review_page(
+                [_authorization_review_node()],
+                total_count=1,
+                has_next_page=True,
+                end_cursor="cursor-1",
+            )
+            responses = iter([page, repeated])
+        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+
+        with pytest.raises(RuntimeError, match=message):
+            adapter.merge_authorization_reviews(7)
+
+
+class TestMergeAuthorizationPermissions:
+    """Collaborator permissions are parsed separately from review resolution."""
+
+    @pytest.mark.parametrize(
+        ("status", "body", "expected"),
+        [
+            (200, {"permission": "write"}, "WRITE"),
+            (200, {"permission": "maintain"}, "WRITE"),
+            (200, {"permission": "admin"}, "ADMIN"),
+            (404, None, "NONE"),
+        ],
+    )
+    def test_permission_response_normalization(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        status: int,
+        body: dict[str, object] | None,
+        expected: str,
+    ) -> None:
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            adapter,
+            "_collaborator_permission_response",
+            lambda _login: (status, body),
+        )
+
+        assert adapter.repository_permission_for_actor("operator") == expected
+
+    def test_malformed_permission_response_is_unavailable(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            adapter,
+            "_collaborator_permission_response",
+            lambda _login: (200, {"permission": "owner"}),
+        )
+
+        with pytest.raises(RuntimeError, match="permission"):
+            adapter.repository_permission_for_actor("operator")
+
+
+def test_mismatched_authorization_is_rejected_before_transport(
+    adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The irreversible boundary accepts only a capability for its request."""
+    adapter.repo = "repo"
+    call_mock = MagicMock()
+    monkeypatch.setattr(pg, "gh_call", call_mock)
+
+    result = adapter.merge_pr_if_head(7, "a" * 40, replace(_authorization(), head_sha="b" * 40))
+
+    assert result.malformed is True
+    call_mock.assert_not_called()
 
 
 class TestConversationResolutionAdmission:

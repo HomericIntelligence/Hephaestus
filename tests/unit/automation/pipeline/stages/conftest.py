@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
+from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER, MergeAuthorization
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -91,6 +92,8 @@ class FakeStageGitHub(FakeGitHub):
         learn_terminal: bool = False,
         plan_read_error: str | None = None,
         journal_read_error: str | None = None,
+        authorization_reviews: tuple[dict[str, object], ...] | None = None,
+        actor_permissions: dict[str, str] | None = None,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -125,6 +128,15 @@ class FakeStageGitHub(FakeGitHub):
             learn_terminal: Seed answer for drive_green_learn_terminal —
                 True mirrors an issue whose post-merge /learn already ran
                 terminally (the #848 dedupe record).
+            plan_read_error: Optional failure returned by plan-comment
+                discovery.
+            journal_read_error: Optional failure returned by review-journal
+                discovery.
+            authorization_reviews: Exact-head native reviews; ``None`` uses
+                one stable trusted operator approval, while an empty tuple
+                models absent authorization.
+            actor_permissions: Current collaborator permissions for review
+                authors.
 
         """
         super().__init__()
@@ -157,6 +169,32 @@ class FakeStageGitHub(FakeGitHub):
             if isinstance(pr_state, _DefaultPrState)
             else pr_state
         )
+        default_head = (
+            self._pr_state.get("headRefOid") if isinstance(self._pr_state, dict) else "a" * 40
+        )
+        if not isinstance(default_head, str) or not default_head:
+            default_head = "a" * 40
+        self._authorization_reviews = (
+            authorization_reviews
+            if authorization_reviews is not None
+            else (
+                {
+                    "id": "R1",
+                    "fullDatabaseId": 1,
+                    "body": MERGE_AUTHORIZATION_MARKER,
+                    "state": "APPROVED",
+                    "submittedAt": "2026-08-08T00:00:00Z",
+                    "updatedAt": "2026-08-08T00:00:00Z",
+                    "includesCreatedEdit": False,
+                    "lastEditedAt": None,
+                    "viewerDidAuthor": False,
+                    "author": {"login": "operator", "__typename": "User"},
+                    "commit": {"oid": default_head},
+                },
+            )
+        )
+        self._actor_permissions = actor_permissions or {"operator": "WRITE"}
+        self.merge_attempts: list[tuple[int, str, str]] = []
         self._conversation_resolution = conversation_resolution
         self.conversation_resolution_checks: list[tuple[int, str]] = []
         self._pr_review_context = (
@@ -630,6 +668,24 @@ class FakeStageGitHub(FakeGitHub):
         del pr_number
         return dict(self._pr_state) if isinstance(self._pr_state, dict) else self._pr_state
 
+    @property
+    def _repo_slug(self) -> str:
+        """Return the stable repository identity used by merge authorization."""
+        return "org/repo-a"
+
+    def _viewer_login(self) -> str:
+        """Return the fake authenticated automation actor."""
+        return "hephaestus[bot]"
+
+    def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
+        """Return a fresh copy of the scripted native-review snapshot."""
+        del pr_number
+        return tuple(dict(review) for review in self._authorization_reviews)
+
+    def repository_permission_for_actor(self, login: str) -> str:
+        """Return the scripted current collaborator permission."""
+        return self._actor_permissions.get(login, "NONE")
+
     def base_branch_requires_conversation_resolution(
         self, pr_number: int, base_branch: str
     ) -> bool:
@@ -637,9 +693,15 @@ class FakeStageGitHub(FakeGitHub):
         self.conversation_resolution_checks.append((pr_number, base_branch))
         return self._conversation_resolution
 
-    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+    def merge_pr_if_head(
+        self,
+        pr_number: int,
+        reviewed_sha: str,
+        authorization: MergeAuthorization,
+    ) -> ConditionalMergeResult:
         """Mirror one successful SHA-conditional normal merge request."""
-        self._log("merge_pr_if_head", pr_number, reviewed_sha)
+        self.merge_attempts.append((pr_number, reviewed_sha, authorization.review_id))
+        self._log("merge_pr_if_head", pr_number, reviewed_sha, authorization.review_id)
         self._pr_state = {"state": "MERGED"}
         return ConditionalMergeResult(status=200, body={"merged": True})
 

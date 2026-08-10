@@ -333,7 +333,8 @@ def blocked_audit_recovery_body(
 ) -> str | None:
     """Return an actionable repair body when BLOCKED lacks a current explanation.
 
-    The label remains the sole state authority. This helper only repairs the
+    The plan-state label remains the sole plan-review state authority. This
+    helper only repairs the
     audit half of an interrupted label-first BLOCKED transaction and never
     infers eligibility or removes the latch.
     """
