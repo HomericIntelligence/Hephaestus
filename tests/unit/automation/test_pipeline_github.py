@@ -2408,6 +2408,27 @@ class TestMergeAuthorizationQueries:
         assert calls[1]["after"] == "cursor-1"
         assert len(calls) == 4
 
+    def test_duplicate_review_ids_across_mixed_body_pages_are_rejected(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A page overlap cannot pair a marked approval with an unmarked duplicate."""
+        page_one = _authorization_review_page(
+            [_authorization_review_node("R1")],
+            total_count=2,
+            has_next_page=True,
+            end_cursor="cursor-1",
+        )
+        page_two = _authorization_review_page(
+            [_authorization_review_node("R1", body="ordinary review body")],
+            total_count=2,
+        )
+        responses = iter([page_one, page_two])
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+
+        with pytest.raises(RuntimeError, match="duplicated"):
+            adapter.merge_authorization_reviews(7)
+
     def test_stable_read_drift_is_unavailable(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2452,7 +2473,7 @@ class TestMergeAuthorizationQueries:
             responses = iter([page])
         else:
             repeated = _authorization_review_page(
-                [_authorization_review_node()],
+                [_authorization_review_node("R2")],
                 total_count=1,
                 has_next_page=True,
                 end_cursor="cursor-1",

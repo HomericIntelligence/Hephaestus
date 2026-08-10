@@ -436,11 +436,11 @@ class StageGitHub(Protocol):
 
     def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
         """Return one stable native-review authorization snapshot."""
-        ...
+        pass
 
     def repository_permission_for_actor(self, login: str) -> str:
         """Return the actor's current repository permission."""
-        ...
+        pass
 
     def base_branch_requires_conversation_resolution(
         self, pr_number: int, base_branch: str

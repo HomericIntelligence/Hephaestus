@@ -41,6 +41,7 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
         )
         reviews: list[dict[str, object]] = []
         seen_cursors: set[str] = set()
+        seen_review_ids: set[str] = set()
         after: str | None = None
         expected_total: int | None = None
         for page_number in range(100):
@@ -91,6 +92,12 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
                 if not isinstance(node, Mapping):
                     raise RuntimeError("merge authorization review node is malformed")
                 normalized = dict(node)
+                review_id = normalized.get("id")
+                if not isinstance(review_id, str) or not review_id:
+                    raise RuntimeError("merge authorization review node id is malformed")
+                if review_id in seen_review_ids:
+                    raise RuntimeError("merge authorization review node id is duplicated")
+                seen_review_ids.add(review_id)
                 if "fullDatabaseId" in normalized:
                     with suppress(ValueError):
                         normalized["fullDatabaseId"] = normalize_review_database_id(
