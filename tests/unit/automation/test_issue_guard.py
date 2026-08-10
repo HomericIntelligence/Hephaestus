@@ -418,21 +418,21 @@ def test_http_guard_store_bounds_initial_history_scan_to_branch_comparison() -> 
         calls.append(args)
         path = next(arg for arg in args if arg.startswith("repos/Owner/Repo"))
         if path.endswith("git/ref/heads/2404-auto-impl"):
-            return response({"object": {"sha": branch_oid}})
-        if path == "repos/Owner/Repo":
-            return response({"default_branch": "main"})
-        if path.endswith("git/ref/heads/main"):
-            return response({"object": {"sha": base_oid}})
-        if path.endswith(f"git/commits/{branch_oid}"):
-            return response(
+            result = response({"object": {"sha": branch_oid}})
+        elif path == "repos/Owner/Repo":
+            result = response({"default_branch": "main"})
+        elif path.endswith("git/ref/heads/main"):
+            result = response({"object": {"sha": base_oid}})
+        elif path.endswith(f"git/commits/{branch_oid}"):
+            result = response(
                 {
                     "tree": {"sha": tree_oid},
                     "message": "fix(example): implementation",
                     "parents": [{"sha": base_oid}],
                 }
             )
-        if "/compare/" in path:
-            return response(
+        elif "/compare/" in path:
+            result = response(
                 {
                     "total_commits": 1,
                     "commits": [
@@ -443,7 +443,9 @@ def test_http_guard_store_bounds_initial_history_scan_to_branch_comparison() -> 
                     ],
                 }
             )
-        raise AssertionError(f"unexpected per-commit history request: {path}")
+        else:
+            raise AssertionError(f"unexpected per-commit history request: {path}")
+        return result
 
     store = GitHubIssueGuardStore("Owner/Repo", branch="2404-auto-impl", call=call)
 
@@ -632,7 +634,11 @@ def test_http_guard_store_rejects_a_signature_github_does_not_verify(tmp_path: P
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
     def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        body = {"verification": {"verified": False, "reason": "unknown_key"}}
+        path = next(arg for arg in args if arg.startswith("repos/Owner/Repo"))
+        if path.endswith("git/ref/heads/2404-auto-impl"):
+            body = {"object": {"sha": remote_head}}
+        else:
+            body = {"verification": {"verified": False, "reason": "unknown_key"}}
         return subprocess.CompletedProcess(
             args,
             0,
@@ -656,6 +662,75 @@ def test_http_guard_store_rejects_a_signature_github_does_not_verify(tmp_path: P
         store.update_ref("Owner/Repo", 2404, oid, parent_oid)
 
     assert remote_head == parent_oid
+    assert len(pushes) == 2
+    assert f"--force-with-lease=refs/heads/2404-auto-impl:{commit_oid}" in pushes[1]
+    assert f"{parent_oid}:refs/heads/2404-auto-impl" in pushes[1]
+
+
+def test_http_guard_store_fails_when_unverified_rollback_leaves_rejected_tip(
+    tmp_path: Path,
+) -> None:
+    """A false-success rollback is rejected if readback still sees the bad commit."""
+    record = GuardRecord(
+        version=1,
+        repository="Owner/Repo",
+        issue=2404,
+        claim_id=uuid4(),
+        run_id=uuid4(),
+        actor="automation",
+        phase=GuardPhase.ACTIVE,
+        work_stage="planning",
+        lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        predecessor_oid="1" * 40,
+        reason="test",
+    )
+    commit_oid = "2" * 40
+    parent_oid = "4" * 40
+    remote_head = parent_oid
+    pushes: list[list[str]] = []
+
+    def git_call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal remote_head
+        if "push" in args:
+            pushes.append(args)
+            lease = next(arg for arg in args if arg.startswith("--force-with-lease="))
+            expected = lease.rsplit(":", 1)[1]
+            assert remote_head == expected
+            target = args[-1].split(":", 1)[0]
+            if len(pushes) == 1:
+                remote_head = target
+        stdout = f"{commit_oid}\n" if "commit-tree" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        path = next(arg for arg in args if arg.startswith("repos/Owner/Repo"))
+        if path.endswith("git/ref/heads/2404-auto-impl"):
+            body = {"object": {"sha": remote_head}}
+        else:
+            body = {"verification": {"verified": False, "reason": "unknown_key"}}
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                f"HTTP/1.1 200 OK\r\nDate: Tue, 01 Jan 2030 00:00:00 GMT\r\n\r\n{json.dumps(body)}"
+            ),
+            stderr="",
+        )
+
+    store = GitHubIssueGuardStore(
+        "Owner/Repo",
+        branch="2404-auto-impl",
+        call=call,
+        git_call=git_call,
+        staging_root=tmp_path,
+    )
+    store._last_server_time = datetime(2030, 1, 1, tzinfo=UTC)
+    oid, _ = store.create_commit("Owner/Repo", "3" * 40, [parent_oid], record.to_commit_message())
+
+    with pytest.raises(GuardUnavailableError, match="unverified guard commit remained"):
+        store.update_ref("Owner/Repo", 2404, oid, parent_oid)
+
+    assert remote_head == commit_oid
     assert len(pushes) == 2
     assert f"--force-with-lease=refs/heads/2404-auto-impl:{commit_oid}" in pushes[1]
     assert f"{parent_oid}:refs/heads/2404-auto-impl" in pushes[1]

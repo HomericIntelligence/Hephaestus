@@ -1229,6 +1229,7 @@ class GitHubIssueGuardStore:
         environment: Mapping[str, str],
     ) -> None:
         """Remove an unverified commit through a lease pinned to its exact OID."""
+        restored_oid = expected_oid or None
         try:
             self._push_staged_ref(
                 repository_path,
@@ -1239,7 +1240,7 @@ class GitHubIssueGuardStore:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             observed = self._ref_oid()
-            if observed == (expected_oid or None):
+            if observed == restored_oid:
                 return
             if observed != rejected_oid:
                 raise GuardConflictError(
@@ -1248,6 +1249,14 @@ class GitHubIssueGuardStore:
             raise GuardUnavailableError(
                 "unverified guard commit remained after rollback failed"
             ) from exc
+        observed = self._ref_oid()
+        if observed == restored_oid:
+            return
+        if observed != rejected_oid:
+            raise GuardConflictError(
+                "implementation branch changed during unverified guard rollback"
+            )
+        raise GuardUnavailableError("unverified guard commit remained after rollback")
 
     def _confirm_remote_signature(self, oid: str) -> None:
         """Require GitHub to verify the newly published guard signature."""
