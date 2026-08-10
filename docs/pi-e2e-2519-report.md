@@ -1,35 +1,31 @@
 # Pi Issue 2519 Report
 
-This report is rendered from the private `build/pi-e2e-2519/<run-id>/`
-manifest. It summarizes the live Pi/Codex conformance evidence for issue
-#2519 and records the reproducible operator artifacts that can be re-generated
-from the same run directory.
-
-## Fixture
-
-- Title: `fix(utils): reject negative byte sizes`
-- Scope: `hephaestus/utils/helpers.py human_readable_size`
-- Regression test: `tests/unit/utils/test_general_utils.py TestHumanReadableSize`
-
-## Evidence Summary
-
-- Run ID: `<run-id>`
-- Pi version: `<recorded in run.json>`
-- Package inventory: `<recorded in run.json>`
+- Evidence status: `incomplete`
+- Fixture: `fix(utils): reject negative byte sizes`
+- Run ID: `20260810T074700Z-live`
+- Created: `2026-08-10T07:46:48Z`
+- Pi version: `0.80.2`
+- Pi binary: recorded privately in the run manifest
 - Skill commands: `skill:advise`, `skill:learn`, `skill:pr-review`
-- Session IDs: `<recorded from captured provider JSON events>`
-- Tool scopes: `<recorded from captured provider JSON events and proxy argv>`
-- Stage outcomes: `<recorded per captured command>`
+- Inventory status: `ready`
+- Inventory ready: `True`
 
-## Artifacts
+## Captured Commands
 
-- Private run manifest: `build/pi-e2e-2519/<run-id>/run.json`
-- Provider proxy log: `build/pi-e2e-2519/<run-id>/provider-proxy.jsonl`
-- Captured command outputs: `build/pi-e2e-2519/<run-id>/commands/`
-- Defect records: `build/pi-e2e-2519/<run-id>/defects/`
-- Rendered runbook: `docs/runbooks/pi-e2e-2519.md`
+| Stage | Provider | Status | Returncode | Session evidence | Tool scopes | Skill calls |
+| --- | --- | --- | --- | --- | --- | --- |
+| planning | pi | failure | 1 | 1 recorded privately | read, grep | n/a |
+| control | codex | success | 0 | none | n/a | n/a |
+
+## Snapshots
+
+_No repository snapshots recorded yet._
 
 ## Defects
 
-Any defects observed during the live run should be recorded in the private
-manifest and mirrored here as follow-up issues before publication.
+_No follow-up defects recorded._
+
+## Publication
+
+- Runbook: `docs/runbooks/pi-e2e-2519.md`
+- Report: `docs/pi-e2e-2519-report.md`

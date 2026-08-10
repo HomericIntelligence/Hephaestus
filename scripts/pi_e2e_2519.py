@@ -32,9 +32,9 @@ from hephaestus.utils.helpers import slugify
 ISSUE_NUMBER = 2519
 FIXTURE_TITLE = "fix(utils): reject negative byte sizes"
 FIXTURE_SUMMARY = (
-    "Exercise hephaestus/utils/helpers.py:75-96 and "
-    "tests/unit/utils/test_general_utils.py:115-139 with a deterministic "
-    "negative-size rejection."
+    "Exercise `hephaestus/utils/helpers.py` `human_readable_size` and "
+    "`tests/unit/utils/test_general_utils.py` `TestHumanReadableSize` with a "
+    "deterministic negative-size rejection."
 )
 RUN_ROOT_NAME = "pi-e2e-2519"
 DEFAULT_REPORT_PATH = Path("docs/pi-e2e-2519-report.md")
@@ -46,7 +46,18 @@ DEFECTS_DIR_NAME = "defects"
 ARTIFACTS_DIR_NAME = "artifacts"
 PROXY_TOOL_NAMES = ("pi", "codex")
 REQUIRED_SKILL_COMMANDS = ("skill:advise", "skill:learn", "skill:pr-review")
+REQUIRED_E2E_STAGES = (
+    "discovery",
+    "advise",
+    "planning",
+    "implementation",
+    "tests",
+    "commit-pr",
+    "review",
+    "handoff",
+)
 SKILL_COMMAND_RE = re.compile(r"(?:\$athena:|/athena:|skill:)[A-Za-z0-9._:/-]+")
+DEFAULT_CAPTURE_TIMEOUT_SECONDS = 600
 
 
 def _repo_root() -> Path:
@@ -193,6 +204,24 @@ def _normalize_command_argv(command_argv: Sequence[str]) -> list[str]:
     if argv and argv[0] == "--":
         return argv[1:]
     return argv
+
+
+def _positive_timeout(value: str) -> int:
+    """Parse a capture timeout that guarantees bounded provider execution."""
+    try:
+        timeout = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer") from exc
+    if timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer")
+    return timeout
+
+
+def _timeout_output(value: str | bytes | None) -> str:
+    """Normalize subprocess timeout output for the text artifacts."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
 
 
 def _jsonl_objects(text: str) -> list[dict[str, Any]]:
@@ -480,6 +509,7 @@ def _record_command(
     command_argv: Sequence[str],
     prompt: str,
     prompt_file: Path | None,
+    timeout_seconds: int,
 ) -> int:
     proxy_dir = _prepare_provider_proxy_dir(run_dir)
     manifest = _load_manifest(run_dir)
@@ -497,16 +527,26 @@ def _record_command(
         write_secure(prompt_copy, prompt)
         prompt_copy.chmod(0o600)
     start = _utc_now()
-    completed = subprocess.run(
-        list(command_argv),
-        cwd=Path(manifest["repo_root"]),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
+    try:
+        completed = subprocess.run(
+            list(command_argv),
+            cwd=Path(manifest["repo_root"]),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+        returncode = completed.returncode
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        returncode = 124
+        stdout = _timeout_output(exc.stdout)
+        stderr = _timeout_output(exc.stderr)
+        stderr += f"error: command timed out after {timeout_seconds} seconds\n"
+        timed_out = True
     write_secure(stdout_path, stdout)
     write_secure(stderr_path, stderr)
     analysis = _capture_analysis(stdout, stderr, proxy_log)
@@ -515,14 +555,16 @@ def _record_command(
             "provider": provider,
             "stage": stage,
             "command": list(command_argv),
-            "returncode": completed.returncode,
+            "returncode": returncode,
+            "timeout_seconds": timeout_seconds,
+            "timed_out": timed_out,
             "started_at": start,
             "finished_at": _utc_now(),
             "prompt_sha256": _prompt_digest(prompt),
             "stdout_path": str(stdout_path.relative_to(run_dir)),
             "stderr_path": str(stderr_path.relative_to(run_dir)),
             "proxy_log_path": str(proxy_log.relative_to(run_dir)),
-            "outcome": "success" if completed.returncode == 0 else "failure",
+            "outcome": "success" if returncode == 0 else "failure",
         }
     )
     write_secure(analysis_path, json.dumps(analysis, indent=2, sort_keys=True) + "\n")
@@ -531,8 +573,10 @@ def _record_command(
         "kind": "capture",
         "provider": provider,
         "stage": stage,
-        "status": "success" if completed.returncode == 0 else "failure",
-        "returncode": completed.returncode,
+        "status": "success" if returncode == 0 else "failure",
+        "returncode": returncode,
+        "timeout_seconds": timeout_seconds,
+        "timed_out": timed_out,
         "prompt_sha256": _prompt_digest(prompt),
         "session_ids": analysis["session_ids"],
         "skill_calls": analysis["skill_calls"],
@@ -554,7 +598,7 @@ def _record_command(
     _append_command_entry(run_dir, entry)
     sys.stdout.write(stdout)
     sys.stderr.write(stderr)
-    return completed.returncode
+    return returncode
 
 
 def _record_failure_probe(
@@ -564,6 +608,7 @@ def _record_failure_probe(
     stage: str,
     command_argv: Sequence[str],
     prompt: str,
+    timeout_seconds: int,
 ) -> int:
     rc = _record_command(
         run_dir,
@@ -572,6 +617,7 @@ def _record_failure_probe(
         command_argv=command_argv,
         prompt=prompt,
         prompt_file=None,
+        timeout_seconds=timeout_seconds,
     )
     if rc == 0:
         print("error: failure probe unexpectedly succeeded", file=sys.stderr)
@@ -613,19 +659,19 @@ def _record_defect(
 def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Path) -> str:
     pi = cast(dict[str, Any], manifest.get("pi", {}))
     inventory = cast(dict[str, Any], pi.get("package_inventory", {}))
-    commands = cast(list[dict[str, Any]], manifest.get("commands", []))
+    commands = [entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"]
     defects = cast(list[dict[str, Any]], manifest.get("defects", []))
     snapshots = cast(list[dict[str, Any]], manifest.get("snapshots", []))
     skill_commands = ", ".join(f"`{skill}`" for skill in pi.get("skill_commands", [])) or "n/a"
     lines = [
         "# Pi Issue 2519 Report",
         "",
+        f"- Evidence status: `{_evidence_status(manifest)}`",
         f"- Fixture: `{manifest['fixture']['title']}`",
         f"- Run ID: `{manifest['run_id']}`",
-        f"- Repository: `{manifest['repo_root']}`",
         f"- Created: `{manifest['created_at']}`",
         f"- Pi version: `{pi.get('version', '')}`",
-        f"- Pi binary: `{pi.get('binary', '')}`",
+        "- Pi binary: recorded privately in the run manifest",
         f"- Skill commands: {skill_commands}",
         f"- Inventory status: `{inventory.get('status', '')}`",
         f"- Inventory ready: `{inventory.get('ready', False)}`",
@@ -637,7 +683,7 @@ def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Pa
         lines.extend(
             [
                 (
-                    "| Kind | Stage | Provider | Returncode | Session IDs | "
+                    "| Stage | Provider | Status | Returncode | Session evidence | "
                     "Tool scopes | Skill calls |"
                 ),
                 "| --- | --- | --- | --- | --- | --- | --- |",
@@ -648,11 +694,15 @@ def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Pa
                 "| "
                 + " | ".join(
                     [
-                        str(entry.get("kind", "")),
                         str(entry.get("stage", "")),
                         str(entry.get("provider", "")),
+                        str(entry.get("status", "")),
                         str(entry.get("returncode", "")),
-                        ", ".join(entry.get("session_ids", [])) or "n/a",
+                        (
+                            f"{len(entry.get('session_ids', []))} recorded privately"
+                            if entry.get("session_ids")
+                            else "none"
+                        ),
                         ", ".join(entry.get("tool_scopes", [])) or "n/a",
                         ", ".join(entry.get("skill_calls", [])) or "n/a",
                     ]
@@ -695,15 +745,15 @@ def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Pa
             "",
             "## Publication",
             "",
-            f"- Runbook: `{runbook_path}`",
-            f"- Report: `{report_path}`",
+            f"- Runbook: `{DEFAULT_RUNBOOK_PATH}`",
+            f"- Report: `{DEFAULT_REPORT_PATH}`",
             "",
         ]
     )
     rendered = "\n".join(lines)
     tokens = pi_private_redaction_tokens(
         Path(manifest["repo_root"]),
-        cast(str, pi.get("version", "")),
+        "",
         additional_roots=(Path(manifest["repo_root"]),),
     )
     return redact_pi_private_values(rendered, tokens)
@@ -721,6 +771,9 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "",
             "This runbook reproduces the live evidence collected for issue #2519.",
             "",
+            f"- Evidence status: `{_evidence_status(manifest)}`",
+            "- Exact local paths and session identifiers remain in the owner-only manifest.",
+            "",
             "## Target Fixture",
             "",
             f"- `{FIXTURE_TITLE}`",
@@ -728,9 +781,9 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "",
             "## Evidence Root",
             "",
-            f"- Run directory: `{run_dir}`",
-            f"- Manifest: `{run_dir / MANIFEST_NAME}`",
-            f"- Report: `{report_path}`",
+            f"- Run directory: `build/{RUN_ROOT_NAME}/<run-id>/`",
+            f"- Manifest: `build/{RUN_ROOT_NAME}/<run-id>/{MANIFEST_NAME}`",
+            f"- Report: `{DEFAULT_REPORT_PATH}`",
             "",
             "## Collection Steps",
             "",
@@ -752,7 +805,12 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "## Direct Commands",
             "",
             "```bash",
+            f"uv run python scripts/{script_name} init --run-id <run-id>",
             f"uv run python scripts/{script_name} inventory --run-id <run-id>",
+            (
+                f"uv run python scripts/{script_name} snapshot --run-id <run-id> "
+                "--label repo-snapshot"
+            ),
             (
                 f"uv run python scripts/{script_name} capture --run-id <run-id> "
                 "--stage <stage> --provider pi -- <command...>"
@@ -761,19 +819,37 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
                 f"uv run python scripts/{script_name} failure-probe --run-id <run-id> "
                 "--stage <stage> --provider codex -- <command...>"
             ),
+            (
+                f"uv run python scripts/{script_name} record-defect --run-id <run-id> "
+                '--summary "<summary>" --follow-up-issue <issue-number>'
+            ),
             f"uv run python scripts/{script_name} render --run-id <run-id>",
             (
                 f"uv run python scripts/{script_name} verify --run-id <run-id> "
-                f"--criterion publication --report {report_path} "
+                f"--criterion completion --report {DEFAULT_REPORT_PATH} "
                 f"--runbook {DEFAULT_RUNBOOK_PATH}"
             ),
+            (
+                f"uv run python scripts/{script_name} attest-publication --run-id <run-id> "
+                "--repo HomericIntelligence/Hephaestus --ref <commit-sha> --verify-defects"
+            ),
             "```",
+            "",
+            "## Verification Criteria",
+            "",
+            "- `fixture` validates the deterministic fixture contract.",
+            "- `workflow` requires inventory, command, and repository snapshot evidence.",
+            "- `capture` requires private session identifiers and observed tool scopes.",
+            "- `comparison` requires Pi and a distinct control provider.",
+            "- `mnemosyne` requires observed advise, learn, and review skill calls.",
+            "- `publication` requires deterministic manifest-to-document rendering.",
+            "- `completion` requires every Pi stage to succeed plus all criteria above.",
             "",
         ]
     )
     tokens = pi_private_redaction_tokens(
         Path(manifest["repo_root"]),
-        cast(str, pi.get("version", "")),
+        "",
         additional_roots=(run_dir,),
     )
     return redact_pi_private_values(rendered, tokens)
@@ -848,22 +924,73 @@ def _verify_comparison(manifest: dict[str, Any]) -> None:
 
 
 def _verify_mnemosyne(manifest: dict[str, Any]) -> None:
-    pi = cast(dict[str, Any], manifest.get("pi", {}))
-    skill_commands = set(pi.get("skill_commands", []))
-    if not set(REQUIRED_SKILL_COMMANDS).issubset(skill_commands):
-        raise ValueError("required Athena skill commands are missing from inventory")
+    capture_entries = [
+        entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"
+    ]
     observed = {
         skill
-        for entry in manifest.get("commands", [])
+        for entry in capture_entries
         for skill in entry.get("skill_calls", [])
         if isinstance(skill, str)
     }
-    if not {"skill:advise", "skill:learn"}.issubset(observed):
-        raise ValueError("no recorded capture observed the required advise/learn skill calls")
+    if not set(REQUIRED_SKILL_COMMANDS).issubset(observed):
+        raise ValueError(
+            "recorded capture evidence does not include the required "
+            "advise, learn, and review skill calls"
+        )
 
 
-def _verify_publication(manifest: dict[str, Any], report_path: Path, runbook_path: Path) -> None:
+def _verify_completion(manifest: dict[str, Any]) -> None:
+    """Require the complete successful Pi workflow and its control evidence."""
+    _verify_fixture(manifest)
+    _verify_workflow(manifest)
+    _verify_capture(manifest)
+    _verify_comparison(manifest)
+    _verify_mnemosyne(manifest)
+    pi = cast(dict[str, Any], manifest.get("pi", {}))
+    inventory = cast(dict[str, Any], pi.get("package_inventory", {}))
+    if inventory.get("ready") is not True:
+        raise ValueError("Pi package inventory is not ready")
+    pi_captures = [
+        entry
+        for entry in manifest.get("commands", [])
+        if entry.get("kind") == "capture" and entry.get("provider") == "pi"
+    ]
+    failed = [
+        entry.get("id", "unknown") for entry in pi_captures if entry.get("status") != "success"
+    ]
+    if failed:
+        raise ValueError(f"Pi capture stages did not succeed: {', '.join(map(str, failed))}")
+    observed_stages = {
+        entry.get("stage") for entry in pi_captures if isinstance(entry.get("stage"), str)
+    }
+    missing_stages = [stage for stage in REQUIRED_E2E_STAGES if stage not in observed_stages]
+    if missing_stages:
+        raise ValueError(f"required Pi stages are missing: {', '.join(missing_stages)}")
+
+
+def _evidence_status(manifest: dict[str, Any]) -> str:
+    """Return the truthful publishable completion state for a private manifest."""
+    try:
+        _verify_completion(manifest)
+    except (KeyError, TypeError, ValueError):
+        return "incomplete"
+    return "complete"
+
+
+def _verify_publication(
+    manifest: dict[str, Any],
+    run_dir: Path,
+    report_path: Path,
+    runbook_path: Path,
+) -> None:
     _require_manifest_paths(report_path, runbook_path)
+    expected_report = _render_report(manifest, report_path, runbook_path)
+    expected_runbook = _render_runbook(manifest, run_dir, report_path)
+    if report_path.read_text(encoding="utf-8") != expected_report:
+        raise ValueError("rendered report does not match the manifest")
+    if runbook_path.read_text(encoding="utf-8") != expected_runbook:
+        raise ValueError("rendered runbook does not match the manifest")
     publication = cast(dict[str, Any], manifest.get("publication", {}))
     if publication and publication.get("report") != str(report_path):
         raise ValueError("publication report path does not match the manifest")
@@ -897,7 +1024,13 @@ def _verify_run(
     if criterion == "publication":
         if report_path is None or runbook_path is None:
             raise ValueError("publication verification requires report and runbook paths")
-        _verify_publication(manifest, report_path, runbook_path)
+        _verify_publication(manifest, run_dir, report_path, runbook_path)
+        return 0
+    if criterion == "completion":
+        if report_path is None or runbook_path is None:
+            raise ValueError("completion verification requires report and runbook paths")
+        _verify_completion(manifest)
+        _verify_publication(manifest, run_dir, report_path, runbook_path)
         return 0
     raise ValueError(f"unsupported verification criterion: {criterion}")
 
@@ -912,11 +1045,10 @@ def _attest_publication(
     verify_defects: bool,
 ) -> int:
     manifest = _load_manifest(run_dir)
-    _verify_publication(manifest, report_path, runbook_path)
+    _verify_completion(manifest)
+    _verify_publication(manifest, run_dir, report_path, runbook_path)
     if verify_defects:
         defects = cast(list[dict[str, Any]], manifest.get("defects", []))
-        if not defects:
-            raise ValueError("verify-defects was requested but no defects were recorded")
         if not all(
             isinstance(entry.get("follow_up_issue"), int) and entry["follow_up_issue"] > 0
             for entry in defects
@@ -958,6 +1090,12 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--provider", choices=("pi", "codex", "claude"), default="pi")
     capture.add_argument("--prompt", default="")
     capture.add_argument("--prompt-file", type=Path)
+    capture.add_argument(
+        "--timeout",
+        type=_positive_timeout,
+        default=DEFAULT_CAPTURE_TIMEOUT_SECONDS,
+        help="maximum provider execution time in seconds (default: %(default)s)",
+    )
     capture.add_argument("command_argv", nargs=argparse.REMAINDER)
 
     failure = subparsers.add_parser("failure-probe", help="capture a command expected to fail")
@@ -966,6 +1104,12 @@ def build_parser() -> argparse.ArgumentParser:
     failure.add_argument("--provider", choices=("pi", "codex", "claude"), default="pi")
     failure.add_argument("--prompt", default="")
     failure.add_argument("--prompt-file", type=Path)
+    failure.add_argument(
+        "--timeout",
+        type=_positive_timeout,
+        default=DEFAULT_CAPTURE_TIMEOUT_SECONDS,
+        help="maximum provider execution time in seconds (default: %(default)s)",
+    )
     failure.add_argument("command_argv", nargs=argparse.REMAINDER)
 
     defect = subparsers.add_parser("record-defect", help="record a follow-up defect")
@@ -984,7 +1128,15 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--run-id", required=True)
     verify.add_argument(
         "--criterion",
-        choices=("fixture", "workflow", "capture", "comparison", "mnemosyne", "publication"),
+        choices=(
+            "fixture",
+            "workflow",
+            "capture",
+            "comparison",
+            "mnemosyne",
+            "publication",
+            "completion",
+        ),
         required=True,
     )
     verify.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
@@ -1031,6 +1183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 command_argv=command_argv,
                 prompt=prompt,
                 prompt_file=args.prompt_file,
+                timeout_seconds=args.timeout,
             )
         if args.command == "failure-probe":
             prompt = args.prompt or _load_prompt(args)
@@ -1043,6 +1196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stage=args.stage,
                 command_argv=command_argv,
                 prompt=prompt,
+                timeout_seconds=args.timeout,
             )
         if args.command == "record-defect":
             return _record_defect(

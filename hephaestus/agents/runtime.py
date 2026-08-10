@@ -2088,9 +2088,7 @@ def resume_agent_session(
     """Resume a direct-runner agent session."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
-        if (
-            execution_request is None
-        ):
+        if execution_request is None:
             raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
         policy = _require_pi_request(execution_request)
         if execution_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:

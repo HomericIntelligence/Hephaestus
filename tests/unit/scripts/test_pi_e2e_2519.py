@@ -48,7 +48,7 @@ def _write_provider(path: Path) -> None:
         "        print(json.dumps({'type': 'session', 'id': 'session-123'}))\n"
         "        print(json.dumps({'type': 'session_meta', 'payload': {'id': 'session-123'}}))\n"
         "        print(json.dumps({'type': 'message_end', 'message': "
-        "{'role': 'assistant', 'content': 'skill:advise'}}))\n"
+        "{'role': 'assistant', 'content': 'skill:advise skill:pr-review'}}))\n"
         "        return 0\n"
         "\n"
         "    def handler(signum: int, _frame: object) -> None:\n"
@@ -222,7 +222,7 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
         "--tools",
         "read,grep",
         "--commands",
-        "skill:learn",
+        "skill:learn,skill:pr-review",
     ]
     assert module.main(second) == 0
 
@@ -232,8 +232,10 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
     assert captures[0]["prompt_sha256"] == module._prompt_digest("capture prompt")
     assert "session-123" in captures[0]["session_ids"]
     assert "skill:advise" in captures[0]["skill_calls"]
+    assert "skill:pr-review" in captures[0]["skill_calls"]
     assert "read" in captures[0]["tool_scopes"]
     assert "grep" in captures[0]["tool_scopes"]
+    assert "skill:pr-review" in captures[1]["skill_calls"]
     assert captures[0]["provider_invocations"][0]["real_binary"] == str(pi_real)
     assert (run_dir / "commands").is_dir()
     assert (run_dir / "commands" / "01-planning").exists()
@@ -322,6 +324,48 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
             ]
         )
         == 0
+    )
+
+
+def test_mnemosyne_verification_ignores_inventory_catalog_skill_calls(
+    tmp_path: Path,
+) -> None:
+    """Mnemosyne verification must use observed capture evidence only."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    manifest["commands"] = [
+        {
+            "id": "inventory-01",
+            "kind": "inventory",
+            "provider": "pi",
+            "skill_calls": list(module.REQUIRED_SKILL_COMMANDS),
+        },
+        {
+            "id": "01-planning",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "planning",
+            "skill_calls": ["skill:advise", "skill:learn"],
+        },
+    ]
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "mnemosyne",
+            ]
+        )
+        == 1
     )
 
 
@@ -427,6 +471,59 @@ def test_failure_probe_records_a_failure_as_a_successful_probe(
     assert probe["status"] == "failure"
 
 
+def test_capture_timeout_records_a_bounded_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """capture() must record a timed-out provider stage as a failure."""
+    module = _load_module()
+    repo_root, run_dir = _bootstrap_run(module, tmp_path)
+    provider_dir = tmp_path / "providers"
+    provider_dir.mkdir()
+    pi_real = provider_dir / "pi-real"
+    _write_provider(pi_real)
+    monkeypatch.setattr(
+        module.shutil,
+        "which",
+        lambda name: str(pi_real) if name == "pi" else None,
+    )
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "capture",
+                "--run-id",
+                run_dir.name,
+                "--stage",
+                "planning",
+                "--provider",
+                "pi",
+                "--timeout",
+                "1",
+                "--",
+                "pi",
+                str(tmp_path / "argv.json"),
+                str(tmp_path / "signal.txt"),
+                "wait",
+            ]
+        )
+        == 124
+    )
+
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    capture = manifest["commands"][-1]
+    assert capture["status"] == "failure"
+    assert capture["returncode"] == 124
+    assert capture["timeout_seconds"] == 1
+    assert capture["timed_out"] is True
+    stderr_path = run_dir / capture["artifacts"]["stderr"]
+    assert "command timed out after 1 seconds" in stderr_path.read_text(encoding="utf-8")
+
+
 def test_record_defect_persists_a_follow_up_issue(
     tmp_path: Path,
 ) -> None:
@@ -496,15 +593,23 @@ def test_render_verify_and_publication_attestation(
     ]
     manifest["commands"] = [
         {
-            "id": "01-planning",
+            "id": f"{index:02d}-{stage}",
             "kind": "capture",
             "provider": "pi",
-            "stage": "planning",
+            "stage": stage,
             "status": "success",
             "returncode": 0,
             "prompt_sha256": module._prompt_digest(prompt),
-            "session_ids": ["session-123"],
-            "skill_calls": ["skill:advise"],
+            "session_ids": [f"private-session-{index}"],
+            "skill_calls": (
+                ["skill:advise"]
+                if stage == "advise"
+                else ["skill:pr-review"]
+                if stage == "review"
+                else ["skill:learn"]
+                if stage == "handoff"
+                else []
+            ),
             "tool_scopes": ["read"],
             "stdout_digest": "a" * 64,
             "stderr_digest": "b" * 64,
@@ -515,7 +620,30 @@ def test_render_verify_and_publication_attestation(
             "started_at": "2026-08-10T00:00:00Z",
             "finished_at": "2026-08-10T00:00:01Z",
         }
+        for index, stage in enumerate(module.REQUIRED_E2E_STAGES, start=1)
     ]
+    manifest["commands"].append(
+        {
+            "id": "10-control",
+            "kind": "capture",
+            "provider": "codex",
+            "stage": "control",
+            "status": "success",
+            "returncode": 0,
+            "prompt_sha256": module._prompt_digest(prompt),
+            "session_ids": ["private-control-session"],
+            "skill_calls": [],
+            "tool_scopes": ["read"],
+            "stdout_digest": "a" * 64,
+            "stderr_digest": "b" * 64,
+            "stdout_event_count": 1,
+            "stderr_event_count": 0,
+            "artifacts": {},
+            "provider_invocations": [],
+            "started_at": "2026-08-10T00:00:00Z",
+            "finished_at": "2026-08-10T00:00:01Z",
+        }
+    )
     manifest["defects"] = [
         {
             "id": "defect-1",
@@ -552,9 +680,16 @@ def test_render_verify_and_publication_attestation(
     report_text = report.read_text(encoding="utf-8")
     runbook_text = runbook.read_text(encoding="utf-8")
     assert "Pi Issue 2519 Report" in report_text
-    assert "Session IDs" in report_text or "Session" in report_text
+    assert "Evidence status: `complete`" in report_text
+    assert "pi 0.80.2" in report_text
+    assert "recorded privately" in report_text
+    assert "private-session" not in report_text
+    assert str(repo_root) not in report_text
+    assert "/usr/bin/pi" not in report_text
     assert "Pi Issue 2519 Runbook" in runbook_text
     assert "capture --run-id <run-id>" in runbook_text
+    assert str(repo_root) not in runbook_text
+    assert str(run_dir) not in runbook_text
 
     assert (
         module.main(
@@ -568,6 +703,45 @@ def test_render_verify_and_publication_attestation(
                 run_dir.name,
                 "--criterion",
                 "publication",
+                "--report",
+                str(report),
+                "--runbook",
+                str(runbook),
+            ]
+        )
+        == 0
+    )
+    report.write_text("stale report\n", encoding="utf-8")
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "publication",
+                "--report",
+                str(report),
+                "--runbook",
+                str(runbook),
+            ]
+        )
+        == 1
+    )
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "render",
+                "--run-id",
+                run_dir.name,
                 "--report",
                 str(report),
                 "--runbook",
@@ -603,3 +777,96 @@ def test_render_verify_and_publication_attestation(
     publication = json.loads(publication_path.read_text(encoding="utf-8"))
     assert publication["repo"] == "HomericIntelligence/Hephaestus"
     assert publication["ref"] == "main"
+
+
+def test_incomplete_run_is_truthful_private_and_cannot_be_attested(
+    tmp_path: Path,
+) -> None:
+    """A failed Pi capture must remain private and block completion attestation."""
+    module = _load_module()
+    repo_root, run_dir = _bootstrap_run(module, tmp_path, run_id="private-live-run")
+    manifest = module._load_manifest(run_dir)
+    private_binary = tmp_path / "private-toolchain" / "pi"
+    private_session = "019feaa3-private-session"
+    manifest["pi"] = {
+        "version": "pi 0.80.2",
+        "binary": str(private_binary),
+        "skill_commands": list(module.REQUIRED_SKILL_COMMANDS),
+        "package_inventory": {"ready": True, "status": "ready"},
+    }
+    manifest["commands"] = [
+        {
+            "id": "01-planning",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "planning",
+            "status": "failure",
+            "returncode": 1,
+            "session_ids": [private_session],
+            "skill_calls": [],
+            "tool_scopes": ["read", "grep"],
+        },
+        {
+            "id": "02-control",
+            "kind": "capture",
+            "provider": "codex",
+            "stage": "control",
+            "status": "success",
+            "returncode": 0,
+            "session_ids": [],
+            "skill_calls": [],
+            "tool_scopes": [],
+        },
+    ]
+    module._save_manifest(run_dir, manifest)
+    report = tmp_path / "docs" / "pi-e2e-2519-report.md"
+    runbook = tmp_path / "docs" / "runbooks" / "pi-e2e-2519.md"
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "render",
+                "--run-id",
+                run_dir.name,
+                "--report",
+                str(report),
+                "--runbook",
+                str(runbook),
+            ]
+        )
+        == 0
+    )
+
+    published = report.read_text(encoding="utf-8") + runbook.read_text(encoding="utf-8")
+    assert "Evidence status: `incomplete`" in published
+    assert "failure" in published
+    assert private_session not in published
+    assert str(private_binary) not in published
+    assert str(repo_root) not in published
+    assert str(run_dir) not in published
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "attest-publication",
+                "--run-id",
+                run_dir.name,
+                "--repo",
+                "HomericIntelligence/Hephaestus",
+                "--ref",
+                "main",
+                "--report",
+                str(report),
+                "--runbook",
+                str(runbook),
+            ]
+        )
+        == 1
+    )
