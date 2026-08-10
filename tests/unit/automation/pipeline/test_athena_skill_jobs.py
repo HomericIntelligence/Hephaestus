@@ -7,11 +7,9 @@ import queue
 import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
@@ -79,10 +77,10 @@ def test_worker_dispatches_athena_skill_job_to_injected_executor(tmp_path: Path)
     assert calls == [_request()]
 
 
-def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
+def test_athena_skill_job_never_invokes_an_agent_harness(
     tmp_path: Path,
 ) -> None:
-    """Pi jobs invoke their proven skill command while the host owns enforcement."""
+    """The host contract is authoritative even when the selected agent is Pi."""
     calls: list[AthenaSkillRequest] = []
 
     class Executor:
@@ -103,24 +101,19 @@ def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
         athena_skill_executor=Executor(),
     )
     try:
-        with (
-            patch(
-                "hephaestus.automation.pipeline.worker_pool.run_agent_athena_skill",
-                return_value=AgentRunResult(stdout="Pi skill completed", stderr=""),
-            ) as run_skill,
-        ):
-            result = pool._run(AthenaSkillJob(request=request, descr="advise"))
+        result = pool._run(AthenaSkillJob(request=request, descr="advise"))
     finally:
         pool.shutdown(mark_interrupted=False)
 
     assert result.ok is True
     assert calls == [request]
-    run_skill.assert_called_once()
-    assert run_skill.call_args.args[0] == "advise"
-    assert run_skill.call_args.kwargs["agent"] == "pi"
-    assert run_skill.call_args.kwargs["cwd"] == request.cwd
-    assert run_skill.call_args.kwargs["timeout"] == request.timeout_s
-    assert run_skill.call_args.kwargs["model"] == request.model
+
+
+def test_worker_pool_has_no_athena_agent_dispatch_dependency() -> None:
+    source = Path("hephaestus/automation/pipeline/worker_pool.py").read_text(encoding="utf-8")
+
+    assert "run_agent_athena_skill" not in source
+    assert "_pi_athena_skill_prompt" not in source
 
 
 def test_worker_converts_athena_executor_failure_to_bounded_job_error(tmp_path: Path) -> None:

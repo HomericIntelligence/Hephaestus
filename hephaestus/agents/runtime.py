@@ -1822,69 +1822,6 @@ def run_pi_session(
     )
 
 
-def run_pi_athena_skill(
-    kind: str,
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    preflight: PiPreflightResult,
-    model: str = "",
-) -> AgentRunResult:
-    """Run one receipt-proven Athena skill command through Pi."""
-    _require_pi_automation_admission(cwd)
-    # Retain the receipt verification even though the policy owns the emitted
-    # command grant.  An Athena package that cannot prove this command is not
-    # admitted to the external isolation adapter.
-    pi_athena_invocation_args(kind, preflight)
-    try:
-        request = {
-            "advise": ExecutionRequest(
-                AgentRole.ADVISOR, AgentOperation.ADVISE, SessionLifecycle.ONE_SHOT
-            ),
-            "learn": ExecutionRequest(
-                AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
-            ),
-        }[kind]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported Pi Athena skill kind: {kind}") from exc
-    return _run_pi_with_policy(
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        model=model,
-        policy=resolve_policy(request),
-    )
-
-
-def run_agent_athena_skill(
-    kind: str,
-    prompt: str,
-    *,
-    agent: str,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-) -> AgentRunResult | None:
-    """Run the provider-specific Athena command required by an admitted agent.
-
-    Athena's host-owned executor remains authoritative for contract binding,
-    corpus retrieval, and learning delivery. Pi additionally runs its pinned
-    package command; other providers have no provider-local command to invoke.
-    """
-    if not is_pi(agent):
-        return None
-    preflight = _require_pi_automation_admission(cwd)
-    return run_pi_athena_skill(
-        kind,
-        prompt,
-        cwd=cwd,
-        timeout=timeout,
-        preflight=preflight,
-        model=model,
-    )
-
-
 def run_pi_smoke_session(
     prompt: str,
     *,

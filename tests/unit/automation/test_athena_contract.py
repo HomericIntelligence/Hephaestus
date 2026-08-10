@@ -10,11 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.agents.pi_plugins import (
-    InventoryResult,
-    PiPreflightResult,
-    load_pi_package_catalog,
-)
 from hephaestus.automation.athena_contract import (
     AthenaContractError,
     AthenaContractReceipt,
@@ -23,47 +18,45 @@ from hephaestus.automation.athena_contract import (
 )
 
 FIXTURE_ROOT = Path("tests/fixtures/athena_contract/v0.4.0")
+CONTRACT_MODULE = Path("hephaestus/automation/athena_contract.py")
 
 
 def _expected_contract() -> dict[str, str]:
     return json.loads((FIXTURE_ROOT / "contract.json").read_text(encoding="utf-8"))
 
 
-def _preflight(root: Path) -> PiPreflightResult:
-    """Build a ready preflight receipt bound to the fixture checkout."""
-    inventory = InventoryResult(
-        ready=True,
-        status="ready",
-        roots={"athena": root},
-        scopes={"athena": "user"},
-    )
-    return PiPreflightResult.ready_result(inventory)
-
-
-def _fixture_git_content(_root: Path, _commit: str, relative: Path) -> bytes:
-    """Return the immutable fixture content that represents the pinned tree."""
-    return (FIXTURE_ROOT / relative).read_bytes()
-
-
-def test_receipt_binds_fixture_to_catalog_pinned_athena_contract() -> None:
-    catalog = load_pi_package_catalog()
-
+def test_receipt_binds_fixture_to_provider_neutral_athena_contract() -> None:
     receipt = load_athena_contract_receipt(
         contract_root=FIXTURE_ROOT,
-        catalog=catalog,
-        preflight=_preflight(FIXTURE_ROOT),
-        pinned_content_reader=_fixture_git_content,
         trust_source="fixture:v0.4.0",
     )
 
     assert receipt == AthenaContractReceipt(**_expected_contract())
-    assert receipt.athena_repository == catalog.packages[0].identity
-    assert receipt.athena_commit == catalog.packages[0].pin
     assert receipt.requires_flat_skill_corpus is True
     assert receipt.requires_pr_backed_learning is True
 
 
-def test_receipt_refuses_content_that_differs_from_preflight_pinned_checkout(
+def test_default_receipt_needs_no_harness_or_contract_checkout() -> None:
+    receipt = load_athena_contract_receipt()
+
+    expected = _expected_contract()
+    assert receipt.athena_repository == expected["athena_repository"]
+    assert receipt.athena_commit == expected["athena_commit"]
+    assert receipt.advise_sha256 == expected["advise_sha256"]
+    assert receipt.learn_sha256 == expected["learn_sha256"]
+    assert receipt.dependency_resolution_sha256 == expected["dependency_resolution_sha256"]
+    assert receipt.trust_source == "hephaestus-athena-contract:v0.4.0"
+
+
+def test_contract_module_does_not_depend_on_pi_or_agent_runtime() -> None:
+    source = CONTRACT_MODULE.read_text(encoding="utf-8")
+
+    assert "hephaestus.agents.pi" not in source
+    assert "hephaestus.agents.runtime" not in source
+    assert "preflight_pi_environment" not in source
+
+
+def test_receipt_refuses_content_that_differs_from_packaged_contract(
     tmp_path: Path,
 ) -> None:
     copied = tmp_path / "contract"
@@ -76,8 +69,6 @@ def test_receipt_refuses_content_that_differs_from_preflight_pinned_checkout(
     with pytest.raises(AthenaContractError, match=r"pinned Athena content mismatch.*advise"):
         load_athena_contract_receipt(
             contract_root=copied,
-            preflight=_preflight(copied),
-            pinned_content_reader=_fixture_git_content,
             trust_source="fixture:v0.4.0",
         )
 
@@ -90,17 +81,13 @@ def test_missing_contract_file_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(AthenaContractError, match="dependency-resolution"):
         load_athena_contract_receipt(
             contract_root=copied,
-            preflight=_preflight(copied),
-            pinned_content_reader=_fixture_git_content,
         )
 
 
-def test_receipt_rejects_contract_root_outside_preflight_proven_package(tmp_path: Path) -> None:
-    with pytest.raises(AthenaContractError, match="does not match Pi preflight"):
+def test_receipt_rejects_contract_root_with_wrong_files(tmp_path: Path) -> None:
+    with pytest.raises(AthenaContractError, match="missing Athena contract file"):
         load_athena_contract_receipt(
             contract_root=tmp_path,
-            preflight=_preflight(FIXTURE_ROOT),
-            pinned_content_reader=_fixture_git_content,
         )
 
 
