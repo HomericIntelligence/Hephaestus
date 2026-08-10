@@ -30,7 +30,7 @@ def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:
     """Reject a thread-free review whose cumulative PR diff is empty."""
     if str(item.payload.get("pr_diff") or "").strip():
         return None
-    item.payload.pop("reviewed_pr_head_sha", None)
+    _clear_round_review_state(item)
     item.payload["empty_diff_reimplementation"] = True
     logger.warning(
         "pr_review:%d: empty cumulative diff; failing back to implementation",
