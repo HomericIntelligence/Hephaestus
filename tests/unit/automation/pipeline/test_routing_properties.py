@@ -51,6 +51,7 @@ _REASON_BUDGET: dict[str, str | None] = {
     "already_implementation_go_pr": None,
     "head_changed": None,
     "agent_error": None,
+    "empty_pr_diff": None,
     "implementation_remediation": None,
     "exhaustion": None,
     "fix_exhausted": None,

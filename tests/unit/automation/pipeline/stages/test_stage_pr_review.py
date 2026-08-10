@@ -530,6 +530,53 @@ class TestPrReviewStageOnEnter:
         assert result == Continue(next_state="ADDRESS_WAIT")
         assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
 
+    def test_checkout_rejects_empty_diff_before_review_or_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty diff must revoke all round-scoped review evidence."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_worktree": item.worktree,
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "reviewed_pr_head_sha": "a" * 40,
+                "reviewed_pr_proof_generation": 7,
+                "host_verification_receipts": [{"head_sha": "a" * 40, "ok": False}],
+                "pr_diff": "\n\t",
+                "review_audit": _valid_audit(),
+                "review_feedback": [{"body": "stale finding"}],
+                "review_changed_paths": ["example.py"],
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state=CLEANUP_REVIEW_WORKTREE_WAIT)
+        assert item.payload["empty_diff_reimplementation"] is True
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert "host_verification_receipts" not in item.payload
+        assert "pr_diff" not in item.payload
+        assert "review_audit" not in item.payload
+        assert "review_feedback" not in item.payload
+        assert "review_changed_paths" not in item.payload
+        assert "reviewed_pr_proof_generation" in item.payload
+        assert github.mutation_log == []
+
+        item.state = CLEANUP_REVIEW_WORKTREE_WAIT
+        removal = stage.step(item, ctx)
+        assert isinstance(removal, JobRequest)
+        assert isinstance(removal.job, GitJob)
+        assert removal.job.op == "remove_worktree"
+        stage.on_job_done(item, JobResult(ok=True), ctx)
+
+        assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff")
+        assert item.payload["empty_diff_reimplementation"] is True
+
     def test_host_verification_rechecks_new_unreplied_thread_before_review(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

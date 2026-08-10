@@ -191,6 +191,26 @@ class TestAgentErrorPingPongTerminates:
         assert label_writes == []
 
 
+class TestEmptyDiffReroutesToSubstantiveImplementation:
+    """pr_review empty-diff fail-back reaches the implementation adopter."""
+
+    def test_empty_diff_fail_back_consumes_the_marker_before_re_adopting(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty review diff must be handed to implementation, not re-reviewed."""
+        assert ROUTES[StageName.PR_REVIEW].fail_routes["empty_pr_diff"] == StageName.IMPLEMENTATION
+
+        impl_stage = ImplementationStage()
+        item = make_work_item(issue=3, pr=1001, state="ADOPTED")
+        item.branch = "3-real-branch"
+        item.payload["empty_diff_reimplementation"] = True
+
+        outcome = impl_stage.step(item, make_ctx())
+
+        assert outcome == Continue(next_state="ADVISE_WAIT")
+        assert "empty_diff_reimplementation" not in item.payload
+
+
 class TestPostReviewRebaseReusesRestoredWriter:
     """pr_review cleanup -> merge_wait rebase fail-back -> implementation reuses writer."""
 

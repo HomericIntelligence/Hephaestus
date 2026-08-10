@@ -157,7 +157,7 @@ flowchart LR
 
     plan_review -. "nogo (iter 3 / plan_cycles 2)" .-> planning
     implementation -. "agent_error" .-> implementation
-    pr_review -. "agent_error / implementation_remediation" .-> implementation
+    pr_review -. "agent_error / empty_pr_diff / implementation_remediation" .-> implementation
     implementation -. "already_implementation_go_pr" .-> merge_wait
 ```
 
@@ -489,8 +489,8 @@ the scope's first stage so the scoped work is redone
 
 ### Cross-stage ping-pong bound
 
-Some regression edges (`pr_review → implementation` for `agent_error` or
-`implementation_remediation`)
+Some regression edges (`pr_review → implementation` for `agent_error`,
+`empty_pr_diff`, or `implementation_remediation`)
 can ping-pong. The
 [`_FAIL_BACK_CAP`](../hephaestus/automation/pipeline/coordinator.py)
 constant is the sum of every budget in
@@ -1224,7 +1224,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
 | `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `rebase_conflict = 2`, `test_fix = 1` |
-| `pr_review` | `MERGE_WAIT` | `agent_error` or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
+| `pr_review` | `MERGE_WAIT` | `agent_error`, `empty_pr_diff`, or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
 | `finished` | `FINISHED` | — (terminal) | — |
 

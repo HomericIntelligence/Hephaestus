@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from hephaestus.automation.session_naming import (
     AGENT_ADDRESS_REVIEW,
     AGENT_PR_REVIEWER,
@@ -13,11 +15,28 @@ from ..reply_handoff import (
     PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES as _REPLY_VISIBILITY_RETRIES,
 )
 from ..work_item import WorkItem
+from .base import Disposition, StageOutcome
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
     _REPLY_HANDOFF_RECEIPT_ERROR,
     _clear_round_review_state,
+    _issue_number,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def empty_diff_outcome(item: WorkItem) -> StageOutcome | None:
+    """Reject a thread-free review whose cumulative PR diff is empty."""
+    if str(item.payload.get("pr_diff") or "").strip():
+        return None
+    _clear_round_review_state(item)
+    item.payload["empty_diff_reimplementation"] = True
+    logger.warning(
+        "pr_review:%d: empty cumulative diff; failing back to implementation",
+        _issue_number(item),
+    )
+    return StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff")
 
 
 def restart_direct_pr_review(item: WorkItem) -> str | None:
@@ -76,4 +95,8 @@ def consume_reply_handoff_receipt(item: WorkItem, pending_request_key: str) -> s
     return receipt.status
 
 
-__all__ = ["consume_reply_handoff_receipt", "restart_direct_pr_review"]
+__all__ = [
+    "consume_reply_handoff_receipt",
+    "empty_diff_outcome",
+    "restart_direct_pr_review",
+]
