@@ -151,6 +151,11 @@ The reviewed external capabilities remain separate catalog-pinned packages:
 `pi-subagents` supplies delegation and `pi-web-access` supplies explicitly
 scoped web access. Athena bundles neither package.
 
+Issue #2519 captures the live Pi/Codex conformance evidence for this provider
+boundary. The private run artifacts live under `build/pi-e2e-2519/<run-id>/`
+and the reproducible publication outputs are `docs/pi-e2e-2519-report.md`
+and `docs/runbooks/pi-e2e-2519.md`.
+
 ### Acceptance collection and publication
 
 After the upstream package and this implementation PR exist, use clean Athena

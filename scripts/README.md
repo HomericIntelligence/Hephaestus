@@ -84,6 +84,13 @@ through installed `hephaestus-*` console scripts.
 - **`publish_pi_package_acceptance.py`** — Publish and exactly read back the
   actor-owned Athena `v0.4.0` acceptance comment on issue #2515.
 
+### Pi end-to-end evidence
+
+- **`pi_e2e_2519.py`** — Collect the live issue #2519 Pi/Codex evidence run,
+  keep the private raw records under `build/pi-e2e-2519/<run-id>/`, and render
+  the reproducible `docs/pi-e2e-2519-report.md` plus
+  `docs/runbooks/pi-e2e-2519.md` artifacts.
+
 Collection is read-only with respect to GitHub:
 
 ```bash
