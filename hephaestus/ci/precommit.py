@@ -12,6 +12,21 @@ import yaml
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
 
+_VALID_HOOK_STATUSES = ("failed", "passed")
+
+
+def _require_non_negative_int(value: int, field_name: str) -> None:
+    """Require a genuine non-negative integer metric."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+
+
+def _parse_non_negative_int(value: str) -> int:
+    """Parse a non-negative integer for an argparse option."""
+    parsed = int(value)
+    _require_non_negative_int(parsed, "value")
+    return parsed
+
 
 def load_precommit_config(path: Path) -> list[dict[str, object]]:
     """Load the repository's pre-commit repository entries."""
@@ -35,7 +50,16 @@ def format_summary_table(elapsed_s: int, file_count: int, hook_status: str) -> s
     Returns:
         Markdown-formatted table string including a trailing newline.
 
+    Raises:
+        ValueError: If elapsed time or file count is negative, or the hook
+            status is not ``"passed"`` or ``"failed"``.
+
     """
+    _require_non_negative_int(elapsed_s, "elapsed_s")
+    _require_non_negative_int(file_count, "file_count")
+    if hook_status not in _VALID_HOOK_STATUSES:
+        raise ValueError("hook_status must be 'passed' or 'failed'")
+
     status_icon = "[PASS]" if hook_status == "passed" else "[FAIL]"
     return (
         "## Pre-commit Hook Benchmark\n\n"
@@ -48,7 +72,14 @@ def format_summary_table(elapsed_s: int, file_count: int, hook_status: str) -> s
 
 
 def check_threshold(elapsed_s: int, threshold_s: int = 120) -> bool:
-    """Return whether a pre-commit run exceeded its runtime threshold."""
+    """Return whether a pre-commit run exceeded its runtime threshold.
+
+    Raises:
+        ValueError: If elapsed time or the threshold is negative.
+
+    """
+    _require_non_negative_int(elapsed_s, "elapsed_s")
+    _require_non_negative_int(threshold_s, "threshold_s")
     return elapsed_s > threshold_s
 
 
@@ -69,13 +100,29 @@ def write_step_summary(content: str, summary_path: str | None = None) -> None:
 def bench_precommit_main(argv: list[str] | None = None) -> int:
     """Report pre-commit timing without making performance advisory-only."""
     parser = argparse.ArgumentParser(description="Report pre-commit hook benchmark results.")
-    parser.add_argument("--elapsed", type=int, required=True, help="Elapsed time in seconds.")
-    parser.add_argument("--files", type=int, default=0, help="Number of files processed.")
     parser.add_argument(
-        "--status", default="passed", help='Hook exit status string, e.g. "passed" or "failed".'
+        "--elapsed",
+        type=_parse_non_negative_int,
+        required=True,
+        help="Elapsed time in seconds.",
     )
     parser.add_argument(
-        "--threshold", type=int, default=120, help="Warning threshold in seconds (default: 120)."
+        "--files",
+        type=_parse_non_negative_int,
+        default=0,
+        help="Number of files processed.",
+    )
+    parser.add_argument(
+        "--status",
+        choices=_VALID_HOOK_STATUSES,
+        default="passed",
+        help='Hook exit status string, e.g. "passed" or "failed".',
+    )
+    parser.add_argument(
+        "--threshold",
+        type=_parse_non_negative_int,
+        default=120,
+        help="Warning threshold in seconds (default: 120).",
     )
     add_json_arg(parser)
     add_version_arg(parser)

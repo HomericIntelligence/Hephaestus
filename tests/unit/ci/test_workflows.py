@@ -41,9 +41,11 @@ class TestCollectYmlFiles:
         workflows = tmp_path / ".github/" / "workflows/"
         workflows.mkdir(parents=True)
         (workflows / "ci.yml").write_text("name: CI")
+        (workflows / "release.yaml").write_text("name: Release")
         (workflows / "release.yml").write_text("name: Release")
         result = collect_yml_files(tmp_path)
         assert "ci.yml" in result
+        assert "release.yaml" in result
         assert "release.yml" in result
 
     def test_no_workflows_dir(self, tmp_path: Path) -> None:
@@ -78,6 +80,12 @@ class TestParseReadmeTable:
         result = parse_readme_table(readme)
         assert "release.yml" in result
 
+    def test_parses_yaml_filename(self, tmp_path: Path) -> None:
+        readme = tmp_path / "README.md"
+        readme.write_text("| [release.yaml](#release) | Creates releases |\n")
+        result = parse_readme_table(readme)
+        assert "release.yaml" in result
+
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
         result = parse_readme_table(tmp_path / "nonexistent.md")
         assert result == set()
@@ -105,6 +113,23 @@ class TestCheckInventory:
         self._setup(tmp_path, ["ci.yml"], ["ci.yml"])
         undoc, missing = check_inventory(tmp_path)
         assert undoc == []
+        assert missing == []
+
+    def test_missing_workflows_dir_returns_empty_inventory(self, tmp_path: Path) -> None:
+        undoc, missing = check_inventory(tmp_path)
+        assert undoc == []
+        assert missing == []
+
+    def test_in_sync_for_both_workflow_suffixes(self, tmp_path: Path) -> None:
+        self._setup(tmp_path, ["ci.yml", "release.yaml"], ["ci.yml", "release.yaml"])
+        undoc, missing = check_inventory(tmp_path)
+        assert undoc == []
+        assert missing == []
+
+    def test_yaml_workflow_is_reported_when_undocumented(self, tmp_path: Path) -> None:
+        self._setup(tmp_path, ["release.yaml"], [])
+        undoc, missing = check_inventory(tmp_path)
+        assert undoc == ["release.yaml"]
         assert missing == []
 
     def test_undocumented_file(self, tmp_path: Path) -> None:
@@ -146,8 +171,12 @@ class TestWorkflowInventoryConfiguration:
         assert hook["pass_filenames"] is False
         assert hook["always_run"] is True
         assert (
+            hook["description"]
+            == "Ensure .github/workflows/README.md documents every .yml and .yaml workflow"
+        )
+        assert (
             hook["files"]
-            == r"^(\.pre-commit-config\.yaml|\.github/" + r"workflows/(README\.md|.*\.yml))$"
+            == r"^(\.pre-commit-config\.yaml|\.github/" + r"workflows/(README\.md|.*\.ya?ml))$"
         )
 
 
@@ -413,6 +442,11 @@ class TestCollectWorkflowFiles:
         f.write_text("name: CI")
         result = collect_workflow_files([str(f)])
         assert f in result
+
+    def test_ignores_direct_non_workflow_file(self, tmp_path: Path) -> None:
+        readme = tmp_path / "README.md"
+        readme.write_text("# Workflows")
+        assert collect_workflow_files([str(readme)]) == []
 
     def test_finds_directory(self, tmp_path: Path) -> None:
         (tmp_path / "ci.yml").write_text("name: CI")
@@ -783,6 +817,39 @@ class TestCLIEntryPoints:
         )
         assert check_workflow_inventory_main() == 0
 
+    def test_inventory_missing_workflows_dir_returns_ok(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from hephaestus.ci.workflows import check_workflow_inventory_main
+
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
+        )
+        assert check_workflow_inventory_main() == 0
+        captured = capsys.readouterr()
+        assert captured.out == "OK: workflow inventory is in sync.\n"
+        assert captured.err == ""
+
+    def test_inventory_empty_workflows_dir_returns_ok(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from hephaestus.ci.workflows import check_workflow_inventory_main
+
+        (tmp_path / ".github/" / "workflows").mkdir(parents=True)
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
+        )
+        assert check_workflow_inventory_main() == 0
+        captured = capsys.readouterr()
+        assert captured.out == "OK: workflow inventory is in sync.\n"
+        assert captured.err == ""
+
     def test_inventory_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from hephaestus.ci.workflows import check_workflow_inventory_main
 
@@ -801,6 +868,20 @@ class TestCLIEntryPoints:
         from hephaestus.ci.workflows import validate_workflow_checkout_main
 
         wf = tmp_path / "ci.yml"
+        wf.write_text(
+            "jobs:\n  build:\n    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - uses: ./.github/actions/setup\n"
+        )
+        monkeypatch.setattr("sys.argv", ["hephaestus-validate-workflow-checkout", str(wf)])
+        assert validate_workflow_checkout_main() == 0
+
+    def test_checkout_valid_yaml_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hephaestus.ci.workflows import validate_workflow_checkout_main
+
+        wf = tmp_path / "ci.yaml"
         wf.write_text(
             "jobs:\n  build:\n    steps:\n"
             "      - uses: actions/checkout@v4\n"

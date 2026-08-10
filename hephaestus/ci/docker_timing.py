@@ -21,6 +21,17 @@ Usage::
 
 from __future__ import annotations
 
+import math
+from decimal import Decimal
+
+
+def _validate_durations(cold_seconds: int, warm_seconds: int) -> None:
+    """Validate the duration domain used by Docker timing metrics."""
+    if isinstance(cold_seconds, bool) or not isinstance(cold_seconds, int) or cold_seconds <= 0:
+        raise ValueError("cold_seconds must be a positive integer")
+    if isinstance(warm_seconds, bool) or not isinstance(warm_seconds, int) or warm_seconds < 0:
+        raise ValueError("warm_seconds must be a non-negative integer")
+
 
 def count_cached_layers(build_log: str) -> int:
     """Count the number of CACHED layer lines in a docker build --progress=plain log.
@@ -47,13 +58,20 @@ def compute_reduction(cold_seconds: int, warm_seconds: int) -> float:
 
     Returns:
         Percentage reduction, rounded to one decimal place.
-        Returns 0.0 if *cold_seconds* is zero to avoid division by zero.
+
+    Raises:
+        ValueError: If ``cold_seconds`` is not positive or ``warm_seconds`` is
+            negative.
 
     """
-    if cold_seconds <= 0:
-        return 0.0
+    _validate_durations(cold_seconds, warm_seconds)
     reduction = (cold_seconds - warm_seconds) / cold_seconds * 100
     return round(reduction, 1)
+
+
+def _format_percentage(value: int | float) -> str:
+    """Render a percentage without inventing or dropping fractional precision."""
+    return format(Decimal(str(value)).normalize(), "f")
 
 
 def build_summary_table(
@@ -78,8 +96,31 @@ def build_summary_table(
     Returns:
         Markdown string containing the full summary table.
 
+    Raises:
+        ValueError: If a duration, cached-layer count, reduction, or threshold
+            is outside its documented metric domain.
+
     """
+    _validate_durations(cold_seconds, warm_seconds)
+    if isinstance(cached_layers, bool) or not isinstance(cached_layers, int) or cached_layers < 0:
+        raise ValueError("cached_layers must be a non-negative integer")
+    if (
+        isinstance(reduction, bool)
+        or not isinstance(reduction, (int, float))
+        or not math.isfinite(reduction)
+        or reduction > 100
+    ):
+        raise ValueError("reduction must be a finite number no greater than 100")
+    if (
+        isinstance(acceptance_threshold, bool)
+        or not isinstance(acceptance_threshold, (int, float))
+        or not math.isfinite(acceptance_threshold)
+        or not 0 <= acceptance_threshold <= 100
+    ):
+        raise ValueError("acceptance_threshold must be a finite percentage in 0..100")
+
     verdict = "PASS" if reduction >= acceptance_threshold else "FAIL"
+    threshold_display = _format_percentage(acceptance_threshold)
     return (
         "## Docker Build Timing: Source-Only Change Cache Efficiency\n\n"
         "| Metric | Value |\n"
@@ -88,5 +129,5 @@ def build_summary_table(
         f"| Warm rebuild (source change only) | {warm_seconds}s |\n"
         f"| Reduction | {reduction}% |\n"
         f"| Cached layers (warm build) | {cached_layers} |\n"
-        f"| Acceptance criterion (≥{acceptance_threshold:.0f}%) | {verdict} |\n"
+        f"| Acceptance criterion (≥{threshold_display}%) | {verdict} |\n"
     )
