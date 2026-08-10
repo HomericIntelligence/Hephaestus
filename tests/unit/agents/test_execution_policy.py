@@ -423,6 +423,42 @@ def test_named_host_adapter_sanitizes_protocol_attribute_failures(
     assert "private" not in str(exc_info.value)
 
 
+def test_named_host_adapter_rejects_incompatible_invoke_signature(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A selected broker must accept the complete keyword invocation contract."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    class Adapter:
+        def invoke(
+            self,
+            *,
+            policy: ExecutionPolicy,
+            command: list[str],
+        ) -> agent_runtime.AgentRunResult:
+            raise AssertionError("selection must not invoke the adapter")
+
+    class EntryPoint:
+        def load(self) -> object:
+            return Adapter
+
+    monkeypatch.setattr(
+        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+    )
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent: True)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+    monkeypatch.setattr(agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),))
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+
+    with pytest.raises(
+        agent_runtime.PiIsolationUnavailableError,
+        match=r"does not implement invoke\(\) with the required keyword contract",
+    ):
+        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+
+    assert agent_runtime._PI_ISOLATION_ADAPTER is None
+
+
 def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
