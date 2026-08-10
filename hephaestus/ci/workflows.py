@@ -3,7 +3,8 @@
 Provides two checks:
 
 **Inventory check** (``hephaestus-check-workflow-inventory``): Detects drift
-between ``.github/workflows/*.yml`` files on disk and the workflow table in
+between ``.github/workflows/*.yml`` and ``*.yaml`` files on disk and the
+workflow table in
 ``.github/workflows/README.md``.
 
 **Checkout-order check** (``hephaestus-validate-workflow-checkout``): Validates
@@ -40,12 +41,13 @@ else:
 
 # Security limit: reject workflow files larger than 1 MB.
 _MAX_FILE_SIZE = 1_048_576
+_WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
 
-# Matches a .yml filename (with or without a markdown hyperlink) inside a
+# Matches a .yml or .yaml filename (with or without a markdown hyperlink) inside a
 # pipe-delimited table cell.  Examples:
 #   | validate-workflows.yml |
 #   | [comprehensive-tests.yml](#anchor) |
-_TABLE_FILENAME_RE = re.compile(r"\|\s*\[?([a-zA-Z0-9_.-]+\.yml)\]?[^|]*\|")
+_TABLE_FILENAME_RE = re.compile(r"\|\s*\[?([a-zA-Z0-9_.-]+\.ya?ml)\]?[^|]*\|")
 
 
 # ---------------------------------------------------------------------------
@@ -54,42 +56,37 @@ _TABLE_FILENAME_RE = re.compile(r"\|\s*\[?([a-zA-Z0-9_.-]+\.yml)\]?[^|]*\|")
 
 
 def collect_yml_files(repo_root: Path) -> set[str]:
-    """Return basenames of ``*.yml`` files in ``.github/workflows/``, excluding worktrees.
+    """Return basenames of workflow files in ``.github/workflows/``.
+
+    This compatibility wrapper delegates workflow discovery to
+    :func:`collect_workflow_files`.
 
     Args:
         repo_root: Absolute path to the repository root.
 
     Returns:
-        Set of ``.yml`` basenames (e.g. ``{"ci.yml", "release.yml"}``).
+        Set of ``.yml`` and ``.yaml`` basenames (e.g.
+        ``{"ci.yml", "release.yaml"}``).
 
     """
     workflows_dir = repo_root / ".github" / "workflows"
     if not workflows_dir.is_dir():
         return set()
-
-    result: set[str] = set()
-    for path in workflows_dir.glob("*.yml"):
-        try:
-            rel = path.relative_to(repo_root)
-        except ValueError:
-            rel = path
-        if any(part == "worktrees" for part in rel.parts):
-            continue
-        result.add(path.name)
-    return result
+    return {path.name for path in collect_workflow_files([str(workflows_dir)])}
 
 
 def parse_readme_table(readme_path: Path) -> set[str]:
-    """Parse ``.github/workflows/README.md`` and return documented ``.yml`` filenames.
+    """Parse the workflow README and return documented workflow filenames.
 
-    Only lines containing a pipe-delimited table cell with a ``.yml`` filename
-    are considered.  Both plain and hyperlinked forms are matched.
+    Only lines containing a pipe-delimited table cell with a ``.yml`` or
+    ``.yaml`` filename are considered.  Both plain and hyperlinked forms are
+    matched.
 
     Args:
         readme_path: Path to the README.md file to parse.
 
     Returns:
-        Set of documented ``.yml`` basenames.
+        Set of documented ``.yml`` and ``.yaml`` basenames.
 
     """
     if not readme_path.is_file():
@@ -104,7 +101,7 @@ def parse_readme_table(readme_path: Path) -> set[str]:
 
 
 def check_inventory(repo_root: Path) -> tuple[list[str], list[str]]:
-    """Compare on-disk ``.yml`` files against the README table.
+    """Compare on-disk workflow files against the README table.
 
     Args:
         repo_root: Absolute path to the repository root.
@@ -151,9 +148,14 @@ class WorkflowToolError(NamedTuple):
 class WorkflowValidationError(RuntimeError):
     """Raised when workflow discovery or validation is incomplete."""
 
-    def __init__(self, errors: list[WorkflowToolError]) -> None:
+    def __init__(
+        self,
+        errors: list[WorkflowToolError],
+        workflow_files: list[Path] | None = None,
+    ) -> None:
         """Initialize the error with every incomplete-validation finding."""
         self.errors: tuple[WorkflowToolError, ...] = tuple(errors)
+        self.workflow_files: tuple[Path, ...] = tuple(workflow_files or ())
         detail = "; ".join(f"{error.target}: {error.message}" for error in errors)
         super().__init__(detail)
 
@@ -350,12 +352,14 @@ def _collect_workflow_files_detailed(paths: list[str]) -> _WorkflowCollectionRes
             continue
 
         if stat.S_ISREG(mode):
-            files.append(target)
+            if target.suffix in _WORKFLOW_SUFFIXES:
+                files.append(target)
         elif stat.S_ISDIR(mode):
             try:
                 directory_entries = list(target.iterdir())
-                yml_files = sorted(path for path in directory_entries if path.suffix == ".yml")
-                yaml_files = sorted(path for path in directory_entries if path.suffix == ".yaml")
+                workflow_files = sorted(
+                    path for path in directory_entries if path.suffix in _WORKFLOW_SUFFIXES
+                )
             except OSError as exc:
                 tool_errors.append(
                     WorkflowToolError(
@@ -365,8 +369,7 @@ def _collect_workflow_files_detailed(paths: list[str]) -> _WorkflowCollectionRes
                     )
                 )
             else:
-                files.extend(yml_files)
-                files.extend(yaml_files)
+                files.extend(workflow_files)
         else:
             tool_errors.append(
                 WorkflowToolError(
@@ -413,7 +416,7 @@ def collect_workflow_files(paths: list[str]) -> list[Path]:
     """
     result = _collect_workflow_files_detailed(paths)
     if result.tool_errors:
-        raise WorkflowValidationError(result.tool_errors)
+        raise WorkflowValidationError(result.tool_errors, result.workflow_files)
     return result.workflow_files
 
 
@@ -430,7 +433,9 @@ def check_workflow_inventory_main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Detect drift between .github/workflows/*.yml files and README.md table.",
+        description=(
+            "Detect drift between .github/workflows/*.yml and *.yaml files and README.md table."
+        ),
         epilog="Example: %(prog)s --repo-root /path/to/repo",
     )
     parser.add_argument(
@@ -482,7 +487,7 @@ def check_workflow_inventory_main() -> int:
 
     print(
         "Fix: update the Workflow Summary table in .github/workflows/README.md "
-        "so it exactly matches the *.yml files on disk."
+        "so it exactly matches the *.yml and *.yaml files on disk."
     )
     return 1
 
@@ -519,9 +524,12 @@ def validate_workflow_checkout_main() -> int:
         repo_root = get_repo_root()
         target_paths = [str(repo_root / ".github" / "workflows")]
 
-    collection = _collect_workflow_files_detailed(target_paths)
-    workflow_files = collection.workflow_files
-    tool_errors = list(collection.tool_errors)
+    try:
+        workflow_files = collect_workflow_files(target_paths)
+        tool_errors: list[WorkflowToolError] = []
+    except WorkflowValidationError as exc:
+        workflow_files = list(exc.workflow_files)
+        tool_errors = list(exc.errors)
     all_violations: list[Violation] = []
     for wf_file in workflow_files:
         result = _validate_workflow_detailed(wf_file)
@@ -540,7 +548,7 @@ def validate_workflow_checkout_main() -> int:
         for violation in all_violations
     ]
 
-    empty_inventory = not workflow_files and not collection.tool_errors
+    empty_inventory = not workflow_files and not tool_errors
     if empty_inventory and not args.allow_empty:
         policy_violations.append(
             {
