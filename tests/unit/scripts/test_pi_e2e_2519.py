@@ -688,6 +688,8 @@ def test_render_verify_and_publication_attestation(
     assert "/usr/bin/pi" not in report_text
     assert "Pi Issue 2519 Runbook" in runbook_text
     assert "capture --run-id <run-id>" in runbook_text
+    assert "Session identifiers are published in the report" in runbook_text
+    assert "session identifiers remain in the owner-only manifest" not in runbook_text
     assert str(repo_root) not in runbook_text
     assert str(run_dir) not in runbook_text
 
