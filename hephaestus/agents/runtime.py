@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+import inspect
 import json
 import os
 import shutil
@@ -239,6 +240,26 @@ def register_pi_isolation_adapter(adapter: PiIsolationAdapter) -> None:
     _PI_ISOLATION_ADAPTER = adapter
 
 
+def _supports_pi_isolation_adapter_invoke_contract(adapter: object) -> bool:
+    """Return whether ``adapter.invoke`` accepts the runtime's keyword call."""
+    try:
+        invoke = getattr(adapter, "invoke", None)
+        if not callable(invoke):
+            return False
+        inspect.signature(invoke).bind(
+            policy=object(),
+            command=[],
+            prompt="",
+            cwd=Path("."),
+            timeout=0,
+            model="",
+            session_id=None,
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _load_configured_pi_isolation_adapter() -> None:
     """Load the explicitly selected host adapter for a fresh CLI process."""
     adapter_name = os.environ.get(PI_ISOLATION_ADAPTER_ENV, "").strip()
@@ -263,14 +284,14 @@ def _load_configured_pi_isolation_adapter() -> None:
     try:
         factory = matches[0].load()
         adapter = factory()
-        invoke = getattr(adapter, "invoke", None)
     except Exception:
         raise PiIsolationUnavailableError(
             f"Pi isolation adapter {adapter_name!r} could not be initialized"
         ) from None
-    if not callable(invoke):
+    if not _supports_pi_isolation_adapter_invoke_contract(adapter):
         raise PiIsolationUnavailableError(
-            f"Pi isolation adapter {adapter_name!r} does not implement invoke()"
+            f"Pi isolation adapter {adapter_name!r} does not implement invoke() with the "
+            "required keyword contract"
         )
     register_pi_isolation_adapter(adapter)
 

@@ -10,12 +10,28 @@
 - Inventory status: `ready`
 - Inventory ready: `True`
 
+## Verification Outcome
+
+This is an incomplete, unverified partial capture, not an end-to-end Pi workflow
+attestation. The only Pi stage recorded is a failed planning attempt, and no
+repository snapshot was recorded. Consequently, this report provides no
+evidence of isolated Pi implementation, test execution, commit or pull-request
+creation, review, merge, or handoff. Completion and publication attestation
+remain blocked pending a newly captured, renderable run with the required
+evidence.
+
 ## Captured Commands
 
 | Stage | Provider | Status | Returncode | Session evidence | Tool scopes | Skill calls |
 | --- | --- | --- | --- | --- | --- | --- |
 | planning | pi | failure | 1 | `019feaa3-88b4-76c6-84c0-858c63b4cb31` | read, grep | n/a |
-| control | codex | success | 0 | none | n/a | n/a |
+| control | codex | unverified / unproven | claimed `0` (private manifest only) | none | n/a | n/a |
+
+The Codex control result is unverified: no committed, report-bound control
+transcript exists for independent re-execution. The available host receipts
+cover linting, type checking, and unit tests only; they do not establish this
+Codex invocation. A committed transcript bound to this report and reproducible
+by an independent reviewer is required before this row can be marked successful.
 
 ## Snapshots
 

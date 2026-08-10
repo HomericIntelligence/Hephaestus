@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -87,6 +88,317 @@ def _bootstrap_run(module: ModuleType, tmp_path: Path, run_id: str = "run-1") ->
     return repo_root, run_root / run_id
 
 
+def _host_athena_receipt(
+    *,
+    capture_id: str,
+    stage: str,
+    readback_head_sha: str | None = None,
+) -> dict[str, Any]:
+    athena_commit = "a" * 40
+    mnemosyne_commit = "b" * 40
+    delivered_commit = "c" * 40
+    contract = {
+        "athena_repository": "github.com/HomericIntelligence/Athena",
+        "athena_commit": athena_commit,
+        "advise_sha256": "1" * 64,
+        "learn_sha256": "2" * 64,
+        "dependency_resolution_sha256": "3" * 64,
+        "trust_source": "pi-package-catalog",
+    }
+    binding = {
+        "root": "/host-owned/mnemosyne",
+        "repository": "HomericIntelligence/Mnemosyne",
+        "default_branch": "main",
+        "commit_sha": mnemosyne_commit,
+        "trust_basis": "canonical upstream",
+        "athena_contract": contract,
+    }
+    kind = "advise" if stage == "advise" else "learn"
+    delivery_receipt = None
+    corpus: dict[str, Any] = {
+        "repository": binding["repository"],
+        "commit_sha": mnemosyne_commit,
+        "selected_paths": ["skills/evidence-receipts.md"],
+        "entry_count": 1,
+        "athena_contract": contract,
+    }
+    if kind == "learn":
+        corpus = {}
+        delivery_receipt = {
+            "repository": binding["repository"],
+            "branch": "skill/evidence-receipts",
+            "base_branch": binding["default_branch"],
+            "commit_sha": delivered_commit,
+            "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/17",
+            "pr_number": 17,
+            "readback_head_sha": readback_head_sha or delivered_commit,
+            "validation_evidence": ["uv run pytest tests/unit"],
+            "final_disposition": "amend",
+            "local_only": False,
+            "signed_commit": True,
+            "dco_signed_off": True,
+        }
+    return {
+        "schema_version": 1,
+        "provider": "pi",
+        "capture_id": capture_id,
+        "stage": stage,
+        "pi_command_receipt": {
+            "command": f"skill:{kind}",
+            "package_key": "athena",
+            "package_root": "/host-owned/athena",
+            "repository": contract["athena_repository"],
+            "commit": athena_commit,
+        },
+        "host_result": {
+            "kind": kind,
+            "context": "Selected host-owned advice." if kind == "advise" else "",
+            "receipt": {
+                "contract": contract,
+                "binding": binding,
+                "corpus": corpus,
+            },
+            "delivery_receipt": delivery_receipt,
+            "error": None,
+        },
+    }
+
+
+def _attach_host_athena_receipt(
+    module: ModuleType,
+    run_dir: Path,
+    entry: dict[str, Any],
+    *,
+    readback_head_sha: str | None = None,
+) -> None:
+    payload = _host_athena_receipt(
+        capture_id=entry["id"],
+        stage=entry["stage"],
+        readback_head_sha=readback_head_sha,
+    )
+    relative_path = Path("commands") / entry["id"] / "athena-host-receipt.json"
+    receipt_path = run_dir / relative_path
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    receipt_path.write_bytes(content)
+    entry["athena_host_receipt"] = {
+        "artifact": str(relative_path),
+        "sha256": module._sha256_bytes(content),
+    }
+
+
+def _attach_stage_receipt(
+    module: ModuleType,
+    run_dir: Path,
+    manifest: dict[str, Any],
+    entry: dict[str, Any],
+) -> None:
+    stage = entry["stage"]
+    sequence = module.REQUIRED_E2E_STAGES.index(stage) + 1
+    request = module.PI_EVIDENCE_STAGE_REQUESTS[stage]
+    policy = module._pi_policy_evidence(module.resolve_policy(request), request)
+    entry["execution_policy"] = {
+        key: value for key, value in policy.items() if key not in {"skill_calls", "tool_scopes"}
+    }
+    entry["tool_scopes"] = policy["tool_scopes"]
+    entry["skill_calls"] = policy["skill_calls"]
+    entry.setdefault("stdout_digest", module._sha256_text(f"{stage}-stdout"))
+    entry.setdefault("stderr_digest", module._sha256_text(f"{stage}-stderr"))
+    entry.setdefault("artifacts", {})
+
+    session_ids = [f"private-session-{sequence}"]
+    binding_sha = ""
+    resumed_from: str | None = None
+    if request.lifecycle is module.SessionLifecycle.RESUME_REQUIRED:
+        implementation = next(
+            value
+            for value in manifest["commands"]
+            if value.get("kind") == "capture"
+            and value.get("provider") == "pi"
+            and value.get("stage") == "implementation"
+        )
+        session_ids = implementation["session_ids"]
+        binding_artifact = implementation["artifacts"]["session_binding"]
+        entry["artifacts"]["session_binding"] = binding_artifact
+        binding_sha = module._sha256_bytes((run_dir / binding_artifact).read_bytes())
+        resumed_from = implementation["id"]
+    elif request.lifecycle is module.SessionLifecycle.START_NEW:
+        binding = module.AgentSessionBinding(
+            session_id=session_ids[0],
+            canonical_cwd=str(Path(manifest["repo_root"]).resolve()),
+            role=request.role,
+            model_fingerprint=module._sha256_text(f"{stage}-model"),
+        )
+        relative_binding = Path("commands") / entry["id"] / "session-binding.json"
+        binding_path = run_dir / relative_binding
+        binding_path.parent.mkdir(parents=True, exist_ok=True)
+        binding_path.write_text(binding.to_json() + "\n", encoding="utf-8")
+        entry["artifacts"]["session_binding"] = relative_binding.as_posix()
+        binding_sha = module._sha256_bytes(binding_path.read_bytes())
+    entry["session_ids"] = session_ids
+
+    if stage in {"advise", "handoff"}:
+        _attach_host_athena_receipt(module, run_dir, entry)
+
+    head = entry["revision"]
+    lifecycle: dict[str, Any] = {
+        "kind": module.PI_STAGE_LIFECYCLE_KINDS[stage],
+        "fixture_sha256": module._fixture_digest(manifest),
+        "head_sha": head,
+        "success": True,
+    }
+    if stage == "discovery":
+        lifecycle.update(paths=list(module.FIXTURE_PATHS), all_paths_found=True)
+    elif stage == "advise":
+        lifecycle["athena_receipt_sha256"] = entry["athena_host_receipt"]["sha256"]
+    elif stage == "planning":
+        lifecycle["plan_sha256"] = entry["stdout_digest"]
+    elif stage == "implementation":
+        lifecycle.update(
+            changed_paths=list(module.FIXTURE_PATHS),
+            diff_sha256=module._sha256_text("fixture-diff"),
+        )
+    elif stage == "tests":
+        lifecycle.update(
+            argv=list(module.FIXTURE_TEST_ARGV),
+            returncode=0,
+            timed_out=False,
+            result_sha256=module._sha256_text("fixture-test-result"),
+        )
+    else:
+        lifecycle["pull_request"] = {
+            "repository": module.PROJECT_REPOSITORY,
+            "number": 2519,
+            "url": f"https://github.com/{module.PROJECT_REPOSITORY}/pull/2519",
+            "state": "OPEN",
+            "branch": "2519-pi-e2e",
+            "head_sha": head,
+            "closes_issue": module.ISSUE_NUMBER,
+            "readback_verified": True,
+        }
+        if stage == "commit-pr":
+            lifecycle.update(commit_sha=head, signed_commit=True, dco_signed_off=True)
+        elif stage == "review":
+            lifecycle.update(
+                reviewed_head_sha=head,
+                implementation_go=True,
+                implementation_no_go=False,
+                unresolved_threads=0,
+                native_auto_merge=False,
+                review_receipt_id=module._sha256_text("review-receipt"),
+            )
+        else:
+            lifecycle.update(
+                learn_receipt_sha256=entry["athena_host_receipt"]["sha256"],
+                finished_handoff=True,
+            )
+
+    payload = {
+        "schema_version": 1,
+        "kind": "hephaestus-pi-e2e-stage",
+        "run_id": manifest["run_id"],
+        "issue_number": module.ISSUE_NUMBER,
+        "provider": "pi",
+        "capture_id": entry["id"],
+        "stage": stage,
+        "coordinator": {
+            "source": "hephaestus.automation.pipeline.coordinator",
+            "pipeline_stage": module.PI_STAGE_COORDINATOR_STAGES[stage],
+            "job_kind": module.PI_STAGE_COORDINATOR_JOBS[stage],
+            "sequence": sequence,
+            "outcome": "success",
+            "receipt_id": module._sha256_text(f"coordinator-{stage}"),
+            "worker_id": f"worker-{sequence}",
+            "completed_at": f"2026-08-10T00:00:{sequence:02d}Z",
+        },
+        "provider_evidence": {
+            "execution_policy": policy,
+            "tool_scopes": policy["tool_scopes"],
+            "skill_calls": policy["skill_calls"],
+            "session_ids": session_ids,
+            "invocation_id": module._sha256_text(f"invocation-{stage}"),
+            "stdout_sha256": entry["stdout_digest"],
+            "stderr_sha256": entry["stderr_digest"],
+            "session_binding_sha256": binding_sha,
+            "resumed_from_capture_id": resumed_from,
+        },
+        "worktree": {
+            "root": str(Path(manifest["repo_root"]).resolve()),
+            "git_dir": str(Path(manifest["repo_root"]).resolve() / ".git/worktrees/fixture"),
+            "git_common_dir": str(Path(manifest["repo_root"]).resolve() / ".git"),
+            "isolated": True,
+            "branch": "2519-pi-e2e",
+            "head": head,
+            "clean": stage not in {"implementation", "tests"},
+            "status_sha256": module._sha256_text(f"status-{stage}"),
+            "observed_at": f"2026-08-10T00:00:{sequence:02d}Z",
+        },
+        "lifecycle": lifecycle,
+    }
+    relative_path = Path("commands") / entry["id"] / "stage-receipt.json"
+    receipt_path = run_dir / relative_path
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    receipt_path.write_bytes(content)
+    entry["stage_receipt"] = {
+        "artifact": relative_path.as_posix(),
+        "sha256": module._sha256_bytes(content),
+    }
+
+
+def _manifest_with_stage_receipts(
+    module: ModuleType,
+    tmp_path: Path,
+) -> tuple[Path, dict[str, Any]]:
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    revision = "a" * 40
+    manifest["commands"] = [
+        {
+            "id": f"{index:02d}-{stage}",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": stage,
+            "fixture_sha256": module._fixture_digest(manifest),
+            "revision": revision,
+            "status": "success",
+            "returncode": 0,
+            "timed_out": False,
+            "prompt_sha256": module._sha256_text(f"prompt-{stage}"),
+            "session_ids": [],
+            "skill_calls": [],
+            "tool_scopes": [],
+            "stdout_digest": module._sha256_text(f"stdout-{stage}"),
+            "stderr_digest": module._sha256_text(f"stderr-{stage}"),
+            "stdout_event_count": 1,
+            "stderr_event_count": 0,
+            "artifacts": {},
+            "provider_invocations": [],
+            "started_at": f"2026-08-10T00:00:{index:02d}Z",
+            "finished_at": f"2026-08-10T00:01:{index:02d}Z",
+        }
+        for index, stage in enumerate(module.REQUIRED_E2E_STAGES, start=1)
+    ]
+    for entry in manifest["commands"]:
+        _attach_stage_receipt(module, run_dir, manifest, entry)
+    module._save_manifest(run_dir, manifest)
+    return run_dir, manifest
+
+
+def _rewrite_stage_receipt(
+    module: ModuleType,
+    run_dir: Path,
+    entry: dict[str, Any],
+    mutate: Any,
+) -> None:
+    receipt_path = run_dir / entry["stage_receipt"]["artifact"]
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    mutate(payload)
+    content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    receipt_path.write_bytes(content)
+    entry["stage_receipt"]["sha256"] = module._sha256_bytes(content)
+
+
 def test_init_creates_private_manifest_and_owner_only_directory(
     tmp_path: Path,
 ) -> None:
@@ -101,6 +413,65 @@ def test_init_creates_private_manifest_and_owner_only_directory(
     assert manifest["fixture"]["title"] == "fix(utils): reject negative byte sizes"
     assert run_dir.name == "run-1"
     assert stat.S_IMODE(run_dir.stat().st_mode) & 0o077 == 0
+
+
+@pytest.mark.parametrize("run_id_kind", ("absolute", "traversal"))
+def test_init_rejects_unsafe_run_ids_before_creating_the_run_root(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    run_id_kind: str,
+) -> None:
+    """init() must not create or chmod paths outside its configured run root."""
+    module = _load_module()
+    run_root = tmp_path / "build" / "pi-e2e-2519"
+    escaped_dir = tmp_path / "escaped-run"
+    run_id = str(escaped_dir) if run_id_kind == "absolute" else "../escaped-run"
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(run_root),
+                "init",
+                "--run-id",
+                run_id,
+            ]
+        )
+        == 1
+    )
+
+    assert "one safe path component" in capsys.readouterr().err
+    assert not run_root.exists()
+    assert not escaped_dir.exists()
+
+
+@pytest.mark.parametrize("run_id", ("/outside-run", "../outside-run"))
+def test_later_run_resolution_rejects_unsafe_run_ids(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    run_id: str,
+) -> None:
+    """Commands after init must enforce the same contained run-id contract."""
+    module = _load_module()
+    run_root = tmp_path / "build" / "pi-e2e-2519"
+    _bootstrap_run(module, tmp_path)
+
+    assert (
+        module.main(
+            [
+                "--run-root",
+                str(run_root),
+                "inventory",
+                "--run-id",
+                run_id,
+            ]
+        )
+        == 1
+    )
+
+    assert "one safe path component" in capsys.readouterr().err
 
 
 def test_inventory_records_pi_version_and_skill_commands(
@@ -151,6 +522,39 @@ def test_inventory_records_pi_version_and_skill_commands(
     assert (run_dir / "artifacts" / "inventory.json").is_file()
 
 
+def test_capture_rejects_generic_direct_pi_command(tmp_path: Path) -> None:
+    """Pi evidence must never execute a caller-supplied command directly."""
+    module = _load_module()
+    repo_root, run_dir = _bootstrap_run(module, tmp_path)
+    marker = tmp_path / "direct-pi-command-ran"
+
+    rc = module.main(
+        [
+            "--repo-root",
+            str(repo_root),
+            "--run-root",
+            str(tmp_path / "build" / "pi-e2e-2519"),
+            "capture",
+            "--run-id",
+            run_dir.name,
+            "--stage",
+            "planning",
+            "--provider",
+            "pi",
+            "--prompt",
+            "plan the fixture",
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ]
+    )
+
+    assert rc == 1
+    assert not marker.exists()
+    assert module._load_manifest(run_dir)["commands"] == []
+
+
 def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -160,15 +564,54 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
     repo_root, run_dir = _bootstrap_run(module, tmp_path)
     provider_dir = tmp_path / "providers"
     provider_dir.mkdir()
-    pi_real = provider_dir / "pi-real"
     codex_real = provider_dir / "codex-real"
-    _write_provider(pi_real)
     _write_provider(codex_real)
     monkeypatch.setattr(
         module.shutil,
         "which",
-        lambda name: str(pi_real) if name == "pi" else str(codex_real) if name == "codex" else None,
+        lambda name: str(codex_real) if name == "codex" else None,
     )
+    runtime_calls: list[tuple[str, Any]] = []
+
+    def _resolve_agent(agent: str, *, cwd: Path) -> str:
+        assert cwd == repo_root
+        runtime_calls.append(("resolve", agent))
+        return agent
+
+    def _run_agent_session(
+        agent: str,
+        prompt: str,
+        **kwargs: object,
+    ) -> object:
+        assert agent == "pi"
+        assert prompt == "capture prompt"
+        runtime_calls.append(("session", kwargs["execution_request"]))
+        stdout = (
+            "\n".join(
+                (
+                    json.dumps({"type": "session", "id": "session-123"}),
+                    json.dumps({"type": "session_meta", "payload": {"id": "session-123"}}),
+                    json.dumps(
+                        {
+                            "type": "message_end",
+                            "message": {
+                                "role": "assistant",
+                                "content": "skill:advise skill:pr-review",
+                            },
+                        }
+                    ),
+                )
+            )
+            + "\n"
+        )
+        return module.AgentRunResult(
+            stdout=stdout,
+            stderr="",
+            session_id="session-123",
+        )
+
+    monkeypatch.setattr(module, "resolve_agent", _resolve_agent)
+    monkeypatch.setattr(module, "run_agent_session", _run_agent_session)
     prompt_file = tmp_path / "prompt.md"
     prompt_file.write_text("capture prompt", encoding="utf-8")
     argv_file = tmp_path / "argv.json"
@@ -179,6 +622,14 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
         "--run-root",
         str(tmp_path / "build" / "pi-e2e-2519"),
     ]
+    manifest = module._load_manifest(run_dir)
+    manifest["snapshots"] = [
+        {
+            "label": "capture-revision",
+            "head": "a" * 40,
+        }
+    ]
+    module._save_manifest(run_dir, manifest)
 
     first = [
         *base_args,
@@ -191,15 +642,6 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
         "pi",
         "--prompt-file",
         str(prompt_file),
-        "--",
-        "pi",
-        str(argv_file),
-        str(signal_file),
-        "emit",
-        "--tools",
-        "read,grep",
-        "--commands",
-        "skill:advise",
     ]
     assert module.main(first) == 0
 
@@ -236,7 +678,19 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
     assert "read" in captures[0]["tool_scopes"]
     assert "grep" in captures[0]["tool_scopes"]
     assert "skill:pr-review" in captures[1]["skill_calls"]
-    assert captures[0]["provider_invocations"][0]["real_binary"] == str(pi_real)
+    assert captures[0]["provider_invocations"] == []
+    assert captures[0]["execution_policy"] == {
+        "role": "planner",
+        "operation": "plan",
+        "lifecycle": "start_new",
+        "filesystem": "checkout_ro",
+        "network": "provider_relay",
+    }
+    assert runtime_calls[0] == ("resolve", "pi")
+    request = runtime_calls[1][1]
+    assert request.role.value == "planner"
+    assert request.operation.value == "plan"
+    assert request.lifecycle.value == "start_new"
     assert (run_dir / "commands").is_dir()
     assert (run_dir / "commands" / "01-planning").exists()
     snapshot_results = iter(
@@ -266,7 +720,7 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
     manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     manifest["pi"] = {
         "version": "pi 0.80.2",
-        "binary": str(pi_real),
+        "binary": "/admitted/pi",
         "skill_commands": list(module.REQUIRED_SKILL_COMMANDS),
         "package_inventory": {
             "ready": True,
@@ -277,6 +731,42 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
         },
     }
     module._save_manifest(run_dir, manifest)
+    assert (
+        module.main(
+            [
+                *base_args,
+                "record-comparison",
+                "--run-id",
+                run_dir.name,
+                "--pi-entry",
+                captures[0]["id"],
+                "--control-entry",
+                captures[1]["id"],
+            ]
+        )
+        == 0
+    )
+    manifest = module._load_manifest(run_dir)
+    comparison = manifest["comparisons"][0]
+    assert comparison["stage"] == "planning"
+    assert comparison["revision"] == "a" * 40
+    assert comparison["fixture_sha256"] == module._fixture_digest(manifest)
+    assert comparison["pi_outcome"]["status"] == "success"
+    assert comparison["control_outcome"]["status"] == "success"
+    assert comparison["outcomes_match"] is True
+    assert comparison["artifact_comparison"] == {
+        "stdout_matches": True,
+        "stderr_matches": True,
+    }
+    assert (
+        module._record_comparison(
+            run_dir,
+            pi_entry_id=captures[0]["id"],
+            control_entry_id=captures[1]["id"],
+        )
+        == 0
+    )
+    assert len(module._load_manifest(run_dir)["comparisons"]) == 1
     assert (
         module.main(
             [
@@ -307,7 +797,7 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
                 "mnemosyne",
             ]
         )
-        == 0
+        == 1
     )
     assert (
         module.main(
@@ -324,6 +814,39 @@ def test_capture_records_session_ids_tool_scopes_and_comparison_inputs(
             ]
         )
         == 0
+    )
+    manifest = module._load_manifest(run_dir)
+    pi_capture = next(entry for entry in manifest["commands"] if entry.get("provider") == "pi")
+    pi_capture["returncode"] = 9
+    pi_capture["status"] = "failure"
+    module._save_manifest(run_dir, manifest)
+    assert (
+        module.main(
+            [
+                *base_args,
+                "record-comparison",
+                "--run-id",
+                run_dir.name,
+                "--pi-entry",
+                captures[0]["id"],
+                "--control-entry",
+                captures[1]["id"],
+            ]
+        )
+        == 1
+    )
+    assert (
+        module.main(
+            [
+                *base_args,
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "comparison",
+            ]
+        )
+        == 1
     )
 
 
@@ -363,6 +886,462 @@ def test_mnemosyne_verification_ignores_inventory_catalog_skill_calls(
                 run_dir.name,
                 "--criterion",
                 "mnemosyne",
+            ]
+        )
+        == 1
+    )
+
+
+def test_mnemosyne_verification_rejects_forged_provider_prose_and_command_grants(
+    tmp_path: Path,
+) -> None:
+    """Provider-controlled names and requested grants are not host receipts."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    manifest["commands"] = [
+        {
+            "id": "01-advise",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "advise",
+            "status": "success",
+            "skill_calls": list(module.REQUIRED_SKILL_COMMANDS),
+            "tool_scopes": list(module.REQUIRED_SKILL_COMMANDS),
+            "provider_invocations": [
+                {
+                    "tool": "pi",
+                    "argv": [
+                        "pi",
+                        "--commands",
+                        ",".join(module.REQUIRED_SKILL_COMMANDS),
+                    ],
+                }
+            ],
+        },
+        {
+            "id": "02-handoff",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "handoff",
+            "status": "success",
+            "skill_calls": ["skill:learn"],
+            "tool_scopes": ["skill:learn"],
+        },
+    ]
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "mnemosyne",
+            ]
+        )
+        == 1
+    )
+
+
+def test_mnemosyne_verification_accepts_pi_bound_host_receipts(tmp_path: Path) -> None:
+    """Canonical persisted advise and PR-readback learn receipts are sufficient."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    manifest["commands"] = [
+        {
+            "id": "01-advise",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "advise",
+            "status": "success",
+            "execution_policy": {
+                "role": "advisor",
+                "operation": "advise",
+                "lifecycle": "one_shot",
+            },
+        },
+        {
+            "id": "02-handoff",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "handoff",
+            "status": "success",
+            "execution_policy": {
+                "role": "learner",
+                "operation": "learn",
+                "lifecycle": "start_new",
+            },
+        },
+    ]
+    for entry in manifest["commands"]:
+        _attach_host_athena_receipt(module, run_dir, entry)
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "mnemosyne",
+            ]
+        )
+        == 0
+    )
+
+
+def test_mnemosyne_verification_rejects_learn_receipt_without_matching_readback(
+    tmp_path: Path,
+) -> None:
+    """A PR-looking delivery receipt fails when host readback does not match."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    manifest["commands"] = [
+        {
+            "id": "01-advise",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "advise",
+            "status": "success",
+            "execution_policy": {
+                "role": "advisor",
+                "operation": "advise",
+                "lifecycle": "one_shot",
+            },
+        },
+        {
+            "id": "02-handoff",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "handoff",
+            "status": "success",
+            "execution_policy": {
+                "role": "learner",
+                "operation": "learn",
+                "lifecycle": "start_new",
+            },
+        },
+    ]
+    _attach_host_athena_receipt(module, run_dir, manifest["commands"][0])
+    _attach_host_athena_receipt(
+        module,
+        run_dir,
+        manifest["commands"][1],
+        readback_head_sha="d" * 40,
+    )
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "mnemosyne",
+            ]
+        )
+        == 1
+    )
+
+
+def test_stage_receipts_reject_noop_labels_and_pooled_evidence(tmp_path: Path) -> None:
+    """Eight labels or one shared receipt cannot stand in for eight host observations."""
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+
+    module._verify_stage_receipts(manifest, run_dir)
+
+    labels_only = json.loads(json.dumps(manifest))
+    for entry in labels_only["commands"]:
+        entry.pop("stage_receipt", None)
+    with pytest.raises(ValueError, match="artifact descriptor"):
+        module._verify_stage_receipts(labels_only, run_dir)
+
+    pooled = json.loads(json.dumps(manifest))
+    pooled["commands"][1]["stage_receipt"] = pooled["commands"][0]["stage_receipt"]
+    with pytest.raises(ValueError, match="not bound to its successful capture"):
+        module._verify_stage_receipts(pooled, run_dir)
+
+
+def test_record_stage_receipt_ingests_host_artifact_for_one_exact_capture(
+    tmp_path: Path,
+) -> None:
+    """The collector can persist a coordinator export without manual manifest edits."""
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+    planning = next(value for value in manifest["commands"] if value["stage"] == "planning")
+    persisted_path = run_dir / planning["stage_receipt"]["artifact"]
+    coordinator_export = tmp_path / "planning-stage-receipt.json"
+    coordinator_export.write_bytes(persisted_path.read_bytes())
+    planning.pop("stage_receipt")
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                manifest["repo_root"],
+                "--run-root",
+                str(run_dir.parent),
+                "record-stage-receipt",
+                "--run-id",
+                run_dir.name,
+                "--capture-id",
+                planning["id"],
+                "--receipt",
+                str(coordinator_export),
+            ]
+        )
+        == 0
+    )
+    recorded = module._load_manifest(run_dir)
+    recorded_planning = next(
+        value for value in recorded["commands"] if value["stage"] == "planning"
+    )
+    assert recorded_planning["stage_receipt"]["artifact"].endswith("stage-receipt.json")
+    module._verify_stage_receipts(recorded, run_dir)
+
+
+def test_stage_receipts_require_worktree_test_github_and_handoff_readbacks(
+    tmp_path: Path,
+) -> None:
+    """Completion-relevant host facts fail closed when any lifecycle receipt is absent."""
+    module = _load_module()
+    scenarios = (
+        (
+            "worktree",
+            "planning",
+            lambda payload: payload["worktree"].__setitem__("isolated", False),
+            "worktree is not isolated",
+        ),
+        (
+            "tests",
+            "tests",
+            lambda payload: payload["lifecycle"].__setitem__("returncode", 1),
+            "passing host fixture-test receipt",
+        ),
+        (
+            "github",
+            "review",
+            lambda payload: payload["lifecycle"]["pull_request"].__setitem__(
+                "readback_verified", False
+            ),
+            "pull-request readback evidence",
+        ),
+        (
+            "handoff",
+            "handoff",
+            lambda payload: payload["lifecycle"].__setitem__("finished_handoff", False),
+            "learning delivery evidence",
+        ),
+    )
+    for name, stage, mutate, message in scenarios:
+        scenario_root = tmp_path / name
+        scenario_root.mkdir()
+        run_dir, manifest = _manifest_with_stage_receipts(module, scenario_root)
+        entry = next(value for value in manifest["commands"] if value["stage"] == stage)
+        _rewrite_stage_receipt(module, run_dir, entry, mutate)
+        with pytest.raises(ValueError, match=message):
+            module._verify_stage_receipts(manifest, run_dir)
+
+
+def test_comparison_verification_rejects_unpaired_provider_labels(
+    tmp_path: Path,
+) -> None:
+    """Provider labels alone must not count as paired comparison evidence."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    manifest["commands"] = [
+        {
+            "id": "01-pi-planning",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "planning",
+            "status": "success",
+        },
+        {
+            "id": "02-codex-review",
+            "kind": "capture",
+            "provider": "codex",
+            "stage": "review",
+            "status": "success",
+        },
+    ]
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "comparison",
+            ]
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "control_value"),
+    [
+        ("fixture_sha256", "0" * 64),
+        ("stage", "review"),
+        ("revision", "b" * 40),
+        ("prompt_sha256", "c" * 64),
+    ],
+)
+def test_record_comparison_rejects_unpaired_capture_metadata(
+    tmp_path: Path,
+    field: str,
+    control_value: str,
+) -> None:
+    """A persisted pair must describe the same fixture, stage, revision, and prompt."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    revision = "a" * 40
+    manifest["snapshots"] = [{"label": "fixture", "head": revision}]
+    capture = {
+        "kind": "capture",
+        "stage": "planning",
+        "fixture_sha256": module._fixture_digest(manifest),
+        "revision": revision,
+        "status": "success",
+        "returncode": 0,
+        "timed_out": False,
+        "prompt_sha256": module._prompt_digest("fixture prompt"),
+        "stdout_digest": "a" * 64,
+        "stderr_digest": "b" * 64,
+    }
+    control = {**capture, "id": "02-control", "provider": "codex"}
+    control[field] = control_value
+    manifest["commands"] = [
+        {**capture, "id": "01-pi", "provider": "pi"},
+        control,
+    ]
+    module._save_manifest(run_dir, manifest)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "record-comparison",
+                "--run-id",
+                run_dir.name,
+                "--pi-entry",
+                "01-pi",
+                "--control-entry",
+                "02-control",
+            ]
+        )
+        == 1
+    )
+    assert module._load_manifest(run_dir)["comparisons"] == []
+
+
+def test_comparison_verification_rejects_different_outcomes(
+    tmp_path: Path,
+) -> None:
+    """A recorded artifact comparison cannot certify divergent provider outcomes."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    manifest = module._load_manifest(run_dir)
+    revision = "a" * 40
+    manifest["snapshots"] = [{"label": "fixture", "head": revision}]
+    capture = {
+        "kind": "capture",
+        "stage": "planning",
+        "fixture_sha256": module._fixture_digest(manifest),
+        "revision": revision,
+        "timed_out": False,
+        "prompt_sha256": module._prompt_digest("fixture prompt"),
+        "stdout_digest": "a" * 64,
+        "stderr_digest": "b" * 64,
+    }
+    manifest["commands"] = [
+        {
+            **capture,
+            "id": "01-pi",
+            "provider": "pi",
+            "status": "success",
+            "returncode": 0,
+        },
+        {
+            **capture,
+            "id": "02-control",
+            "provider": "codex",
+            "status": "failure",
+            "returncode": 7,
+        },
+    ]
+    module._save_manifest(run_dir, manifest)
+    base_args = [
+        "--repo-root",
+        str(tmp_path / "repo"),
+        "--run-root",
+        str(tmp_path / "build" / "pi-e2e-2519"),
+    ]
+
+    assert (
+        module.main(
+            [
+                *base_args,
+                "record-comparison",
+                "--run-id",
+                run_dir.name,
+                "--pi-entry",
+                "01-pi",
+                "--control-entry",
+                "02-control",
+            ]
+        )
+        == 0
+    )
+    comparison = module._load_manifest(run_dir)["comparisons"][0]
+    assert comparison["pi_outcome"]["status"] == "success"
+    assert comparison["control_outcome"]["status"] == "failure"
+    assert comparison["outcomes_match"] is False
+    assert (
+        module.main(
+            [
+                *base_args,
+                "verify",
+                "--run-id",
+                run_dir.name,
+                "--criterion",
+                "comparison",
             ]
         )
         == 1
@@ -426,7 +1405,7 @@ def test_failure_probe_records_a_failure_as_a_successful_probe(
     _, run_dir = _bootstrap_run(module, tmp_path)
     provider_dir = tmp_path / "providers"
     provider_dir.mkdir()
-    failing_real = provider_dir / "pi-real"
+    failing_real = provider_dir / "codex-real"
     failing_real.write_text(
         (
             "#!/usr/bin/env python3\n"
@@ -439,7 +1418,7 @@ def test_failure_probe_records_a_failure_as_a_successful_probe(
     failing_real.chmod(0o700)
 
     def _which(name: str) -> str | None:
-        return str(failing_real) if name == "pi" else None
+        return str(failing_real) if name == "codex" else None
 
     monkeypatch.setattr(module.shutil, "which", _which)
 
@@ -455,9 +1434,9 @@ def test_failure_probe_records_a_failure_as_a_successful_probe(
             "--stage",
             "review",
             "--provider",
-            "pi",
+            "codex",
             "--",
-            "pi",
+            "codex",
             str(tmp_path / "argv.json"),
             str(tmp_path / "signal.txt"),
             "emit",
@@ -467,8 +1446,38 @@ def test_failure_probe_records_a_failure_as_a_successful_probe(
     assert rc == 0
     manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     probe = manifest["commands"][-1]
-    assert probe["kind"] == "capture"
-    assert probe["status"] == "failure"
+    assert probe["kind"] == "failure_probe"
+    assert probe["status"] == "success"
+    assert probe["returncode"] == 7
+    assert probe["probe_outcome"] == {
+        "expected": "nonzero",
+        "observed": "nonzero",
+        "matches_expectation": True,
+    }
+
+
+def test_failure_probe_verification_rejects_an_unexpected_success() -> None:
+    """An unexpected probe success remains a fail-closed completion failure."""
+    module = _load_module()
+    manifest = {
+        "commands": [
+            {
+                "id": "01-boundary-probe",
+                "kind": "failure_probe",
+                "provider": "pi",
+                "status": "failure",
+                "returncode": 0,
+                "probe_outcome": {
+                    "expected": "nonzero",
+                    "observed": "zero",
+                    "matches_expectation": False,
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="failure probe did not fail as expected"):
+        module._verify_failure_probes(manifest)
 
 
 def test_capture_timeout_records_a_bounded_failure(
@@ -480,12 +1489,12 @@ def test_capture_timeout_records_a_bounded_failure(
     repo_root, run_dir = _bootstrap_run(module, tmp_path)
     provider_dir = tmp_path / "providers"
     provider_dir.mkdir()
-    pi_real = provider_dir / "pi-real"
-    _write_provider(pi_real)
+    codex_real = provider_dir / "codex-real"
+    _write_provider(codex_real)
     monkeypatch.setattr(
         module.shutil,
         "which",
-        lambda name: str(pi_real) if name == "pi" else None,
+        lambda name: str(codex_real) if name == "codex" else None,
     )
 
     assert (
@@ -501,11 +1510,11 @@ def test_capture_timeout_records_a_bounded_failure(
                 "--stage",
                 "planning",
                 "--provider",
-                "pi",
+                "codex",
                 "--timeout",
                 "1",
                 "--",
-                "pi",
+                "codex",
                 str(tmp_path / "argv.json"),
                 str(tmp_path / "signal.txt"),
                 "wait",
@@ -597,8 +1606,11 @@ def test_render_verify_and_publication_attestation(
             "kind": "capture",
             "provider": "pi",
             "stage": stage,
+            "fixture_sha256": module._fixture_digest(manifest),
+            "revision": "a" * 40,
             "status": "success",
             "returncode": 0,
+            "timed_out": False,
             "prompt_sha256": module._prompt_digest(prompt),
             "session_ids": [f"private-session-{index}"],
             "skill_calls": (
@@ -617,6 +1629,13 @@ def test_render_verify_and_publication_attestation(
             "stderr_event_count": 0,
             "artifacts": {},
             "provider_invocations": [],
+            "execution_policy": (
+                {"role": "advisor", "operation": "advise", "lifecycle": "one_shot"}
+                if stage == "advise"
+                else {"role": "learner", "operation": "learn", "lifecycle": "start_new"}
+                if stage == "handoff"
+                else {}
+            ),
             "started_at": "2026-08-10T00:00:00Z",
             "finished_at": "2026-08-10T00:00:01Z",
         }
@@ -627,9 +1646,12 @@ def test_render_verify_and_publication_attestation(
             "id": "10-control",
             "kind": "capture",
             "provider": "codex",
-            "stage": "control",
+            "stage": "planning",
+            "fixture_sha256": module._fixture_digest(manifest),
+            "revision": "a" * 40,
             "status": "success",
             "returncode": 0,
+            "timed_out": False,
             "prompt_sha256": module._prompt_digest(prompt),
             "session_ids": ["private-control-session"],
             "skill_calls": [],
@@ -644,6 +1666,29 @@ def test_render_verify_and_publication_attestation(
             "finished_at": "2026-08-10T00:00:01Z",
         }
     )
+    manifest["commands"].append(
+        {
+            **manifest["commands"][3],
+            "id": "11-review-boundary-probe",
+            "kind": "failure_probe",
+            "stage": "review",
+            "status": "success",
+            "returncode": 7,
+            "session_ids": ["private-probe-session"],
+            "probe_outcome": {
+                "expected": "nonzero",
+                "observed": "nonzero",
+                "matches_expectation": True,
+            },
+        }
+    )
+    for entry in manifest["commands"]:
+        if (
+            entry.get("kind") == "capture"
+            and entry.get("provider") == "pi"
+            and entry.get("stage") in module.REQUIRED_E2E_STAGES
+        ):
+            _attach_stage_receipt(module, run_dir, manifest, entry)
     manifest["defects"] = [
         {
             "id": "defect-1",
@@ -656,6 +1701,24 @@ def test_render_verify_and_publication_attestation(
         }
     ]
     module._save_manifest(run_dir, manifest)
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "record-comparison",
+                "--run-id",
+                run_dir.name,
+                "--pi-entry",
+                "03-planning",
+                "--control-entry",
+                "10-control",
+            ]
+        )
+        == 0
+    )
     report = tmp_path / "docs" / "pi-e2e-2519-report.md"
     runbook = tmp_path / "docs" / "runbooks" / "pi-e2e-2519.md"
 
@@ -688,6 +1751,7 @@ def test_render_verify_and_publication_attestation(
     assert "/usr/bin/pi" not in report_text
     assert "Pi Issue 2519 Runbook" in runbook_text
     assert "capture --run-id <run-id>" in runbook_text
+    assert "--provider pi -- <command...>" not in runbook_text
     assert "HEPH_PI_ISOLATION_ADAPTER" in runbook_text
     assert "direct Pi CLI execution is not workflow evidence" in runbook_text
     assert "Session identifiers are published in the report" in runbook_text
@@ -754,6 +1818,22 @@ def test_render_verify_and_publication_attestation(
         )
         == 0
     )
+    publication_sha = "a" * 40
+
+    def _resolve_publication_ref(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert args[0] == [
+            "git",
+            "-C",
+            str(repo_root),
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{publication_sha}^{{commit}}",
+        ]
+        assert kwargs["check"] is False
+        return subprocess.CompletedProcess(args[0], 0, f"{publication_sha}\n", "")
+
+    monkeypatch.setattr(module.subprocess, "run", _resolve_publication_ref)
     assert (
         module.main(
             [
@@ -767,7 +1847,7 @@ def test_render_verify_and_publication_attestation(
                 "--repo",
                 "HomericIntelligence/Hephaestus",
                 "--ref",
-                "main",
+                publication_sha,
                 "--report",
                 str(report),
                 "--runbook",
@@ -780,7 +1860,97 @@ def test_render_verify_and_publication_attestation(
     publication_path = run_dir / "artifacts" / "publication.json"
     publication = json.loads(publication_path.read_text(encoding="utf-8"))
     assert publication["repo"] == "HomericIntelligence/Hephaestus"
-    assert publication["ref"] == "main"
+    assert publication["ref"] == publication_sha
+    assert publication["commit_sha"] == publication_sha
+    assert publication["snapshot_sha"] == publication_sha
+    assert [receipt["head_sha"] for receipt in publication["workflow_receipts"]] == [
+        publication_sha,
+        publication_sha,
+        publication_sha,
+    ]
+    assert (
+        module._verify_run(
+            run_dir,
+            criterion="publication",
+            report_path=report,
+            runbook_path=runbook,
+        )
+        == 0
+    )
+
+    publication["snapshot_sha"] = "b" * 40
+    manifest = module._load_manifest(run_dir)
+    manifest["publication"] = publication
+    module._save_manifest(run_dir, manifest)
+    with pytest.raises(
+        ValueError,
+        match="publication snapshot_sha does not match its local evidence",
+    ):
+        module._verify_run(
+            run_dir,
+            criterion="publication",
+            report_path=report,
+            runbook_path=runbook,
+        )
+
+
+def test_publication_commit_resolution_rejects_symbolic_unresolved_and_mismatched_refs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Publication must identify one existing immutable local commit exactly."""
+    module = _load_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    with pytest.raises(ValueError, match="full immutable commit SHA"):
+        module._resolve_publication_commit(repo_root, "main")
+
+    requested_sha = "a" * 40
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", "unknown revision"),
+    )
+    with pytest.raises(ValueError, match="does not resolve to an existing commit"):
+        module._resolve_publication_commit(repo_root, requested_sha)
+
+    resolved_sha = "b" * 40
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, f"{resolved_sha}\n", ""),
+    )
+    with pytest.raises(ValueError, match="resolved to a different commit"):
+        module._resolve_publication_commit(repo_root, requested_sha)
+
+
+def test_publication_attestation_rejects_snapshot_and_workflow_receipt_mismatches() -> None:
+    """Publication must bind the immutable commit to local snapshot and PR receipts."""
+    module = _load_module()
+    commit_sha = "a" * 40
+    stage_receipts = {
+        stage: {
+            "capture_id": f"capture-{stage}",
+            "receipt_id": "b" * 64,
+            "worktree": {"head": commit_sha},
+            "pr_identity": (
+                2519,
+                "https://github.com/HomericIntelligence/Hephaestus/pull/2519",
+                "2519",
+            ),
+        }
+        for stage in ("commit-pr", "review", "handoff")
+    }
+    manifest = {"snapshots": [{"head": "c" * 40}]}
+
+    with pytest.raises(ValueError, match="does not match the captured snapshot"):
+        module._publication_attestation_evidence(manifest, stage_receipts, commit_sha)
+
+    manifest["snapshots"][0]["head"] = commit_sha
+    stage_receipts["review"]["worktree"] = {"head": "d" * 40}
+    with pytest.raises(ValueError, match="review workflow receipt"):
+        module._publication_attestation_evidence(manifest, stage_receipts, commit_sha)
 
 
 def test_incomplete_run_is_truthful_private_and_cannot_be_attested(

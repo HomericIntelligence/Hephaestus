@@ -21,15 +21,34 @@ import sys
 import textwrap
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from hephaestus.agents.execution_policy import (
+    AgentOperation,
+    AgentRole,
+    ExecutionPolicy,
+    ExecutionRequest,
+    SessionLifecycle,
+    resolve_policy,
+)
 from hephaestus.agents.pi_plugins import inspect_pi_package_inventory, load_pi_package_catalog
-from hephaestus.agents.runtime import pi_private_redaction_tokens, redact_pi_private_values
+from hephaestus.agents.pi_session import AgentSessionBinding
+from hephaestus.agents.runtime import (
+    AgentRunResult,
+    direct_agent_model,
+    pi_private_redaction_tokens,
+    redact_pi_private_values,
+    resolve_agent,
+    run_agent_session,
+    run_agent_text,
+)
+from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import slugify
 
 ISSUE_NUMBER = 2519
+PROJECT_REPOSITORY = "HomericIntelligence/Hephaestus"
 FIXTURE_TITLE = "fix(utils): reject negative byte sizes"
 FIXTURE_SUMMARY = (
     "Exercise `hephaestus/utils/helpers.py` `human_readable_size` and "
@@ -57,8 +76,95 @@ REQUIRED_E2E_STAGES = (
     "handoff",
 )
 SKILL_COMMAND_RE = re.compile(r"(?:\$athena:|/athena:|skill:)[A-Za-z0-9._:/-]+")
+SAFE_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 600
+MAX_ATHENA_HOST_RECEIPT_BYTES = 64 * 1024
+MAX_STAGE_RECEIPT_BYTES = 128 * 1024
 PI_PROVIDER_NAME = "pi"
+FIXTURE_PATHS = (
+    "hephaestus/utils/helpers.py",
+    "tests/unit/utils/test_general_utils.py",
+)
+FIXTURE_TEST_ARGV = (
+    "uv",
+    "run",
+    "pytest",
+    "tests/unit/utils/test_general_utils.py::TestHumanReadableSize",
+    "-q",
+)
+PI_EVIDENCE_STAGE_REQUESTS = {
+    "discovery": ExecutionRequest(
+        AgentRole.PLAN_REVIEWER,
+        AgentOperation.PLAN_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    ),
+    "advise": ExecutionRequest(
+        AgentRole.ADVISOR,
+        AgentOperation.ADVISE,
+        SessionLifecycle.ONE_SHOT,
+    ),
+    "planning": ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.PLAN,
+        SessionLifecycle.START_NEW,
+    ),
+    "implementation": ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    ),
+    "tests": ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.TEST_FIX,
+        SessionLifecycle.RESUME_REQUIRED,
+    ),
+    "commit-pr": ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.GIT_MESSAGE,
+        SessionLifecycle.ONE_SHOT,
+    ),
+    "review": ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    ),
+    "handoff": ExecutionRequest(
+        AgentRole.LEARNER,
+        AgentOperation.LEARN,
+        SessionLifecycle.START_NEW,
+    ),
+}
+PI_STAGE_COORDINATOR_STAGES = {
+    "discovery": "repo",
+    "advise": "planning",
+    "planning": "planning",
+    "implementation": "implementation",
+    "tests": "implementation",
+    "commit-pr": "implementation",
+    "review": "pr_review",
+    "handoff": "finished",
+}
+PI_STAGE_COORDINATOR_JOBS = {
+    "discovery": "GitHubJob",
+    "advise": "AthenaSkillJob",
+    "planning": "AgentJob",
+    "implementation": "AgentJob",
+    "tests": "BuildTestJob",
+    "commit-pr": "GitJob",
+    "review": "AgentJob",
+    "handoff": "AthenaSkillJob",
+}
+PI_STAGE_LIFECYCLE_KINDS = {
+    "discovery": "fixture-discovery",
+    "advise": "athena-advise",
+    "planning": "fixture-plan",
+    "implementation": "fixture-diff",
+    "tests": "fixture-test",
+    "commit-pr": "commit-pr-readback",
+    "review": "review-readback",
+    "handoff": "learn-handoff",
+}
 
 
 def _repo_root() -> Path:
@@ -131,8 +237,22 @@ def _default_manifest(run_id: str, repo_root: Path) -> dict[str, Any]:
     }
 
 
+def _validated_run_dir(run_root: Path, run_id: str) -> Path:
+    """Return a contained run directory for one safe run-id path component."""
+    if not SAFE_RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run ID must be one safe path component")
+
+    resolved_run_root = run_root.resolve()
+    run_dir = resolved_run_root / run_id
+    try:
+        run_dir.resolve().relative_to(resolved_run_root)
+    except ValueError as exc:
+        raise ValueError("run ID resolves outside the configured run root") from exc
+    return run_dir
+
+
 def _resolve_run_dir(run_root: Path, run_id: str) -> Path:
-    run_dir = run_root / run_id
+    run_dir = _validated_run_dir(run_root, run_id)
     if not run_dir.exists():
         raise FileNotFoundError(f"run directory does not exist: {run_dir}")
     return run_dir
@@ -149,8 +269,8 @@ def _random_token() -> str:
 
 
 def _prepare_run_dir(run_root: Path, run_id: str, repo_root: Path) -> Path:
+    run_dir = _validated_run_dir(run_root, run_id)
     _ensure_owner_only_dir(run_root)
-    run_dir = run_root / run_id
     _ensure_owner_only_dir(run_dir)
     for subdir in (COMMANDS_DIR_NAME, DEFECTS_DIR_NAME, ARTIFACTS_DIR_NAME):
         _ensure_owner_only_dir(run_dir / subdir)
@@ -180,6 +300,13 @@ def _append_defect_entry(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]
     return manifest
 
 
+def _append_comparison_entry(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    manifest = _load_manifest(run_dir)
+    manifest["comparisons"].append(entry)
+    _save_manifest(run_dir, manifest)
+    return manifest
+
+
 def _update_manifest(run_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     manifest = _load_manifest(run_dir)
     manifest.update(patch)
@@ -189,6 +316,26 @@ def _update_manifest(run_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
 
 def _prompt_digest(prompt: str) -> str:
     return _sha256_text(prompt)
+
+
+def _fixture_digest(manifest: dict[str, Any]) -> str:
+    fixture = manifest.get("fixture")
+    if not isinstance(fixture, dict):
+        raise ValueError("run manifest fixture is invalid")
+    serialized = json.dumps(fixture, sort_keys=True, separators=(",", ":"))
+    return _sha256_text(serialized)
+
+
+def _latest_snapshot_revision(manifest: dict[str, Any]) -> str:
+    snapshots = manifest.get("snapshots", [])
+    if not isinstance(snapshots, list):
+        return ""
+    for snapshot in reversed(snapshots):
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("head"), str):
+            revision = snapshot["head"].strip()
+            if revision:
+                return revision
+    return ""
 
 
 def _load_prompt(args: argparse.Namespace) -> str:
@@ -502,6 +649,87 @@ def _record_snapshot(run_dir: Path, label: str) -> int:
     return 0
 
 
+def _pi_stage_session_binding(
+    run_dir: Path, request: ExecutionRequest
+) -> AgentSessionBinding | None:
+    if request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
+        return None
+    manifest = _load_manifest(run_dir)
+    for entry in reversed(manifest.get("commands", [])):
+        if (
+            isinstance(entry, dict)
+            and entry.get("kind") == "capture"
+            and entry.get("provider") == PI_PROVIDER_NAME
+            and entry.get("stage") == "implementation"
+            and entry.get("status") == "success"
+        ):
+            artifacts = entry.get("artifacts")
+            binding_path = artifacts.get("session_binding") if isinstance(artifacts, dict) else None
+            if isinstance(binding_path, str) and binding_path:
+                return AgentSessionBinding.from_json(
+                    (run_dir / binding_path).read_text(encoding="utf-8")
+                )
+    raise ValueError("Pi tests capture requires a successful implementation session binding")
+
+
+def _run_pi_stage(
+    run_dir: Path,
+    *,
+    stage: str,
+    prompt: str,
+    cwd: Path,
+    timeout_seconds: int,
+) -> tuple[AgentRunResult, ExecutionPolicy, ExecutionRequest]:
+    try:
+        request = PI_EVIDENCE_STAGE_REQUESTS[stage]
+    except KeyError as exc:
+        raise ValueError(f"unsupported Pi evidence stage: {stage!r}") from exc
+
+    agent = resolve_agent(PI_PROVIDER_NAME, cwd=cwd)
+    policy = resolve_policy(request)
+    model = direct_agent_model(agent)
+    if request.lifecycle is SessionLifecycle.ONE_SHOT:
+        completed = run_agent_text(
+            agent,
+            prompt,
+            cwd=cwd,
+            timeout=timeout_seconds,
+            model=model,
+            execution_request=request,
+        )
+        return (
+            AgentRunResult(stdout=completed.stdout or "", stderr=completed.stderr or ""),
+            policy,
+            request,
+        )
+
+    result = run_agent_session(
+        agent,
+        prompt,
+        cwd=cwd,
+        timeout=timeout_seconds,
+        model=model,
+        execution_request=request,
+        resume_binding=_pi_stage_session_binding(run_dir, request),
+    )
+    return result, policy, request
+
+
+def _pi_policy_evidence(
+    policy: ExecutionPolicy,
+    request: ExecutionRequest,
+) -> dict[str, Any]:
+    return {
+        "role": policy.role.value,
+        "operation": policy.operation.value,
+        "lifecycle": request.lifecycle.value,
+        "filesystem": policy.filesystem.value,
+        "network": policy.network.value,
+        "tool_scopes": sorted(policy.builtins),
+        "skill_calls": sorted(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills),
+    }
+
+
 def _record_command(
     run_dir: Path,
     *,
@@ -512,14 +740,17 @@ def _record_command(
     prompt_file: Path | None,
     timeout_seconds: int,
 ) -> int:
-    proxy_dir = _prepare_provider_proxy_dir(run_dir)
+    if provider == PI_PROVIDER_NAME and command_argv:
+        raise ValueError(
+            "Pi capture rejects direct command arguments; the admitted runtime owns provider "
+            "execution"
+        )
     manifest = _load_manifest(run_dir)
     command_index = len(manifest["commands"]) + 1
     record_dir = _ensure_owner_only_dir(
         run_dir / COMMANDS_DIR_NAME / f"{command_index:02d}-{slugify(stage) or 'stage'}"
     )
     proxy_log = record_dir / PROXY_LOG_NAME
-    env = _provider_proxy_env(proxy_dir, proxy_log)
     stdout_path = record_dir / "stdout.txt"
     stderr_path = record_dir / "stderr.txt"
     analysis_path = record_dir / "analysis.json"
@@ -528,19 +759,37 @@ def _record_command(
         write_secure(prompt_copy, prompt)
         prompt_copy.chmod(0o600)
     start = _utc_now()
+    pi_result: AgentRunResult | None = None
+    pi_policy: ExecutionPolicy | None = None
+    pi_request: ExecutionRequest | None = None
     try:
-        completed = subprocess.run(
-            list(command_argv),
-            cwd=Path(manifest["repo_root"]),
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout_seconds,
-        )
-        returncode = completed.returncode
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
+        if provider == PI_PROVIDER_NAME:
+            pi_result, pi_policy, pi_request = _run_pi_stage(
+                run_dir,
+                stage=stage,
+                prompt=prompt,
+                cwd=Path(manifest["repo_root"]),
+                timeout_seconds=timeout_seconds,
+            )
+            returncode = 0
+            stdout = pi_result.stdout
+            stderr = pi_result.stderr
+            write_secure(proxy_log, "")
+        else:
+            proxy_dir = _prepare_provider_proxy_dir(run_dir)
+            env = _provider_proxy_env(proxy_dir, proxy_log)
+            completed = subprocess.run(
+                list(command_argv),
+                cwd=Path(manifest["repo_root"]),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+            returncode = completed.returncode
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
         timed_out = False
     except subprocess.TimeoutExpired as exc:
         returncode = 124
@@ -551,6 +800,21 @@ def _record_command(
     write_secure(stdout_path, stdout)
     write_secure(stderr_path, stderr)
     analysis = _capture_analysis(stdout, stderr, proxy_log)
+    if pi_result is not None and pi_policy is not None and pi_request is not None:
+        policy_evidence = _pi_policy_evidence(pi_policy, pi_request)
+        if pi_result.session_id:
+            analysis["session_ids"] = list(
+                dict.fromkeys([*analysis["session_ids"], pi_result.session_id])
+            )
+        analysis["skill_calls"] = list(
+            dict.fromkeys([*analysis["skill_calls"], *policy_evidence["skill_calls"]])
+        )
+        analysis["tool_scopes"] = policy_evidence["tool_scopes"]
+        analysis["execution_policy"] = {
+            key: value
+            for key, value in policy_evidence.items()
+            if key not in {"skill_calls", "tool_scopes"}
+        }
     analysis.update(
         {
             "provider": provider,
@@ -569,11 +833,17 @@ def _record_command(
         }
     )
     write_secure(analysis_path, json.dumps(analysis, indent=2, sort_keys=True) + "\n")
+    session_binding_path: Path | None = None
+    if pi_result is not None and pi_result.session_binding is not None:
+        session_binding_path = record_dir / "session-binding.json"
+        write_secure(session_binding_path, pi_result.session_binding.to_json() + "\n")
     entry = {
         "id": f"{command_index:02d}-{slugify(stage) or 'stage'}",
         "kind": "capture",
         "provider": provider,
         "stage": stage,
+        "fixture_sha256": _fixture_digest(manifest),
+        "revision": _latest_snapshot_revision(manifest),
         "status": "success" if returncode == 0 else "failure",
         "returncode": returncode,
         "timeout_seconds": timeout_seconds,
@@ -596,6 +866,10 @@ def _record_command(
         "started_at": start,
         "finished_at": _utc_now(),
     }
+    if session_binding_path is not None:
+        entry["artifacts"]["session_binding"] = str(session_binding_path.relative_to(run_dir))
+    if pi_policy is not None:
+        entry["execution_policy"] = analysis["execution_policy"]
     _append_command_entry(run_dir, entry)
     sys.stdout.write(stdout)
     sys.stderr.write(stderr)
@@ -620,9 +894,247 @@ def _record_failure_probe(
         prompt_file=None,
         timeout_seconds=timeout_seconds,
     )
-    if rc == 0:
+    manifest = _load_manifest(run_dir)
+    try:
+        entry = manifest["commands"][-1]
+    except (IndexError, KeyError, TypeError) as exc:
+        raise RuntimeError("failure probe did not record a command entry") from exc
+    if not isinstance(entry, dict):
+        raise RuntimeError("failure probe did not record a valid command entry")
+
+    expected_failure = rc != 0
+    entry["kind"] = "failure_probe"
+    entry["status"] = "success" if expected_failure else "failure"
+    entry["probe_outcome"] = {
+        "expected": "nonzero",
+        "observed": "nonzero" if expected_failure else "zero",
+        "matches_expectation": expected_failure,
+    }
+    _save_manifest(run_dir, manifest)
+    if not expected_failure:
         print("error: failure probe unexpectedly succeeded", file=sys.stderr)
         return 1
+    return 0
+
+
+def _capture_entry_by_id(manifest: dict[str, Any], entry_id: str) -> dict[str, Any]:
+    matches = [
+        entry
+        for entry in manifest.get("commands", [])
+        if isinstance(entry, dict)
+        and entry.get("kind") == "capture"
+        and entry.get("id") == entry_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"comparison entry must identify one captured command: {entry_id}")
+    return cast(dict[str, Any], matches[0])
+
+
+def _capture_outcome(entry: dict[str, Any]) -> dict[str, Any]:
+    status = entry.get("status")
+    returncode = entry.get("returncode")
+    timed_out = entry.get("timed_out")
+    stdout_digest = entry.get("stdout_digest")
+    stderr_digest = entry.get("stderr_digest")
+    if status not in {"success", "failure"}:
+        raise ValueError(f"capture {entry.get('id', 'unknown')} has an invalid status")
+    if not isinstance(returncode, int) or isinstance(returncode, bool):
+        raise ValueError(f"capture {entry.get('id', 'unknown')} has no return code")
+    if not isinstance(timed_out, bool):
+        raise ValueError(f"capture {entry.get('id', 'unknown')} has no timeout outcome")
+    for stream, digest in (("stdout", stdout_digest), ("stderr", stderr_digest)):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError(
+                f"capture {entry.get('id', 'unknown')} has no valid {stream} artifact digest"
+            )
+    return {
+        "status": status,
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "stdout_sha256": stdout_digest,
+        "stderr_sha256": stderr_digest,
+    }
+
+
+def _comparison_payload(
+    manifest: dict[str, Any],
+    *,
+    pi_entry_id: str,
+    control_entry_id: str,
+) -> dict[str, Any]:
+    pi_entry = _capture_entry_by_id(manifest, pi_entry_id)
+    control_entry = _capture_entry_by_id(manifest, control_entry_id)
+    if pi_entry.get("provider") != PI_PROVIDER_NAME:
+        raise ValueError("comparison Pi entry is not a Pi capture")
+    control_provider = control_entry.get("provider")
+    if not isinstance(control_provider, str) or control_provider == PI_PROVIDER_NAME:
+        raise ValueError("comparison control entry must use a non-Pi provider")
+
+    fixture_sha256 = _fixture_digest(manifest)
+    if {
+        pi_entry.get("fixture_sha256"),
+        control_entry.get("fixture_sha256"),
+    } != {fixture_sha256}:
+        raise ValueError("comparison captures do not target the manifest fixture")
+
+    stage = pi_entry.get("stage")
+    if not isinstance(stage, str) or not stage or control_entry.get("stage") != stage:
+        raise ValueError("comparison captures must target the same stage")
+    revision = pi_entry.get("revision")
+    snapshot_revisions = {
+        snapshot.get("head")
+        for snapshot in manifest.get("snapshots", [])
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("head"), str)
+    }
+    if (
+        not isinstance(revision, str)
+        or not revision
+        or control_entry.get("revision") != revision
+        or revision not in snapshot_revisions
+    ):
+        raise ValueError("comparison captures must target the same recorded revision")
+    prompt_sha256 = pi_entry.get("prompt_sha256")
+    if (
+        not isinstance(prompt_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", prompt_sha256) is None
+        or control_entry.get("prompt_sha256") != prompt_sha256
+    ):
+        raise ValueError("comparison captures must use the same fixture prompt")
+
+    pi_outcome = _capture_outcome(pi_entry)
+    control_outcome = _capture_outcome(control_entry)
+    return {
+        "fixture_sha256": fixture_sha256,
+        "stage": stage,
+        "revision": revision,
+        "prompt_sha256": prompt_sha256,
+        "pi_entry_id": pi_entry_id,
+        "control_entry_id": control_entry_id,
+        "pi_provider": PI_PROVIDER_NAME,
+        "control_provider": control_provider,
+        "pi_outcome": pi_outcome,
+        "control_outcome": control_outcome,
+        "outcomes_match": (
+            pi_outcome["status"] == control_outcome["status"]
+            and pi_outcome["returncode"] == control_outcome["returncode"]
+            and pi_outcome["timed_out"] == control_outcome["timed_out"]
+        ),
+        "artifact_comparison": {
+            "stdout_matches": (pi_outcome["stdout_sha256"] == control_outcome["stdout_sha256"]),
+            "stderr_matches": (pi_outcome["stderr_sha256"] == control_outcome["stderr_sha256"]),
+        },
+    }
+
+
+def _record_comparison(
+    run_dir: Path,
+    *,
+    pi_entry_id: str,
+    control_entry_id: str,
+) -> int:
+    manifest = _load_manifest(run_dir)
+    payload = _comparison_payload(
+        manifest,
+        pi_entry_id=pi_entry_id,
+        control_entry_id=control_entry_id,
+    )
+    for comparison in manifest.get("comparisons", []):
+        if not isinstance(comparison, dict):
+            raise ValueError("run manifest contains an invalid comparison record")
+        if (
+            comparison.get("pi_entry_id") == pi_entry_id
+            and comparison.get("control_entry_id") == control_entry_id
+        ):
+            for key, expected in payload.items():
+                if comparison.get(key) != expected:
+                    raise ValueError("existing comparison record does not match its captures")
+            return 0
+    _append_comparison_entry(
+        run_dir,
+        {
+            "id": f"comparison-{len(manifest.get('comparisons', [])) + 1:02d}",
+            **payload,
+            "recorded_at": _utc_now(),
+        },
+    )
+    return 0
+
+
+def _receipt_payload_from_path(path: Path, *, label: str, size_limit: int) -> dict[str, Any]:
+    """Load one bounded host-owned JSON receipt without following a final symlink."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a regular, non-symlink file")
+    content = path.read_bytes()
+    if not content or len(content) > size_limit:
+        raise ValueError(f"{label} size is invalid")
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return cast(dict[str, Any], payload)
+
+
+def _persist_receipt_payload(
+    run_dir: Path,
+    entry_id: str,
+    filename: str,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    relative_path = Path(COMMANDS_DIR_NAME) / entry_id / filename
+    receipt_path = run_dir / relative_path
+    _ensure_owner_only_dir(receipt_path.parent)
+    _write_json(receipt_path, payload)
+    return {
+        "artifact": relative_path.as_posix(),
+        "sha256": _sha256_bytes(receipt_path.read_bytes()),
+    }
+
+
+def _record_stage_receipt(
+    run_dir: Path,
+    *,
+    capture_id: str,
+    receipt_path: Path,
+    athena_host_receipt_path: Path | None,
+) -> int:
+    """Ingest host/coordinator receipts and bind them to one exact Pi capture."""
+    manifest = _load_manifest(run_dir)
+    entry = _capture_entry_by_id(manifest, capture_id)
+    if entry.get("provider") != PI_PROVIDER_NAME:
+        raise ValueError("stage receipts may be attached only to Pi captures")
+    if "stage_receipt" in entry or "athena_host_receipt" in entry:
+        raise ValueError("capture already has persisted host receipt evidence")
+
+    stage_payload = _receipt_payload_from_path(
+        receipt_path,
+        label="Pi stage coordinator receipt",
+        size_limit=MAX_STAGE_RECEIPT_BYTES,
+    )
+    entry["stage_receipt"] = _persist_receipt_payload(
+        run_dir,
+        capture_id,
+        "stage-receipt.json",
+        stage_payload,
+    )
+    if athena_host_receipt_path is not None:
+        athena_payload = _receipt_payload_from_path(
+            athena_host_receipt_path,
+            label="Athena host receipt",
+            size_limit=MAX_ATHENA_HOST_RECEIPT_BYTES,
+        )
+        entry["athena_host_receipt"] = _persist_receipt_payload(
+            run_dir,
+            capture_id,
+            "athena-host-receipt.json",
+            athena_payload,
+        )
+
+    # Validate before making the descriptor durable in the manifest. The
+    # by a corrected retry.
+    _verify_pi_stage_receipt(manifest, run_dir, entry)
+    _save_manifest(run_dir, manifest)
     return 0
 
 
@@ -657,7 +1169,12 @@ def _record_defect(
     return 0
 
 
-def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Path) -> str:
+def _render_report(
+    manifest: dict[str, Any],
+    run_dir: Path,
+    report_path: Path,
+    runbook_path: Path,
+) -> str:
     pi = cast(dict[str, Any], manifest.get("pi", {}))
     inventory = cast(dict[str, Any], pi.get("package_inventory", {}))
     commands = [entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"]
@@ -667,7 +1184,7 @@ def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Pa
     lines = [
         "# Pi Issue 2519 Report",
         "",
-        f"- Evidence status: `{_evidence_status(manifest)}`",
+        f"- Evidence status: `{_evidence_status(manifest, run_dir)}`",
         f"- Fixture: `{manifest['fixture']['title']}`",
         f"- Run ID: `{manifest['run_id']}`",
         f"- Created: `{manifest['created_at']}`",
@@ -769,7 +1286,7 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "",
             "This runbook reproduces the live evidence collected for issue #2519.",
             "",
-            f"- Evidence status: `{_evidence_status(manifest)}`",
+            f"- Evidence status: `{_evidence_status(manifest, run_dir)}`",
             "- Exact local paths remain in the owner-only manifest.",
             "- Session identifiers are published in the report as required evidence.",
             "",
@@ -794,11 +1311,16 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             ),
             "2. Initialize the private run directory.",
             "3. Record the exact Pi inventory and command catalog.",
-            "4. Capture Pi or Codex control runs through the temporary provider proxy.",
-            "5. Capture any failure probes that demonstrate the stage boundary.",
-            "6. Record defects as follow-up issues.",
-            "7. Render the report and runbook from the manifest.",
-            "8. Attest publication readiness.",
+            "4. Capture Pi prompts through the admitted runtime or controls through the "
+            "temporary provider proxy.",
+            (
+                "5. Export and attach each coordinator-owned stage receipt, including its "
+                "linked-worktree, exact-revision, provider, and lifecycle readbacks."
+            ),
+            "6. Capture any failure probes that demonstrate the stage boundary.",
+            "7. Record defects as follow-up issues.",
+            "8. Render the report and runbook from the manifest.",
+            "9. Attest publication readiness.",
             "",
             "## Verification Matrix",
             "",
@@ -818,11 +1340,23 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             ),
             (
                 f"uv run python scripts/{script_name} capture --run-id <run-id> "
-                "--stage <stage> --provider pi -- <command...>"
+                "--stage <stage> --provider pi --prompt-file <prompt-file>"
+            ),
+            (
+                f"uv run python scripts/{script_name} capture --run-id <run-id> "
+                "--stage <stage> --provider codex -- <command...>"
             ),
             (
                 f"uv run python scripts/{script_name} failure-probe --run-id <run-id> "
                 "--stage <stage> --provider codex -- <command...>"
+            ),
+            (
+                f"uv run python scripts/{script_name} record-comparison --run-id <run-id> "
+                "--pi-entry <pi-entry-id> --control-entry <control-entry-id>"
+            ),
+            (
+                f"uv run python scripts/{script_name} record-stage-receipt --run-id <run-id> "
+                "--capture-id <pi-entry-id> --receipt <coordinator-receipt.json>"
             ),
             (
                 f"uv run python scripts/{script_name} record-defect --run-id <run-id> "
@@ -844,11 +1378,24 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "",
             "- `fixture` validates the deterministic fixture contract.",
             "- `workflow` requires inventory, command, and repository snapshot evidence.",
-            "- `capture` requires private session identifiers and observed tool scopes.",
-            "- `comparison` requires Pi and a distinct control provider.",
-            "- `mnemosyne` requires observed advise, learn, and review skill calls.",
+            (
+                "- `capture` requires each Pi stage's own host-observed provider invocation, "
+                "session binding when stateful, and exact policy tool scopes."
+            ),
+            (
+                "- `comparison` requires a persisted Pi/control pair for the same fixture, "
+                "stage, prompt, and recorded revision, with matching outcomes."
+            ),
+            (
+                "- `mnemosyne` requires persisted Pi-bound Athena advise and learning host "
+                "receipts, including matching Mnemosyne PR readback evidence."
+            ),
             "- `publication` requires deterministic manifest-to-document rendering.",
-            "- `completion` requires every Pi stage to succeed plus all criteria above.",
+            (
+                "- `completion` requires a distinct coordinator receipt for every Pi stage, "
+                "per-stage isolated worktree/revision evidence, fixture test and exact-head "
+                "GitHub lifecycle readbacks, every expected failure probe, and all criteria above."
+            ),
             "",
         ]
     )
@@ -862,7 +1409,7 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
 
 def _render_artifacts(run_dir: Path, report_path: Path, runbook_path: Path) -> int:
     manifest = _load_manifest(run_dir)
-    report_text = _render_report(manifest, report_path, runbook_path)
+    report_text = _render_report(manifest, run_dir, report_path, runbook_path)
     runbook_text = _render_runbook(manifest, run_dir, report_path)
     write_secure(report_path, report_text)
     write_secure(runbook_path, runbook_text)
@@ -916,68 +1463,749 @@ def _verify_capture(manifest: dict[str, Any]) -> None:
         raise ValueError("no captured command recorded tool scopes")
 
 
+def _verify_failure_probes(manifest: dict[str, Any]) -> None:
+    """Require every recorded failure probe to have observed its expected nonzero result."""
+    for entry in manifest.get("commands", []):
+        if not isinstance(entry, dict) or entry.get("kind") != "failure_probe":
+            continue
+        returncode = entry.get("returncode")
+        expected_failure = (
+            isinstance(returncode, int) and not isinstance(returncode, bool) and returncode != 0
+        )
+        expected_outcome = {
+            "expected": "nonzero",
+            "observed": "nonzero" if expected_failure else "zero",
+            "matches_expectation": expected_failure,
+        }
+        if entry.get("probe_outcome") != expected_outcome:
+            raise ValueError("failure probe has an invalid expected-outcome record")
+        if entry.get("status") != ("success" if expected_failure else "failure"):
+            raise ValueError("failure probe status does not match its observed outcome")
+        if not expected_failure:
+            raise ValueError("failure probe did not fail as expected")
+
+
 def _verify_comparison(manifest: dict[str, Any]) -> None:
-    capture_entries = [
-        entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"
-    ]
-    providers = {entry.get("provider") for entry in capture_entries if entry.get("provider")}
-    if len(providers) < 2:
-        raise ValueError("comparison requires at least two distinct provider runs")
-    staged = {entry.get("stage") for entry in capture_entries if entry.get("stage")}
-    if len(staged) < 1:
-        raise ValueError("comparison requires at least one staged capture")
+    comparisons = manifest.get("comparisons", [])
+    if not isinstance(comparisons, list) or not comparisons:
+        raise ValueError("comparison requires a persisted Pi/control pair")
+    seen_pairs: set[tuple[str, str]] = set()
+    for comparison in comparisons:
+        if not isinstance(comparison, dict):
+            raise ValueError("run manifest contains an invalid comparison record")
+        pi_entry_id = comparison.get("pi_entry_id")
+        control_entry_id = comparison.get("control_entry_id")
+        if not isinstance(pi_entry_id, str) or not isinstance(control_entry_id, str):
+            raise ValueError("comparison record does not identify both captures")
+        pair = (pi_entry_id, control_entry_id)
+        if pair in seen_pairs:
+            raise ValueError("comparison record pair is duplicated")
+        seen_pairs.add(pair)
+        expected = _comparison_payload(
+            manifest,
+            pi_entry_id=pi_entry_id,
+            control_entry_id=control_entry_id,
+        )
+        for key, value in expected.items():
+            if comparison.get(key) != value:
+                raise ValueError("comparison record does not match its captured outcomes")
+        if comparison.get("outcomes_match") is not True:
+            raise ValueError("paired Pi and control outcomes do not match")
 
 
-def _verify_mnemosyne(manifest: dict[str, Any]) -> None:
-    capture_entries = [
-        entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"
-    ]
-    observed = {
-        skill
-        for entry in capture_entries
-        for skill in entry.get("skill_calls", [])
-        if isinstance(skill, str)
-    }
-    if not set(REQUIRED_SKILL_COMMANDS).issubset(observed):
+def _receipt_dict(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Athena host receipt has invalid {field}")
+    return cast(dict[str, Any], value)
+
+
+def _receipt_string(data: dict[str, Any], field: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Athena host receipt lacks non-empty {field}")
+    return value
+
+
+def _receipt_sha(data: dict[str, Any], field: str, length: int) -> str:
+    value = _receipt_string(data, field)
+    if re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
+        raise ValueError(f"Athena host receipt has invalid {field}")
+    return value
+
+
+def _load_private_receipt(
+    run_dir: Path,
+    descriptor_value: object,
+    *,
+    label: str,
+    size_limit: int,
+) -> dict[str, Any]:
+    descriptor = _receipt_dict(descriptor_value, f"{label} artifact descriptor")
+    if set(descriptor) != {"artifact", "sha256"}:
+        raise ValueError(f"{label} artifact descriptor is not canonical")
+    artifact = PurePosixPath(_receipt_string(descriptor, "artifact"))
+    if artifact.is_absolute() or ".." in artifact.parts or not artifact.parts:
+        raise ValueError(f"{label} artifact path escapes the run directory")
+
+    receipt_path = run_dir
+    for part in artifact.parts:
+        receipt_path /= part
+        if receipt_path.is_symlink():
+            raise ValueError(f"{label} artifact path must not contain symlinks")
+    try:
+        receipt_path.resolve(strict=True).relative_to(run_dir.resolve(strict=True))
+    except (FileNotFoundError, ValueError) as exc:
+        raise ValueError(f"{label} artifact is unavailable") from exc
+    if not receipt_path.is_file():
+        raise ValueError(f"{label} artifact is not a regular file")
+
+    content = receipt_path.read_bytes()
+    if not content or len(content) > size_limit:
+        raise ValueError(f"{label} artifact size is invalid")
+    expected_digest = _receipt_sha(descriptor, "sha256", 64)
+    if _sha256_bytes(content) != expected_digest:
+        raise ValueError(f"{label} artifact digest does not match")
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} artifact is not valid JSON") from exc
+    return _receipt_dict(payload, f"{label} artifact payload")
+
+
+def _load_athena_host_receipt(
+    run_dir: Path,
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    return _load_private_receipt(
+        run_dir,
+        entry.get("athena_host_receipt"),
+        label="Athena host receipt",
+        size_limit=MAX_ATHENA_HOST_RECEIPT_BYTES,
+    )
+
+
+def _verify_contract_and_binding(
+    command_receipt: dict[str, Any],
+    result_receipt: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    contract = _receipt_dict(result_receipt.get("contract"), "Athena contract")
+    binding = _receipt_dict(result_receipt.get("binding"), "Mnemosyne binding")
+    athena_repository = _receipt_string(contract, "athena_repository")
+    athena_commit = _receipt_sha(contract, "athena_commit", 40)
+    for field in ("advise_sha256", "learn_sha256", "dependency_resolution_sha256"):
+        _receipt_sha(contract, field, 64)
+    _receipt_string(contract, "trust_source")
+    if (
+        command_receipt.get("repository") != athena_repository
+        or command_receipt.get("commit") != athena_commit
+    ):
+        raise ValueError("Pi command receipt is not bound to the Athena contract")
+
+    _receipt_string(binding, "root")
+    _receipt_string(binding, "repository")
+    _receipt_string(binding, "default_branch")
+    _receipt_sha(binding, "commit_sha", 40)
+    _receipt_string(binding, "trust_basis")
+    if binding.get("athena_contract") != contract:
+        raise ValueError("Mnemosyne binding is not bound to the Athena contract")
+    return contract, binding
+
+
+def _verify_advise_receipt(
+    host_result: dict[str, Any],
+    result_receipt: dict[str, Any],
+    contract: dict[str, Any],
+    binding: dict[str, Any],
+) -> None:
+    if host_result.get("delivery_receipt") is not None:
+        raise ValueError("Athena advise receipt unexpectedly includes learning delivery")
+    corpus = _receipt_dict(result_receipt.get("corpus"), "Mnemosyne corpus")
+    if (
+        corpus.get("repository") != binding["repository"]
+        or corpus.get("commit_sha") != binding["commit_sha"]
+        or corpus.get("athena_contract") != contract
+    ):
+        raise ValueError("Mnemosyne corpus receipt is not bound to its checkout")
+    selected_paths = corpus.get("selected_paths")
+    entry_count = corpus.get("entry_count")
+    if (
+        not isinstance(selected_paths, list)
+        or len(selected_paths) > 5
+        or isinstance(entry_count, bool)
+        or not isinstance(entry_count, int)
+        or entry_count != len(selected_paths)
+    ):
+        raise ValueError("Mnemosyne corpus selection receipt is invalid")
+    for source in selected_paths:
+        if not isinstance(source, str):
+            raise ValueError("Mnemosyne corpus selection contains a non-string path")
+        path = PurePosixPath(source)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or len(path.parts) != 2
+            or path.parts[0] != "skills"
+            or path.suffix != ".md"
+            or path.name.endswith(".notes.md")
+        ):
+            raise ValueError("Mnemosyne corpus selection is outside the flat skill corpus")
+
+
+def _verify_learn_delivery_receipt(
+    host_result: dict[str, Any],
+    binding: dict[str, Any],
+) -> None:
+    delivery = _receipt_dict(host_result.get("delivery_receipt"), "LearnDeliveryReceipt")
+    if not valid_delivery_receipt(delivery):
+        raise ValueError("LearnDeliveryReceipt lacks matching PR readback evidence")
+    repository = _receipt_string(delivery, "repository")
+    commit_sha = _receipt_sha(delivery, "commit_sha", 40)
+    if (
+        repository != binding["repository"]
+        or delivery.get("base_branch") != binding["default_branch"]
+        or delivery.get("readback_head_sha") != commit_sha
+    ):
+        raise ValueError("LearnDeliveryReceipt is not bound to the Mnemosyne checkout")
+    branch = _receipt_string(delivery, "branch")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) or ".." in branch:
+        raise ValueError("LearnDeliveryReceipt has an unsafe branch")
+    pr_number = delivery.get("pr_number")
+    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
+        raise ValueError("LearnDeliveryReceipt has an invalid PR number")
+    expected_url = f"https://github.com/{repository}/pull/{pr_number}"
+    if delivery.get("pr_url") != expected_url:
+        raise ValueError("LearnDeliveryReceipt PR URL does not match its repository and number")
+    validation = delivery.get("validation_evidence")
+    if (
+        not isinstance(validation, list)
+        or not validation
+        or any(not isinstance(item, str) or not item for item in validation)
+    ):
+        raise ValueError("LearnDeliveryReceipt lacks validation evidence")
+    _receipt_string(delivery, "final_disposition")
+    if (
+        delivery.get("local_only") is not False
+        or delivery.get("signed_commit") is not True
+        or delivery.get("dco_signed_off") is not True
+    ):
+        raise ValueError("LearnDeliveryReceipt lacks signed, DCO-attested durable delivery")
+
+
+def _verify_pi_bound_athena_receipt(
+    run_dir: Path,
+    entry: dict[str, Any],
+) -> str:
+    payload = _load_athena_host_receipt(run_dir, entry)
+    stage = entry.get("stage")
+    if not isinstance(stage, str):
+        raise ValueError("Athena host receipt capture lacks a stage")
+    expected = {
+        "advise": ("advise", "advisor", "advise", "one_shot"),
+        "handoff": ("learn", "learner", "learn", "start_new"),
+    }.get(stage)
+    if expected is None:
+        raise ValueError("Athena host receipt is attached to an unsupported capture stage")
+    kind, role, operation, lifecycle = expected
+    policy = _receipt_dict(entry.get("execution_policy"), "execution policy")
+    if (
+        entry.get("kind") != "capture"
+        or entry.get("provider") != PI_PROVIDER_NAME
+        or entry.get("status") != "success"
+        or policy.get("role") != role
+        or policy.get("operation") != operation
+        or policy.get("lifecycle") != lifecycle
+    ):
+        raise ValueError("Athena host receipt is not bound to a successful Pi capture policy")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("provider") != PI_PROVIDER_NAME
+        or payload.get("capture_id") != entry.get("id")
+        or payload.get("stage") != stage
+    ):
+        raise ValueError("Athena host receipt artifact is not bound to its Pi capture")
+
+    command_receipt = _receipt_dict(payload.get("pi_command_receipt"), "Pi Athena command receipt")
+    if (
+        command_receipt.get("command") != f"skill:{kind}"
+        or command_receipt.get("package_key") != "athena"
+        or not Path(_receipt_string(command_receipt, "package_root")).is_absolute()
+    ):
+        raise ValueError("Athena host receipt lacks canonical Pi command provenance")
+    host_result = _receipt_dict(payload.get("host_result"), "Athena host result")
+    if (
+        host_result.get("kind") != kind
+        or host_result.get("error") is not None
+        or not isinstance(host_result.get("context", ""), str)
+    ):
+        raise ValueError("Athena host result is unsuccessful or has the wrong kind")
+    result_receipt = _receipt_dict(host_result.get("receipt"), "Athena result receipt")
+    contract, binding = _verify_contract_and_binding(command_receipt, result_receipt)
+    if kind == "advise":
+        _verify_advise_receipt(host_result, result_receipt, contract, binding)
+    else:
+        _verify_learn_delivery_receipt(host_result, binding)
+    return kind
+
+
+def _verify_mnemosyne(manifest: dict[str, Any], run_dir: Path) -> None:
+    verified: set[str] = set()
+    for entry in manifest.get("commands", []):
+        if not isinstance(entry, dict) or "athena_host_receipt" not in entry:
+            continue
+        kind = _verify_pi_bound_athena_receipt(run_dir, cast(dict[str, Any], entry))
+        if kind in verified:
+            raise ValueError(f"duplicate persisted Athena {kind} host receipt")
+        verified.add(kind)
+    missing = {"advise", "learn"}.difference(verified)
+    if missing:
         raise ValueError(
-            "recorded capture evidence does not include the required "
-            "advise, learn, and review skill calls"
+            "Mnemosyne verification requires persisted Pi-bound Athena advise and "
+            "LearnDeliveryReceipt host evidence"
         )
 
 
-def _verify_completion(manifest: dict[str, Any]) -> None:
+def _stage_receipt_dict(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Pi stage receipt has invalid {field}")
+    return cast(dict[str, Any], value)
+
+
+def _stage_receipt_string(data: dict[str, Any], field: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError(f"Pi stage receipt lacks non-empty {field}")
+    return value
+
+
+def _stage_receipt_sha(data: dict[str, Any], field: str, length: int = 64) -> str:
+    value = _stage_receipt_string(data, field)
+    if re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
+        raise ValueError(f"Pi stage receipt has invalid {field}")
+    return value
+
+
+def _stage_receipt_positive_int(data: dict[str, Any], field: str) -> int:
+    value = data.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"Pi stage receipt has invalid {field}")
+    return value
+
+
+def _stage_receipt_string_list(data: dict[str, Any], field: str) -> list[str]:
+    value = data.get(field)
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ValueError(f"Pi stage receipt has invalid {field}")
+    return cast(list[str], value)
+
+
+def _verify_stage_worktree(
+    manifest: dict[str, Any],
+    entry: dict[str, Any],
+    worktree: dict[str, Any],
+) -> dict[str, Any]:
+    root = Path(_stage_receipt_string(worktree, "root"))
+    git_dir = Path(_stage_receipt_string(worktree, "git_dir"))
+    common_dir = Path(_stage_receipt_string(worktree, "git_common_dir"))
+    if not root.is_absolute() or root.resolve() != Path(manifest["repo_root"]).resolve():
+        raise ValueError("Pi stage receipt is not bound to the manifest worktree")
+    if not git_dir.is_absolute() or not common_dir.is_absolute() or git_dir == common_dir:
+        raise ValueError("Pi stage receipt lacks isolated linked-worktree evidence")
+    try:
+        git_dir_parts = git_dir.relative_to(common_dir).parts
+    except ValueError as exc:
+        raise ValueError("Pi stage receipt git directory is outside its common directory") from exc
+    if len(git_dir_parts) < 2 or git_dir_parts[0] != "worktrees":
+        raise ValueError("Pi stage receipt lacks linked-worktree metadata")
+    if worktree.get("isolated") is not True:
+        raise ValueError("Pi stage receipt worktree is not isolated")
+    branch = _stage_receipt_string(worktree, "branch")
+    if ".." in branch or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) is None:
+        raise ValueError("Pi stage receipt has an unsafe worktree branch")
+    head = _stage_receipt_sha(worktree, "head", 40)
+    if entry.get("revision") != head:
+        raise ValueError("Pi stage receipt head does not match its capture revision")
+    if not isinstance(worktree.get("clean"), bool):
+        raise ValueError("Pi stage receipt lacks a worktree cleanliness observation")
+    _stage_receipt_sha(worktree, "status_sha256")
+    _stage_receipt_string(worktree, "observed_at")
+    return {
+        "root": str(root.resolve()),
+        "branch": branch,
+        "head": head,
+        "clean": worktree["clean"],
+    }
+
+
+def _verify_stage_provider_evidence(
+    entry: dict[str, Any],
+    run_dir: Path,
+    stage: str,
+    worktree: dict[str, Any],
+    provider_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    request = PI_EVIDENCE_STAGE_REQUESTS[stage]
+    expected_policy = _pi_policy_evidence(resolve_policy(request), request)
+    observed_policy = _stage_receipt_dict(
+        provider_evidence.get("execution_policy"), "provider execution_policy"
+    )
+    if observed_policy != expected_policy:
+        raise ValueError("Pi stage receipt provider policy does not match the required stage")
+    expected_entry_policy = {
+        key: value
+        for key, value in expected_policy.items()
+        if key not in {"skill_calls", "tool_scopes"}
+    }
+    if entry.get("execution_policy") != expected_entry_policy:
+        raise ValueError("Pi capture policy is not bound to its stage receipt")
+
+    tool_scopes = _stage_receipt_string_list(provider_evidence, "tool_scopes")
+    if tool_scopes != expected_policy["tool_scopes"] or entry.get("tool_scopes") != tool_scopes:
+        raise ValueError("Pi stage receipt lacks its own observed tool-scope evidence")
+    skill_calls = _stage_receipt_string_list(provider_evidence, "skill_calls")
+    if skill_calls != expected_policy["skill_calls"]:
+        raise ValueError("Pi stage receipt skill evidence does not match the host policy")
+    entry_skill_calls = entry.get("skill_calls")
+    if not isinstance(entry_skill_calls, list) or not set(skill_calls).issubset(entry_skill_calls):
+        raise ValueError("Pi capture lacks its host-observed required skill calls")
+
+    session_ids = _stage_receipt_string_list(provider_evidence, "session_ids")
+    if entry.get("session_ids") != session_ids:
+        raise ValueError("Pi stage receipt session evidence is not bound to its capture")
+    invocation_id = _stage_receipt_sha(provider_evidence, "invocation_id")
+    if provider_evidence.get("stdout_sha256") != entry.get(
+        "stdout_digest"
+    ) or provider_evidence.get("stderr_sha256") != entry.get("stderr_digest"):
+        raise ValueError("Pi stage receipt output evidence is not bound to its capture")
+
+    binding_sha = provider_evidence.get("session_binding_sha256", "")
+    resumed_from = provider_evidence.get("resumed_from_capture_id")
+    if request.lifecycle is SessionLifecycle.ONE_SHOT:
+        if binding_sha != "" or resumed_from is not None:
+            raise ValueError("one-shot Pi stage receipt unexpectedly claims session state")
+    else:
+        if not session_ids:
+            raise ValueError("stateful Pi stage receipt lacks observed session evidence")
+        if not isinstance(binding_sha, str) or re.fullmatch(r"[0-9a-f]{64}", binding_sha) is None:
+            raise ValueError("stateful Pi stage receipt lacks a session-binding digest")
+        artifacts = _stage_receipt_dict(entry.get("artifacts"), "capture artifacts")
+        binding_artifact = artifacts.get("session_binding")
+        if not isinstance(binding_artifact, str) or not binding_artifact:
+            raise ValueError("stateful Pi capture lacks a session-binding artifact")
+        binding_payload = _load_private_receipt(
+            run_dir,
+            {"artifact": binding_artifact, "sha256": binding_sha},
+            label="Pi session binding",
+            size_limit=MAX_STAGE_RECEIPT_BYTES,
+        )
+        binding = AgentSessionBinding.from_json(
+            json.dumps(binding_payload, sort_keys=True, separators=(",", ":"))
+        )
+        if (
+            binding.session_id not in session_ids
+            or binding.canonical_cwd != worktree["root"]
+            or binding.role is not request.role
+        ):
+            raise ValueError("Pi session binding does not match its stage, session, and worktree")
+        if request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+            if not isinstance(resumed_from, str) or not resumed_from:
+                raise ValueError("resumed Pi stage receipt lacks its source capture")
+        elif resumed_from is not None:
+            raise ValueError("new Pi stage receipt unexpectedly claims a resumed capture")
+    return {
+        "invocation_id": invocation_id,
+        "session_ids": tuple(session_ids),
+        "session_binding_sha256": binding_sha,
+        "resumed_from_capture_id": resumed_from,
+    }
+
+
+def _verify_stage_pr_readback(
+    lifecycle: dict[str, Any],
+    *,
+    expected_head: str,
+) -> tuple[int, str, str]:
+    pull_request = _stage_receipt_dict(lifecycle.get("pull_request"), "pull_request")
+    repository = _stage_receipt_string(pull_request, "repository")
+    if repository != PROJECT_REPOSITORY:
+        raise ValueError("Pi stage receipt pull request targets the wrong repository")
+    pr_number = _stage_receipt_positive_int(pull_request, "number")
+    pr_url = _stage_receipt_string(pull_request, "url")
+    if pr_url != f"https://github.com/{repository}/pull/{pr_number}":
+        raise ValueError("Pi stage receipt pull-request URL does not match its identity")
+    if (
+        pull_request.get("state") != "OPEN"
+        or pull_request.get("head_sha") != expected_head
+        or pull_request.get("closes_issue") != ISSUE_NUMBER
+        or pull_request.get("readback_verified") is not True
+    ):
+        raise ValueError("Pi stage receipt lacks exact open pull-request readback evidence")
+    branch = _stage_receipt_string(pull_request, "branch")
+    return pr_number, pr_url, branch
+
+
+def _verify_stage_lifecycle(
+    manifest: dict[str, Any],
+    run_dir: Path,
+    entry: dict[str, Any],
+    stage: str,
+    worktree: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> tuple[int, str, str] | None:
+    if lifecycle.get("kind") != PI_STAGE_LIFECYCLE_KINDS[stage]:
+        raise ValueError("Pi stage receipt has the wrong lifecycle evidence kind")
+    if (
+        lifecycle.get("fixture_sha256") != _fixture_digest(manifest)
+        or lifecycle.get("head_sha") != worktree["head"]
+        or lifecycle.get("success") is not True
+    ):
+        raise ValueError("Pi stage lifecycle is not bound to the fixture and revision")
+
+    if stage == "discovery":
+        if (
+            lifecycle.get("paths") != list(FIXTURE_PATHS)
+            or lifecycle.get("all_paths_found") is not True
+        ):
+            raise ValueError("discovery lacks host-observed fixture paths")
+    elif stage == "advise":
+        descriptor = _receipt_dict(entry.get("athena_host_receipt"), "artifact descriptor")
+        if lifecycle.get("athena_receipt_sha256") != descriptor.get("sha256"):
+            raise ValueError("advise lifecycle is not bound to its Athena host receipt")
+        if _verify_pi_bound_athena_receipt(run_dir, entry) != "advise":
+            raise ValueError("advise lifecycle has the wrong Athena host receipt")
+    elif stage == "planning":
+        if lifecycle.get("plan_sha256") != entry.get("stdout_digest"):
+            raise ValueError("planning lifecycle is not bound to the captured plan artifact")
+    elif stage == "implementation":
+        changed_paths = _stage_receipt_string_list(lifecycle, "changed_paths")
+        if set(changed_paths) != set(FIXTURE_PATHS):
+            raise ValueError("implementation does not contain the exact fixture diff")
+        _stage_receipt_sha(lifecycle, "diff_sha256")
+    elif stage == "tests":
+        if (
+            lifecycle.get("argv") != list(FIXTURE_TEST_ARGV)
+            or lifecycle.get("returncode") != 0
+            or lifecycle.get("timed_out") is not False
+        ):
+            raise ValueError("tests stage lacks a passing host fixture-test receipt")
+        _stage_receipt_sha(lifecycle, "result_sha256")
+    elif stage == "commit-pr":
+        if (
+            lifecycle.get("commit_sha") != worktree["head"]
+            or lifecycle.get("signed_commit") is not True
+            or lifecycle.get("dco_signed_off") is not True
+            or worktree["clean"] is not True
+        ):
+            raise ValueError("commit-pr lacks a clean signed DCO commit receipt")
+        return _verify_stage_pr_readback(lifecycle, expected_head=worktree["head"])
+    elif stage == "review":
+        pr_identity = _verify_stage_pr_readback(lifecycle, expected_head=worktree["head"])
+        if (
+            lifecycle.get("reviewed_head_sha") != worktree["head"]
+            or lifecycle.get("implementation_go") is not True
+            or lifecycle.get("implementation_no_go") is not False
+            or lifecycle.get("unresolved_threads") != 0
+            or lifecycle.get("native_auto_merge") is not False
+            or worktree["clean"] is not True
+        ):
+            raise ValueError("review lacks exact-head host review and label readback evidence")
+        _stage_receipt_sha(lifecycle, "review_receipt_id")
+        return pr_identity
+    elif stage == "handoff":
+        pr_identity = _verify_stage_pr_readback(lifecycle, expected_head=worktree["head"])
+        descriptor = _receipt_dict(entry.get("athena_host_receipt"), "artifact descriptor")
+        if (
+            lifecycle.get("learn_receipt_sha256") != descriptor.get("sha256")
+            or lifecycle.get("finished_handoff") is not True
+            or worktree["clean"] is not True
+        ):
+            raise ValueError("handoff lacks exact PR and learning delivery evidence")
+        if _verify_pi_bound_athena_receipt(run_dir, entry) != "learn":
+            raise ValueError("handoff lifecycle has the wrong Athena host receipt")
+        return pr_identity
+    return None
+
+
+def _verify_pi_stage_receipt(
+    manifest: dict[str, Any],
+    run_dir: Path,
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    payload = _load_private_receipt(
+        run_dir,
+        entry.get("stage_receipt"),
+        label="Pi stage coordinator receipt",
+        size_limit=MAX_STAGE_RECEIPT_BYTES,
+    )
+    stage = entry.get("stage")
+    if not isinstance(stage, str) or stage not in PI_EVIDENCE_STAGE_REQUESTS:
+        raise ValueError("Pi stage receipt capture has an unsupported stage")
+    required_keys = {
+        "schema_version",
+        "kind",
+        "run_id",
+        "issue_number",
+        "provider",
+        "capture_id",
+        "stage",
+        "coordinator",
+        "provider_evidence",
+        "worktree",
+        "lifecycle",
+    }
+    if set(payload) != required_keys:
+        raise ValueError("Pi stage coordinator receipt has an unsupported schema")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("kind") != "hephaestus-pi-e2e-stage"
+        or payload.get("run_id") != manifest.get("run_id")
+        or payload.get("issue_number") != ISSUE_NUMBER
+        or payload.get("provider") != PI_PROVIDER_NAME
+        or payload.get("capture_id") != entry.get("id")
+        or payload.get("stage") != stage
+        or entry.get("kind") != "capture"
+        or entry.get("provider") != PI_PROVIDER_NAME
+        or entry.get("status") != "success"
+    ):
+        raise ValueError("Pi stage coordinator receipt is not bound to its successful capture")
+
+    coordinator = _stage_receipt_dict(payload.get("coordinator"), "coordinator")
+    sequence = REQUIRED_E2E_STAGES.index(stage) + 1
+    if (
+        coordinator.get("source") != "hephaestus.automation.pipeline.coordinator"
+        or coordinator.get("pipeline_stage") != PI_STAGE_COORDINATOR_STAGES[stage]
+        or coordinator.get("job_kind") != PI_STAGE_COORDINATOR_JOBS[stage]
+        or coordinator.get("sequence") != sequence
+        or coordinator.get("outcome") != "success"
+    ):
+        raise ValueError("Pi stage receipt lacks its required coordinator completion")
+    receipt_id = _stage_receipt_sha(coordinator, "receipt_id")
+    _stage_receipt_string(coordinator, "worker_id")
+    _stage_receipt_string(coordinator, "completed_at")
+
+    worktree = _verify_stage_worktree(
+        manifest,
+        entry,
+        _stage_receipt_dict(payload.get("worktree"), "worktree"),
+    )
+    provider = _verify_stage_provider_evidence(
+        entry,
+        run_dir,
+        stage,
+        worktree,
+        _stage_receipt_dict(payload.get("provider_evidence"), "provider_evidence"),
+    )
+    pr_identity = _verify_stage_lifecycle(
+        manifest,
+        run_dir,
+        entry,
+        stage,
+        worktree,
+        _stage_receipt_dict(payload.get("lifecycle"), "lifecycle"),
+    )
+    descriptor = _receipt_dict(entry.get("stage_receipt"), "artifact descriptor")
+    return {
+        "capture_id": entry["id"],
+        "stage": stage,
+        "receipt_id": receipt_id,
+        "artifact": descriptor["artifact"],
+        "worktree": worktree,
+        "provider": provider,
+        "pr_identity": pr_identity,
+    }
+
+
+def _verify_stage_receipts(manifest: dict[str, Any], run_dir: Path) -> dict[str, dict[str, Any]]:
+    captures_by_stage: dict[str, dict[str, Any]] = {}
+    failed_captures: list[str] = []
+    for value in manifest.get("commands", []):
+        if (
+            not isinstance(value, dict)
+            or value.get("kind") != "capture"
+            or value.get("provider") != PI_PROVIDER_NAME
+        ):
+            continue
+        if value.get("status") != "success":
+            failed_captures.append(str(value.get("id", "unknown")))
+        stage = value.get("stage")
+        if stage not in REQUIRED_E2E_STAGES:
+            continue
+        if stage in captures_by_stage:
+            raise ValueError(f"required Pi stage has duplicate captures: {stage}")
+        captures_by_stage[cast(str, stage)] = cast(dict[str, Any], value)
+    if failed_captures:
+        raise ValueError(f"Pi capture stages did not succeed: {', '.join(failed_captures)}")
+    missing = [stage for stage in REQUIRED_E2E_STAGES if stage not in captures_by_stage]
+    if missing:
+        raise ValueError(f"required Pi stages are missing: {', '.join(missing)}")
+
+    receipts = [
+        _verify_pi_stage_receipt(manifest, run_dir, captures_by_stage[stage])
+        for stage in REQUIRED_E2E_STAGES
+    ]
+    for field in ("receipt_id", "artifact"):
+        values = [receipt[field] for receipt in receipts]
+        if len(set(values)) != len(values):
+            raise ValueError(f"Pi stages reuse pooled {field} evidence")
+    invocation_ids = [receipt["provider"]["invocation_id"] for receipt in receipts]
+    if len(set(invocation_ids)) != len(invocation_ids):
+        raise ValueError("Pi stages reuse pooled provider invocation evidence")
+    roots = {receipt["worktree"]["root"] for receipt in receipts}
+    if len(roots) != 1:
+        raise ValueError("Pi stages are not bound to one isolated fixture worktree")
+
+    by_stage = {receipt["stage"]: receipt for receipt in receipts}
+    implementation = by_stage["implementation"]
+    tests = by_stage["tests"]
+    if (
+        tests["provider"]["resumed_from_capture_id"] != implementation["capture_id"]
+        or tests["provider"]["session_binding_sha256"]
+        != implementation["provider"]["session_binding_sha256"]
+        or tests["provider"]["session_ids"] != implementation["provider"]["session_ids"]
+    ):
+        raise ValueError("tests stage is not bound to its implementation Pi session")
+
+    new_session_stages = ("planning", "implementation", "handoff")
+    new_bindings = [
+        by_stage[stage]["provider"]["session_binding_sha256"] for stage in new_session_stages
+    ]
+    if len(set(new_bindings)) != len(new_bindings):
+        raise ValueError("independent Pi stages reuse pooled session bindings")
+
+    pr_identities = [by_stage[stage]["pr_identity"] for stage in ("commit-pr", "review", "handoff")]
+    if pr_identities[0] is None or any(identity != pr_identities[0] for identity in pr_identities):
+        raise ValueError("GitHub lifecycle receipts do not identify one exact pull request")
+    committed_head = by_stage["commit-pr"]["worktree"]["head"]
+    if any(
+        by_stage[stage]["worktree"]["head"] != committed_head for stage in ("review", "handoff")
+    ):
+        raise ValueError("review and handoff are not bound to the committed PR head")
+    return by_stage
+
+
+def _verify_completion(manifest: dict[str, Any], run_dir: Path) -> dict[str, dict[str, Any]]:
     """Require the complete successful Pi workflow and its control evidence."""
     _verify_fixture(manifest)
     _verify_workflow(manifest)
     _verify_capture(manifest)
+    _verify_failure_probes(manifest)
     _verify_comparison(manifest)
-    _verify_mnemosyne(manifest)
+    stage_receipts = _verify_stage_receipts(manifest, run_dir)
+    _verify_mnemosyne(manifest, run_dir)
     pi = cast(dict[str, Any], manifest.get("pi", {}))
     inventory = cast(dict[str, Any], pi.get("package_inventory", {}))
     if inventory.get("ready") is not True:
         raise ValueError("Pi package inventory is not ready")
-    pi_captures = [
-        entry
-        for entry in manifest.get("commands", [])
-        if entry.get("kind") == "capture" and entry.get("provider") == PI_PROVIDER_NAME
-    ]
-    failed = [
-        entry.get("id", "unknown") for entry in pi_captures if entry.get("status") != "success"
-    ]
-    if failed:
-        raise ValueError(f"Pi capture stages did not succeed: {', '.join(map(str, failed))}")
-    observed_stages = {
-        entry.get("stage") for entry in pi_captures if isinstance(entry.get("stage"), str)
-    }
-    missing_stages = [stage for stage in REQUIRED_E2E_STAGES if stage not in observed_stages]
-    if missing_stages:
-        raise ValueError(f"required Pi stages are missing: {', '.join(missing_stages)}")
+    return stage_receipts
 
 
-def _evidence_status(manifest: dict[str, Any]) -> str:
+def _evidence_status(manifest: dict[str, Any], run_dir: Path) -> str:
     """Return the truthful publishable completion state for a private manifest."""
     try:
-        _verify_completion(manifest)
+        _verify_completion(manifest, run_dir)
     except (KeyError, TypeError, ValueError):
         return "incomplete"
     return "complete"
@@ -990,17 +2218,35 @@ def _verify_publication(
     runbook_path: Path,
 ) -> None:
     _require_manifest_paths(report_path, runbook_path)
-    expected_report = _render_report(manifest, report_path, runbook_path)
+    expected_report = _render_report(manifest, run_dir, report_path, runbook_path)
     expected_runbook = _render_runbook(manifest, run_dir, report_path)
     if report_path.read_text(encoding="utf-8") != expected_report:
         raise ValueError("rendered report does not match the manifest")
     if runbook_path.read_text(encoding="utf-8") != expected_runbook:
         raise ValueError("rendered runbook does not match the manifest")
-    publication = cast(dict[str, Any], manifest.get("publication", {}))
-    if publication and publication.get("report") != str(report_path):
+    publication_value = manifest.get("publication", {})
+    if not isinstance(publication_value, dict):
+        raise ValueError("publication record is invalid")
+    publication = cast(dict[str, Any], publication_value)
+    if not publication:
+        return
+    if publication.get("report") != str(report_path):
         raise ValueError("publication report path does not match the manifest")
-    if publication and publication.get("runbook") != str(runbook_path):
+    if publication.get("runbook") != str(runbook_path):
         raise ValueError("publication runbook path does not match the manifest")
+    if publication.get("repo") != PROJECT_REPOSITORY:
+        raise ValueError("publication repository does not match the configured repository")
+    commit_sha = _full_commit_sha(publication.get("commit_sha"), label="publication commit")
+    if publication.get("ref") != commit_sha:
+        raise ValueError("publication ref does not match its immutable commit")
+    evidence = _publication_attestation_evidence(
+        manifest,
+        _verify_stage_receipts(manifest, run_dir),
+        commit_sha,
+    )
+    for field, expected in evidence.items():
+        if publication.get(field) != expected:
+            raise ValueError(f"publication {field} does not match its local evidence")
 
 
 def _verify_run(
@@ -1024,7 +2270,7 @@ def _verify_run(
         _verify_comparison(manifest)
         return 0
     if criterion == "mnemosyne":
-        _verify_mnemosyne(manifest)
+        _verify_mnemosyne(manifest, run_dir)
         return 0
     if criterion == "publication":
         if report_path is None or runbook_path is None:
@@ -1034,10 +2280,92 @@ def _verify_run(
     if criterion == "completion":
         if report_path is None or runbook_path is None:
             raise ValueError("completion verification requires report and runbook paths")
-        _verify_completion(manifest)
+        _verify_completion(manifest, run_dir)
         _verify_publication(manifest, run_dir, report_path, runbook_path)
         return 0
     raise ValueError(f"unsupported verification criterion: {criterion}")
+
+
+def _full_commit_sha(value: object, *, label: str) -> str:
+    """Return a canonical immutable Git commit SHA or fail closed."""
+    if not isinstance(value, str) or FULL_COMMIT_SHA_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a full immutable commit SHA")
+    return value
+
+
+def _resolve_publication_commit(repo_root: Path, ref: str) -> str:
+    """Resolve an explicitly immutable publication ref in the local worktree."""
+    requested_sha = _full_commit_sha(ref, label="publication ref")
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                f"{requested_sha}^{{commit}}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise ValueError(
+            "publication ref could not be resolved in the configured repository"
+        ) from exc
+    if result.returncode != 0:
+        raise ValueError("publication ref does not resolve to an existing commit")
+    resolved_sha = _full_commit_sha(result.stdout.strip(), label="resolved publication ref")
+    if resolved_sha != requested_sha:
+        raise ValueError("publication ref resolved to a different commit")
+    return resolved_sha
+
+
+def _publication_attestation_evidence(
+    manifest: dict[str, Any],
+    stage_receipts: dict[str, dict[str, Any]],
+    commit_sha: str,
+) -> dict[str, Any]:
+    """Bind a publication to the captured local snapshot and workflow receipts."""
+    snapshot_sha = _full_commit_sha(
+        _latest_snapshot_revision(manifest), label="captured snapshot revision"
+    )
+    if snapshot_sha != commit_sha:
+        raise ValueError("publication commit does not match the captured snapshot")
+
+    workflow_receipts: list[dict[str, Any]] = []
+    for stage in ("commit-pr", "review", "handoff"):
+        receipt = stage_receipts.get(stage)
+        if not isinstance(receipt, dict):
+            raise ValueError(f"publication lacks the required {stage} workflow receipt")
+        worktree = receipt.get("worktree")
+        if not isinstance(worktree, dict) or worktree.get("head") != commit_sha:
+            raise ValueError(f"publication commit does not match the {stage} workflow receipt")
+        pr_identity = receipt.get("pr_identity")
+        if (
+            not isinstance(pr_identity, tuple)
+            or len(pr_identity) != 3
+            or isinstance(pr_identity[0], bool)
+            or not isinstance(pr_identity[0], int)
+            or not isinstance(pr_identity[1], str)
+            or not isinstance(pr_identity[2], str)
+        ):
+            raise ValueError(f"publication lacks the required {stage} PR readback receipt")
+        receipt_id = _stage_receipt_sha({"receipt_id": receipt.get("receipt_id")}, "receipt_id")
+        workflow_receipts.append(
+            {
+                "stage": stage,
+                "capture_id": receipt["capture_id"],
+                "receipt_id": receipt_id,
+                "head_sha": commit_sha,
+                "pr_number": pr_identity[0],
+                "pr_url": pr_identity[1],
+                "branch": pr_identity[2],
+            }
+        )
+    return {"snapshot_sha": snapshot_sha, "workflow_receipts": workflow_receipts}
 
 
 def _attest_publication(
@@ -1050,8 +2378,15 @@ def _attest_publication(
     verify_defects: bool,
 ) -> int:
     manifest = _load_manifest(run_dir)
-    _verify_completion(manifest)
+    stage_receipts = _verify_completion(manifest, run_dir)
     _verify_publication(manifest, run_dir, report_path, runbook_path)
+    if repo != PROJECT_REPOSITORY:
+        raise ValueError("publication repository does not match the configured repository")
+    repo_root_value = manifest.get("repo_root")
+    if not isinstance(repo_root_value, str) or not repo_root_value:
+        raise ValueError("publication manifest lacks a configured repository path")
+    commit_sha = _resolve_publication_commit(Path(repo_root_value), ref)
+    evidence = _publication_attestation_evidence(manifest, stage_receipts, commit_sha)
     if verify_defects:
         defects = cast(list[dict[str, Any]], manifest.get("defects", []))
         if not all(
@@ -1061,7 +2396,9 @@ def _attest_publication(
             raise ValueError("one or more defects lacks a valid follow-up issue")
     publication = {
         "repo": repo,
-        "ref": ref,
+        "ref": commit_sha,
+        "commit_sha": commit_sha,
+        **evidence,
         "report": str(report_path),
         "runbook": str(runbook_path),
         "verified_defects": verify_defects,
@@ -1124,6 +2461,23 @@ def build_parser() -> argparse.ArgumentParser:
     defect.add_argument("--details", default="")
     defect.add_argument("--source-entry", default="")
 
+    comparison = subparsers.add_parser(
+        "record-comparison",
+        help="persist a paired Pi/control comparison",
+    )
+    comparison.add_argument("--run-id", required=True)
+    comparison.add_argument("--pi-entry", required=True)
+    comparison.add_argument("--control-entry", required=True)
+
+    stage_receipt = subparsers.add_parser(
+        "record-stage-receipt",
+        help="bind one host/coordinator receipt to an exact Pi capture",
+    )
+    stage_receipt.add_argument("--run-id", required=True)
+    stage_receipt.add_argument("--capture-id", required=True)
+    stage_receipt.add_argument("--receipt", type=Path, required=True)
+    stage_receipt.add_argument("--athena-host-receipt", type=Path)
+
     render = subparsers.add_parser("render", help="render the report and runbook")
     render.add_argument("--run-id", required=True)
     render.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
@@ -1179,7 +2533,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "capture":
             prompt = args.prompt or _load_prompt(args)
             command_argv = _normalize_command_argv(args.command_argv)
-            if not command_argv:
+            if args.provider == PI_PROVIDER_NAME and command_argv:
+                raise ValueError(
+                    "Pi capture rejects direct command arguments; provide only a stage prompt so "
+                    "the admitted runtime can apply its execution policy"
+                )
+            if args.provider != PI_PROVIDER_NAME and not command_argv:
                 raise ValueError("capture requires a command to execute")
             return _record_command(
                 run_dir,
@@ -1193,7 +2552,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "failure-probe":
             prompt = args.prompt or _load_prompt(args)
             command_argv = _normalize_command_argv(args.command_argv)
-            if not command_argv:
+            if args.provider == PI_PROVIDER_NAME and command_argv:
+                raise ValueError(
+                    "Pi failure probes reject direct command arguments; provide only a stage "
+                    "prompt so the admitted runtime can apply its execution policy"
+                )
+            if args.provider != PI_PROVIDER_NAME and not command_argv:
                 raise ValueError("failure-probe requires a command to execute")
             return _record_failure_probe(
                 run_dir,
@@ -1210,6 +2574,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 follow_up_issue=args.follow_up_issue,
                 details=args.details,
                 source_entry=args.source_entry,
+            )
+        if args.command == "record-comparison":
+            return _record_comparison(
+                run_dir,
+                pi_entry_id=args.pi_entry,
+                control_entry_id=args.control_entry,
+            )
+        if args.command == "record-stage-receipt":
+            return _record_stage_receipt(
+                run_dir,
+                capture_id=args.capture_id,
+                receipt_path=args.receipt,
+                athena_host_receipt_path=args.athena_host_receipt,
             )
         if args.command == "render":
             return _render_artifacts(run_dir, args.report, args.runbook)
@@ -1230,7 +2607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verify_defects=args.verify_defects,
             )
         raise ValueError(f"unsupported command: {args.command}")
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
