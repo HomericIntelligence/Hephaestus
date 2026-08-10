@@ -8,6 +8,7 @@ defaults.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -80,13 +81,6 @@ class TestAddAgentTimeoutArg:
         add_agent_timeout_arg(parser, default_doc=999)
         args = parser.parse_args([])
         assert args.agent_timeout is None
-
-    def test_zero_is_accepted(self) -> None:
-        """Zero is a valid integer value (no lower-bound guard in this helper)."""
-        parser = _fresh_parser()
-        add_agent_timeout_arg(parser)
-        args = parser.parse_args(["--agent-timeout", "0"])
-        assert args.agent_timeout == 0
 
     def test_non_integer_exits_with_error(self) -> None:
         """A non-integer value triggers argparse error (exits 2)."""
@@ -367,6 +361,34 @@ class TestCombinedFlags:
         assert args.learn_timeout is None
         assert args.follow_up_timeout is None
         assert args.poll_max_wait is None
+
+
+_TIMEOUT_ARGUMENTS: tuple[tuple[Callable[[argparse.ArgumentParser], None], str], ...] = (
+    (add_agent_timeout_arg, "--agent-timeout"),
+    (add_advise_timeout_arg, "--advise-timeout"),
+    (add_poll_max_wait_arg, "--poll-max-wait"),
+    (add_git_message_timeout_arg, "--git-message-timeout"),
+    (add_learn_timeout_arg, "--learn-timeout"),
+    (add_follow_up_timeout_arg, "--follow-up-timeout"),
+)
+
+
+@pytest.mark.parametrize(("add_timeout_arg", "flag"), _TIMEOUT_ARGUMENTS)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_non_positive_timeout_is_rejected(
+    add_timeout_arg: Callable[[argparse.ArgumentParser], None], flag: str, value: str
+) -> None:
+    """Shared timeout flags reject zero and negative values consistently."""
+    parser = _fresh_parser()
+    add_timeout_arg(parser)
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args([flag, value])
+
+    assert exc.value.code == 2
+    help_text = " ".join(parser.format_help().split())
+    assert "positive integer" in help_text
+    assert "zero does not disable" in help_text
 
 
 # ---------------------------------------------------------------------------
