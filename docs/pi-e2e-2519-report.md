@@ -13,12 +13,24 @@
 ## Verification Outcome
 
 This is an incomplete, unverified partial capture, not an end-to-end Pi workflow
-attestation. The only Pi stage recorded is a failed planning attempt, and no
-repository snapshot was recorded. Consequently, this report provides no
-evidence of isolated Pi implementation, test execution, commit or pull-request
-creation, review, merge, or handoff. Completion and publication attestation
-remain blocked pending a newly captured, renderable run with the required
-evidence.
+attestation. It is not closure evidence for #2519.
+
+The only captured Pi command failed during planning. No isolated Pi worktree,
+repository snapshot, successful test run, commit/PR creation, review, or handoff
+evidence has been recorded.
+
+Missing required acceptance evidence:
+
+- A repository snapshot bound to the Pi run.
+- Successful isolated Pi planning, implementation, tests, commit/PR creation,
+  review, and handoff stage receipts.
+- Pi/control comparison evidence for the same fixture, prompt, and recorded
+  revision, and persisted success artifacts or failure behavior.
+- Mnemosyne advise/learn delivery receipts bound to the Pi workflow.
+- Publication attestation for the rendered report and runbook.
+
+Host receipts or a control-provider run do not substitute for the missing
+isolated Pi workflow evidence.
 
 ## Captured Commands
 

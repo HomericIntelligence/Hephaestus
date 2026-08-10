@@ -82,6 +82,12 @@ DEFAULT_CAPTURE_TIMEOUT_SECONDS = 600
 MAX_ATHENA_HOST_RECEIPT_BYTES = 64 * 1024
 MAX_STAGE_RECEIPT_BYTES = 128 * 1024
 PI_PROVIDER_NAME = "pi"
+FAILURE_PROBE_KIND = "failure_probe"
+FAILURE_PROBE_EVIDENCE_KIND = "expected_failure_probe"
+EXPECTED_FAILURE_PROBE_OUTCOME = {
+    "returncode": "nonzero",
+    "timed_out": False,
+}
 FIXTURE_PATHS = (
     "hephaestus/utils/helpers.py",
     "tests/unit/utils/test_general_utils.py",
@@ -239,7 +245,16 @@ def _default_manifest(run_id: str, repo_root: Path) -> dict[str, Any]:
 
 def _validated_run_dir(run_root: Path, run_id: str) -> Path:
     """Return a contained run directory for one safe run-id path component."""
-    if not SAFE_RUN_ID_RE.fullmatch(run_id):
+    separators = tuple(separator for separator in (os.sep, os.altsep, "/", "\\") if separator)
+    if (
+        not run_id
+        or run_id in {".", ".."}
+        or Path(run_id).is_absolute()
+        or PurePosixPath(run_id).is_absolute()
+        or any(separator in run_id for separator in separators)
+        or len(PurePosixPath(run_id).parts) != 1
+        or not SAFE_RUN_ID_RE.fullmatch(run_id)
+    ):
         raise ValueError("run ID must be one safe path component")
 
     resolved_run_root = run_root.resolve()
@@ -876,6 +891,31 @@ def _record_command(
     return returncode
 
 
+def _failure_probe_result(returncode: int, timed_out: bool) -> str:
+    if timed_out:
+        return "unexpected_timeout"
+    if returncode == 0:
+        return "unexpected_success"
+    return "matched_expected_nonzero"
+
+
+def _expected_failure_probe_fields(returncode: int, timed_out: bool) -> dict[str, Any]:
+    matches = returncode != 0 and not timed_out
+    return {
+        "evidence_kind": FAILURE_PROBE_EVIDENCE_KIND,
+        "status": "expected_failure" if matches else _failure_probe_result(returncode, timed_out),
+        "expected_outcome": dict(EXPECTED_FAILURE_PROBE_OUTCOME),
+        "observed_outcome": {
+            "returncode": returncode,
+            "timed_out": timed_out,
+        },
+        "validation": {
+            "matches_expectation": matches,
+            "result": _failure_probe_result(returncode, timed_out),
+        },
+    }
+
+
 def _record_failure_probe(
     run_dir: Path,
     *,
@@ -885,7 +925,7 @@ def _record_failure_probe(
     prompt: str,
     timeout_seconds: int,
 ) -> int:
-    rc = _record_command(
+    _record_command(
         run_dir,
         provider=provider,
         stage=stage,
@@ -902,17 +942,21 @@ def _record_failure_probe(
     if not isinstance(entry, dict):
         raise RuntimeError("failure probe did not record a valid command entry")
 
-    expected_failure = rc != 0
-    entry["kind"] = "failure_probe"
-    entry["status"] = "success" if expected_failure else "failure"
-    entry["probe_outcome"] = {
-        "expected": "nonzero",
-        "observed": "nonzero" if expected_failure else "zero",
-        "matches_expectation": expected_failure,
-    }
+    returncode = entry.get("returncode")
+    timed_out = entry.get("timed_out")
+    if (
+        not isinstance(returncode, int)
+        or isinstance(returncode, bool)
+        or not isinstance(timed_out, bool)
+    ):
+        raise RuntimeError("failure probe did not record a valid command outcome")
+
+    probe_fields = _expected_failure_probe_fields(returncode, timed_out)
+    entry["kind"] = FAILURE_PROBE_KIND
+    entry.update(probe_fields)
     _save_manifest(run_dir, manifest)
-    if not expected_failure:
-        print("error: failure probe unexpectedly succeeded", file=sys.stderr)
+    if not probe_fields["validation"]["matches_expectation"]:
+        print(f"error: failure probe {probe_fields['validation']['result']}", file=sys.stderr)
         return 1
     return 0
 
@@ -930,7 +974,37 @@ def _capture_entry_by_id(manifest: dict[str, Any], entry_id: str) -> dict[str, A
     return cast(dict[str, Any], matches[0])
 
 
-def _capture_outcome(entry: dict[str, Any]) -> dict[str, Any]:
+def _capture_artifact_sha256(run_dir: Path, entry: dict[str, Any], stream: str) -> str:
+    artifacts = entry.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError(f"capture {entry.get('id', 'unknown')} has no artifact manifest")
+    artifact_value = artifacts.get(stream)
+    if not isinstance(artifact_value, str) or not artifact_value:
+        raise ValueError(f"capture {entry.get('id', 'unknown')} lacks a {stream} artifact")
+    artifact = PurePosixPath(artifact_value)
+    if artifact.is_absolute() or ".." in artifact.parts or not artifact.parts:
+        raise ValueError(f"capture {entry.get('id', 'unknown')} {stream} artifact escapes run")
+
+    artifact_path = run_dir
+    for part in artifact.parts:
+        artifact_path /= part
+        if artifact_path.is_symlink():
+            raise ValueError(
+                f"capture {entry.get('id', 'unknown')} {stream} artifact path uses a symlink"
+            )
+    try:
+        artifact_path.resolve(strict=True).relative_to(run_dir.resolve(strict=True))
+    except (FileNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"capture {entry.get('id', 'unknown')} {stream} artifact is unavailable"
+        ) from exc
+    if not artifact_path.is_file():
+        raise ValueError(f"capture {entry.get('id', 'unknown')} {stream} artifact is invalid")
+
+    return _sha256_bytes(artifact_path.read_bytes())
+
+
+def _capture_outcome(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
     status = entry.get("status")
     returncode = entry.get("returncode")
     timed_out = entry.get("timed_out")
@@ -947,6 +1021,11 @@ def _capture_outcome(entry: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"capture {entry.get('id', 'unknown')} has no valid {stream} artifact digest"
             )
+        artifact_digest = _capture_artifact_sha256(run_dir, entry, stream)
+        if artifact_digest != digest:
+            raise ValueError(
+                f"capture {entry.get('id', 'unknown')} {stream} artifact digest mismatch"
+            )
     return {
         "status": status,
         "returncode": returncode,
@@ -958,6 +1037,7 @@ def _capture_outcome(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _comparison_payload(
     manifest: dict[str, Any],
+    run_dir: Path,
     *,
     pi_entry_id: str,
     control_entry_id: str,
@@ -1001,8 +1081,8 @@ def _comparison_payload(
     ):
         raise ValueError("comparison captures must use the same fixture prompt")
 
-    pi_outcome = _capture_outcome(pi_entry)
-    control_outcome = _capture_outcome(control_entry)
+    pi_outcome = _capture_outcome(run_dir, pi_entry)
+    control_outcome = _capture_outcome(run_dir, control_entry)
     return {
         "fixture_sha256": fixture_sha256,
         "stage": stage,
@@ -1035,6 +1115,7 @@ def _record_comparison(
     manifest = _load_manifest(run_dir)
     payload = _comparison_payload(
         manifest,
+        run_dir,
         pi_entry_id=pi_entry_id,
         control_entry_id=control_entry_id,
     )
@@ -1181,10 +1262,11 @@ def _render_report(
     defects = cast(list[dict[str, Any]], manifest.get("defects", []))
     snapshots = cast(list[dict[str, Any]], manifest.get("snapshots", []))
     skill_commands = ", ".join(f"`{skill}`" for skill in pi.get("skill_commands", [])) or "n/a"
+    evidence_status = _evidence_status(manifest, run_dir)
     lines = [
         "# Pi Issue 2519 Report",
         "",
-        f"- Evidence status: `{_evidence_status(manifest, run_dir)}`",
+        f"- Evidence status: `{evidence_status}`",
         f"- Fixture: `{manifest['fixture']['title']}`",
         f"- Run ID: `{manifest['run_id']}`",
         f"- Created: `{manifest['created_at']}`",
@@ -1194,9 +1276,40 @@ def _render_report(
         f"- Inventory status: `{inventory.get('status', '')}`",
         f"- Inventory ready: `{inventory.get('ready', False)}`",
         "",
-        "## Captured Commands",
-        "",
     ]
+    if evidence_status != "complete":
+        lines.extend(
+            [
+                "## Verification Outcome",
+                "",
+                "This is an incomplete, unverified partial capture, not an end-to-end Pi "
+                "workflow attestation. It is not closure evidence for #2519.",
+                "",
+                "The only captured Pi command failed during planning. No isolated Pi "
+                "worktree, repository snapshot, successful test run, commit/PR creation, "
+                "review, or handoff evidence has been recorded.",
+                "",
+                "Missing required acceptance evidence:",
+                "",
+                "- A repository snapshot bound to the Pi run.",
+                "- Successful isolated Pi planning, implementation, tests, commit/PR "
+                "creation, review, and handoff stage receipts.",
+                "- Pi/control comparison evidence for the same fixture, prompt, recorded "
+                "revision, and persisted success artifacts or failure behavior.",
+                "- Mnemosyne advise/learn delivery receipts bound to the Pi workflow.",
+                "- Publication attestation for the rendered report and runbook.",
+                "",
+                "Host receipts or a control-provider run do not substitute for the missing "
+                "isolated Pi workflow evidence.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Captured Commands",
+            "",
+        ]
+    )
     if commands:
         lines.extend(
             [
@@ -1207,15 +1320,26 @@ def _render_report(
                 "| --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
+        has_unverified_control = False
         for entry in commands:
+            status = str(entry.get("status", ""))
+            returncode = str(entry.get("returncode", ""))
+            if (
+                entry.get("stage") == "control"
+                and entry.get("status") == "success"
+                and not entry.get("session_ids")
+            ):
+                status = "unverified / unproven"
+                returncode = f"claimed `{returncode}` (private manifest only)"
+                has_unverified_control = True
             lines.append(
                 "| "
                 + " | ".join(
                     [
                         str(entry.get("stage", "")),
                         str(entry.get("provider", "")),
-                        str(entry.get("status", "")),
-                        str(entry.get("returncode", "")),
+                        status,
+                        returncode,
                         ", ".join(f"`{session_id}`" for session_id in entry.get("session_ids", []))
                         or "none",
                         ", ".join(entry.get("tool_scopes", [])) or "n/a",
@@ -1223,6 +1347,18 @@ def _render_report(
                     ]
                 )
                 + " |"
+            )
+        if has_unverified_control:
+            lines.extend(
+                [
+                    "",
+                    "The Codex control result is unverified: no committed, report-bound control "
+                    "transcript exists for independent re-execution. The available host receipts "
+                    "cover linting, type checking, and unit tests only; they do not establish this "
+                    "Codex invocation. A committed transcript bound to this report and "
+                    "reproducible by an independent reviewer is required before this row can be "
+                    "marked successful.",
+                ]
             )
     else:
         lines.append("_No captured commands recorded yet._")
@@ -1384,7 +1520,8 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             ),
             (
                 "- `comparison` requires a persisted Pi/control pair for the same fixture, "
-                "stage, prompt, and recorded revision, with matching outcomes."
+                "stage, prompt, and recorded revision, with matching outcomes plus "
+                "matching success artifact digests or matching failure behavior."
             ),
             (
                 "- `mnemosyne` requires persisted Pi-bound Athena advise and learning host "
@@ -1466,26 +1603,28 @@ def _verify_capture(manifest: dict[str, Any]) -> None:
 def _verify_failure_probes(manifest: dict[str, Any]) -> None:
     """Require every recorded failure probe to have observed its expected nonzero result."""
     for entry in manifest.get("commands", []):
-        if not isinstance(entry, dict) or entry.get("kind") != "failure_probe":
+        if not isinstance(entry, dict) or entry.get("kind") != FAILURE_PROBE_KIND:
             continue
         returncode = entry.get("returncode")
-        expected_failure = (
-            isinstance(returncode, int) and not isinstance(returncode, bool) and returncode != 0
-        )
-        expected_outcome = {
-            "expected": "nonzero",
-            "observed": "nonzero" if expected_failure else "zero",
-            "matches_expectation": expected_failure,
-        }
-        if entry.get("probe_outcome") != expected_outcome:
-            raise ValueError("failure probe has an invalid expected-outcome record")
-        if entry.get("status") != ("success" if expected_failure else "failure"):
+        timed_out = entry.get("timed_out")
+        if (
+            entry.get("evidence_kind") != FAILURE_PROBE_EVIDENCE_KIND
+            or not isinstance(returncode, int)
+            or isinstance(returncode, bool)
+            or not isinstance(timed_out, bool)
+        ):
+            raise ValueError("failure probe has an invalid observed outcome")
+        expected_fields = _expected_failure_probe_fields(returncode, timed_out)
+        for field in ("expected_outcome", "observed_outcome", "validation"):
+            if entry.get(field) != expected_fields[field]:
+                raise ValueError("failure probe has an invalid expected-outcome record")
+        if entry.get("status") != expected_fields["status"]:
             raise ValueError("failure probe status does not match its observed outcome")
-        if not expected_failure:
-            raise ValueError("failure probe did not fail as expected")
+        if expected_fields["validation"]["matches_expectation"] is not True:
+            raise ValueError("failure probe did not match expected nonzero outcome")
 
 
-def _verify_comparison(manifest: dict[str, Any]) -> None:
+def _verify_comparison(manifest: dict[str, Any], run_dir: Path) -> None:
     comparisons = manifest.get("comparisons", [])
     if not isinstance(comparisons, list) or not comparisons:
         raise ValueError("comparison requires a persisted Pi/control pair")
@@ -1503,6 +1642,7 @@ def _verify_comparison(manifest: dict[str, Any]) -> None:
         seen_pairs.add(pair)
         expected = _comparison_payload(
             manifest,
+            run_dir,
             pi_entry_id=pi_entry_id,
             control_entry_id=control_entry_id,
         )
@@ -1511,6 +1651,17 @@ def _verify_comparison(manifest: dict[str, Any]) -> None:
                 raise ValueError("comparison record does not match its captured outcomes")
         if comparison.get("outcomes_match") is not True:
             raise ValueError("paired Pi and control outcomes do not match")
+        artifacts = comparison.get("artifact_comparison")
+        pi_outcome = comparison.get("pi_outcome")
+        control_outcome = comparison.get("control_outcome")
+        if (
+            isinstance(pi_outcome, dict)
+            and isinstance(control_outcome, dict)
+            and pi_outcome.get("status") == "success"
+            and control_outcome.get("status") == "success"
+            and artifacts != {"stdout_matches": True, "stderr_matches": True}
+        ):
+            raise ValueError("successful Pi/control comparison artifacts do not match")
 
 
 def _receipt_dict(value: object, field: str) -> dict[str, Any]:
@@ -1748,19 +1899,30 @@ def _verify_pi_bound_athena_receipt(
 
 
 def _verify_mnemosyne(manifest: dict[str, Any], run_dir: Path) -> None:
-    verified: set[str] = set()
+    required_stages = {"advise", "review", "handoff"}
+    verified_stages: set[str] = set()
+    verified_athena: set[str] = set()
     for entry in manifest.get("commands", []):
-        if not isinstance(entry, dict) or "athena_host_receipt" not in entry:
+        if not isinstance(entry, dict):
             continue
-        kind = _verify_pi_bound_athena_receipt(run_dir, cast(dict[str, Any], entry))
-        if kind in verified:
-            raise ValueError(f"duplicate persisted Athena {kind} host receipt")
-        verified.add(kind)
-    missing = {"advise", "learn"}.difference(verified)
-    if missing:
+        stage = entry.get("stage")
+        if stage not in required_stages or "stage_receipt" not in entry:
+            continue
+        if stage in verified_stages:
+            raise ValueError(f"duplicate persisted Pi {stage} stage receipt")
+        _verify_pi_stage_receipt(manifest, run_dir, cast(dict[str, Any], entry))
+        verified_stages.add(cast(str, stage))
+        if stage == "advise":
+            verified_athena.add("advise")
+        elif stage == "handoff":
+            verified_athena.add("learn")
+
+    missing_stages = required_stages.difference(verified_stages)
+    missing_athena = {"advise", "learn"}.difference(verified_athena)
+    if missing_stages or missing_athena:
         raise ValueError(
-            "Mnemosyne verification requires persisted Pi-bound Athena advise and "
-            "LearnDeliveryReceipt host evidence"
+            "Mnemosyne verification requires persisted Pi-bound coordinator review, "
+            "Athena advise, and LearnDeliveryReceipt host evidence"
         )
 
 
@@ -1847,6 +2009,9 @@ def _verify_stage_provider_evidence(
     worktree: dict[str, Any],
     provider_evidence: dict[str, Any],
 ) -> dict[str, Any]:
+    outcome = _capture_outcome(run_dir, entry)
+    if outcome["status"] != "success":
+        raise ValueError("Pi stage receipt is not bound to a successful provider capture")
     request = PI_EVIDENCE_STAGE_REQUESTS[stage]
     expected_policy = _pi_policy_evidence(resolve_policy(request), request)
     observed_policy = _stage_receipt_dict(
@@ -1873,12 +2038,15 @@ def _verify_stage_provider_evidence(
         raise ValueError("Pi capture lacks its host-observed required skill calls")
 
     session_ids = _stage_receipt_string_list(provider_evidence, "session_ids")
+    if not session_ids:
+        raise ValueError("Pi stage receipt lacks observed session evidence")
     if entry.get("session_ids") != session_ids:
         raise ValueError("Pi stage receipt session evidence is not bound to its capture")
     invocation_id = _stage_receipt_sha(provider_evidence, "invocation_id")
-    if provider_evidence.get("stdout_sha256") != entry.get(
-        "stdout_digest"
-    ) or provider_evidence.get("stderr_sha256") != entry.get("stderr_digest"):
+    if (
+        provider_evidence.get("stdout_sha256") != outcome["stdout_sha256"]
+        or provider_evidence.get("stderr_sha256") != outcome["stderr_sha256"]
+    ):
         raise ValueError("Pi stage receipt output evidence is not bound to its capture")
 
     binding_sha = provider_evidence.get("session_binding_sha256", "")
@@ -2120,6 +2288,7 @@ def _verify_pi_stage_receipt(
 
 def _verify_stage_receipts(manifest: dict[str, Any], run_dir: Path) -> dict[str, dict[str, Any]]:
     captures_by_stage: dict[str, dict[str, Any]] = {}
+    capture_ids: set[str] = set()
     failed_captures: list[str] = []
     for value in manifest.get("commands", []):
         if (
@@ -2128,11 +2297,17 @@ def _verify_stage_receipts(manifest: dict[str, Any], run_dir: Path) -> dict[str,
             or value.get("provider") != PI_PROVIDER_NAME
         ):
             continue
-        if value.get("status") != "success":
-            failed_captures.append(str(value.get("id", "unknown")))
         stage = value.get("stage")
         if stage not in REQUIRED_E2E_STAGES:
             continue
+        capture_id = value.get("id")
+        if not isinstance(capture_id, str) or not capture_id:
+            raise ValueError(f"required Pi stage has an invalid capture id: {stage}")
+        if capture_id in capture_ids:
+            raise ValueError("required Pi stages reuse duplicate capture ids")
+        capture_ids.add(capture_id)
+        if value.get("status") != "success":
+            failed_captures.append(str(value.get("id", "unknown")))
         if stage in captures_by_stage:
             raise ValueError(f"required Pi stage has duplicate captures: {stage}")
         captures_by_stage[cast(str, stage)] = cast(dict[str, Any], value)
@@ -2153,6 +2328,16 @@ def _verify_stage_receipts(manifest: dict[str, Any], run_dir: Path) -> dict[str,
     invocation_ids = [receipt["provider"]["invocation_id"] for receipt in receipts]
     if len(set(invocation_ids)) != len(invocation_ids):
         raise ValueError("Pi stages reuse pooled provider invocation evidence")
+    session_owners: dict[str, str] = {}
+    for receipt in receipts:
+        stage = receipt["stage"]
+        for session_id in receipt["provider"]["session_ids"]:
+            owner = session_owners.get(session_id)
+            if owner is None:
+                session_owners[session_id] = stage
+                continue
+            if {owner, stage} != {"implementation", "tests"}:
+                raise ValueError("independent Pi stages reuse pooled session evidence")
     roots = {receipt["worktree"]["root"] for receipt in receipts}
     if len(roots) != 1:
         raise ValueError("Pi stages are not bound to one isolated fixture worktree")
@@ -2192,7 +2377,7 @@ def _verify_completion(manifest: dict[str, Any], run_dir: Path) -> dict[str, dic
     _verify_workflow(manifest)
     _verify_capture(manifest)
     _verify_failure_probes(manifest)
-    _verify_comparison(manifest)
+    _verify_comparison(manifest, run_dir)
     stage_receipts = _verify_stage_receipts(manifest, run_dir)
     _verify_mnemosyne(manifest, run_dir)
     pi = cast(dict[str, Any], manifest.get("pi", {}))
@@ -2267,7 +2452,7 @@ def _verify_run(
         _verify_capture(manifest)
         return 0
     if criterion == "comparison":
-        _verify_comparison(manifest)
+        _verify_comparison(manifest, run_dir)
         return 0
     if criterion == "mnemosyne":
         _verify_mnemosyne(manifest, run_dir)
@@ -2294,8 +2479,9 @@ def _full_commit_sha(value: object, *, label: str) -> str:
 
 
 def _resolve_publication_commit(repo_root: Path, ref: str) -> str:
-    """Resolve an explicitly immutable publication ref in the local worktree."""
-    requested_sha = _full_commit_sha(ref, label="publication ref")
+    """Resolve a publication ref and require it to be the immutable commit name."""
+    if not isinstance(ref, str) or not ref:
+        raise ValueError("publication ref must identify an existing commit")
     try:
         result = subprocess.run(
             [
@@ -2305,7 +2491,7 @@ def _resolve_publication_commit(repo_root: Path, ref: str) -> str:
                 "rev-parse",
                 "--verify",
                 "--end-of-options",
-                f"{requested_sha}^{{commit}}",
+                f"{ref}^{{commit}}",
             ],
             capture_output=True,
             text=True,
@@ -2318,7 +2504,9 @@ def _resolve_publication_commit(repo_root: Path, ref: str) -> str:
     if result.returncode != 0:
         raise ValueError("publication ref does not resolve to an existing commit")
     resolved_sha = _full_commit_sha(result.stdout.strip(), label="resolved publication ref")
-    if resolved_sha != requested_sha:
+    if FULL_COMMIT_SHA_RE.fullmatch(ref) is None:
+        raise ValueError("publication ref must be supplied as its resolved immutable commit SHA")
+    if resolved_sha != ref:
         raise ValueError("publication ref resolved to a different commit")
     return resolved_sha
 
