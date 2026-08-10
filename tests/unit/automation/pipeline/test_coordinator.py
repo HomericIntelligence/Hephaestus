@@ -1218,6 +1218,21 @@ class TestFailBackRouting:
         assert item.stage is StageName.IMPLEMENTATION
         assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
 
+    def test_empty_pr_diff_routes_to_substantive_implementation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The empty-diff review guard must reach the marker's consumer."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(4, StageName.PR_REVIEW)
+        item.payload["empty_diff_reimplementation"] = True
+        coordinator._push_item(item, StageName.PR_REVIEW, enter=False)
+
+        coordinator._route(item, StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff"))
+
+        assert item.stage is StageName.IMPLEMENTATION
+        assert len(coordinator.queues[StageName.IMPLEMENTATION]) == 1
+        assert item.payload["empty_diff_reimplementation"] is True
+
     def test_unknown_reason_uses_default_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

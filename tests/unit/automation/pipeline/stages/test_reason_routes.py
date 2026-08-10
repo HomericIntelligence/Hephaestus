@@ -103,6 +103,7 @@ def test_scan_is_not_vacuous() -> None:
 def test_named_reasons_route_where_the_doc_says() -> None:
     """The doc's key cross-stage arrows hold for the emitted vocabulary."""
     assert ROUTES[StageName.PR_REVIEW].fail_routes["agent_error"] == StageName.IMPLEMENTATION
+    assert ROUTES[StageName.PR_REVIEW].fail_routes["empty_pr_diff"] == StageName.IMPLEMENTATION
     assert ROUTES[StageName.IMPLEMENTATION].fail_routes["plan_not_go"] == StageName.PLAN_REVIEW
     assert (
         ROUTES[StageName.IMPLEMENTATION].fail_routes["already_implementation_go_pr"]

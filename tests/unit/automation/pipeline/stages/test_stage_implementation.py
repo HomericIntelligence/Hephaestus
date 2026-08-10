@@ -620,6 +620,19 @@ class TestGate:
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.ADVANCE
 
+    def test_adopted_empty_diff_failback_runs_substantive_implementation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An empty reviewed diff reuses the PR writer but does not re-review it."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="ADOPTED")
+        item.payload["empty_diff_reimplementation"] = True
+
+        outcome = stage.step(item, make_ctx())
+
+        assert outcome == Continue(next_state="ADVISE_WAIT")
+        assert "empty_diff_reimplementation" not in item.payload
+
     def test_adopted_dirty_worktree_salvages_then_advances(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
