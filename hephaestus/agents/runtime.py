@@ -237,6 +237,10 @@ def register_pi_isolation_adapter(adapter: PiIsolationAdapter) -> None:
     integration opt in without exposing an unscoped provider runner.
     """
     global _PI_ISOLATION_ADAPTER
+    if not _supports_pi_isolation_adapter_invoke_contract(adapter):
+        raise PiIsolationUnavailableError(
+            "Pi isolation adapter does not implement invoke() with the required keyword contract"
+        )
     _PI_ISOLATION_ADAPTER = adapter
 
 

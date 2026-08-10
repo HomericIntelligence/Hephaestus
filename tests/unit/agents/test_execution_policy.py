@@ -189,6 +189,28 @@ def test_registered_host_adapter_admits_pi_selection(
     assert agent_runtime.resolve_agent("pi", cwd=tmp_path) == "pi"
 
 
+def test_register_host_adapter_rejects_incompatible_invoke_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit registration validates the same keyword contract as entry points."""
+
+    class Adapter:
+        def invoke(self, *, policy: ExecutionPolicy) -> agent_runtime.AgentRunResult:
+            raise AssertionError("registration must not invoke the adapter")
+
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+
+    with pytest.raises(
+        agent_runtime.PiIsolationUnavailableError,
+        match=r"does not implement invoke\(\) with the required keyword contract",
+    ):
+        agent_runtime.register_pi_isolation_adapter(
+            cast(agent_runtime.PiIsolationAdapter, Adapter())
+        )
+
+    assert agent_runtime._PI_ISOLATION_ADAPTER is None
+
+
 def test_named_host_adapter_entry_point_admits_fresh_cli_process(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
