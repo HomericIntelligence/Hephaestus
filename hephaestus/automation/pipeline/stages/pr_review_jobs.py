@@ -18,7 +18,11 @@ from ..github_jobs import (
     ReplyHandoffAttempted,
 )
 from .pr_review_diagnostics import publish_host_verification_failure
-from .pr_review_recovery import consume_reply_handoff_receipt, restart_direct_pr_review
+from .pr_review_recovery import (
+    consume_reply_handoff_receipt,
+    empty_diff_outcome,
+    restart_direct_pr_review,
+)
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -418,14 +422,7 @@ class PrReviewJobs(_PrReviewHost):
         return JobRequest(job, on_done_state=VALIDATE_WAIT)
 
     def _route_threads_before_broad_review(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Recheck threads immediately before dispatching a broad audit.
-
-        ``on_enter`` owns the first routing decision, but a reviewer checkout
-        and its fixed host verification can take long enough for a new thread
-        to appear.  Never schedule a second broad audit for that new work:
-        give unreplied threads to implementation, or send a complete response
-        set to comment validation on the already-proven detached checkout.
-        """
+        """Route threads appearing during checkout before broad review."""
         if item.pr is None:
             return self._cleanup_review_worktree_then(
                 item,
@@ -460,22 +457,9 @@ class PrReviewJobs(_PrReviewHost):
                 # host checks are running. Keep the already-selected
                 # validation-only route instead of opening a second audit.
                 return Continue(next_state=VALIDATE_WAIT)
-            if not str(item.payload.get("pr_diff") or "").strip():
-                # A reviewer cannot attach a blocking finding to an empty
-                # diff. Sending this snapshot through the broad-review
-                # contract would therefore manufacture a clean audit and
-                # authorize an empty PR. Existing review threads are routed
-                # above and retain their normal remediation semantics.
-                item.payload.pop("reviewed_pr_head_sha", None)
-                item.payload["empty_diff_reimplementation"] = True
-                logger.warning(
-                    "pr_review:%d: empty cumulative diff; failing back to implementation",
-                    _issue_number(item),
-                )
-                return self._cleanup_review_worktree_then(
-                    item,
-                    StageOutcome(Disposition.FAIL_BACK, "empty_pr_diff"),
-                )
+            empty_diff = empty_diff_outcome(item)
+            if empty_diff:
+                return self._cleanup_review_worktree_then(item, empty_diff)
             return self._submit_review_job(item, ctx)
         snapshots = _validation_thread_snapshots(live_threads, receipts)
         remediation_threads = _normalize_remediation_threads(live_threads)
