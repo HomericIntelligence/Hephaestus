@@ -699,11 +699,8 @@ def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Pa
                         str(entry.get("provider", "")),
                         str(entry.get("status", "")),
                         str(entry.get("returncode", "")),
-                        (
-                            f"{len(entry.get('session_ids', []))} recorded privately"
-                            if entry.get("session_ids")
-                            else "none"
-                        ),
+                        ", ".join(f"`{session_id}`" for session_id in entry.get("session_ids", []))
+                        or "none",
                         ", ".join(entry.get("tool_scopes", [])) or "n/a",
                         ", ".join(entry.get("skill_calls", [])) or "n/a",
                     ]

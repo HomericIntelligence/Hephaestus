@@ -14,7 +14,7 @@
 
 | Stage | Provider | Status | Returncode | Session evidence | Tool scopes | Skill calls |
 | --- | --- | --- | --- | --- | --- | --- |
-| planning | pi | failure | 1 | 1 recorded privately | read, grep | n/a |
+| planning | pi | failure | 1 | `019feaa3-88b4-76c6-84c0-858c63b4cb31` | read, grep | n/a |
 | control | codex | success | 0 | none | n/a | n/a |
 
 ## Snapshots

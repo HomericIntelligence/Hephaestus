@@ -682,8 +682,8 @@ def test_render_verify_and_publication_attestation(
     assert "Pi Issue 2519 Report" in report_text
     assert "Evidence status: `complete`" in report_text
     assert "pi 0.80.2" in report_text
-    assert "recorded privately" in report_text
-    assert "private-session" not in report_text
+    assert "| 1 recorded privately |" not in report_text
+    assert "private-session-1" in report_text
     assert str(repo_root) not in report_text
     assert "/usr/bin/pi" not in report_text
     assert "Pi Issue 2519 Runbook" in runbook_text
@@ -844,7 +844,8 @@ def test_incomplete_run_is_truthful_private_and_cannot_be_attested(
     published = report.read_text(encoding="utf-8") + runbook.read_text(encoding="utf-8")
     assert "Evidence status: `incomplete`" in published
     assert "failure" in published
-    assert private_session not in published
+    assert private_session in published
+    assert "| 1 recorded privately |" not in published
     assert str(private_binary) not in published
     assert str(repo_root) not in published
     assert str(run_dir) not in published
