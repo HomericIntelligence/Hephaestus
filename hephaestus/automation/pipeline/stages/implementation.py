@@ -696,6 +696,14 @@ class ImplementationStage(Stage):
     def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADOPTED advances to pr_review after the adopted worktree is ready."""
         issue = _issue_number(item)
+        if item.payload.pop("empty_diff_reimplementation", False):
+            logger.info(
+                "implementation:%d: adopted PR #%s has an empty diff; "
+                "running a substantive implementation pass",
+                issue,
+                item.pr,
+            )
+            return Continue(next_state=ADVISE_WAIT)
         # Existing-PR fast path complete: worktree ready on the PR's real
         # head branch — hand the PR to pr_review (doc step 1 "skip to
         # step 8": nothing to implement, commit, or create).
