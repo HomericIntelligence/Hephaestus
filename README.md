@@ -312,12 +312,12 @@ The package currently installs 57 console scripts from `[project.scripts]`.
 
 | Command | Description |
 |---|---|
-| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code or Codex (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |
+| `hephaestus-automation-loop` | Multi-repo queue-based automation pipeline using Claude Code, Codex, or an explicitly admitted Pi host adapter (repo → planning → plan_review → implementation → pr_review → merge_wait → finished; restarted implementation-GO inputs re-enter `merge_wait` with their loop-owned approval label) |
 | `hephaestus-install-pi-plugins` | Install and preflight the catalog-pinned Pi CLI package set; passing this gate does not bypass #2518 |
-| `hephaestus-plan-issues` | Bulk issue planning using Claude Code or Codex |
-| `hephaestus-implement-issues` | Bulk issue implementation using Claude Code or Codex in parallel worktrees |
-| `hephaestus-review-prs` | PR review/remediation automation using Claude Code or Codex in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
-| `hephaestus-agent-stage` | Run one Claude or Codex automation stage with prompt and skill context |
+| `hephaestus-plan-issues` | Bulk issue planning using Claude Code, Codex, or an explicitly admitted Pi host adapter |
+| `hephaestus-implement-issues` | Bulk issue implementation using Claude Code, Codex, or an explicitly admitted Pi host adapter in parallel worktrees |
+| `hephaestus-review-prs` | PR review/remediation automation using Claude Code, Codex, or an explicitly admitted Pi host adapter in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
+| `hephaestus-agent-stage` | Run one Claude, Codex, or explicitly admitted Pi automation stage with prompt and skill context |
 | `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 | `hephaestus-drive-prs-green` | Review directly scoped PRs or PRs linked from discovered issues through the pr_review/merge_wait pipeline slice; it does not sweep unrelated open PRs |

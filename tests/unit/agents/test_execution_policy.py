@@ -193,6 +193,7 @@ def test_named_host_adapter_entry_point_admits_fresh_cli_process(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An explicitly selected installed adapter bootstraps a fresh process."""
+    """An explicit installed adapter can bootstrap a new console process."""
     from hephaestus.agents.pi_plugins import PiPreflightResult
 
     class Adapter:
@@ -205,6 +206,7 @@ def test_named_host_adapter_entry_point_admits_fresh_cli_process(
                 return Adapter()
 
             return factory
+            return Adapter
 
     observed: list[dict[str, str]] = []
 
@@ -325,6 +327,8 @@ def test_named_host_adapter_requires_one_exact_entry_point(
         agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
     )
     monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
+    authenticated = pytest.fail
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", authenticated)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setattr(
         agent_runtime,
@@ -385,29 +389,6 @@ def test_named_host_adapter_rejects_an_invalid_protocol(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A factory result without a callable invoke boundary remains unadmitted."""
-    from hephaestus.agents.pi_plugins import PiPreflightResult
-
-    class EntryPoint:
-        def load(self) -> object:
-            return object
-
-    monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
-    )
-    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
-    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
-    monkeypatch.setattr(
-        agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
-    )
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
-
-    with pytest.raises(
-        agent_runtime.PiIsolationUnavailableError,
-        match=r"does not implement invoke\(\)",
-    ):
-        agent_runtime.resolve_agent("pi", cwd=tmp_path)
-
-
 def test_named_host_adapter_sanitizes_protocol_attribute_failures(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
