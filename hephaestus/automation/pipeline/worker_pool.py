@@ -53,7 +53,6 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
     GitHubJobRunner,
-    GuardedGitHubJob,
 )
 from hephaestus.automation.pipeline.jobs import (
     WORKTREE_MATERIALIZED_KEY,
@@ -1494,13 +1493,7 @@ class WorkerPool:
 
     def submit(
         self,
-        job: AgentJob
-        | BuildTestJob
-        | GitJob
-        | GitHubJob
-        | GuardedGitHubJob
-        | CompactJob
-        | AthenaSkillJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
         on_done_state: str | StageName,
         *,
         claim_key: str = "",
@@ -1611,13 +1604,7 @@ class WorkerPool:
 
     def _run(
         self,
-        job: AgentJob
-        | BuildTestJob
-        | GitJob
-        | GitHubJob
-        | GuardedGitHubJob
-        | CompactJob
-        | AthenaSkillJob,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
         claim_key: str = "",
         claim_stage: str = "",
     ) -> JobResult:
@@ -1659,7 +1646,7 @@ class WorkerPool:
                     result = self._run_build_test(job)
                 elif isinstance(job, GitJob):
                     result = self._run_git(job)
-                elif isinstance(job, (GitHubJob, GuardedGitHubJob)):
+                elif isinstance(job, GitHubJob):
                     result = self._run_github(job)
                 elif isinstance(job, CompactJob):
                     result = self._run_compact(job)
@@ -1701,12 +1688,11 @@ class WorkerPool:
             worker_id=worker_id,
         )
 
-    def _run_github(self, job: GitHubJob | GuardedGitHubJob) -> JobResult:
+    def _run_github(self, job: GitHubJob) -> JobResult:
         """Execute one closed GitHub operation exactly once per submission."""
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
-        operation = job.operation if isinstance(job, GuardedGitHubJob) else job
-        with self._repo_lock(operation.repo):
+        with self._repo_lock(job.repo):
             receipt = self._github_job_runner.run(job)
         return JobResult(ok=True, value=receipt)
 
@@ -3179,7 +3165,6 @@ class WorkerPool:
         """Validate and atomically reserve a direct-scope implementation branch."""
         base_sha = kwargs.pop("base_sha", None)
         branch_name = str(kwargs.get("branch_name") or "")
-        guard_managed_branch = bool(kwargs.pop("guard_managed_branch", False))
         if base_sha is None:
             return None, branch_name
         if sync_to_remote or bool(kwargs.get("refresh_base", False)):
@@ -3193,11 +3178,6 @@ class WorkerPool:
             return JobResult(ok=False, error="direct scope checkout pin mismatch")
         if not branch_name:
             return JobResult(ok=False, error="direct scope branch name is missing")
-        if guard_managed_branch:
-            # The issue guard atomically created/advanced this exact
-            # implementation branch. That branch is the direct-scope
-            # reservation, so an absent-only reservation would race with it.
-            return None, branch_name
         git_utils.reserve_remote_branch_if_absent(
             branch_name,
             base_sha,

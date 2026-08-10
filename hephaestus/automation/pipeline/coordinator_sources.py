@@ -1,6 +1,5 @@
 import sys
-from contextlib import nullcontext
-from typing import Any, cast
+from typing import Any
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
@@ -114,76 +113,66 @@ class SourceCoordinator(_CoordinatorHost):
             ):
                 source.pending = metadata
                 return True
-            with self._claim_source_issue(repo, number, "repo-source") as claim:
-                if claim is None:
-                    source.pending = metadata
-                    return True
-                github = claim.github
-                try:
-                    if source.wave_lease is None and is_epic(labels, title):
-                        github.skip_epics({number: labels})
-                        logger.info(
-                            "repo:%s: #%d is an epic; tagged state:skip, excluded",
-                            repo,
-                            number,
-                        )
-                        source.pending = None
-                        self._progress = True
-                        return True
-                    facts = _seeding.seed_issue_from_github(number, github)
-                    if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
-                        github.ensure_blocked_audit(number)
-                    entry = _seeding.seed_entry_from_facts(facts)
-                    if source.wave_lease is not None:
-                        entry = wave_entry_from_facts(
-                            source.wave_lease,
-                            facts,
-                            entry,
-                            repo_root=Path(str(self._ctx_for_repo(repo).paths.repo_root)),
-                            org=self.config.org,
-                            repo=repo,
-                        )
-                    scope_stages = (
-                        self.config.scope.stages if self.config.scope is not None else None
+            github = self._ctx_for_repo(repo).github
+            try:
+                if source.wave_lease is None and is_epic(labels, title):
+                    github.skip_epics({number: labels})
+                    logger.info(
+                        "repo:%s: #%d is an epic; tagged state:skip, excluded",
+                        repo,
+                        number,
                     )
-                    if source.wave_lease is None or entry.stage is not StageName.FINISHED:
-                        stage, reason, passed = self._scope_seed_decision(
-                            number, entry.stage, entry.reason, scope_stages
-                        )
-                        entry = replace(entry, stage=stage, reason=reason, passed=passed)
-                    if entry.stage is None:
-                        if source.wave_lease is None and entry.skip_tag_obligation is not None:
-                            github.skip_epics({entry.skip_tag_obligation.issue: []})
-                        logger.info("[%s] excluded: %s", repo, entry.reason)
-                        source.pending = None
-                        self._progress = True
-                        return True
-                    new_item = self._entry_to_item(entry, repo)
-                    if new_item.stage is StageName.FINISHED and new_item.result is None:
-                        new_item.result = ItemResult(
-                            passed=entry.passed,
-                            reason=entry.reason,
-                            final_stage=StageName.FINISHED,
-                        )
-                    elif new_item.stage is not StageName.REPO:
-                        self._pass_work_count += 1
-                    if source.wave_lease is not None:
-                        new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-                    claim.transfer_to(new_item)
                     source.pending = None
-                    if self._push_item(new_item, new_item.stage, enter=True):
-                        source.seeded_count += 1
-                        self._progress = True
-                        return True
-                    self._release_item_guard(new_item, "duplicate source admission")
                     self._progress = True
                     return True
-                except Exception as exc:
-                    logger.warning(
-                        "repo:%s: issue #%d classification failed: %s", repo, number, exc
+                facts = _seeding.seed_issue_from_github(number, github)
+                if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
+                    github.ensure_blocked_audit(number)
+                entry = _seeding.seed_entry_from_facts(facts)
+                if source.wave_lease is not None:
+                    entry = wave_entry_from_facts(
+                        source.wave_lease,
+                        facts,
+                        entry,
+                        repo_root=Path(str(self._ctx_for_repo(repo).paths.repo_root)),
+                        org=self.config.org,
+                        repo=repo,
                     )
-                    self._record_repo_source_failure(repo, f"discovery failed: {exc}")
-                    return False
+                scope_stages = self.config.scope.stages if self.config.scope is not None else None
+                if source.wave_lease is None or entry.stage is not StageName.FINISHED:
+                    stage, reason, passed = self._scope_seed_decision(
+                        number, entry.stage, entry.reason, scope_stages
+                    )
+                    entry = replace(entry, stage=stage, reason=reason, passed=passed)
+                if entry.stage is None:
+                    if source.wave_lease is None and entry.skip_tag_obligation is not None:
+                        github.skip_epics({entry.skip_tag_obligation.issue: []})
+                    logger.info("[%s] excluded: %s", repo, entry.reason)
+                    source.pending = None
+                    self._progress = True
+                    return True
+                new_item = self._entry_to_item(entry, repo)
+                if new_item.stage is StageName.FINISHED and new_item.result is None:
+                    new_item.result = ItemResult(
+                        passed=entry.passed,
+                        reason=entry.reason,
+                        final_stage=StageName.FINISHED,
+                    )
+                elif new_item.stage is not StageName.REPO:
+                    self._pass_work_count += 1
+                if source.wave_lease is not None:
+                    new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+                source.pending = None
+                if self._push_item(new_item, new_item.stage, enter=True):
+                    source.seeded_count += 1
+                    self._progress = True
+                    return True
+                self._progress = True
+                return True
+            except Exception as exc:
+                logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
+                self._record_repo_source_failure(repo, f"discovery failed: {exc}")
+                return False
 
     def _record_repo_source_failure(self, repo: str, reason: str) -> None:
         """Retain a bounded terminal failure after a detached cursor aborts."""
@@ -340,15 +329,7 @@ class SourceCoordinator(_CoordinatorHost):
                 # is honored (seeding.py write-path boundary).
                 if entry.skip_tag_obligation is not None:
                     issue = entry.skip_tag_obligation.issue
-                    with self._claim_source_issue(default_repo, issue, "seed-source") as claim:
-                        if claim is None:
-                            logger.info(
-                                "deferring guarded epic exclusion for %s#%s",
-                                default_repo,
-                                issue,
-                            )
-                            continue
-                        claim.github.skip_epics({issue: []})
+                    self._ctx_for_repo(default_repo).github.skip_epics({issue: []})
                 logger.info("seed excluded: %s", entry.reason)
                 continue
             item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
@@ -479,46 +460,38 @@ class SourceCoordinator(_CoordinatorHost):
         overlap_enabled: bool,
     ) -> tuple[WorkItem | None, bool]:
         """Classify one source issue and snapshot its overlap reservation."""
-        existing_pr, guard_branch, guard_active = self._direct_issue_guard_identity(
-            source.repo, issue, source.run_nonce
-        )
-        with self._claim_source_issue(
-            source.repo, issue, "direct-issue-source", branch=guard_branch
-        ) as claim:
-            if claim is None:
-                source.issues.append(issue)
-                return None, False
-            if guard_active:
-                self._verify_issue_source_guard(source.repo, issue, existing_pr, guard_branch)
-            if source.wave_lease is None:
-                entry = self._seed_direct_issue_entry(source.repo, issue, github=claim.github)
-            else:
-                facts = _seeding.seed_issue_from_github(issue, claim.github)
-                entry = wave_entry_from_facts(
-                    source.wave_lease,
-                    facts,
-                    _seeding.seed_entry_from_facts(facts),
-                    repo_root=Path(str(self._ctx_for_repo(source.repo).paths.repo_root)),
-                    org=self.config.org,
-                    repo=source.repo,
-                )
-            if entry.stage is None:
-                if entry.skip_tag_obligation is not None:
-                    claim.github.skip_epics({entry.skip_tag_obligation.issue: []})
-                logger.info("seed excluded: %s", entry.reason)
-                return None, False
-            item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
-            if source.wave_lease is not None:
-                item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-            if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
-                repo = (self.config.org, item.repo)
-                planned = _admission._fetch_planned_files(issue, repo=repo)
-                item_claims = {(repo, path) for path in planned} if planned else set()
-                if item_claims and item_claims.intersection(active_claims):
-                    return None, True
-                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
-            claim.transfer_to(item)
-            return item, False
+        existing_pr, branch = self._direct_issue_identity(source.repo, issue, source.run_nonce)
+        github = self._ctx_for_repo(source.repo).github
+        if source.wave_lease is None:
+            entry = self._seed_direct_issue_entry(source.repo, issue, github=github)
+        else:
+            facts = _seeding.seed_issue_from_github(issue, github)
+            entry = wave_entry_from_facts(
+                source.wave_lease,
+                facts,
+                _seeding.seed_entry_from_facts(facts),
+                repo_root=Path(str(self._ctx_for_repo(source.repo).paths.repo_root)),
+                org=self.config.org,
+                repo=source.repo,
+            )
+        if entry.stage is None:
+            if entry.skip_tag_obligation is not None:
+                github.skip_epics({entry.skip_tag_obligation.issue: []})
+            logger.info("seed excluded: %s", entry.reason)
+            return None, False
+        item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
+        if existing_pr is not None:
+            item.branch = branch
+        if source.wave_lease is not None:
+            item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+        if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
+            repo = (self.config.org, item.repo)
+            planned = _admission._fetch_planned_files(issue, repo=repo)
+            item_claims = {(repo, path) for path in planned} if planned else set()
+            if item_claims and item_claims.intersection(active_claims):
+                return None, True
+            item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+        return item, False
 
     def _drain_direct_issue_source(self) -> int:
         """Pull explicit issues directly into queues without a seed spill buffer.
@@ -599,42 +572,16 @@ class SourceCoordinator(_CoordinatorHost):
                     break
 
             raw_github = self._ctx_for_repo(source.repo).github
-            linked_issue = (
-                raw_github.find_issue_for_pr(pr)
-                if self._guard_enabled and not self.config.dry_run
-                else None
-            )
-            guard_branch = self._guard_branch_for_pr(source.repo, pr) if linked_issue else None
-            claim = (
-                self._claim_source_issue(
-                    source.repo, linked_issue, "direct-pr-source", branch=guard_branch
-                )
-                if linked_issue is not None
-                else None
-            )
-            with claim if claim is not None else nullcontext() as owned:
-                if claim is not None and owned is None:
-                    source.pending_pr = pr
-                    break
-                github = owned.github if owned is not None else raw_github
-                if claim is not None and claim.handle is not None:
-                    self._verify_pr_source_guard(
-                        source.repo, pr, cast(int, linked_issue), cast(str, guard_branch)
-                    )
-                entry = self._seed_direct_pr_scope(source.repo, (pr,), github=github)[0]
-                if entry.stage is None:
-                    logger.info("seed excluded: %s", entry.reason)
-                    continue
+            entry = self._seed_direct_pr_scope(source.repo, (pr,), github=raw_github)[0]
+            if entry.stage is None:
+                logger.info("seed excluded: %s", entry.reason)
+                continue
 
-                item = self._prepare_direct_item(entry, source.repo, source.base_sha)
-                if source.wave_lease is not None:
-                    item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-                if claim is not None and item.issue is not None:
-                    claim.transfer_to(item)
+            item = self._prepare_direct_item(entry, source.repo, source.base_sha)
+            if source.wave_lease is not None:
+                item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
             if self._push_item(item, item.stage, enter=True):
                 pushed += 1
-            elif claim is not None:
-                self._release_item_guard(item, "duplicate direct PR admission")
         return pushed
 
     def _clamp_seed_stage_to_scope(

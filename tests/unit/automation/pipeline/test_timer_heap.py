@@ -21,7 +21,6 @@ from hephaestus.automation.pipeline.coordinator import (
 )
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
-    GuardedGitHubJob,
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
@@ -231,7 +230,7 @@ class TestRetryDelayConsumption:
         assert isinstance(pool, FakeWorkerPool)
 
         class Runner:
-            def run(self, job: GitHubJob | GuardedGitHubJob) -> MergeWaitCycleCompleted:
+            def run(self, job: GitHubJob) -> MergeWaitCycleCompleted:
                 assert isinstance(job, GitHubJob)
                 assert isinstance(job.request, RunMergeWaitCycleRequest)
                 return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)
@@ -314,7 +313,7 @@ class TestRetryDelayConsumption:
         assert isinstance(pool, FakeWorkerPool)
 
         class Runner:
-            def run(self, job: GitHubJob | GuardedGitHubJob) -> MergeWaitCycleCompleted:
+            def run(self, job: GitHubJob) -> MergeWaitCycleCompleted:
                 assert isinstance(job, GitHubJob)
                 assert isinstance(job.request, RunMergeWaitCycleRequest)
                 return PipelineGitHubJobRunner._run_merge_wait_cycle(job.request, github)

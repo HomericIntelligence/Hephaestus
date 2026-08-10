@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, Self
 
-from hephaestus.automation.issue_guard import GuardCredential
-
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _JOURNAL_MARKER_RE = re.compile(
     r"<!-- hephaestus-implementation-reply-handoff:"
@@ -251,42 +249,6 @@ def github_request_pr(request: GitHubRequest) -> int | None:
 
 
 @dataclass(frozen=True)
-class GuardedGitHubJob:
-    """Worker-only envelope pairing an operation with its issue authority."""
-
-    operation: GitHubJob
-    guard: GuardCredential
-
-    @property
-    def descr(self) -> str:
-        """Expose the bound operation description for generic job observability."""
-        return self.operation.descr
-
-    @classmethod
-    def bind(
-        cls,
-        operation: GitHubJob,
-        guard: GuardCredential,
-        *,
-        org: str,
-        linked_pr: int | None = None,
-    ) -> Self:
-        """Bind an operation to its issue guard and verified linked PR."""
-        expected_repo = f"{org}/{operation.repo}"
-        if guard.repository != expected_repo:
-            raise ValueError("guard repository differs from job repository")
-        issue_number = github_request_issue(operation.request)
-        if issue_number is None:
-            raise ValueError("GitHub job has no issue target")
-        if issue_number not in {guard.issue, linked_pr}:
-            raise ValueError("job target differs from guard issue or linked PR")
-        request_pr = github_request_pr(operation.request)
-        if request_pr is not None and linked_pr is not None and request_pr != linked_pr:
-            raise ValueError("job PR differs from linked PR")
-        return cls(operation=operation, guard=guard)
-
-
-@dataclass(frozen=True)
 class ReplyJournalRecovered:
     """Receipt for a journal recovery read."""
 
@@ -403,6 +365,6 @@ type GitHubReceipt = (
 class GitHubJobRunner(Protocol):
     """Executes closed GitHub requests with job-scoped accessors."""
 
-    def run(self, job: GitHubJob | GuardedGitHubJob) -> GitHubReceipt:
+    def run(self, job: GitHubJob) -> GitHubReceipt:
         """Execute one closed GitHub request and return its immutable receipt."""
         raise NotImplementedError

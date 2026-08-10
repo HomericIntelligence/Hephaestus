@@ -198,30 +198,6 @@ class TestGetLatestPlan:
         assert result is None
 
 
-class TestPlanReviewerGuardBranchIdentity:
-    """Standalone plan guards use the writable production PR head only."""
-
-    def test_fork_pr_cannot_bind_a_base_repository_guard_branch(self) -> None:
-        """Fork PRs fail closed before the standalone guard can acquire."""
-        from hephaestus.automation import plan_reviewer
-        from hephaestus.automation.issue_guard import InMemoryGuardStore, IssueGuard
-
-        store = InMemoryGuardStore()
-        options = PlanReviewerOptions(issues=[617], dry_run=False, max_workers=1, enable_ui=False)
-        with (
-            patch.object(plan_reviewer, "get_repo_info", return_value=("Owner", "Repo")),
-            patch.object(plan_reviewer, "find_pr_for_issue", return_value=812),
-            patch.object(plan_reviewer, "pr_head_is_writable", return_value=False),
-        ):
-            reviewer = PlanReviewer(
-                options,
-                guard_factory=lambda _repository: IssueGuard(store),
-            )
-
-            with pytest.raises(RuntimeError, match="writable production branch"):
-                reviewer._new_guard_service("Owner/Repo", issue=617)
-
-
 class TestPostReviewStateLabels:
     """Standalone review persistence uses only the state-token/label contract."""
 

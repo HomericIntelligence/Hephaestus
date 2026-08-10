@@ -35,7 +35,6 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
-    GuardedGitHubJob,
     ReplyJournalAppended,
 )
 from hephaestus.automation.pipeline.jobs import (
@@ -205,7 +204,7 @@ def test_github_job_dispatches_once_through_injected_typed_runner(
     calls: list[GitHubJob] = []
 
     class Runner:
-        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
             assert isinstance(submitted, GitHubJob)
             calls.append(submitted)
             return ReplyJournalAppended(request=submitted.request)  # type: ignore[arg-type]
@@ -245,7 +244,7 @@ def test_same_repo_github_jobs_are_serialized(
     guard = threading.Lock()
 
     class Runner:
-        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
             nonlocal active, max_active
             assert isinstance(submitted, GitHubJob)
             with guard:
@@ -302,7 +301,7 @@ def test_different_repo_github_jobs_may_run_concurrently(
     guard = threading.Lock()
 
     class Runner:
-        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
             nonlocal active, max_active
             assert isinstance(submitted, GitHubJob)
             with guard:
@@ -349,7 +348,7 @@ def test_failing_github_job_is_not_replayed_by_worker_pool(
     calls = 0
 
     class Runner:
-        def run(self, submitted: GitHubJob | GuardedGitHubJob) -> ReplyJournalAppended:
+        def run(self, submitted: GitHubJob) -> ReplyJournalAppended:
             nonlocal calls
             assert isinstance(submitted, GitHubJob)
             del submitted
