@@ -13,6 +13,7 @@ needs hands-on recovery.
 | [Drive-green stall](ci-driver-stall.md) | A PR with loop-owned `state:implementation-go` remains blocked. |
 | [Claude quota exhausted (429)](claude-quota-exhausted.md) | A stage reports a 429 quota/session-limit infrastructure failure and the issue remains unlabeled. |
 | [Reviving a state:skip-labeled issue](state-skip-revival.md) | An issue was labeled `state:skip` after automation already started work on it (planned or opened a PR) and you want to resume driving it. |
+| [Pi issue #2519 evidence run](pi-e2e-2519.md) | You need to reproduce the live Pi/Codex conformance evidence run, regenerate the report, or re-attest the publication artifacts. |
 | [No silent failures](no-silent-failures.md) | Policy reference: why `\|\| true`, `continue-on-error`, and advisory `::warning::` are forbidden, and how to fix a tripped hook. |
 | [Backup and disaster recovery](backup-restore.md) | You need to back up or restore `build/.issue_implementer` state, or rebuild a lost workstation end-to-end (policy: ADR-0012). |
 

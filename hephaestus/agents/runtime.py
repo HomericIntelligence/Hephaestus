@@ -1687,7 +1687,7 @@ def _run_pi_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run Pi with prompt content attached via an ephemeral file, not argv."""
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
-        _require_pi_automation_admission(cwd)
+        raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
     prompt_path: Path | None = None
     private_temp_dir: Path | None = None
     try:
@@ -1800,7 +1800,7 @@ def _invoke_pi_session(
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
-        _require_pi_automation_admission(cwd)
+        raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
     cmd = list(base_cmd) if base_cmd is not None else _pi_base_cmd(session_id=session_id)
     result = _run_pi_command(
         cmd,
@@ -1973,11 +1973,10 @@ def run_agent_text(
     """Run a direct-runner agent non-interactively and return text output."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
+        if execution_request is None:
+            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
         policy = _require_pi_request(execution_request)
-        if (
-            execution_request is None
-            or execution_request.lifecycle is not SessionLifecycle.ONE_SHOT
-        ):
+        if execution_request.lifecycle is not SessionLifecycle.ONE_SHOT:
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
     if is_codex(agent):
         return run_codex_text(
@@ -2020,9 +2019,9 @@ def run_agent_session(
     """Run a direct-runner agent session and return output plus session id."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
         if execution_request is None:
-            raise AssertionError("unreachable")
+            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+        policy = _require_pi_request(execution_request)
         if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
                 raise PiSessionBindingError(
@@ -2089,11 +2088,12 @@ def resume_agent_session(
     """Resume a direct-runner agent session."""
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
         if (
             execution_request is None
-            or execution_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED
         ):
+            raise RuntimeError(PI_AUTOMATION_PREFLIGHT_ERROR)
+        policy = _require_pi_request(execution_request)
+        if execution_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(
                 "Pi session resume requires a RESUME_REQUIRED ExecutionRequest"
             )
