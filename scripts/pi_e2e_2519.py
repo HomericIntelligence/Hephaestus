@@ -58,6 +58,7 @@ REQUIRED_E2E_STAGES = (
 )
 SKILL_COMMAND_RE = re.compile(r"(?:\$athena:|/athena:|skill:)[A-Za-z0-9._:/-]+")
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 600
+PI_PROVIDER_NAME = "pi"
 
 
 def _repo_root() -> Path:
@@ -954,7 +955,7 @@ def _verify_completion(manifest: dict[str, Any]) -> None:
     pi_captures = [
         entry
         for entry in manifest.get("commands", [])
-        if entry.get("kind") == "capture" and entry.get("provider") == "pi"
+        if entry.get("kind") == "capture" and entry.get("provider") == PI_PROVIDER_NAME
     ]
     failed = [
         entry.get("id", "unknown") for entry in pi_captures if entry.get("status") != "success"
