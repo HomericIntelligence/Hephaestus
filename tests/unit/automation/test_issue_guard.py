@@ -6,6 +6,7 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -303,7 +304,7 @@ def test_guard_record_round_trips_and_recovery_secret_is_rejected() -> None:
 
 
 def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa: C901
-    """REST storage advances the implementation branch with non-force writes."""
+    """HTTP metadata and signed Git CAS preserve server-time guard semantics."""
     record = GuardRecord(
         version=1,
         repository="Owner/Repo",
@@ -322,7 +323,8 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa
     calls: list[tuple[list[str], dict[str, Any]]] = []
     date = "Tue, 01 Jan 2030 00:00:00 GMT"
     branch = "2404-auto-impl"
-    branch_reads = 0
+    pushed = False
+    git_calls: list[list[str]] = []
 
     def response(status: int, body: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
@@ -333,7 +335,6 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa
         )
 
     def call(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        nonlocal branch_reads
         calls.append((args, kwargs))
         paths = {arg for arg in args if arg.startswith("repos/Owner/Repo")}
         if args[-1] == "user":
@@ -341,8 +342,7 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa
         if any(path.endswith("issues/2404") for path in paths):
             return response(200, {"labels": [{"name": STATE_PLAN_GO}, {"name": 3}]})
         if any(path.endswith(f"git/ref/heads/{branch}") for path in paths):
-            branch_reads += 1
-            if branch_reads == 1:
+            if not pushed:
                 return response(404, {})
             return response(200, {"object": {"sha": commit_oid}})
         if any(path.endswith("git/ref/heads/main") for path in paths):
@@ -352,19 +352,32 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa
         if any("/git/commits/" in path for path in paths):
             return response(
                 200,
-                {"tree": {"sha": tree_oid}, "message": record.to_json(), "parents": []},
+                {
+                    "tree": {"sha": tree_oid},
+                    "message": record.to_commit_message(),
+                    "parents": [],
+                    "verification": {"verified": True, "reason": "valid"},
+                },
             )
-        if any(path.endswith("git/commits") for path in paths):
-            return response(201, {"sha": commit_oid})
-        if any(path.endswith("git/refs") for path in paths):
-            return response(201, {})
-        if any(path.endswith(f"git/refs/heads/{branch}") for path in paths):
-            return response(200, {})
         if "repos/Owner/Repo" in paths:
             return response(200, {"default_branch": "main"})
         return response(200, {})
 
-    github = GitHubIssueGuardStore("Owner/Repo", branch=branch, call=call, env={"GH_TOKEN": "test"})
+    def git_call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal pushed
+        git_calls.append(args)
+        if "push" in args:
+            pushed = True
+        stdout = f"{commit_oid}\n" if "commit-tree" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    github = GitHubIssueGuardStore(
+        "Owner/Repo",
+        branch=branch,
+        call=call,
+        git_call=git_call,
+        env={"GH_TOKEN": "test"},
+    )
     assert github.read_labels("Owner/Repo", 2404) == (STATE_PLAN_GO,)
     github.add_label("Owner/Repo", 2404, "state:extra")
     github.remove_label("Owner/Repo", 2404, "state:extra")
@@ -372,17 +385,210 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa
     assert github.default_tip("Owner/Repo") == ("4" * 40, tree_oid)
     assert any("repos/Owner/Repo" in args for args, _kwargs in calls)
     assert all("repos/Owner/Repo/" not in args for args, _kwargs in calls)
-    assert github.create_commit("Owner/Repo", tree_oid, ["4" * 40], record.to_json())[0]
+    assert github.create_commit("Owner/Repo", tree_oid, ["4" * 40], record.to_commit_message())[0]
     github.create_ref("Owner/Repo", 2404, commit_oid, expected_oid="4" * 40)
-    github.update_ref("Owner/Repo", 2404, commit_oid, commit_oid)
     snapshot = github.read_ref("Owner/Repo", 2404)
     assert snapshot is not None and snapshot.record == record
     assert all(kwargs["env"] == {"GH_TOKEN": "test"} for _args, kwargs in calls)
-    update = next(args for args, _kwargs in calls if "force=false" in args)
-    assert "force=false" in update
-    assert any(f"git/refs/heads/{branch}" in arg for arg in update)
+    update = next(args for args in git_calls if "push" in args)
+    assert f"--force-with-lease=refs/heads/{branch}:" in update
+    assert f"{commit_oid}:refs/heads/{branch}" in update
     assert all("refs/tags/" not in arg for args, _kwargs in calls for arg in args)
     assert all("hephaestus/issue-guards" not in arg for args, _kwargs in calls for arg in args)
+
+
+def test_http_guard_store_stages_a_signed_commit_and_pushes_with_exact_lease(
+    tmp_path: Path,
+) -> None:
+    """Production guard writes are signed locally and published by an exact CAS."""
+    record = GuardRecord(
+        version=1,
+        repository="Owner/Repo",
+        issue=2404,
+        claim_id=uuid4(),
+        run_id=uuid4(),
+        actor="automation",
+        phase=GuardPhase.ACTIVE,
+        work_stage="planning",
+        lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        predecessor_oid="1" * 40,
+        reason="test",
+    )
+    parent_oid = "4" * 40
+    tree_oid = "3" * 40
+    commit_oid = "2" * 40
+    git_calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def git_call(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        git_calls.append((args, kwargs))
+        stdout = f"{commit_oid}\n" if "commit-tree" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert any(f"git/commits/{commit_oid}" in arg for arg in args)
+        body = {"verification": {"verified": True, "reason": "valid"}}
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                f"HTTP/1.1 200 OK\r\nDate: Tue, 01 Jan 2030 00:00:00 GMT\r\n\r\n{json.dumps(body)}"
+            ),
+            stderr="",
+        )
+
+    store = GitHubIssueGuardStore(
+        "Owner/Repo",
+        branch="2404-auto-impl",
+        call=call,
+        git_call=git_call,
+        staging_root=tmp_path,
+    )
+    store._last_server_time = datetime(2030, 1, 1, tzinfo=UTC)
+
+    oid, _server_time = store.create_commit(
+        "Owner/Repo", tree_oid, [parent_oid], record.to_commit_message()
+    )
+    assert oid == commit_oid
+    store.update_ref("Owner/Repo", 2404, oid, parent_oid)
+
+    commands = [args for args, _kwargs in git_calls]
+    assert any("commit-tree" in args and "-S" in args for args in commands)
+    assert any("verify-commit" in args and commit_oid in args for args in commands)
+    push = next(args for args in commands if "push" in args)
+    assert f"--force-with-lease=refs/heads/2404-auto-impl:{parent_oid}" in push
+    assert f"{commit_oid}:refs/heads/2404-auto-impl" in push
+
+
+def test_http_guard_store_fails_closed_when_local_signing_fails(tmp_path: Path) -> None:
+    """A signing failure cannot publish or retain a staged guard commit."""
+    record = GuardRecord(
+        version=1,
+        repository="Owner/Repo",
+        issue=2404,
+        claim_id=uuid4(),
+        run_id=uuid4(),
+        actor="automation",
+        phase=GuardPhase.ACTIVE,
+        work_stage="planning",
+        lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        predecessor_oid="1" * 40,
+        reason="test",
+    )
+    git_calls: list[list[str]] = []
+
+    def git_call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        git_calls.append(args)
+        if "commit-tree" in args:
+            raise subprocess.CalledProcessError(128, args, stderr="signing failed")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    store = GitHubIssueGuardStore(
+        "Owner/Repo",
+        branch="2404-auto-impl",
+        git_call=git_call,
+        staging_root=tmp_path,
+    )
+    store._last_server_time = datetime(2030, 1, 1, tzinfo=UTC)
+
+    with pytest.raises(GuardUnavailableError, match="signed guard commit creation failed"):
+        store.create_commit("Owner/Repo", "3" * 40, ["4" * 40], record.to_commit_message())
+
+    assert not any("push" in args for args in git_calls)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_http_guard_store_classifies_rejected_lease_as_guard_conflict(tmp_path: Path) -> None:
+    """A failed push plus a changed live head is a contention loss, not retryable I/O."""
+    record = GuardRecord(
+        version=1,
+        repository="Owner/Repo",
+        issue=2404,
+        claim_id=uuid4(),
+        run_id=uuid4(),
+        actor="automation",
+        phase=GuardPhase.ACTIVE,
+        work_stage="planning",
+        lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        predecessor_oid="1" * 40,
+        reason="test",
+    )
+    commit_oid = "2" * 40
+
+    def git_call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "push" in args:
+            raise subprocess.CalledProcessError(1, args, stderr="stale info")
+        stdout = f"{commit_oid}\n" if "commit-tree" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        body = {"object": {"sha": "9" * 40}}
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                f"HTTP/1.1 200 OK\r\nDate: Tue, 01 Jan 2030 00:00:00 GMT\r\n\r\n{json.dumps(body)}"
+            ),
+            stderr="",
+        )
+
+    store = GitHubIssueGuardStore(
+        "Owner/Repo",
+        branch="2404-auto-impl",
+        call=call,
+        git_call=git_call,
+        staging_root=tmp_path,
+    )
+    store._last_server_time = datetime(2030, 1, 1, tzinfo=UTC)
+    oid, _ = store.create_commit("Owner/Repo", "3" * 40, ["4" * 40], record.to_commit_message())
+
+    with pytest.raises(GuardConflictError, match="changed before its signed CAS"):
+        store.update_ref("Owner/Repo", 2404, oid, "4" * 40)
+
+
+def test_http_guard_store_rejects_a_signature_github_does_not_verify(tmp_path: Path) -> None:
+    """Local verification alone cannot authorize a remotely unverified guard commit."""
+    record = GuardRecord(
+        version=1,
+        repository="Owner/Repo",
+        issue=2404,
+        claim_id=uuid4(),
+        run_id=uuid4(),
+        actor="automation",
+        phase=GuardPhase.ACTIVE,
+        work_stage="planning",
+        lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        predecessor_oid="1" * 40,
+        reason="test",
+    )
+    commit_oid = "2" * 40
+
+    def git_call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        stdout = f"{commit_oid}\n" if "commit-tree" in args else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        body = {"verification": {"verified": False, "reason": "unknown_key"}}
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                f"HTTP/1.1 200 OK\r\nDate: Tue, 01 Jan 2030 00:00:00 GMT\r\n\r\n{json.dumps(body)}"
+            ),
+            stderr="",
+        )
+
+    store = GitHubIssueGuardStore(
+        "Owner/Repo",
+        branch="2404-auto-impl",
+        call=call,
+        git_call=git_call,
+        staging_root=tmp_path,
+    )
+    store._last_server_time = datetime(2030, 1, 1, tzinfo=UTC)
+    oid, _ = store.create_commit("Owner/Repo", "3" * 40, ["4" * 40], record.to_commit_message())
+
+    with pytest.raises(GuardUnavailableError, match="unknown_key"):
+        store.update_ref("Owner/Repo", 2404, oid, "4" * 40)
 
 
 class _FakeGitHub:

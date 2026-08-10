@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 
 from hephaestus.automation.state_labels import (
@@ -44,6 +46,7 @@ _REPOSITORY_RE = re.compile(r"[^/\s]+/[^/\s]+\Z")
 _GUARD_REASON_MAX = 512
 _REF_READBACK_ATTEMPTS = 4
 _REF_READBACK_DELAY_S = 0.25
+_SIGNATURE_READBACK_ATTEMPTS = 4
 _GUARD_COMMIT_SUBJECT = "chore(automation): record issue guard state"
 _GUARD_COMMIT_SIGNOFF = (
     "Signed-off-by: Hephaestus Automation <hephaestus-automation@users.noreply.github.com>"
@@ -853,15 +856,22 @@ class GitHubIssueGuardStore:
         *,
         branch: str | None = None,
         call: Callable[..., subprocess.CompletedProcess[str]] = gh_call,
+        git_call: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         env: Mapping[str, str] | None = None,
+        staging_root: Path | None = None,
     ) -> None:
         self.repository = normalize_repository(repository)
         self.branch_name = branch
         if branch is not None:
             _require_branch(branch)
         self._call = call
+        self._git_call = git_call
         self._env = dict(env) if env is not None else None
+        self._staging_root = staging_root or Path.cwd() / "build"
         self._last_server_time: datetime | None = None
+        self._staged_commit: (
+            tuple[str, tuple[str, ...], tempfile.TemporaryDirectory[str]] | None
+        ) = None
 
     def _request(self, args: list[str], *, check: bool = True) -> tuple[int, dict[str, Any] | None]:
         result = self._call(
@@ -1009,21 +1019,65 @@ class GitHubIssueGuardStore:
     def create_commit(
         self, repository: str, tree: str, parents: Sequence[str], message: str
     ) -> tuple[str, datetime]:
-        args = [
-            "--method",
-            "POST",
-            self._path("git/commits"),
-            "-f",
-            f"message={message}",
-            "-f",
-            f"tree={tree}",
-        ]
-        for parent in parents:
-            args.extend(["-f", f"parents[]={parent}"])
-        status, body = self._request(args)
-        oid = body.get("sha") if isinstance(body, dict) else None
-        if status not in {200, 201} or not isinstance(oid, str):
-            raise GuardUnavailableError("guard commit creation failed")
+        """Stage a locally signed guard commit for an exact-lease push."""
+        normalize_repository(repository)
+        _require_sha(tree, "tree")
+        parent_oids = tuple(parents)
+        if not parent_oids:
+            raise ValueError("guard commits require at least one parent")
+        for parent in parent_oids:
+            _require_sha(parent, "parent")
+        GuardRecord.from_commit_message(message)
+        if self._staged_commit is not None:
+            raise GuardUnavailableError("a signed guard commit is already staged")
+
+        self._staging_root.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(
+            prefix="hephaestus-issue-guard-", dir=self._staging_root
+        )
+        repository_path = Path(temporary.name)
+        remote = f"https://github.com/{self.repository}.git"
+        environment = os.environ.copy()
+        if self._env is not None:
+            environment.update(self._env)
+
+        def run_git(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return self._git_call(
+                args,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+                **kwargs,
+            )
+
+        try:
+            run_git(["git", "init", "--bare", str(repository_path)])
+            run_git(["git", "-C", str(repository_path), "remote", "add", "origin", remote])
+            run_git(
+                [
+                    "git",
+                    "-C",
+                    str(repository_path),
+                    "fetch",
+                    "--no-tags",
+                    "--depth=1",
+                    "origin",
+                    *parent_oids,
+                ]
+            )
+            commit_args = ["git", "-C", str(repository_path), "commit-tree", "-S", tree]
+            for parent in parent_oids:
+                commit_args.extend(["-p", parent])
+            created = run_git(commit_args, input=message)
+            oid = created.stdout.strip()
+            _require_sha(oid, "signed guard commit")
+            run_git(["git", "-C", str(repository_path), "verify-commit", oid])
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            temporary.cleanup()
+            raise GuardUnavailableError("signed guard commit creation failed") from exc
+
+        self._staged_commit = (oid, parent_oids, temporary)
         return oid, self.server_now()
 
     def create_ref(
@@ -1034,52 +1088,80 @@ class GitHubIssueGuardStore:
         *,
         expected_oid: str | None = None,
     ) -> None:
-        status, _ = self._request(
-            [
-                "--method",
-                "POST",
-                self._path("git/refs"),
-                "-f",
-                f"ref=refs/heads/{self._branch()}",
-                "-f",
-                f"sha={oid}",
-            ],
-            check=False,
-        )
-        if status in {409, 422}:
-            current_oid = self._ref_oid()
-            if expected_oid is None or current_oid != expected_oid:
-                raise GuardConflictError("implementation branch already exists or changed")
-            self._patch_ref(oid)
-            return
-        if status not in {200, 201}:
-            raise GuardUnavailableError("implementation branch creation failed")
+        current_oid = self._ref_oid()
+        if current_oid is not None and current_oid != expected_oid:
+            self._discard_staged_commit()
+            raise GuardConflictError("implementation branch already exists or changed")
+        lease = current_oid or ""
+        self._publish_staged_commit(oid, lease)
 
     def update_ref(self, repository: str, issue: int, oid: str, expected_oid: str) -> None:
-        current_oid = self._ref_oid()
-        if current_oid != expected_oid:
-            raise GuardConflictError(
-                "implementation branch changed before its compare-and-swap update"
-            )
-        self._patch_ref(oid)
+        _require_sha(expected_oid, "expected_oid")
+        self._publish_staged_commit(oid, expected_oid)
 
-    def _patch_ref(self, oid: str) -> None:
-        status, _ = self._request(
-            [
-                "--method",
-                "PATCH",
-                self._path(f"git/refs/heads/{self._branch()}"),
-                "-f",
-                f"sha={oid}",
-                "-F",
-                "force=false",
-            ],
-            check=False,
-        )
-        if status in {409, 422}:
-            raise GuardConflictError("implementation branch update lost its non-force CAS")
-        if status not in {200, 201}:
-            raise GuardUnavailableError("implementation branch update failed")
+    def _discard_staged_commit(self) -> None:
+        staged = self._staged_commit
+        self._staged_commit = None
+        if staged is not None:
+            staged[2].cleanup()
+
+    def _publish_staged_commit(self, oid: str, expected_oid: str) -> None:
+        """Push one staged commit with a server-enforced exact-head lease."""
+        staged = self._staged_commit
+        if staged is None or staged[0] != oid or expected_oid not in {"", *staged[1]}:
+            self._discard_staged_commit()
+            raise GuardUnavailableError("signed guard commit staging did not match the CAS")
+        repository_path = Path(staged[2].name)
+        branch_ref = f"refs/heads/{self._branch()}"
+        environment = os.environ.copy()
+        if self._env is not None:
+            environment.update(self._env)
+        try:
+            self._git_call(
+                [
+                    "git",
+                    "-C",
+                    str(repository_path),
+                    "push",
+                    f"--force-with-lease={branch_ref}:{expected_oid}",
+                    "origin",
+                    f"{oid}:{branch_ref}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            observed = self._ref_oid()
+            self._discard_staged_commit()
+            if observed != expected_oid:
+                raise GuardConflictError(
+                    "implementation branch changed before its signed CAS update"
+                ) from exc
+            raise GuardUnavailableError("signed guard commit push failed") from exc
+
+        try:
+            self._confirm_remote_signature(oid)
+        finally:
+            self._discard_staged_commit()
+
+    def _confirm_remote_signature(self, oid: str) -> None:
+        """Require GitHub to verify the newly published guard signature."""
+        for attempt in range(_SIGNATURE_READBACK_ATTEMPTS):
+            status, body = self._request([self._path(f"git/commits/{oid}")])
+            verification = body.get("verification") if isinstance(body, dict) else None
+            if status == 200 and isinstance(verification, dict):
+                if verification.get("verified") is True:
+                    return
+                reason = verification.get("reason")
+                if reason not in {"gpgverify_unavailable"}:
+                    raise GuardUnavailableError(
+                        f"GitHub rejected the guard commit signature: {reason or 'unknown'}"
+                    )
+            if attempt + 1 < _SIGNATURE_READBACK_ATTEMPTS:
+                time.sleep(_REF_READBACK_DELAY_S)
+        raise GuardUnavailableError("GitHub did not verify the guard commit signature")
 
     def actor(self) -> str:
         status, body = self._request(["user"])
