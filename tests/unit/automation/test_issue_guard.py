@@ -443,7 +443,7 @@ def test_http_guard_store_bounds_initial_history_scan_to_branch_comparison() -> 
                     ],
                 }
             )
-        pytest.fail(f"unexpected per-commit history request: {path}")
+        raise AssertionError(f"unexpected per-commit history request: {path}")
 
     store = GitHubIssueGuardStore("Owner/Repo", branch="2404-auto-impl", call=call)
 
@@ -601,7 +601,7 @@ def test_http_guard_store_classifies_rejected_lease_as_guard_conflict(tmp_path: 
 
 
 def test_http_guard_store_rejects_a_signature_github_does_not_verify(tmp_path: Path) -> None:
-    """Local verification alone cannot authorize a remotely unverified guard commit."""
+    """A remotely unverified guard commit is removed with an exact leased rollback."""
     record = GuardRecord(
         version=1,
         repository="Owner/Repo",
@@ -616,8 +616,18 @@ def test_http_guard_store_rejects_a_signature_github_does_not_verify(tmp_path: P
         reason="test",
     )
     commit_oid = "2" * 40
+    parent_oid = "4" * 40
+    remote_head = parent_oid
+    pushes: list[list[str]] = []
 
     def git_call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal remote_head
+        if "push" in args:
+            pushes.append(args)
+            lease = next(arg for arg in args if arg.startswith("--force-with-lease="))
+            expected = lease.rsplit(":", 1)[1]
+            assert remote_head == expected
+            remote_head = args[-1].split(":", 1)[0]
         stdout = f"{commit_oid}\n" if "commit-tree" in args else ""
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
@@ -640,10 +650,15 @@ def test_http_guard_store_rejects_a_signature_github_does_not_verify(tmp_path: P
         staging_root=tmp_path,
     )
     store._last_server_time = datetime(2030, 1, 1, tzinfo=UTC)
-    oid, _ = store.create_commit("Owner/Repo", "3" * 40, ["4" * 40], record.to_commit_message())
+    oid, _ = store.create_commit("Owner/Repo", "3" * 40, [parent_oid], record.to_commit_message())
 
     with pytest.raises(GuardUnavailableError, match="unknown_key"):
-        store.update_ref("Owner/Repo", 2404, oid, "4" * 40)
+        store.update_ref("Owner/Repo", 2404, oid, parent_oid)
+
+    assert remote_head == parent_oid
+    assert len(pushes) == 2
+    assert f"--force-with-lease=refs/heads/2404-auto-impl:{commit_oid}" in pushes[1]
+    assert f"{parent_oid}:refs/heads/2404-auto-impl" in pushes[1]
 
 
 class _FakeGitHub:

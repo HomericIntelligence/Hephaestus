@@ -1163,20 +1163,12 @@ class GitHubIssueGuardStore:
         if self._env is not None:
             environment.update(self._env)
         try:
-            self._git_call(
-                [
-                    "git",
-                    "-C",
-                    str(repository_path),
-                    "push",
-                    f"--force-with-lease={branch_ref}:{expected_oid}",
-                    "origin",
-                    f"{oid}:{branch_ref}",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=environment,
+            self._push_staged_ref(
+                repository_path,
+                branch_ref,
+                expected_oid=expected_oid,
+                target_oid=oid,
+                environment=environment,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             observed = self._ref_oid()
@@ -1189,8 +1181,73 @@ class GitHubIssueGuardStore:
 
         try:
             self._confirm_remote_signature(oid)
+        except GuardUnavailableError:
+            self._rollback_unverified_commit(
+                repository_path,
+                branch_ref,
+                rejected_oid=oid,
+                expected_oid=expected_oid,
+                environment=environment,
+            )
+            raise
         finally:
             self._discard_staged_commit()
+
+    def _push_staged_ref(
+        self,
+        repository_path: Path,
+        branch_ref: str,
+        *,
+        expected_oid: str,
+        target_oid: str,
+        environment: Mapping[str, str],
+    ) -> None:
+        refspec = f"{target_oid}:{branch_ref}" if target_oid else f":{branch_ref}"
+        self._git_call(
+            [
+                "git",
+                "-C",
+                str(repository_path),
+                "push",
+                f"--force-with-lease={branch_ref}:{expected_oid}",
+                "origin",
+                refspec,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    def _rollback_unverified_commit(
+        self,
+        repository_path: Path,
+        branch_ref: str,
+        *,
+        rejected_oid: str,
+        expected_oid: str,
+        environment: Mapping[str, str],
+    ) -> None:
+        """Remove an unverified commit through a lease pinned to its exact OID."""
+        try:
+            self._push_staged_ref(
+                repository_path,
+                branch_ref,
+                expected_oid=rejected_oid,
+                target_oid=expected_oid,
+                environment=environment,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            observed = self._ref_oid()
+            if observed == (expected_oid or None):
+                return
+            if observed != rejected_oid:
+                raise GuardConflictError(
+                    "implementation branch changed before unverified guard rollback"
+                ) from exc
+            raise GuardUnavailableError(
+                "unverified guard commit remained after rollback failed"
+            ) from exc
 
     def _confirm_remote_signature(self, oid: str) -> None:
         """Require GitHub to verify the newly published guard signature."""

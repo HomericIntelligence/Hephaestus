@@ -23,9 +23,11 @@ DCO trailer so the guard's own audit history satisfies the repository's PR
 policy. The commit is created and verified with the operator's configured Git
 signing identity, then published through an exact-head `--force-with-lease`
 compare-and-swap. GitHub's verification result is read back before the
-transition is accepted. Readers also accept the legacy raw-JSON commit form so
-existing guards remain recoverable. The branch is carried in the guard
-credential, so the guard and production writer share one ref:
+transition is accepted. A rejected or unavailable verification triggers an
+exact-lease rollback pinned to the rejected commit, so it cannot remain at the
+branch tip. Readers also accept the legacy raw-JSON commit form so existing
+guards remain recoverable. The branch is carried in the guard credential, so
+the guard and production writer share one ref:
 `refs/heads/<implementation-branch>`. A branch tip may contain ordinary
 implementation commits; readers inspect branch-only history to find the newest
 guard record, while every guard child still advances that same branch with a
