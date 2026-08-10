@@ -16,8 +16,9 @@ from hephaestus.automation.issue_guard import (
     IssueGuard,
     assert_recovery_secret_absent,
 )
-from hephaestus.automation.pipeline.guarded_github import GuardedStageGitHub
+from hephaestus.automation.pipeline.guarded_github import GuardedStageGitHub, GuardTargetError
 
+from ..git_utils import issue_auto_impl_branch_name
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
@@ -82,8 +83,12 @@ class SourceGuardClaim:
             self.transferred = True
             return
         key = (self.repository, self.issue)
+        if item.branch and item.branch != self.handle.credential.branch:
+            raise GuardLostError("work item branch differs from its issue guard branch")
+        item.branch = self.handle.credential.branch
         self.coordinator._issue_guards[key] = self.handle
         item.payload["_issue_guard_handle"] = self.handle
+        item.payload["_issue_guard_branch"] = self.handle.credential.branch
         self.transferred = True
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -331,21 +336,87 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self._ctx_cache: OrderedDict[str, StageContext] = OrderedDict()
         self._ctx_cache_capacity = work_window
 
-    def _guard_service(self, repository: str) -> IssueGuard:
+    def _guard_service(self, repository: str, branch: str) -> IssueGuard:
         """Build a guard service carrying this coordinator's run identity."""
         return IssueGuard(
             self.guard_store_factory(repository),
             run_id=self.run_id,
+            branch=branch,
         )
 
-    def _claim_source_issue(self, repo: str, issue: int, stage: str) -> SourceGuardClaim:
+    def _guard_branch_for_issue(self, repo: str, issue: int) -> str:
+        """Resolve the exact writable implementation branch for an issue."""
+        github = self._ctx_for_repo(repo).github
+        existing_pr = github.find_pr_for_issue(issue)
+        if existing_pr is not None:
+            return self._guard_branch_for_pr(repo, existing_pr)
+        return issue_auto_impl_branch_name(issue)
+
+    def _guard_branch_for_pr(self, repo: str, pr: int) -> str:
+        """Resolve a PR head only when it is the writable production branch."""
+        github = self._ctx_for_repo(repo).github
+        if not github.pr_head_is_writable(pr):
+            raise GuardTargetError(
+                f"PR #{pr} does not have a writable production branch in the base repository"
+            )
+        branch = github.get_pr_head_branch(pr)
+        if not isinstance(branch, str) or not branch.strip():
+            raise GuardTargetError(f"PR #{pr} has no verified production branch")
+        return branch.strip()
+
+    def _verify_issue_source_guard(
+        self, repo: str, issue: int, expected_pr: int | None, expected_branch: str
+    ) -> None:
+        """Revalidate an issue's PR and production branch after source admission."""
+        github = self._ctx_for_repo(repo).github
+        current_pr = github.find_pr_for_issue(issue)
+        if current_pr != expected_pr:
+            raise GuardTargetError("issue-to-PR association changed during admission")
+        if (
+            expected_pr is not None
+            and self._guard_branch_for_pr(repo, expected_pr) != expected_branch
+        ):
+            raise GuardTargetError("PR head branch changed during issue admission")
+
+    def _direct_issue_guard_identity(
+        self, repo: str, issue: int, run_nonce: str
+    ) -> tuple[int | None, str, bool]:
+        """Resolve a direct issue's guarded PR identity before classification."""
+        github = self._ctx_for_repo(repo).github
+        existing_pr = github.find_pr_for_issue(issue)
+        active = self._guard_enabled and not self.config.dry_run
+        branch = (
+            self._guard_branch_for_pr(repo, existing_pr)
+            if existing_pr is not None and active
+            else f"{issue}-auto-impl-direct-{run_nonce}"
+        )
+        return existing_pr, branch, active
+
+    def _verify_pr_source_guard(self, repo: str, pr: int, issue: int, expected_branch: str) -> None:
+        """Revalidate a direct PR's issue association and production branch."""
+        github = self._ctx_for_repo(repo).github
+        if github.find_issue_for_pr(pr) != issue:
+            raise GuardTargetError("PR-to-issue association changed during admission")
+        if self._guard_branch_for_pr(repo, pr) != expected_branch:
+            raise GuardTargetError("PR head branch changed during admission")
+
+    def _claim_source_issue(
+        self,
+        repo: str,
+        issue: int,
+        stage: str,
+        *,
+        branch: str | None = None,
+    ) -> SourceGuardClaim:
         """Acquire a temporary source claim before any issue mutation."""
         repository = _guard_repository(self.config.org, repo)
-        handle = (
-            None
-            if self.config.dry_run or not self._guard_enabled
-            else self._guard_service(repository).acquire(repository, issue, stage)
-        )
+        if self.config.dry_run or not self._guard_enabled:
+            handle = None
+        else:
+            resolved_branch = branch or self._guard_branch_for_issue(repo, issue)
+            handle = self._guard_service(repository, resolved_branch).acquire(
+                repository, issue, stage
+            )
         if handle is not None:
             self._temporary_source_guard_count += 1
         return SourceGuardClaim(self, repository, issue, handle)
@@ -410,11 +481,15 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
             return handle
         if self.config.dry_run:
             raise GuardLostError("dry-run has no durable issue guard")
-        acquired = self._guard_service(key[0]).acquire(key[0], item.issue, item.stage.value)
+        branch = item.branch or self._guard_branch_for_issue(item.repo, item.issue)
+        if not item.branch:
+            item.branch = branch
+        acquired = self._guard_service(key[0], branch).acquire(key[0], item.issue, item.stage.value)
         if acquired is None:
             raise GuardLostError("issue is already owned by another automation run")
         self._issue_guards[key] = acquired
         item.payload["_issue_guard_handle"] = acquired
+        item.payload["_issue_guard_branch"] = acquired.credential.branch
         return acquired
 
     def _confirm_item_guard(self, item: WorkItem, minimum_valid_for: timedelta) -> None:
@@ -422,12 +497,22 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         if self.config.dry_run or not self._guard_enabled or item.issue is None:
             return
         handle = self._guard_for_item(item)
-        confirmed = self._guard_service(handle.credential.repository).confirm(
-            handle.credential, minimum_valid_for
-        )
+        if item.branch != handle.credential.branch:
+            raise GuardLostError("work item branch differs from its issue guard branch")
+        guard_branch = item.payload.get("_issue_guard_branch")
+        if guard_branch is not None and guard_branch != handle.credential.branch:
+            raise GuardLostError("work item guard branch differs from its issue guard branch")
+        if item.pr is not None:
+            current_branch = self._ctx_for_repo(item.repo).github.get_pr_head_branch(item.pr)
+            if current_branch != item.branch:
+                raise GuardLostError("PR head branch changed after issue guard admission")
+        confirmed = self._guard_service(
+            handle.credential.repository, handle.credential.branch
+        ).confirm(handle.credential, minimum_valid_for)
         key = (handle.credential.repository, handle.credential.issue)
         self._issue_guards[key] = confirmed
         item.payload["_issue_guard_handle"] = confirmed
+        item.payload["_issue_guard_branch"] = confirmed.credential.branch
 
     def _release_guard_handle(
         self, repository: str, issue: int, handle: GuardHandle, reason: str
@@ -435,7 +520,7 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         """Release an owner handle and retain it on failure for recovery."""
         if self.config.dry_run or not self._guard_enabled:
             return
-        self._guard_service(repository).release(handle, reason)
+        self._guard_service(repository, handle.credential.branch).release(handle, reason)
         self._issue_guards.pop((repository, issue), None)
         if self._temporary_source_guard_count:
             self._temporary_source_guard_count -= 1

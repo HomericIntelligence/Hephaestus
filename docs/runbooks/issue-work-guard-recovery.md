@@ -5,13 +5,21 @@ orthogonal to the plan labels and is not proof that a plan transition is
 authorized. Do not remove it manually or use the normal automation token to
 clear it.
 
+Guard histories are stored as no-tree-change commits on the implementation
+branch itself. Always provide the exact branch name, including the direct-scope
+nonce when present; there is no separate guard ref.
+
 ## Inspect
 
 Use the read-only inspection mode to capture the current ref OID, claim UUID,
 lease expiry, phase, actor, and preserved plan labels:
 
 ```bash
-hephaestus-recover-issue-guard --repo OWNER/REPO --issue ISSUE --inspect
+hephaestus-recover-issue-guard \
+  --repo OWNER/REPO \
+  --issue ISSUE \
+  --branch IMPLEMENTATION_BRANCH \
+  --inspect
 ```
 
 The output is diagnostic only. If the claim is active and its lease plus the
@@ -30,6 +38,7 @@ hephaestus-recover-issue-guard \
   --recover \
   --repo OWNER/REPO \
   --issue ISSUE \
+  --branch IMPLEMENTATION_BRANCH \
   --expected-claim CLAIM_UUID \
   --expected-oid REF_OID \
   --reason 'confirmed abandoned runner after incident INC-123'

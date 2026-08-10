@@ -962,6 +962,47 @@ def get_pr_head_branch(pr_number: int) -> str | None:
         return None
 
 
+def pr_head_is_writable(pr_number: int, repository: tuple[str, str] | None) -> bool:
+    """Return whether a PR head belongs to the repository being automated.
+
+    A fork head is a valid read-only review target, but binding a guard to its
+    branch name would make the base repository create a duplicate production
+    branch. Missing or malformed repository identity therefore fails closed.
+    """
+    if repository is None:
+        return False
+    owner, repo_name = repository
+    try:
+        result = _gh_call(
+            [
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "headRepository,headRepositoryOwner",
+                "--repo",
+                f"{owner}/{repo_name}",
+            ],
+            check=False,
+        )
+        data = json.loads(result.stdout or "{}")
+    except Exception as exc:
+        logger.debug("Could not verify writable head for PR #%d: %s", pr_number, exc)
+        return False
+    if not isinstance(data, dict):
+        return False
+    head_repository = data.get("headRepository")
+    head_owner = data.get("headRepositoryOwner")
+    head_name = head_repository.get("name") if isinstance(head_repository, dict) else None
+    owner_login = head_owner.get("login") if isinstance(head_owner, dict) else None
+    return (
+        isinstance(head_name, str)
+        and isinstance(owner_login, str)
+        and head_name.casefold() == repo_name.casefold()
+        and owner_login.casefold() == owner.casefold()
+    )
+
+
 def write_work_report(work_units: int) -> None:
     """Write the phase's work-unit count to the path in $HEPH_WORK_REPORT.
 

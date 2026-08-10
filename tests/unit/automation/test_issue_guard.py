@@ -20,6 +20,7 @@ from hephaestus.automation.issue_guard import (
     GuardLostError,
     GuardPhase,
     GuardRecord,
+    GuardSnapshot,
     GuardUnavailableError,
     InMemoryGuardStore,
     IssueGuard,
@@ -74,7 +75,10 @@ def test_non_owner_cannot_confirm_or_recover_a_live_claim() -> None:
     assert handle is not None
 
     with pytest.raises(GuardLostError):
-        owner.confirm(GuardCredential("Owner/Repo", 2404, uuid4(), uuid4()), timedelta(0))
+        owner.confirm(
+            GuardCredential("Owner/Repo", 2404, uuid4(), uuid4(), "test-auto-impl"),
+            timedelta(0),
+        )
     with pytest.raises(GuardConflictError):
         owner.recover(
             "Owner/Repo",
@@ -133,6 +137,27 @@ def test_owner_can_renew_and_release_a_guard() -> None:
     renewed = service.renew(fresh, timedelta(hours=2))
     assert renewed.oid != fresh.oid
     service.release(renewed, "completed successfully")
+
+    assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
+    assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
+
+
+def test_owner_can_release_after_ordinary_implementation_commit() -> None:
+    """A shared production branch may advance between work and release."""
+    store = InMemoryGuardStore()
+    service = IssueGuard(store)
+    handle = service.acquire("Owner/Repo", 2404, "implementation")
+    assert handle is not None
+
+    current = store.refs[("Owner/Repo", 2404)]
+    store.refs[("Owner/Repo", 2404)] = GuardSnapshot(
+        oid="f" * 40,
+        record=current.record,
+        tree=current.tree,
+        server_time=store.now,
+    )
+
+    service.release(handle, "completed after implementation commit")
 
     assert store.refs[("Owner/Repo", 2404)].record.phase is GuardPhase.RELEASED
     assert STATE_IN_PROGRESS not in store.labels[("Owner/Repo", 2404)]
@@ -261,8 +286,8 @@ def test_guard_record_round_trips_and_recovery_secret_is_rejected() -> None:
         assert_recovery_secret_absent({"HEPHAESTUS_GUARD_RECOVERY_TOKEN": "operator"})
 
 
-def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
-    """REST storage parses Date headers and sends explicit non-forced ref writes."""
+def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa: C901
+    """REST storage advances the implementation branch with non-force writes."""
     record = GuardRecord(
         version=1,
         repository="Owner/Repo",
@@ -280,6 +305,8 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
     tree_oid = "3" * 40
     calls: list[tuple[list[str], dict[str, Any]]] = []
     date = "Tue, 01 Jan 2030 00:00:00 GMT"
+    branch = "2404-auto-impl"
+    branch_reads = 0
 
     def response(status: int, body: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
@@ -290,31 +317,38 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
         )
 
     def call(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal branch_reads
         calls.append((args, kwargs))
         paths = {arg for arg in args if arg.startswith("repos/Owner/Repo")}
         if args[-1] == "user":
             return response(200, {"login": "operator"})
         if any(path.endswith("issues/2404") for path in paths):
             return response(200, {"labels": [{"name": STATE_PLAN_GO}, {"name": 3}]})
+        if any(path.endswith(f"git/ref/heads/{branch}") for path in paths):
+            branch_reads += 1
+            if branch_reads == 1:
+                return response(404, {})
+            return response(200, {"object": {"sha": commit_oid}})
         if any(path.endswith("git/ref/heads/main") for path in paths):
             return response(200, {"object": {"sha": "4" * 40}})
-        if any(path.endswith("git/ref/heads/hephaestus/issue-guards/issue-2404") for path in paths):
-            return response(200, {"object": {"sha": commit_oid}})
         if any(path.endswith(f"git/commits/{'4' * 40}") for path in paths):
-            return response(200, {"tree": {"sha": tree_oid}, "message": "tip"})
+            return response(200, {"tree": {"sha": tree_oid}, "message": "tip", "parents": []})
         if any("/git/commits/" in path for path in paths):
-            return response(200, {"tree": {"sha": tree_oid}, "message": record.to_json()})
+            return response(
+                200,
+                {"tree": {"sha": tree_oid}, "message": record.to_json(), "parents": []},
+            )
         if any(path.endswith("git/commits") for path in paths):
             return response(201, {"sha": commit_oid})
-        if any(path.endswith("git/refs") for path in paths) or any(
-            "issue-2404" in path for path in paths
-        ):
+        if any(path.endswith("git/refs") for path in paths):
             return response(201, {})
+        if any(path.endswith(f"git/refs/heads/{branch}") for path in paths):
+            return response(200, {})
         if "repos/Owner/Repo" in paths:
             return response(200, {"default_branch": "main"})
         return response(200, {})
 
-    github = GitHubIssueGuardStore("Owner/Repo", call=call, env={"GH_TOKEN": "test"})
+    github = GitHubIssueGuardStore("Owner/Repo", branch=branch, call=call, env={"GH_TOKEN": "test"})
     assert github.read_labels("Owner/Repo", 2404) == (STATE_PLAN_GO,)
     github.add_label("Owner/Repo", 2404, "state:extra")
     github.remove_label("Owner/Repo", 2404, "state:extra")
@@ -323,13 +357,16 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:
     assert any("repos/Owner/Repo" in args for args, _kwargs in calls)
     assert all("repos/Owner/Repo/" not in args for args, _kwargs in calls)
     assert github.create_commit("Owner/Repo", tree_oid, ["4" * 40], record.to_json())[0]
-    github.create_ref("Owner/Repo", 2404, commit_oid)
-    github.update_ref("Owner/Repo", 2404, commit_oid, "1" * 40)
+    github.create_ref("Owner/Repo", 2404, commit_oid, expected_oid="4" * 40)
+    github.update_ref("Owner/Repo", 2404, commit_oid, commit_oid)
     snapshot = github.read_ref("Owner/Repo", 2404)
     assert snapshot is not None and snapshot.record == record
     assert all(kwargs["env"] == {"GH_TOKEN": "test"} for _args, kwargs in calls)
     update = next(args for args, _kwargs in calls if "force=false" in args)
     assert "force=false" in update
+    assert any(f"git/refs/heads/{branch}" in arg for arg in update)
+    assert all("refs/tags/" not in arg for args, _kwargs in calls for arg in args)
+    assert all("hephaestus/issue-guards" not in arg for args, _kwargs in calls for arg in args)
 
 
 class _FakeGitHub:
@@ -425,7 +462,8 @@ def test_recovery_cli_inspects_without_recovery_credentials(
     """Inspection is read-only and does not require the operator token."""
 
     class EmptyStore:
-        def __init__(self, _repository: str) -> None:
+        def __init__(self, _repository: str, *, branch: str) -> None:
+            assert branch == "2404-auto-impl"
             pass
 
         def read_ref(self, _repository: str, _issue: int) -> None:
@@ -437,13 +475,39 @@ def test_recovery_cli_inspects_without_recovery_credentials(
     monkeypatch.delenv("HEPHAESTUS_GUARD_RECOVERY_TOKEN", raising=False)
     monkeypatch.setattr(recover_issue_guard, "GitHubIssueGuardStore", EmptyStore)
 
-    assert recover_issue_guard.main(["--repo", "Owner/Repo", "--issue", "2404", "--inspect"]) == 0
+    assert (
+        recover_issue_guard.main(
+            [
+                "--repo",
+                "Owner/Repo",
+                "--issue",
+                "2404",
+                "--branch",
+                "2404-auto-impl",
+                "--inspect",
+            ]
+        )
+        == 0
+    )
     assert '"guard": null' in capsys.readouterr().out
 
 
 def test_recovery_cli_rejects_incomplete_recovery_request() -> None:
     """Recovery mode requires all expected-identity evidence before I/O."""
-    assert recover_issue_guard.main(["--repo", "Owner/Repo", "--issue", "2404", "--recover"]) == 1
+    assert (
+        recover_issue_guard.main(
+            [
+                "--repo",
+                "Owner/Repo",
+                "--issue",
+                "2404",
+                "--branch",
+                "2404-auto-impl",
+                "--recover",
+            ]
+        )
+        == 1
+    )
 
 
 def test_recovery_cli_enforces_operator_actor_allowlist(
@@ -455,7 +519,8 @@ def test_recovery_cli_enforces_operator_actor_allowlist(
     monkeypatch.setenv("GH_TOKEN", "normal-token")
 
     class ActorStore:
-        def __init__(self, _repository: str, *, env: dict[str, str]) -> None:
+        def __init__(self, _repository: str, *, branch: str, env: dict[str, str]) -> None:
+            assert branch == "2404-auto-impl"
             assert env["GH_TOKEN"]
 
         def actor(self) -> str:
@@ -469,6 +534,8 @@ def test_recovery_cli_enforces_operator_actor_allowlist(
                 "Owner/Repo",
                 "--issue",
                 "2404",
+                "--branch",
+                "2404-auto-impl",
                 "--recover",
                 "--expected-claim",
                 str(uuid4()),

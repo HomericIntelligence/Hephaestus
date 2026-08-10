@@ -2,8 +2,9 @@
 
 The visible ``state:in-progress`` label is intentionally only a contention
 signal.  The authoritative claim is a compare-and-confirm state machine stored
-in a per-issue Git ref.  Ref updates are non-forced, so two children of the
-same observed record cannot both become the current owner.
+in no-tree-change commits on the issue's implementation branch. Branch updates
+are non-forced, so two children of the same observed record cannot both become
+the current owner.
 """
 # The store implements a deliberately broad public protocol surface; its
 # individual methods mirror transport operations and are documented by the
@@ -41,7 +42,6 @@ _SHUTDOWN_MARGIN = timedelta(minutes=5)
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _REPOSITORY_RE = re.compile(r"[^/\s]+/[^/\s]+\Z")
 _GUARD_REASON_MAX = 512
-_GUARD_REF_PREFIX = "refs/heads/hephaestus/issue-guards/issue-"
 _REF_READBACK_ATTEMPTS = 4
 _REF_READBACK_DELAY_S = 0.25
 
@@ -63,7 +63,7 @@ class GuardConflictError(GuardError):
 
 
 class GuardPhase(StrEnum):
-    """Phases recorded in the issue guard ref."""
+    """Phases recorded in the implementation branch history."""
 
     ACQUIRING = "acquiring"
     ACTIVE = "active"
@@ -81,6 +81,19 @@ def _require_uuid(value: uuid.UUID, field: str) -> None:
 def _require_sha(value: str, field: str) -> None:
     if not isinstance(value, str) or _FULL_SHA_RE.fullmatch(value) is None:
         raise ValueError(f"{field} must be a full lowercase commit SHA")
+
+
+def _require_branch(value: str, field: str = "branch") -> None:
+    """Reject branch names that cannot safely identify a production ref."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value.startswith("refs/")
+        or ".." in value
+        or "@{" in value
+        or any(char.isspace() or char in "~^:?*[\\" for char in value)
+    ):
+        raise ValueError(f"{field} must be a valid branch name")
 
 
 def normalize_repository(repository: str) -> str:
@@ -113,7 +126,7 @@ def _decode_time(value: object) -> datetime:
 
 @dataclass(frozen=True)
 class GuardRecord:
-    """Strict version-one record stored in a guard ref commit."""
+    """Strict version-one record stored in an implementation-branch commit."""
 
     version: Literal[1]
     repository: str
@@ -225,6 +238,7 @@ class GuardCredential:
     issue: int
     claim_id: uuid.UUID
     run_id: uuid.UUID
+    branch: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "repository", normalize_repository(self.repository))
@@ -232,6 +246,7 @@ class GuardCredential:
             raise ValueError("issue must be a positive integer")
         _require_uuid(self.claim_id, "claim_id")
         _require_uuid(self.run_id, "run_id")
+        _require_branch(self.branch)
 
 
 @dataclass(frozen=True)
@@ -278,6 +293,9 @@ class GuardStore(Protocol):
     def remove_label(self, repository: str, issue: int, label: str) -> None:
         raise NotImplementedError
 
+    def bind_branch(self, branch: str) -> None:
+        raise NotImplementedError
+
     def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None:
         raise NotImplementedError
 
@@ -289,7 +307,14 @@ class GuardStore(Protocol):
     ) -> tuple[str, datetime]:
         raise NotImplementedError
 
-    def create_ref(self, repository: str, issue: int, oid: str) -> None:
+    def create_ref(
+        self,
+        repository: str,
+        issue: int,
+        oid: str,
+        *,
+        expected_oid: str | None = None,
+    ) -> None:
         raise NotImplementedError
 
     def update_ref(self, repository: str, issue: int, oid: str, expected_oid: str) -> None:
@@ -317,10 +342,28 @@ class IssueGuard:
         *,
         run_id: uuid.UUID | None = None,
         actor: str | None = None,
+        branch: str | None = None,
     ) -> None:
         self.store = store
         self.run_id = run_id or uuid.uuid4()
         self.actor = actor
+        configured_branch = branch or getattr(store, "branch_name", None)
+        self.branch = configured_branch if isinstance(configured_branch, str) else ""
+        if self.branch:
+            _require_branch(self.branch)
+            self.store.bind_branch(self.branch)
+
+    def bind_branch(self, branch: str) -> None:
+        """Bind this service to the exact implementation branch."""
+        _require_branch(branch)
+        self.branch = branch
+        self.store.bind_branch(branch)
+
+    def _branch(self) -> str:
+        if not self.branch:
+            raise GuardUnavailableError("issue guard requires the implementation branch")
+        _require_branch(self.branch)
+        return self.branch
 
     def _actor(self) -> str:
         actor = self.actor or self.store.actor()
@@ -328,9 +371,14 @@ class IssueGuard:
             raise GuardUnavailableError("authenticated GitHub actor is unavailable")
         return actor
 
-    @staticmethod
-    def _credential(record: GuardRecord) -> GuardCredential:
-        return GuardCredential(record.repository, record.issue, record.claim_id, record.run_id)
+    def _credential(self, record: GuardRecord) -> GuardCredential:
+        return GuardCredential(
+            record.repository,
+            record.issue,
+            record.claim_id,
+            record.run_id,
+            self._branch(),
+        )
 
     @staticmethod
     def _lease_for(minimum_valid_for: timedelta) -> timedelta:
@@ -353,19 +401,22 @@ class IssueGuard:
         except GuardConflictError:
             raise
         except Exception as exc:
-            raise GuardConflictError("guard ref update lost its compare-and-swap") from exc
+            raise GuardConflictError(
+                "implementation branch update lost its compare-and-swap"
+            ) from exc
         for attempt in range(_REF_READBACK_ATTEMPTS):
             current = self.store.read_ref(repository, issue)
             if current is not None and current.oid == oid and current.record == record:
                 return current
             if attempt + 1 < _REF_READBACK_ATTEMPTS:
                 time.sleep(_REF_READBACK_DELAY_S)
-        raise GuardLostError("guard ref read-back did not confirm the child record")
+        raise GuardLostError("implementation branch read-back did not confirm the child record")
 
     def acquire(  # noqa: C901
         self, repository: str, issue: int, work_stage: str
     ) -> GuardHandle | None:
         """Claim an issue, returning ``None`` when another claim owns it."""
+        self._branch()
         repository = normalize_repository(repository)
         if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
             raise ValueError("issue must be a positive integer")
@@ -412,7 +463,7 @@ class IssueGuard:
         oid, _ = self.store.create_commit(repository, tree, parents, record.to_json())
         try:
             if current is None:
-                self.store.create_ref(repository, issue, oid)
+                self.store.create_ref(repository, issue, oid, expected_oid=parents[0])
             else:
                 self.store.update_ref(repository, issue, oid, current.oid)
         except GuardConflictError:
@@ -463,6 +514,7 @@ class IssueGuard:
     def confirm(self, credential: GuardCredential, minimum_valid_for: timedelta) -> GuardHandle:
         """Re-read and prove ownership before a dispatch or mutation."""
         repository = normalize_repository(credential.repository)
+        self.bind_branch(credential.branch)
         current = self.store.read_ref(repository, credential.issue)
         labels = set(self.store.read_labels(repository, credential.issue))
         if current is None or current.record.phase is not GuardPhase.ACTIVE:
@@ -525,10 +577,10 @@ class IssueGuard:
             current.record.phase is GuardPhase.RELEASING
             and current.record.predecessor_oid == handle.oid
         )
-        if not resuming_release and (
-            current.oid != handle.oid
-            or current.record.phase not in {GuardPhase.ACTIVE, GuardPhase.ACQUIRING}
-        ):
+        if not resuming_release and current.record.phase not in {
+            GuardPhase.ACTIVE,
+            GuardPhase.ACQUIRING,
+        }:
             raise GuardLostError("refusing to release a guard not owned by this run")
         if current.record.lease_expires_at <= _server_now(self.store):
             raise GuardLostError("expired guard requires operator recovery")
@@ -645,8 +697,16 @@ def replace_record(record: GuardRecord, **changes: Any) -> GuardRecord:
 class InMemoryGuardStore:
     """Deterministic store useful for unit tests and local protocol checks."""
 
-    def __init__(self, repository: str = "Owner/Repo", *, actor: str = "automation") -> None:
+    def __init__(
+        self,
+        repository: str = "Owner/Repo",
+        *,
+        actor: str = "automation",
+        branch: str = "test-auto-impl",
+    ) -> None:
         self.repository = normalize_repository(repository)
+        _require_branch(branch)
+        self.branch_name = branch
         self.labels: dict[tuple[str, int], set[str]] = {}
         self.refs: dict[tuple[str, int], GuardSnapshot] = {}
         self.now = datetime.now(UTC)
@@ -670,6 +730,10 @@ class InMemoryGuardStore:
     def remove_label(self, repository: str, issue: int, label: str) -> None:
         self.labels.setdefault((repository, issue), set()).discard(label)
 
+    def bind_branch(self, branch: str) -> None:
+        _require_branch(branch)
+        self.branch_name = branch
+
     def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None:
         return self.refs.get((repository, issue))
 
@@ -686,9 +750,16 @@ class InMemoryGuardStore:
         self._commits[oid] = (record, tree, message)
         return oid, self.now
 
-    def create_ref(self, repository: str, issue: int, oid: str) -> None:
+    def create_ref(
+        self,
+        repository: str,
+        issue: int,
+        oid: str,
+        *,
+        expected_oid: str | None = None,
+    ) -> None:
         key = (repository, issue)
-        if key in self.refs:
+        if key in self.refs and expected_oid != self.refs[key].oid:
             raise GuardConflictError("ref already exists")
         record, tree, _message = self._commits[oid]
         if record is None:
@@ -759,10 +830,14 @@ class GitHubIssueGuardStore:
         self,
         repository: str,
         *,
+        branch: str | None = None,
         call: Callable[..., subprocess.CompletedProcess[str]] = gh_call,
         env: Mapping[str, str] | None = None,
     ) -> None:
         self.repository = normalize_repository(repository)
+        self.branch_name = branch
+        if branch is not None:
+            _require_branch(branch)
         self._call = call
         self._env = dict(env) if env is not None else None
         self._last_server_time: datetime | None = None
@@ -791,6 +866,34 @@ class GitHubIssueGuardStore:
         root = f"repos/{self.repository}"
         return f"{root}/{suffix}" if suffix else root
 
+    def bind_branch(self, branch: str) -> None:
+        """Bind all guard operations to the implementation branch."""
+        _require_branch(branch)
+        self.branch_name = branch
+
+    def _branch(self) -> str:
+        branch = self.branch_name
+        if not isinstance(branch, str) or not branch.strip():
+            raise GuardUnavailableError("guard store has no implementation branch")
+        _require_branch(branch)
+        return branch
+
+    def _ref_oid(self) -> str | None:
+        """Read the implementation branch tip, returning ``None`` if absent."""
+        status, body = self._request(
+            [self._path(f"git/ref/heads/{self._branch()}")],
+            check=False,
+        )
+        if status == 404:
+            return None
+        if status != 200 or not isinstance(body, dict):
+            raise GuardUnavailableError("implementation branch response was not successful")
+        obj = body.get("object")
+        oid = obj.get("sha") if isinstance(obj, dict) else None
+        if not isinstance(oid, str):
+            raise GuardUnavailableError("implementation branch response was malformed")
+        return oid
+
     def read_labels(self, repository: str, issue: int) -> Sequence[str]:
         status, body = self._request([self._path(f"issues/{issue}")])
         if status != 200 or not isinstance(body, dict):
@@ -818,40 +921,58 @@ class GitHubIssueGuardStore:
     def remove_label(self, repository: str, issue: int, label: str) -> None:
         self._request(["--method", "DELETE", self._path(f"issues/{issue}/labels/{label}")])
 
-    def _commit(self, repository: str, oid: str) -> tuple[str, datetime]:
+    def _commit_metadata(
+        self, repository: str, oid: str
+    ) -> tuple[str, str, tuple[str, ...], datetime]:
         status, body = self._request([self._path(f"git/commits/{oid}")])
         if status != 200 or not isinstance(body, dict):
-            raise GuardUnavailableError("guard commit response was not successful")
+            raise GuardUnavailableError("implementation branch commit response was not successful")
         tree = body.get("tree")
         tree_sha = tree.get("sha") if isinstance(tree, dict) else None
         message = body.get("message")
+        parents_data = body.get("parents")
+        parents: list[str] = []
+        if isinstance(parents_data, list):
+            for parent in parents_data:
+                parent_sha = parent.get("sha") if isinstance(parent, dict) else None
+                if isinstance(parent_sha, str):
+                    parents.append(parent_sha)
         if not isinstance(tree_sha, str) or not isinstance(message, str):
-            raise GuardUnavailableError("guard commit response was malformed")
-        return tree_sha, self.server_now()
+            raise GuardUnavailableError("implementation branch commit response was malformed")
+        return tree_sha, message, tuple(parents), self.server_now()
+
+    def _guard_record(self, repository: str, oid: str) -> GuardRecord | None:
+        """Find the newest guard record in the branch's first-parent history."""
+        current = oid
+        for _ in range(4096):
+            _tree, message, parents, _server_time = self._commit_metadata(repository, current)
+            try:
+                return GuardRecord.from_json(message)
+            except ValueError:
+                if message.lstrip().startswith("{"):
+                    raise GuardUnavailableError(
+                        "implementation branch contains a malformed guard record"
+                    ) from None
+            if not parents:
+                return None
+            current = parents[0]
+        raise GuardUnavailableError("implementation branch guard history is too deep")
 
     def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None:
-        ref = f"heads/hephaestus/issue-guards/issue-{issue}"
-        status, body = self._request([self._path(f"git/ref/{ref}")], check=False)
-        if status == 404:
+        oid = self._ref_oid()
+        if oid is None:
             return None
-        if status != 200 or not isinstance(body, dict):
-            raise GuardUnavailableError("guard ref response was not successful")
-        obj = body.get("object")
-        oid = obj.get("sha") if isinstance(obj, dict) else None
-        if not isinstance(oid, str):
-            raise GuardUnavailableError("guard ref response was malformed")
-        tree, server_time = self._commit(repository, oid)
-        status, commit_body = self._request([self._path(f"git/commits/{oid}")])
-        message = commit_body.get("message") if isinstance(commit_body, dict) else None
-        if status != 200 or not isinstance(message, str):
-            raise GuardUnavailableError("guard record commit message was malformed")
-        try:
-            record = GuardRecord.from_json(message)
-        except ValueError as exc:
-            raise GuardUnavailableError("guard ref contains a malformed record") from exc
+        tree, _message, _parents, server_time = self._commit_metadata(repository, oid)
+        record = self._guard_record(repository, oid)
+        if record is None:
+            return None
         return GuardSnapshot(oid=oid, record=record, tree=tree, server_time=server_time)
 
     def default_tip(self, repository: str) -> tuple[str, str]:
+        branch_oid = self._ref_oid()
+        if branch_oid is not None:
+            tree, _message, _parents, _server_time = self._commit_metadata(repository, branch_oid)
+            return branch_oid, tree
         status, body = self._request([self._path("")])
         branch = body.get("default_branch") if isinstance(body, dict) else None
         if status != 200 or not isinstance(branch, str) or not branch:
@@ -861,7 +982,7 @@ class GitHubIssueGuardStore:
         oid = obj.get("sha") if isinstance(obj, dict) else None
         if status != 200 or not isinstance(oid, str):
             raise GuardUnavailableError("default branch ref was malformed")
-        tree, _ = self._commit(repository, oid)
+        tree, _message, _parents, _server_time = self._commit_metadata(repository, oid)
         return oid, tree
 
     def create_commit(
@@ -884,30 +1005,49 @@ class GitHubIssueGuardStore:
             raise GuardUnavailableError("guard commit creation failed")
         return oid, self.server_now()
 
-    def create_ref(self, repository: str, issue: int, oid: str) -> None:
+    def create_ref(
+        self,
+        repository: str,
+        issue: int,
+        oid: str,
+        *,
+        expected_oid: str | None = None,
+    ) -> None:
         status, _ = self._request(
             [
                 "--method",
                 "POST",
                 self._path("git/refs"),
                 "-f",
-                f"ref={_GUARD_REF_PREFIX}{issue}",
+                f"ref=refs/heads/{self._branch()}",
                 "-f",
                 f"sha={oid}",
             ],
             check=False,
         )
         if status in {409, 422}:
-            raise GuardConflictError("guard ref already exists")
+            current_oid = self._ref_oid()
+            if expected_oid is None or current_oid != expected_oid:
+                raise GuardConflictError("implementation branch already exists or changed")
+            self._patch_ref(oid)
+            return
         if status not in {200, 201}:
-            raise GuardUnavailableError("guard ref creation failed")
+            raise GuardUnavailableError("implementation branch creation failed")
 
     def update_ref(self, repository: str, issue: int, oid: str, expected_oid: str) -> None:
+        current_oid = self._ref_oid()
+        if current_oid != expected_oid:
+            raise GuardConflictError(
+                "implementation branch changed before its compare-and-swap update"
+            )
+        self._patch_ref(oid)
+
+    def _patch_ref(self, oid: str) -> None:
         status, _ = self._request(
             [
                 "--method",
                 "PATCH",
-                self._path(f"git/refs/heads/hephaestus/issue-guards/issue-{issue}"),
+                self._path(f"git/refs/heads/{self._branch()}"),
                 "-f",
                 f"sha={oid}",
                 "-F",
@@ -916,9 +1056,9 @@ class GitHubIssueGuardStore:
             check=False,
         )
         if status in {409, 422}:
-            raise GuardConflictError("guard ref update lost its non-force CAS")
+            raise GuardConflictError("implementation branch update lost its non-force CAS")
         if status not in {200, 201}:
-            raise GuardUnavailableError("guard ref update failed")
+            raise GuardUnavailableError("implementation branch update failed")
 
     def actor(self) -> str:
         status, body = self._request(["user"])
