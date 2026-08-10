@@ -53,6 +53,13 @@ __all__ = [
     "resolve_repo_root",
 ]
 
+_JSON_STATUS_RESERVED_FIELDS = frozenset({"status", "exit_code"})
+_SUPPORTED_OUTPUT_FORMATS = ("json", "table", "text")
+_POSITIVE_TIMEOUT_HELP = (
+    " Must be a positive integer; zero does not disable the timeout. "
+    "Omit the flag to use the configured default."
+)
+
 
 class CommandRegistry:
     """Registry for CLI commands with decorator-based registration."""
@@ -67,15 +74,22 @@ class CommandRegistry:
         """Register a command function via decorator."""
 
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.commands[name] = {
+            alias_names = list(aliases or [])
+            identifiers = (name, *alias_names)
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError("command name and aliases must be unique")
+
+            collisions = set(identifiers).intersection(self.commands)
+            if collisions:
+                names = ", ".join(sorted(collisions))
+                raise ValueError(f"command identifiers already registered: {names}")
+
+            command = {
                 "function": func,
                 "description": description,
-                "aliases": aliases or [],
+                "aliases": alias_names,
             }
-
-            # Register aliases
-            for alias in aliases or []:
-                self.commands[alias] = self.commands[name]
+            self.commands.update(dict.fromkeys(identifiers, command))
 
             return func
 
@@ -295,6 +309,17 @@ def _finite_float(value: str) -> float:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    """Parse a strictly positive integer for timeout CLI options."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
 def _non_negative_float(value: str) -> float:
     """Parse a finite non-negative float."""
     parsed = _finite_float(value)
@@ -363,6 +388,11 @@ def emit_json_status(exit_code: int, message: str | None = None, **extra: Any) -
         **extra: Additional fields to merge into the envelope.
 
     """
+    reserved_fields = _JSON_STATUS_RESERVED_FIELDS.intersection(extra)
+    if reserved_fields:
+        names = ", ".join(sorted(reserved_fields))
+        raise ValueError(f"extra fields cannot replace reserved JSON fields: {names}")
+
     envelope: dict[str, Any] = {
         "status": "ok" if exit_code == 0 else "error",
         "exit_code": exit_code,
@@ -457,17 +487,18 @@ def format_output(data: Any, format_type: str = "text") -> str:
         data: Data to format
         format_type: Output format. One of ``"json"``, ``"table"``, or
             ``"text"`` (the default). The match is exact and case-sensitive
-            (e.g. ``"JSON"`` is NOT recognized and falls back to ``"text"``).
+            (e.g. ``"JSON"`` is not recognized).
             ``"table"`` applies only when ``data`` is a list or tuple; for any
             other ``data`` type a ``"table"`` request falls back to ``"text"``.
-            Any unrecognized ``format_type`` (a typo, ``""``, etc.) also falls
-            back to the ``"text"`` format rather than raising — callers wanting
-            strict validation must check ``format_type`` before calling.
 
     Returns:
         Formatted string representation
 
     """
+    if format_type not in _SUPPORTED_OUTPUT_FORMATS:
+        supported = ", ".join(_SUPPORTED_OUTPUT_FORMATS)
+        raise ValueError(f"Unsupported output format {format_type!r}; expected one of: {supported}")
+
     if format_type == "json":
         return json.dumps(data, indent=2)
     elif format_type == "table" and isinstance(data, (list, tuple)):
@@ -535,10 +566,13 @@ def add_agent_timeout_arg(
     parser.add_argument(
         flag,
         dest=dest,
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="SECONDS",
-        help=f"Agent subprocess timeout in seconds (default: {default_doc}).{extra}",
+        help=(
+            f"Agent subprocess timeout in seconds (default: {default_doc})."
+            f"{extra}{_POSITIVE_TIMEOUT_HELP}"
+        ),
     )
 
 
@@ -552,10 +586,11 @@ def add_advise_timeout_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--advise-timeout",
         dest="advise_timeout",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the advise sub-agent in seconds (default: 7200).",
+        help="Timeout for the advise sub-agent in seconds (default: 7200)."
+        + _POSITIVE_TIMEOUT_HELP,
     )
 
 
@@ -569,10 +604,11 @@ def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--poll-max-wait",
         dest="poll_max_wait",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="SECONDS",
-        help="Max wall-clock seconds to poll CI before backing off (default: 1200).",
+        help="Max wall-clock seconds to poll CI before backing off (default: 1200)."
+        + _POSITIVE_TIMEOUT_HELP,
     )
 
 
@@ -586,10 +622,11 @@ def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--git-message-timeout",
         dest="git_message_timeout",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the lightweight commit/PR message agent (default: 1200).",
+        help="Timeout for the lightweight commit/PR message agent (default: 1200)."
+        + _POSITIVE_TIMEOUT_HELP,
     )
 
 
@@ -603,10 +640,10 @@ def add_learn_timeout_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--learn-timeout",
         dest="learn_timeout",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the /learn agent session (default: 7200).",
+        help="Timeout for the /learn agent session (default: 7200)." + _POSITIVE_TIMEOUT_HELP,
     )
 
 
@@ -620,8 +657,9 @@ def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--follow-up-timeout",
         dest="follow_up_timeout",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="SECONDS",
-        help="Timeout for the follow-up-issue agent session (default: 7200).",
+        help="Timeout for the follow-up-issue agent session (default: 7200)."
+        + _POSITIVE_TIMEOUT_HELP,
     )
