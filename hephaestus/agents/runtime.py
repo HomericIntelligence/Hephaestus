@@ -32,7 +32,6 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     preflight_pi_environment,
-    prove_athena_skill_command,
 )
 from hephaestus.agents.pi_session import (
     AgentSessionBinding,
@@ -85,10 +84,6 @@ PI_SMOKE_LOG_DIR_PREFIX = "pi-smoke-"
 PI_RUNTIME_TEMP_ROOT_NAME = "hephaestus-pi-runtime"
 _PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
-PI_ATHENA_SKILL_COMMANDS = {
-    "advise": "skill:advise",
-    "learn": "skill:learn",
-}
 PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
     "--mode",
     "json",
@@ -1571,18 +1566,6 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
 
 
-def pi_athena_invocation_args(kind: str, preflight: PiPreflightResult) -> tuple[str, ...]:
-    """Return explicit Pi grants for one receipt-proven Athena skill command."""
-    try:
-        command = PI_ATHENA_SKILL_COMMANDS[kind]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported Pi Athena skill kind: {kind}") from exc
-    receipt = prove_athena_skill_command(command, preflight)
-    if receipt.package_key != "athena":
-        raise ValueError(f"Athena command {command!r} was not proven from Athena")
-    return ("--tools", PI_READ_ONLY_TOOLS, "--commands", command)
-
-
 def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
     """Return the minimized, privacy-enforcing environment for Pi subprocesses."""
     # The public smoke sentinel is only input to Hephaestus validation and
@@ -1819,69 +1802,6 @@ def run_pi_session(
     del prompt, cwd, timeout, model, sandbox, approval
     raise AgentExecutionError(
         "Unscoped run_pi_session is disabled; use run_agent_session with an ExecutionRequest"
-    )
-
-
-def run_pi_athena_skill(
-    kind: str,
-    prompt: str,
-    *,
-    cwd: Path,
-    timeout: int,
-    preflight: PiPreflightResult,
-    model: str = "",
-) -> AgentRunResult:
-    """Run one receipt-proven Athena skill command through Pi."""
-    _require_pi_automation_admission(cwd)
-    # Retain the receipt verification even though the policy owns the emitted
-    # command grant.  An Athena package that cannot prove this command is not
-    # admitted to the external isolation adapter.
-    pi_athena_invocation_args(kind, preflight)
-    try:
-        request = {
-            "advise": ExecutionRequest(
-                AgentRole.ADVISOR, AgentOperation.ADVISE, SessionLifecycle.ONE_SHOT
-            ),
-            "learn": ExecutionRequest(
-                AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
-            ),
-        }[kind]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported Pi Athena skill kind: {kind}") from exc
-    return _run_pi_with_policy(
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        model=model,
-        policy=resolve_policy(request),
-    )
-
-
-def run_agent_athena_skill(
-    kind: str,
-    prompt: str,
-    *,
-    agent: str,
-    cwd: Path,
-    timeout: int,
-    model: str = "",
-) -> AgentRunResult | None:
-    """Run the provider-specific Athena command required by an admitted agent.
-
-    Athena's host-owned executor remains authoritative for contract binding,
-    corpus retrieval, and learning delivery. Pi additionally runs its pinned
-    package command; other providers have no provider-local command to invoke.
-    """
-    if not is_pi(agent):
-        return None
-    preflight = _require_pi_automation_admission(cwd)
-    return run_pi_athena_skill(
-        kind,
-        prompt,
-        cwd=cwd,
-        timeout=timeout,
-        preflight=preflight,
-        model=model,
     )
 
 

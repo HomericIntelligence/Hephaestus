@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -106,6 +107,41 @@ def test_advise_returns_context_and_receipts(tmp_path: Path) -> None:
     assert result.receipt["contract"]["athena_commit"] == "a" * 40
     assert result.receipt["binding"]["commit_sha"] == "b" * 40
     assert result.receipt["corpus"]["selected_paths"] == ["skills/debugging.md"]
+
+
+def test_default_contract_loader_runs_advise_without_an_agent_harness(tmp_path: Path) -> None:
+    class ProviderNeutralBinding:
+        def bind(self, *, contract: AthenaContractReceipt) -> MnemosyneBindingReceipt:
+            return MnemosyneBindingReceipt(
+                root="/tmp/knowledge",
+                repository="HomericIntelligence/Mnemosyne",
+                default_branch="main",
+                commit_sha="b" * 40,
+                trust_basis="canonical upstream",
+                athena_contract=contract.to_dict(),
+            )
+
+    host = MnemosyneSkillHost(
+        binding_service=ProviderNeutralBinding(),
+        corpus_reader=Corpus(),
+    )
+    with (
+        patch(
+            "hephaestus.agents.pi_plugins.preflight_pi_environment",
+            side_effect=AssertionError("host advise must not preflight Pi"),
+        ) as preflight,
+        patch(
+            "hephaestus.agents.runtime.run_agent_session",
+            side_effect=AssertionError("host advise must not start an agent"),
+        ) as start,
+    ):
+        result = host.execute(_request("advise", tmp_path))
+
+    assert result.ok is True
+    assert result.context == "selected guidance"
+    assert result.receipt["contract"]["trust_source"] == ("hephaestus-athena-contract:v0.4.0")
+    preflight.assert_not_called()
+    start.assert_not_called()
 
 
 def test_default_reader_selects_ranked_bound_skills_for_pipeline_advise_payload(

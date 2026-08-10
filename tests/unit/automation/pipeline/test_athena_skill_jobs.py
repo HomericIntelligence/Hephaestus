@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import queue
 import threading
 from dataclasses import FrozenInstanceError
@@ -11,7 +12,6 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
     AthenaSkillRequest,
@@ -79,10 +79,12 @@ def test_worker_dispatches_athena_skill_job_to_injected_executor(tmp_path: Path)
     assert calls == [_request()]
 
 
-def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
+@pytest.mark.parametrize("kind", ["advise", "learn"])
+def test_athena_skill_job_never_invokes_an_agent_harness(
     tmp_path: Path,
+    kind: str,
 ) -> None:
-    """Pi jobs invoke their proven skill command while the host owns enforcement."""
+    """The host contract is authoritative even when the selected agent is Pi."""
     calls: list[AthenaSkillRequest] = []
 
     class Executor:
@@ -94,7 +96,7 @@ def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
                 receipt={"ok": True},
             )
 
-    request = _request(agent="pi")
+    request = _request(kind=kind, agent="pi")
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),
@@ -105,22 +107,40 @@ def test_pi_athena_skill_runs_receipt_proven_command_before_host_enforcement(
     try:
         with (
             patch(
-                "hephaestus.automation.pipeline.worker_pool.run_agent_athena_skill",
-                return_value=AgentRunResult(stdout="Pi skill completed", stderr=""),
-            ) as run_skill,
+                "hephaestus.automation.pipeline.worker_pool.resolve_agent",
+                side_effect=AssertionError("Athena host work must not resolve a harness"),
+            ) as resolve,
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.run_agent_session",
+                side_effect=AssertionError("Athena host work must not start a harness"),
+            ) as start,
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.resume_agent_session",
+                side_effect=AssertionError("Athena host work must not resume a harness"),
+            ) as resume,
         ):
-            result = pool._run(AthenaSkillJob(request=request, descr="advise"))
+            result = pool._run(AthenaSkillJob(request=request, descr=kind))
     finally:
         pool.shutdown(mark_interrupted=False)
 
     assert result.ok is True
     assert calls == [request]
-    run_skill.assert_called_once()
-    assert run_skill.call_args.args[0] == "advise"
-    assert run_skill.call_args.kwargs["agent"] == "pi"
-    assert run_skill.call_args.kwargs["cwd"] == request.cwd
-    assert run_skill.call_args.kwargs["timeout"] == request.timeout_s
-    assert run_skill.call_args.kwargs["model"] == request.model
+    resolve.assert_not_called()
+    start.assert_not_called()
+    resume.assert_not_called()
+
+
+def test_worker_pool_has_no_athena_agent_dispatch_dependency() -> None:
+    source = Path("hephaestus/automation/pipeline/worker_pool.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+
+    assert not any("athena_skill" in name and name.startswith("run_") for name in imported_names)
 
 
 def test_worker_converts_athena_executor_failure_to_bounded_job_error(tmp_path: Path) -> None:
