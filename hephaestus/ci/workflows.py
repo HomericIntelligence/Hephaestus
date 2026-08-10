@@ -114,7 +114,7 @@ def check_inventory(repo_root: Path) -> tuple[list[str], list[str]]:
 
     """
     readme_path = repo_root / ".github" / "workflows" / "README.md"
-    on_disk = {path.name for path in collect_workflow_files([str(readme_path.parent)])}
+    on_disk = collect_yml_files(repo_root)
     in_readme = parse_readme_table(readme_path)
 
     undocumented = sorted(on_disk - in_readme)

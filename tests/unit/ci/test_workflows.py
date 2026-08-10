@@ -115,6 +115,11 @@ class TestCheckInventory:
         assert undoc == []
         assert missing == []
 
+    def test_missing_workflows_dir_returns_empty_inventory(self, tmp_path: Path) -> None:
+        undoc, missing = check_inventory(tmp_path)
+        assert undoc == []
+        assert missing == []
+
     def test_in_sync_for_both_workflow_suffixes(self, tmp_path: Path) -> None:
         self._setup(tmp_path, ["ci.yml", "release.yaml"], ["ci.yml", "release.yaml"])
         undoc, missing = check_inventory(tmp_path)
@@ -811,6 +816,39 @@ class TestCLIEntryPoints:
             "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
         )
         assert check_workflow_inventory_main() == 0
+
+    def test_inventory_missing_workflows_dir_returns_ok(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from hephaestus.ci.workflows import check_workflow_inventory_main
+
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
+        )
+        assert check_workflow_inventory_main() == 0
+        captured = capsys.readouterr()
+        assert captured.out == "OK: workflow inventory is in sync.\n"
+        assert captured.err == ""
+
+    def test_inventory_empty_workflows_dir_returns_ok(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from hephaestus.ci.workflows import check_workflow_inventory_main
+
+        (tmp_path / ".github/" / "workflows").mkdir(parents=True)
+        monkeypatch.setattr(
+            "sys.argv", ["hephaestus-check-workflow-inventory", "--repo-root", str(tmp_path)]
+        )
+        assert check_workflow_inventory_main() == 0
+        captured = capsys.readouterr()
+        assert captured.out == "OK: workflow inventory is in sync.\n"
+        assert captured.err == ""
 
     def test_inventory_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from hephaestus.ci.workflows import check_workflow_inventory_main
