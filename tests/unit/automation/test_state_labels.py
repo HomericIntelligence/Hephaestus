@@ -76,6 +76,10 @@ class TestLabelVocabulary:
             assert len(spec["color"]) == 6
             int(spec["color"], 16)
 
+    def test_provisioning_excludes_removed_issue_ownership_label(self) -> None:
+        """State provisioning must not restore the removed ownership guard."""
+        assert "state:in-progress" not in STATE_LABEL_SPECS
+
     def test_skip_label_is_independent_of_plan_state(self) -> None:
         """``state:skip`` is an override, not a plan-state label."""
         assert STATE_SKIP not in ALL_STATE_LABELS

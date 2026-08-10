@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import hephaestus.github
@@ -46,6 +47,14 @@ def test_console_script_entry_points_resolve() -> None:
         "assert callable(fs) and callable(td)"
     )
     assert r.returncode == 0, f"console-script entry-point import failed:\n{r.stderr}"
+
+
+def test_removed_issue_guard_recovery_command_is_not_packaged() -> None:
+    """The installed command surface must not expose obsolete guard recovery."""
+    project_root = Path(__file__).resolve().parents[3]
+    metadata = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "hephaestus-recover-issue-guard" not in metadata["project"]["scripts"]
 
 
 def test_github_package_does_not_import_automation() -> None:

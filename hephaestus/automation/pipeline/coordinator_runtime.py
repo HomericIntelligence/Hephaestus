@@ -7,7 +7,6 @@ from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import store_agent_session_result
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
-from .guarded_github import guarded_pipeline_job, guarded_stage_context
 
 # This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
@@ -96,7 +95,7 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _ctx_for(self, item: WorkItem) -> StageContext:
         """Return the (cached, per-repo) StageContext for *item*."""
-        return guarded_stage_context(self, item, self._ctx_for_repo(item.repo))
+        return self._ctx_for_repo(item.repo)
 
     def _budget_for(self, name: str) -> int:
         """Return a configured budget override or the route default."""
@@ -279,7 +278,6 @@ class CoordinatorRuntime(_CoordinatorHost):
             # subprocesses (e.g. claude reviewers) would leak (#2059). Idempotent
             # via _pool_shut_down, so the signal path's earlier call is a no-op.
             self._shutdown_pool()
-            self._release_all_guards("pipeline run finished")
             self._finalize_resumable()
             exit_code = self._exit_code()
             stats = RunStats(
@@ -977,7 +975,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         sanctioned fallback).
         """
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
-        job: Any = guarded_pipeline_job(self, item, request.job)
+        job: Any = request.job
         if isinstance(job, AgentJob):
             ok, delay = self._rate_budget_ok()
             if not ok:
@@ -1046,7 +1044,6 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._record_event("done", self._item_key(item), outcome.note)
             self._record_terminal_result(item)
             self._release_source_lease(item)
-            self._release_item_guard(item, "finished stage completed")
             self._release_work_permit(item)
             return
 
@@ -1314,7 +1311,6 @@ class CoordinatorRuntime(_CoordinatorHost):
                 item.payload["_recorded"] = True
             self._record_terminal_result(item)
             self._release_source_lease(item)
-            self._release_item_guard(item, "finished stage completed")
             self._release_work_permit(item)
             return
         result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
