@@ -14,10 +14,7 @@ import logging
 import subprocess
 import threading
 import time
-import uuid
-from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +33,6 @@ from hephaestus.agents.runtime import (
 from hephaestus.automation._review_utils import (
     build_automation_parser,
     drain_completed_futures,
-    find_pr_for_issue,
-    get_pr_head_branch,
-    pr_head_is_writable,
     print_worker_summary,
     work_report_context,
 )
@@ -50,10 +44,8 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
 from .git_utils import (
-    get_repo_info,
     get_repo_root,
     get_repo_slug,
-    issue_auto_impl_branch_name,
     issue_ref,
 )
 from .github_api import (
@@ -63,7 +55,6 @@ from .github_api import (
     gh_issue_json,
     gh_issue_upsert_owned_comment,
 )
-from .issue_guard import GitHubIssueGuardStore, GuardHandle, IssueGuard
 from .models import PlanReviewerOptions, WorkerResult
 from .prompts import get_plan_review_prompt
 from .protocol import PLAN_REVIEW_CANONICAL_MARKER
@@ -121,12 +112,7 @@ class PlanReviewer:
     - Dry-run mode exits before any GitHub write operation
     """
 
-    def __init__(
-        self,
-        options: PlanReviewerOptions,
-        *,
-        guard_factory: Callable[[str], IssueGuard] | None = None,
-    ) -> None:
+    def __init__(self, options: PlanReviewerOptions) -> None:
         """Initialize the plan reviewer.
 
         Args:
@@ -134,13 +120,6 @@ class PlanReviewer:
 
         """
         self.options = options
-        self._guard_factory = guard_factory
-        self.run_id = uuid.uuid4()
-        self.repo_root = get_repo_root() if guard_factory is not None else None
-        self.repo_target = get_repo_info(self.repo_root) if self.repo_root is not None else None
-        self.repository = (
-            f"{self.repo_target[0]}/{self.repo_target[1]}" if self.repo_target else None
-        )
         self.status_tracker = StatusTracker(options.max_workers)
         self.lock = threading.Lock()
         # Per-instance cache for ``_fetch_issue_comments`` (#A3-009, #560).
@@ -200,7 +179,7 @@ class PlanReviewer:
         self._print_summary(results)
         return results
 
-    def _review_issue(self, issue_number: int, slot_id: int) -> WorkerResult:  # noqa: C901
+    def _review_issue(self, issue_number: int, slot_id: int) -> WorkerResult:
         """Review the plan for a single issue.
 
         Args:
@@ -219,26 +198,10 @@ class PlanReviewer:
                     error="Failed to acquire worker slot",
                 )
 
-            guard_service: IssueGuard | None = None
-            guard_handle: GuardHandle | None = None
             try:
                 self.status_tracker.update_slot(
                     acquired_slot, f"{issue_ref(issue_number)}: checking"
                 )
-
-                if self._guard_factory is not None and not self.options.dry_run:
-                    if self.repository is None:
-                        raise RuntimeError("standalone plan reviewer repository is unavailable")
-                    guard_service = self._new_guard_service(self.repository, issue=issue_number)
-                    guard_handle = guard_service.acquire(
-                        self.repository, issue_number, "plan-review"
-                    )
-                    if guard_handle is None:
-                        return WorkerResult(
-                            issue_number=issue_number,
-                            success=True,
-                            already_reviewed=True,
-                        )
 
                 # --- Read-only checks (safe in dry-run) ---
 
@@ -249,10 +212,7 @@ class PlanReviewer:
                 active_states = set(labels).intersection(ALL_STATE_LABELS)
                 if STATE_PLAN_BLOCKED in active_states:
                     if not self.options.dry_run:
-                        if guard_handle is None:
-                            self._ensure_blocked_audit(issue_number)
-                        else:
-                            self._ensure_blocked_audit(issue_number, guard_handle)
+                        self._ensure_blocked_audit(issue_number)
                     logger.info(
                         "Issue %s: plan is BLOCKED; awaiting external intervention",
                         issue_ref(issue_number),
@@ -327,10 +287,7 @@ class PlanReviewer:
                 self.status_tracker.update_slot(
                     acquired_slot, f"{issue_ref(issue_number)}: posting review"
                 )
-                if guard_handle is None:
-                    self._post_review(issue_number, review_text)
-                else:
-                    self._post_review(issue_number, review_text, guard_handle)
+                self._post_review(issue_number, review_text)
 
                 return WorkerResult(issue_number=issue_number, success=True)
 
@@ -341,16 +298,6 @@ class PlanReviewer:
                     success=False,
                     error=str(e)[:80],
                 )
-            finally:
-                if guard_service is not None and guard_handle is not None:
-                    try:
-                        guard_service.release(guard_handle, "standalone plan review finished")
-                    except Exception as exc:
-                        logger.warning(
-                            "Issue %s guard remains for operator recovery: %s",
-                            issue_ref(issue_number),
-                            exc,
-                        )
 
     def _fetch_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
         """Fetch the complete bounded issue journal, caching it per instance.
@@ -426,9 +373,7 @@ class PlanReviewer:
 
         return None
 
-    def _ensure_blocked_audit(
-        self, issue_number: int, guard_handle: GuardHandle | None = None
-    ) -> None:
+    def _ensure_blocked_audit(self, issue_number: int) -> None:
         """Repair an interrupted BLOCKED explanation without invoking an agent."""
         comments = [
             IssueComment(
@@ -445,7 +390,6 @@ class PlanReviewer:
         body = blocked_audit_recovery_body(comments)
         if body is None:
             return
-        self._confirm_guard_for_write(guard_handle)
         gh_issue_upsert_owned_comment(
             issue_number,
             PLAN_REVIEW_CANONICAL_MARKER,
@@ -631,12 +575,7 @@ class PlanReviewer:
             logger.error("Unexpected error calling %s for issue #%s: %s", agent, issue_number, e)
             return None
 
-    def _post_review(
-        self,
-        issue_number: int,
-        review_text: str,
-        guard_handle: GuardHandle | None = None,
-    ) -> None:
+    def _post_review(self, issue_number: int, review_text: str) -> None:
         """Persist one canonical review and its authoritative state label.
 
         Legacy ``Verdict:`` output and ambiguous responses are rejected before
@@ -678,7 +617,6 @@ class PlanReviewer:
         # audit write. GO/NOGO keep audit-first ordering. In every case only
         # a fresh exclusive label confirmation authorizes routing.
         if state == STATE_PLAN_BLOCKED:
-            self._confirm_guard_for_write(guard_handle)
             gh_issue_edit_labels(
                 issue_number,
                 add=[label_to_add],
@@ -686,7 +624,6 @@ class PlanReviewer:
                 **self._repo_kwargs(),
             )
         else:
-            self._confirm_guard_for_write(guard_handle)
             gh_issue_upsert_owned_comment(
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
@@ -694,7 +631,6 @@ class PlanReviewer:
                 legacy_marker=_REVIEW_PREFIX,
                 **self._repo_kwargs(),
             )
-            self._confirm_guard_for_write(guard_handle)
             gh_issue_edit_labels(
                 issue_number,
                 add=[label_to_add],
@@ -710,7 +646,6 @@ class PlanReviewer:
         if not is_exclusive_plan_state(labels, state):
             raise RuntimeError(f"plan state label {state} was not confirmed exclusively")
         if state == STATE_PLAN_BLOCKED:
-            self._confirm_guard_for_write(guard_handle)
             gh_issue_upsert_owned_comment(
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
@@ -722,45 +657,7 @@ class PlanReviewer:
 
     def _repo_kwargs(self) -> dict[str, tuple[str, str]]:
         """Return explicit repository arguments for the guarded path."""
-        return {"repo": self.repo_target} if self.repo_target is not None else {}
-
-    def _new_guard_service(
-        self,
-        repository: str,
-        *,
-        issue: int | None = None,
-        branch: str | None = None,
-    ) -> IssueGuard:
-        """Create a guard service carrying this reviewer run identity."""
-        if self._guard_factory is None:
-            raise RuntimeError("standalone guard factory is unavailable")
-        service = self._guard_factory(repository)
-        if branch is None and issue is not None:
-            branch = issue_auto_impl_branch_name(issue)
-            existing_pr = find_pr_for_issue(issue)
-            if existing_pr is not None:
-                if not pr_head_is_writable(existing_pr, self.repo_target):
-                    raise RuntimeError(
-                        f"PR #{existing_pr} does not have a writable production branch"
-                    )
-                branch = get_pr_head_branch(existing_pr)
-                if not isinstance(branch, str) or not branch.strip():
-                    raise RuntimeError(f"PR #{existing_pr} has no verified production branch")
-                branch = branch.strip()
-        if branch is not None:
-            service.bind_branch(branch)
-        service.run_id = self.run_id
-        return service
-
-    def _confirm_guard_for_write(self, handle: GuardHandle | None) -> None:
-        """Confirm a standalone claim immediately before a durable write."""
-        if handle is None or self._guard_factory is None:
-            return
-        service = self._new_guard_service(
-            handle.credential.repository,
-            branch=handle.credential.branch,
-        )
-        service.confirm(handle.credential, timedelta(0))
+        return {}
 
     def _print_summary(self, results: dict[int, WorkerResult]) -> None:
         """Print a summary of plan review results.
@@ -863,14 +760,7 @@ def main() -> int:
                 ),
             )
 
-            reviewer = PlanReviewer(
-                options,
-                guard_factory=(
-                    None
-                    if args.dry_run
-                    else lambda repository: IssueGuard(GitHubIssueGuardStore(repository))
-                ),
-            )
+            reviewer = PlanReviewer(options)
             results = reviewer.run()
 
             # Compute work units for loop convergence (#613): non-skipped reviews

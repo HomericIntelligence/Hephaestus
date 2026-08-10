@@ -1,7 +1,7 @@
 """Structural guard for the Architecture Decision Record directory.
 
 Keeps ``docs/adr/`` an enumerable, well-formed record: every ADR follows the
-Nygard section skeleton, the numeric prefixes are contiguous and unique, and the
+Nygard section skeleton, the numeric prefixes start at 0001 and are unique, and the
 ``README.md`` index stays bidirectionally in sync with the files on disk.
 """
 
@@ -29,10 +29,11 @@ def test_every_adr_filename_is_well_formed() -> None:
     assert not bad, f"Malformed ADR filenames: {bad}"
 
 
-def test_adr_numbers_are_contiguous_and_unique() -> None:
-    """ADR numeric prefixes stay contiguous from 0001 with no duplicates."""
+def test_adr_numbers_start_at_one_and_are_unique() -> None:
+    """ADR numeric prefixes start at 0001 and do not reuse retired IDs."""
     nums = sorted(int(p.name[:4]) for p in _adr_files())
-    assert nums == list(range(1, len(nums) + 1)), f"ADR numbers not contiguous from 1: {nums}"
+    assert nums and nums[0] == 1, f"ADR numbers do not start at 1: {nums}"
+    assert len(nums) == len(set(nums)), f"ADR numbers are not unique: {nums}"
 
 
 def test_every_adr_has_required_sections() -> None:
