@@ -7,6 +7,7 @@ import queue
 import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -101,12 +102,29 @@ def test_athena_skill_job_never_invokes_an_agent_harness(
         athena_skill_executor=Executor(),
     )
     try:
-        result = pool._run(AthenaSkillJob(request=request, descr="advise"))
+        with (
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.resolve_agent",
+                side_effect=AssertionError("Athena host work must not resolve a harness"),
+            ) as resolve,
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.run_agent_session",
+                side_effect=AssertionError("Athena host work must not start a harness"),
+            ) as start,
+            patch(
+                "hephaestus.automation.pipeline.worker_pool.resume_agent_session",
+                side_effect=AssertionError("Athena host work must not resume a harness"),
+            ) as resume,
+        ):
+            result = pool._run(AthenaSkillJob(request=request, descr="advise"))
     finally:
         pool.shutdown(mark_interrupted=False)
 
     assert result.ok is True
     assert calls == [request]
+    resolve.assert_not_called()
+    start.assert_not_called()
+    resume.assert_not_called()
 
 
 def test_worker_pool_has_no_athena_agent_dispatch_dependency() -> None:

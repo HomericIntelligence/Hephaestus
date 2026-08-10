@@ -7,6 +7,7 @@ import json
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -37,7 +38,11 @@ def test_receipt_binds_fixture_to_provider_neutral_athena_contract() -> None:
 
 
 def test_default_receipt_needs_no_harness_or_contract_checkout() -> None:
-    receipt = load_athena_contract_receipt()
+    with patch(
+        "hephaestus.agents.pi_plugins.preflight_pi_environment",
+        side_effect=AssertionError("Athena contract loading must not preflight Pi"),
+    ) as preflight:
+        receipt = load_athena_contract_receipt()
 
     expected = _expected_contract()
     assert receipt.athena_repository == expected["athena_repository"]
@@ -46,6 +51,7 @@ def test_default_receipt_needs_no_harness_or_contract_checkout() -> None:
     assert receipt.learn_sha256 == expected["learn_sha256"]
     assert receipt.dependency_resolution_sha256 == expected["dependency_resolution_sha256"]
     assert receipt.trust_source == "hephaestus-athena-contract:v0.4.0"
+    preflight.assert_not_called()
 
 
 def test_contract_module_does_not_depend_on_pi_or_agent_runtime() -> None:
