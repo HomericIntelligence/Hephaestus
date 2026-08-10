@@ -41,7 +41,6 @@ else:
 
 # Security limit: reject workflow files larger than 1 MB.
 _MAX_FILE_SIZE = 1_048_576
-_WORKFLOW_GLOBS = ("*.yml", "*.yaml")
 _WORKFLOW_SUFFIXES = frozenset({".yml", ".yaml"})
 
 # Matches a .yml or .yaml filename (with or without a markdown hyperlink) inside a
