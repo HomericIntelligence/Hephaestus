@@ -17,9 +17,12 @@ without an ownership check could clear a live run or alter the independent
 Use `state:in-progress` as an orthogonal, visible contention label. It is not
 part of the plan-state or implementation-state tuples and never authorizes a
 stage transition. The authoritative ownership record is canonical version-one
-JSON in a no-tree-change commit on the exact implementation branch for the
-issue. The branch is carried in the guard credential, so the guard and
-production writer share one ref: `refs/heads/<implementation-branch>`. A
+JSON in the body of a no-tree-change commit on the exact implementation branch
+for the issue. The commit uses a stable Conventional Commit subject and machine
+DCO trailer so the guard's own audit history satisfies the repository's PR
+policy. Readers also accept the legacy raw-JSON commit form so existing guards
+remain recoverable. The branch is carried in the guard credential, so the guard
+and production writer share one ref: `refs/heads/<implementation-branch>`. A
 branch tip may contain ordinary implementation commits; readers walk
 first-parent history to find the newest guard record, while every guard child
 still advances that same branch with a non-forced compare-and-swap update.

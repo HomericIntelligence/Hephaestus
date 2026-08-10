@@ -44,6 +44,10 @@ _REPOSITORY_RE = re.compile(r"[^/\s]+/[^/\s]+\Z")
 _GUARD_REASON_MAX = 512
 _REF_READBACK_ATTEMPTS = 4
 _REF_READBACK_DELAY_S = 0.25
+_GUARD_COMMIT_SUBJECT = "chore(automation): record issue guard state"
+_GUARD_COMMIT_SIGNOFF = (
+    "Signed-off-by: Hephaestus Automation <hephaestus-automation@users.noreply.github.com>"
+)
 
 
 class GuardError(RuntimeError):
@@ -162,7 +166,7 @@ class GuardRecord:
             raise ValueError("reason must be a bounded string")
 
     def to_json(self) -> str:
-        """Return the canonical JSON representation used as commit text."""
+        """Return the canonical JSON representation of this record."""
         return json.dumps(
             {
                 "actor": self.actor,
@@ -181,6 +185,10 @@ class GuardRecord:
             separators=(",", ":"),
             sort_keys=True,
         )
+
+    def to_commit_message(self) -> str:
+        """Return canonical guard text wrapped in a PR-policy-compliant message."""
+        return f"{_GUARD_COMMIT_SUBJECT}\n\n{self.to_json()}\n\n{_GUARD_COMMIT_SIGNOFF}"
 
     @classmethod
     def from_json(cls, value: str) -> Self:
@@ -228,6 +236,19 @@ class GuardRecord:
             return record
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("guard record fields are invalid") from exc
+
+    @classmethod
+    def from_commit_message(cls, value: str) -> Self:
+        """Parse the current commit envelope or a legacy raw-JSON record."""
+        if not isinstance(value, str):
+            raise ValueError("guard commit message must be a string")
+        if value.startswith("{"):
+            return cls.from_json(value)
+        prefix = f"{_GUARD_COMMIT_SUBJECT}\n\n"
+        suffix = f"\n\n{_GUARD_COMMIT_SIGNOFF}"
+        if not value.startswith(prefix) or not value.endswith(suffix):
+            raise ValueError("guard commit message has an invalid envelope")
+        return cls.from_json(value[len(prefix) : -len(suffix)])
 
 
 @dataclass(frozen=True)
@@ -394,7 +415,7 @@ class IssueGuard:
         record: GuardRecord,
     ) -> GuardSnapshot:
         oid, _server_time = self.store.create_commit(
-            repository, previous.tree, [previous.oid], record.to_json()
+            repository, previous.tree, [previous.oid], record.to_commit_message()
         )
         try:
             self.store.update_ref(repository, issue, oid, previous.oid)
@@ -460,7 +481,7 @@ class IssueGuard:
             predecessor_oid=predecessor,
             reason="automation acquisition",
         )
-        oid, _ = self.store.create_commit(repository, tree, parents, record.to_json())
+        oid, _ = self.store.create_commit(repository, tree, parents, record.to_commit_message())
         try:
             if current is None:
                 self.store.create_ref(repository, issue, oid, expected_oid=parents[0])
@@ -746,7 +767,7 @@ class InMemoryGuardStore:
         self, repository: str, tree: str, parents: Sequence[str], message: str
     ) -> tuple[str, datetime]:
         oid = self._sha()
-        record = GuardRecord.from_json(message)
+        record = GuardRecord.from_commit_message(message)
         self._commits[oid] = (record, tree, message)
         return oid, self.now
 
@@ -947,9 +968,9 @@ class GitHubIssueGuardStore:
         for _ in range(4096):
             _tree, message, parents, _server_time = self._commit_metadata(repository, current)
             try:
-                return GuardRecord.from_json(message)
+                return GuardRecord.from_commit_message(message)
             except ValueError:
-                if message.lstrip().startswith("{"):
+                if message.lstrip().startswith("{") or message.startswith(_GUARD_COMMIT_SUBJECT):
                     raise GuardUnavailableError(
                         "implementation branch contains a malformed guard record"
                     ) from None

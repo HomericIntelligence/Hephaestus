@@ -280,6 +280,22 @@ def test_guard_record_round_trips_and_recovery_secret_is_rejected() -> None:
     handle = IssueGuard(store).acquire("Owner/Repo", 2404, "planning")
     assert handle is not None
     assert GuardRecord.from_json(handle.record.to_json()) == handle.record
+    commit_message = handle.record.to_commit_message()
+    assert commit_message.startswith("chore(automation): record issue guard state\n\n")
+    assert commit_message.endswith(
+        "\n\nSigned-off-by: Hephaestus Automation <hephaestus-automation@users.noreply.github.com>"
+    )
+    assert GuardRecord.from_commit_message(commit_message) == handle.record
+    assert GuardRecord.from_commit_message(handle.record.to_json()) == handle.record
+    guard_messages = [
+        message for record, _tree, message in store._commits.values() if record is not None
+    ]
+    assert guard_messages
+    assert all(
+        message.startswith("chore(automation): record issue guard state\n\n")
+        and "\nSigned-off-by: Hephaestus Automation <" in message
+        for message in guard_messages
+    )
 
     assert_recovery_secret_absent({})
     with pytest.raises(GuardUnavailableError):
