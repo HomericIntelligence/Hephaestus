@@ -198,10 +198,7 @@ class TestEmptyDiffReroutesToSubstantiveImplementation:
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """An empty review diff must be handed to implementation, not re-reviewed."""
-        assert (
-            ROUTES[StageName.PR_REVIEW].fail_routes["empty_pr_diff"]
-            == StageName.IMPLEMENTATION
-        )
+        assert ROUTES[StageName.PR_REVIEW].fail_routes["empty_pr_diff"] == StageName.IMPLEMENTATION
 
         impl_stage = ImplementationStage()
         item = make_work_item(issue=3, pr=1001, state="ADOPTED")
