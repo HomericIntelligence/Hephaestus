@@ -32,7 +32,6 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     preflight_pi_environment,
-    prove_athena_skill_command,
 )
 from hephaestus.agents.pi_session import (
     AgentSessionBinding,
@@ -85,10 +84,6 @@ PI_SMOKE_LOG_DIR_PREFIX = "pi-smoke-"
 PI_RUNTIME_TEMP_ROOT_NAME = "hephaestus-pi-runtime"
 _PI_INTERNAL_ADMISSION_TOKEN = object()
 PI_READ_ONLY_TOOLS = "read,grep,find,ls"
-PI_ATHENA_SKILL_COMMANDS = {
-    "advise": "skill:advise",
-    "learn": "skill:learn",
-}
 PI_SMOKE_BASE_ARGS: tuple[str, ...] = (
     "--mode",
     "json",
@@ -1569,18 +1564,6 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     if sandbox in {"workspace-write", "danger-full-access"}:
         return []
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
-
-
-def pi_athena_invocation_args(kind: str, preflight: PiPreflightResult) -> tuple[str, ...]:
-    """Return explicit Pi grants for one receipt-proven Athena skill command."""
-    try:
-        command = PI_ATHENA_SKILL_COMMANDS[kind]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported Pi Athena skill kind: {kind}") from exc
-    receipt = prove_athena_skill_command(command, preflight)
-    if receipt.package_key != "athena":
-        raise ValueError(f"Athena command {command!r} was not proven from Athena")
-    return ("--tools", PI_READ_ONLY_TOOLS, "--commands", command)
 
 
 def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:

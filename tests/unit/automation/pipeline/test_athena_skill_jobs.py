@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import queue
 import threading
 from dataclasses import FrozenInstanceError
@@ -78,8 +79,10 @@ def test_worker_dispatches_athena_skill_job_to_injected_executor(tmp_path: Path)
     assert calls == [_request()]
 
 
+@pytest.mark.parametrize("kind", ["advise", "learn"])
 def test_athena_skill_job_never_invokes_an_agent_harness(
     tmp_path: Path,
+    kind: str,
 ) -> None:
     """The host contract is authoritative even when the selected agent is Pi."""
     calls: list[AthenaSkillRequest] = []
@@ -93,7 +96,7 @@ def test_athena_skill_job_never_invokes_an_agent_harness(
                 receipt={"ok": True},
             )
 
-    request = _request(agent="pi")
+    request = _request(kind=kind, agent="pi")
     pool = WorkerPool(
         size=1,
         shutdown=threading.Event(),
@@ -116,7 +119,7 @@ def test_athena_skill_job_never_invokes_an_agent_harness(
                 side_effect=AssertionError("Athena host work must not resume a harness"),
             ) as resume,
         ):
-            result = pool._run(AthenaSkillJob(request=request, descr="advise"))
+            result = pool._run(AthenaSkillJob(request=request, descr=kind))
     finally:
         pool.shutdown(mark_interrupted=False)
 
@@ -129,9 +132,15 @@ def test_athena_skill_job_never_invokes_an_agent_harness(
 
 def test_worker_pool_has_no_athena_agent_dispatch_dependency() -> None:
     source = Path("hephaestus/automation/pipeline/worker_pool.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
 
-    assert "run_agent_athena_skill" not in source
-    assert "_pi_athena_skill_prompt" not in source
+    assert not any("athena_skill" in name and name.startswith("run_") for name in imported_names)
 
 
 def test_worker_converts_athena_executor_failure_to_bounded_job_error(tmp_path: Path) -> None:

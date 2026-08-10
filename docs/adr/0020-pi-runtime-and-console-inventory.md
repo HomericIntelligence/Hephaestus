@@ -4,8 +4,9 @@
 - Date: 2026-07-29
 - Tracks: #2514
 - Extends: ADR-0019
-- Supersession note: ADR-0025 records the implemented stage-scope
-  AthenaSkillJob receipt handling for `advise` and `learn`.
+- Supersession note: ADR-0025 replaces all rows in this ADR that required Pi
+  discovery or preflight for host-owned Athena `advise` or `learn`. Only agent
+  jobs that execute through Pi use Pi validation.
 
 ## Context
 
@@ -66,11 +67,11 @@ fail-closed rather than receiving a provider-specific bypass.
 | Stage | Pi contract or safe N/A boundary | Owning delivery |
 | --- | --- | --- |
 | `repo` | No model job; repository and GitHub discovery are provider N/A. | Existing behavior |
-| `planning` | Read/search scope plus Athena `advise`; canonical Mnemosyne resolution, package discovery, and #2518 stage-scope/lifecycle enforcement are required. | #2515–#2518 |
-| `plan_review` | Reviewer analysis is read-only, but amendment resumes the planner and `LEARN_WAIT` invokes the Mnemosyne PR workflow. Pi is N/A for the whole stage until those subpaths are separately preflighted. | #2515–#2518; #2517 owns learning semantics and #2518 owns scopes/lifecycle |
-| `implementation` | Default `ADVISE_WAIT` needs Athena `advise`, canonical Mnemosyne resolution, and read/search/skill scope; dirty-worktree and implementation work use an isolated worktree with explicitly scoped write/edit/shell tools. Delegation is opt-in. | #2515–#2518 |
+| `planning` | Host-owned Athena `advise` needs no harness. The planner agent job uses read/search scope and its selected provider contract. | #2518 owns agent scope/lifecycle |
+| `plan_review` | Host-owned `learn` needs no harness. Reviewer and amendment agent jobs use their selected provider contracts. | #2518 owns agent scope/lifecycle |
+| `implementation` | Host-owned Athena `advise` needs no harness. Implementation agent work uses an isolated worktree with explicit write/edit/shell tools. Delegation is opt-in. | #2518 owns agent scope/lifecycle |
 | `pr_review` | Reviewer/validation work is read-only and Athena `pr-review`, delegation, and web capabilities require verified preflight. Address work runs an implementation role in an isolated worktree with write/edit/shell scope, then the host performs a verified commit/push; Pi has no merge authority. | #2515–#2518 |
-| `merge_wait` | No provider authority to merge; `learn` requires verified Mnemosyne PR evidence. | #2517, #2518 |
+| `merge_wait` | No provider authority to merge. Host-owned `learn` needs verified Mnemosyne PR evidence and no harness. | #2517 |
 | `finished` | No model job; terminal-state recording and worktree handling are provider N/A. | Existing behavior |
 
 ### Console entry points

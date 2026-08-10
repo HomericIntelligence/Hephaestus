@@ -62,6 +62,24 @@ def test_contract_module_does_not_depend_on_pi_or_agent_runtime() -> None:
     assert "preflight_pi_environment" not in source
 
 
+def test_trust_source_override_requires_verified_contract_root() -> None:
+    with pytest.raises(AthenaContractError, match="requires a verified root"):
+        load_athena_contract_receipt(trust_source="unverified")
+
+
+def test_manifest_rejects_non_string_fields(tmp_path: Path) -> None:
+    manifest = tmp_path / "athena_contract_manifest.json"
+    invalid = _expected_contract()
+    invalid["athena_repository"] = ["HomericIntelligence/Athena"]  # type: ignore[assignment]
+    manifest.write_text(json.dumps(invalid), encoding="utf-8")
+
+    with (
+        patch("hephaestus.automation.athena_contract._CONTRACT_MANIFEST", manifest),
+        pytest.raises(AthenaContractError, match=r"fields must be strings.*athena_repository"),
+    ):
+        load_athena_contract_receipt()
+
+
 def test_receipt_refuses_content_that_differs_from_packaged_contract(
     tmp_path: Path,
 ) -> None:

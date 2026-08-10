@@ -5,6 +5,11 @@
 - Tracks: #2517
 - Supersedes details in: ADR-0019, ADR-0020
 
+This ADR specifically supersedes the ADR-0019 capability and stage rows and
+the ADR-0020 stage rows that required Pi package discovery or preflight for
+`planning` advice, implementation advice, plan-review learning, or merge-wait
+learning. Those four operations are host-owned. They never require a harness.
+
 ## Context
 
 ADR-0019 defined Mnemosyne as a repository dependency at

@@ -3,8 +3,10 @@
 - Status: Accepted
 - Date: 2026-07-29
 - Tracks: #2514
-- Supersession note: ADR-0025 records the implemented Athena/Mnemosyne receipt,
-  resolver, corpus, learning-delivery, and Pi skill-command details.
+- Supersession note: ADR-0025 replaces every requirement in this ADR that made
+  host-owned Athena `advise` or `learn` depend on Pi discovery, package
+  inventory, preflight, tool grants, or sessions. Only work that runs an agent
+  through Pi uses the Pi admission contract below.
 
 ## Context
 
@@ -41,7 +43,7 @@ test is the machine-checkable companion to this record.
 | Base CLI | Sessions and resume | JSON event stream supplies an opaque session ID; a post-admission resume must validate a worktree-local identity | Normal automation is blocked today. #2518 must reject malformed events, missing identities, and cross-worktree resume/fork prompts rather than treating them as success. |
 | Base CLI | Skills | Pi can load an explicit skill file or directory | Do not claim Athena discovery until the Athena package probe succeeds. |
 | Base CLI | Tool allowlist | `--tools` limits model-visible built-in and package tools | Do not call it an OS sandbox. |
-| Required package | Athena | Native Athena package, pinned source/ref, and canonical skill resources | Block Pi stages requiring Athena skills until discovery proves `advise`, `learn`, and `pr-review`. |
+| Required package | Athena | Native Athena package, pinned source/ref, and canonical skill resources | Block only Pi agent work that loads an Athena skill, such as `pr-review`, until discovery proves that skill. Host-owned `advise` and `learn` do not use this package gate. |
 | Required package | Delegation | `npm:pi-subagents@0.37.2` supplies the `subagent` tool | Block roles that require `Agent`/delegation when absent. |
 | Required package | Web evidence | `npm:pi-web-access@0.15.0` supplies named web tools | Block roles that require `WebFetch` when absent. |
 | Repository dependency | Mnemosyne | Canonical checkout at `~/.agent_brain/knowledge` under Athena's dependency-resolution contract | Never install or model Mnemosyne as a Pi package; resolution or trust failure blocks the skill. |
@@ -82,11 +84,11 @@ that a role-derived Pi scope has been admitted.
 | Direct `run_agent_text` callers (`audit_reviewer`, `plan_reviewer`, `pr_review_core`, `tidy`, and related legacy flows) | Native JSON execution, model/provider selection, and a role-derived tool grant | The shared runner rejects Pi before dispatch until its admission prerequisites exist; unsupported grants must fail before invocation. |
 | Direct `run_agent_session` and `resume_agent_session` callers (`agent_stage`, implementation, CI-fix, follow-up, learn, and post-merge flows) | Opaque session ID, resume, timeout, process lifecycle, and redacted diagnostics | The shared runner rejects Pi before dispatch until its admission prerequisites exist. Session lifecycle has executable runtime tests; process tracking is completed in #2518. |
 | `repo` | No model job | Safe tested N/A; it performs repository and GitHub discovery only. |
-| `planning` | Athena `advise` plus planner read/search scope | Requires canonical Mnemosyne resolution and Athena discovery. |
-| `plan_review` | Read-only reviewer analysis, planner amendment, and a separate Mnemosyne learning subpath | The reviewer remains read-only. `LEARN_WAIT` is Pi N/A until #2517 proves Athena-equivalent learning semantics and #2518 separately scopes its PR-producing workflow. |
-| `implementation` | Default `ADVISE_WAIT` needs Athena `advise` with its canonical Mnemosyne resolution and a read/search/skill scope; dirty-worktree decisions and implementation use an isolated worktree with write/edit/shell scope | Pi is N/A for the whole stage until #2515–#2518 preflight both advice and implementation subpaths. Delegation is opt-in, never ambient. |
+| `planning` | Host-owned Athena `advise`, then planner agent work with read/search scope | `advise` needs no harness. Only the planner agent job uses provider admission. |
+| `plan_review` | Read-only reviewer analysis, planner amendment, and a separate host-owned Mnemosyne learning subpath | Host learning needs no harness. Reviewer and amendment agent jobs use their selected provider contract. |
+| `implementation` | Host-owned Athena `advise`, then implementation work in an isolated worktree with write/edit/shell scope | `advise` needs no harness. Only implementation agent work uses provider admission. Delegation is opt-in, never ambient. |
 | `pr_review` | Reviewer/validation work is read-only; Athena `pr-review` may require preflighted skill/delegation/web capabilities. Address work resumes an implementation role in an isolated worktree with write/edit/shell scope. | The host controls commit/push after address work and Pi has no merge or CI authority. Pi is N/A until #2515–#2518 separately preflight both role scopes. |
-| `merge_wait` | No provider authority to merge; `learn` needs a verified Mnemosyne PR workflow | A successful local edit is not learn evidence. |
+| `merge_wait` | No provider authority to merge; host-owned `learn` needs a verified Mnemosyne PR workflow | `learn` needs no harness. A successful local edit is not learn evidence. |
 | `finished` | No model job | Safe tested N/A; it records terminal state and preserves or cleans worktrees. |
 | Console wrappers (`hephaestus-automation-loop`, plan, implement, review, and agent-stage) | Preserve the exact stage requirements recorded in ADR-0020; wrappers do not invent a second Pi path | Provider selection and preflight are shared. |
 
@@ -117,7 +119,8 @@ post-admission contracts.
 ### Evidence boundary
 
 `advise`, `learn`, and `pr-review` preserve Athena semantics rather than being
-prompt-text aliases.  The mandatory Mnemosyne checkout, source corpus, trust
+prompt-text aliases. Host-owned `advise` and `learn` do not execute through a
+provider. The mandatory Mnemosyne checkout, source corpus, trust
 gates, failed-command behavior, and learning-through-PR evidence are governed
 by Athena.  Mnemosyne content remains fenced untrusted context and cannot set a
 pipeline verdict or widen a tool grant.

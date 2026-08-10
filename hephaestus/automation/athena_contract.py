@@ -72,17 +72,17 @@ def _load_manifest() -> AthenaContractReceipt:
         raise AthenaContractError("Athena contract manifest is unavailable or invalid") from exc
     if not isinstance(raw, dict):
         raise AthenaContractError("Athena contract manifest must be an object")
+    fields = tuple(AthenaContractReceipt.__dataclass_fields__)
     try:
-        receipt = AthenaContractReceipt(
-            athena_repository=str(raw["athena_repository"]),
-            athena_commit=str(raw["athena_commit"]),
-            advise_sha256=str(raw["advise_sha256"]),
-            learn_sha256=str(raw["learn_sha256"]),
-            dependency_resolution_sha256=str(raw["dependency_resolution_sha256"]),
-            trust_source=str(raw["trust_source"]),
-        )
+        values = {field: raw[field] for field in fields}
     except KeyError as exc:
         raise AthenaContractError(f"Athena contract manifest lacks {exc.args[0]!r}") from exc
+    invalid_types = [field for field, value in values.items() if not isinstance(value, str)]
+    if invalid_types:
+        raise AthenaContractError(
+            "Athena contract manifest fields must be strings: " + ", ".join(sorted(invalid_types))
+        )
+    receipt = AthenaContractReceipt(**values)
     if not receipt.athena_repository or not receipt.trust_source:
         raise AthenaContractError("Athena contract manifest identity is empty")
     if _COMMIT_PATTERN.fullmatch(receipt.athena_commit) is None:
@@ -114,6 +114,8 @@ def load_athena_contract_receipt(
 
     """
     receipt = _load_manifest()
+    if trust_source is not None and contract_root is None:
+        raise AthenaContractError("Athena contract trust source requires a verified root")
     if contract_root is not None:
         try:
             root = Path(contract_root).resolve(strict=True)
