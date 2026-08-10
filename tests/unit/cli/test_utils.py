@@ -99,6 +99,34 @@ class TestCommandRegistry:
         registry = CommandRegistry()
         assert registry.get_command("nope") is None
 
+    @pytest.mark.parametrize(
+        ("name", "aliases"),
+        [
+            ("build", []),
+            ("b", []),
+            ("deploy", ["build"]),
+            ("deploy", ["b"]),
+            ("deploy", ["deploy"]),
+            ("deploy", ["d", "d"]),
+        ],
+    )
+    def test_rejects_duplicate_names_and_aliases(self, name: str, aliases: list[str]) -> None:
+        """Duplicate command identifiers leave the registry unchanged."""
+        registry = CommandRegistry()
+
+        @registry.register("build", aliases=["b"])
+        def build() -> None:
+            pass
+
+        before = registry.commands.copy()
+        with pytest.raises(ValueError, match=r"unique|already registered"):
+
+            @registry.register(name, aliases=aliases)
+            def duplicate() -> None:
+                pass
+
+        assert registry.commands == before
+
 
 class TestCreateParser:
     """Tests for create_parser."""
@@ -433,18 +461,12 @@ class TestFormatOutput:
         """Text format of a scalar returns its string representation."""
         assert format_output(42) == "42"
 
-    def test_invalid_format_falls_back_to_text(self) -> None:
-        """Unrecognized format_type renders as text, not an error (POLA #1509).
-
-        Non-vacuous: if the else-branch text fallback (cli/utils.py:380-388)
-        raised instead, the bogus/yaml/"" cases would fail; the "JSON" case
-        guards format_output's case-SENSITIVITY (== "json", not .lower()).
-        """
+    @pytest.mark.parametrize("format_type", ["bogus", "yaml", "", "JSON"])
+    def test_invalid_format_is_rejected(self, format_type: str) -> None:
+        """Unsupported and case-mismatched formats raise a clear error."""
         data = {"name": "hephaestus", "version": "0.3.0"}
-        for bogus in ("bogus", "yaml", "", "JSON"):  # "JSON" stays case-sensitive
-            result = format_output(data, format_type=bogus)
-            assert "name: hephaestus" in result  # text branch ran
-            assert "{" not in result  # NOT json output
+        with pytest.raises(ValueError, match="Unsupported output format"):
+            format_output(data, format_type=format_type)
 
     def test_table_format_on_dict_falls_back_to_text(self) -> None:
         """'table' on non-sequence data falls back to text, not an error (#1509).
@@ -564,3 +586,19 @@ class TestEmitJsonStatus:
         out = json.loads(capsys.readouterr().out)
         assert out["files_checked"] == 5
         assert out["warnings"] == 0
+
+    def test_status_extra_field_is_rejected_without_output(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The framework-owned status field cannot be overridden."""
+        with pytest.raises(ValueError, match="reserved JSON fields"):
+            emit_json_status(0, status="error")
+        assert capsys.readouterr().out == ""
+
+    def test_exit_code_extra_field_is_rejected_without_output(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The framework-owned exit code cannot be supplied twice."""
+        with pytest.raises(TypeError):
+            emit_json_status(0, **{"exit_code": "conflict"})
+        assert capsys.readouterr().out == ""
