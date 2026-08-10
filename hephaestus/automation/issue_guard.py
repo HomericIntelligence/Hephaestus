@@ -47,6 +47,8 @@ _GUARD_REASON_MAX = 512
 _REF_READBACK_ATTEMPTS = 4
 _REF_READBACK_DELAY_S = 0.25
 _SIGNATURE_READBACK_ATTEMPTS = 4
+_GUARD_HISTORY_LIMIT = 4096
+_COMPARE_PAGE_SIZE = 100
 _GUARD_COMMIT_SUBJECT = "chore(automation): record issue guard state"
 _GUARD_COMMIT_SIGNOFF = (
     "Signed-off-by: Hephaestus Automation <hephaestus-automation@users.noreply.github.com>"
@@ -972,38 +974,33 @@ class GitHubIssueGuardStore:
             raise GuardUnavailableError("implementation branch commit response was malformed")
         return tree_sha, message, tuple(parents), self.server_now()
 
-    def _guard_record(self, repository: str, oid: str) -> GuardRecord | None:
-        """Find the newest guard record in the branch's first-parent history."""
-        current = oid
-        for _ in range(4096):
-            _tree, message, parents, _server_time = self._commit_metadata(repository, current)
-            try:
-                return GuardRecord.from_commit_message(message)
-            except ValueError:
-                if message.lstrip().startswith("{") or message.startswith(_GUARD_COMMIT_SUBJECT):
-                    raise GuardUnavailableError(
-                        "implementation branch contains a malformed guard record"
-                    ) from None
-            if not parents:
-                return None
-            current = parents[0]
-        raise GuardUnavailableError("implementation branch guard history is too deep")
+    def _guard_record(self, oid: str, head_message: str) -> GuardRecord | None:
+        """Find the newest guard record without walking shared main history."""
+        record = self._record_from_message(head_message)
+        if record is not None:
+            return record
+        for candidate in reversed(self._commits_since_default(oid)):
+            commit = candidate.get("commit") if isinstance(candidate, dict) else None
+            candidate_message = commit.get("message") if isinstance(commit, dict) else None
+            if not isinstance(candidate_message, str):
+                raise GuardUnavailableError("branch comparison commit metadata was malformed")
+            record = self._record_from_message(candidate_message)
+            if record is not None:
+                return record
+        return None
 
-    def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None:
-        oid = self._ref_oid()
-        if oid is None:
+    @staticmethod
+    def _record_from_message(message: str) -> GuardRecord | None:
+        try:
+            return GuardRecord.from_commit_message(message)
+        except ValueError:
+            if message.lstrip().startswith("{") or message.startswith(_GUARD_COMMIT_SUBJECT):
+                raise GuardUnavailableError(
+                    "implementation branch contains a malformed guard record"
+                ) from None
             return None
-        tree, _message, _parents, server_time = self._commit_metadata(repository, oid)
-        record = self._guard_record(repository, oid)
-        if record is None:
-            return None
-        return GuardSnapshot(oid=oid, record=record, tree=tree, server_time=server_time)
 
-    def default_tip(self, repository: str) -> tuple[str, str]:
-        branch_oid = self._ref_oid()
-        if branch_oid is not None:
-            tree, _message, _parents, _server_time = self._commit_metadata(repository, branch_oid)
-            return branch_oid, tree
+    def _default_branch_oid(self) -> str:
         status, body = self._request([self._path("")])
         branch = body.get("default_branch") if isinstance(body, dict) else None
         if status != 200 or not isinstance(branch, str) or not branch:
@@ -1013,6 +1010,55 @@ class GitHubIssueGuardStore:
         oid = obj.get("sha") if isinstance(obj, dict) else None
         if status != 200 or not isinstance(oid, str):
             raise GuardUnavailableError("default branch ref was malformed")
+        _require_sha(oid, "default branch tip")
+        return oid
+
+    def _commits_since_default(self, oid: str) -> list[dict[str, Any]]:
+        """Return branch-only commits through bounded compare pagination."""
+        base_oid = self._default_branch_oid()
+        if base_oid == oid:
+            return []
+        commits: list[dict[str, Any]] = []
+        total: int | None = None
+        page = 1
+        while total is None or len(commits) < total:
+            endpoint = f"compare/{base_oid}...{oid}?per_page={_COMPARE_PAGE_SIZE}&page={page}"
+            status, body = self._request([self._path(endpoint)])
+            page_commits = body.get("commits") if isinstance(body, dict) else None
+            observed_total = body.get("total_commits") if isinstance(body, dict) else None
+            if (
+                status != 200
+                or not isinstance(page_commits, list)
+                or isinstance(observed_total, bool)
+                or not isinstance(observed_total, int)
+                or observed_total < 0
+                or observed_total > _GUARD_HISTORY_LIMIT
+                or (total is not None and observed_total != total)
+            ):
+                raise GuardUnavailableError("branch comparison response was malformed or too deep")
+            total = observed_total
+            commits.extend(item for item in page_commits if isinstance(item, dict))
+            if len(commits) > total or (len(commits) < total and not page_commits):
+                raise GuardUnavailableError("branch comparison pagination was incomplete")
+            page += 1
+        return commits
+
+    def read_ref(self, repository: str, issue: int) -> GuardSnapshot | None:
+        oid = self._ref_oid()
+        if oid is None:
+            return None
+        tree, message, _parents, server_time = self._commit_metadata(repository, oid)
+        record = self._guard_record(oid, message)
+        if record is None:
+            return None
+        return GuardSnapshot(oid=oid, record=record, tree=tree, server_time=server_time)
+
+    def default_tip(self, repository: str) -> tuple[str, str]:
+        branch_oid = self._ref_oid()
+        if branch_oid is not None:
+            tree, _message, _parents, _server_time = self._commit_metadata(repository, branch_oid)
+            return branch_oid, tree
+        oid = self._default_branch_oid()
         tree, _message, _parents, _server_time = self._commit_metadata(repository, oid)
         return oid, tree
 

@@ -397,6 +397,61 @@ def test_http_guard_store_uses_server_time_and_non_force_refs() -> None:  # noqa
     assert all("hephaestus/issue-guards" not in arg for args, _kwargs in calls for arg in args)
 
 
+def test_http_guard_store_bounds_initial_history_scan_to_branch_comparison() -> None:
+    """A new implementation branch does not trigger one REST call per main commit."""
+    branch_oid = "2" * 40
+    base_oid = "4" * 40
+    tree_oid = "3" * 40
+    calls: list[list[str]] = []
+
+    def response(body: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["gh"],
+            0,
+            stdout=(
+                f"HTTP/1.1 200 OK\r\nDate: Tue, 01 Jan 2030 00:00:00 GMT\r\n\r\n{json.dumps(body)}"
+            ),
+            stderr="",
+        )
+
+    def call(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        path = next(arg for arg in args if arg.startswith("repos/Owner/Repo"))
+        if path.endswith("git/ref/heads/2404-auto-impl"):
+            return response({"object": {"sha": branch_oid}})
+        if path == "repos/Owner/Repo":
+            return response({"default_branch": "main"})
+        if path.endswith("git/ref/heads/main"):
+            return response({"object": {"sha": base_oid}})
+        if path.endswith(f"git/commits/{branch_oid}"):
+            return response(
+                {
+                    "tree": {"sha": tree_oid},
+                    "message": "fix(example): implementation",
+                    "parents": [{"sha": base_oid}],
+                }
+            )
+        if "/compare/" in path:
+            return response(
+                {
+                    "total_commits": 1,
+                    "commits": [
+                        {
+                            "sha": branch_oid,
+                            "commit": {"message": "fix(example): implementation"},
+                        }
+                    ],
+                }
+            )
+        pytest.fail(f"unexpected per-commit history request: {path}")
+
+    store = GitHubIssueGuardStore("Owner/Repo", branch="2404-auto-impl", call=call)
+
+    assert store.read_ref("Owner/Repo", 2404) is None
+    assert sum("git/commits/" in arg for call_args in calls for arg in call_args) == 1
+    assert sum("/compare/" in arg for call_args in calls for arg in call_args) == 1
+
+
 def test_http_guard_store_stages_a_signed_commit_and_pushes_with_exact_lease(
     tmp_path: Path,
 ) -> None:

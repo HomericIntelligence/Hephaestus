@@ -27,9 +27,13 @@ transition is accepted. Readers also accept the legacy raw-JSON commit form so
 existing guards remain recoverable. The branch is carried in the guard
 credential, so the guard and production writer share one ref:
 `refs/heads/<implementation-branch>`. A branch tip may contain ordinary
-implementation commits; readers walk first-parent history to find the newest
+implementation commits; readers inspect branch-only history to find the newest
 guard record, while every guard child still advances that same branch with a
 server-enforced exact-head compare-and-swap update.
+
+Before the first guard exists, the reader bounds discovery to commits unique
+to the implementation branch through the GitHub comparison API. It never
+walks the repository's shared default-branch history one commit at a time.
 
 An automation run reads labels, refuses a live guard, creates an acquiring
 record, installs it with an exact-head leased ref operation, and reads it back
