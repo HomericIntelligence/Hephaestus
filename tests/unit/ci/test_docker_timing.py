@@ -91,6 +91,11 @@ class TestBuildSummaryTable:
         table = build_summary_table(100, 80, 3, 20.0, acceptance_threshold=25.0)
         assert "FAIL" in table
 
+    def test_fractional_threshold_renders_without_rounding(self) -> None:
+        table = build_summary_table(1000, 5, 0, 99.5, acceptance_threshold=99.5)
+        assert "| Acceptance criterion (≥99.5%) | PASS |" in table
+        assert "≥100%" not in table
+
     @pytest.mark.parametrize(
         "overrides",
         [

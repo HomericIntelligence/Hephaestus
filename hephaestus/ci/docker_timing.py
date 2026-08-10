@@ -22,6 +22,7 @@ Usage::
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 
 
 def _validate_durations(cold_seconds: int, warm_seconds: int) -> None:
@@ -66,6 +67,11 @@ def compute_reduction(cold_seconds: int, warm_seconds: int) -> float:
     _validate_durations(cold_seconds, warm_seconds)
     reduction = (cold_seconds - warm_seconds) / cold_seconds * 100
     return round(reduction, 1)
+
+
+def _format_percentage(value: int | float) -> str:
+    """Render a percentage without inventing or dropping fractional precision."""
+    return format(Decimal(str(value)).normalize(), "f")
 
 
 def build_summary_table(
@@ -114,6 +120,7 @@ def build_summary_table(
         raise ValueError("acceptance_threshold must be a finite percentage in 0..100")
 
     verdict = "PASS" if reduction >= acceptance_threshold else "FAIL"
+    threshold_display = _format_percentage(acceptance_threshold)
     return (
         "## Docker Build Timing: Source-Only Change Cache Efficiency\n\n"
         "| Metric | Value |\n"
@@ -122,5 +129,5 @@ def build_summary_table(
         f"| Warm rebuild (source change only) | {warm_seconds}s |\n"
         f"| Reduction | {reduction}% |\n"
         f"| Cached layers (warm build) | {cached_layers} |\n"
-        f"| Acceptance criterion (≥{acceptance_threshold:.0f}%) | {verdict} |\n"
+        f"| Acceptance criterion (≥{threshold_display}%) | {verdict} |\n"
     )
