@@ -518,6 +518,26 @@ class TestGate:
         assert item.payload["existing_pr"] is True
         assert github.mutation_log == []
 
+    def test_gate_existing_pr_rejects_guard_branch_drift(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """PR adoption cannot replace the production branch bound to a guard."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            open_pr=1001,
+            pr_head_branch="replacement-branch",
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, state="GATE")
+        item.payload["_issue_guard_branch"] = "production-branch"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.FINISH_FAIL, "issue_guard_branch_changed")
+        assert item.branch == ""
+        assert github.mutation_log == []
+
     def test_gate_existing_pr_stands_down_when_auto_merge_is_externally_armed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

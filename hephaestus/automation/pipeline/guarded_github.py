@@ -80,13 +80,16 @@ class GuardedStageGitHub:
             self.credential.issue,
             self.credential.claim_id,
             self.credential.run_id,
+            self.credential.branch,
         )
 
     def _issue(self, issue_number: int) -> None:
         if issue_number != self.credential.issue:
             raise GuardTargetError("GitHub issue target differs from guard credential")
         try:
-            IssueGuard(self.guard_store).confirm(self.credential, timedelta(0))
+            IssueGuard(self.guard_store, branch=self.credential.branch).confirm(
+                self.credential, timedelta(0)
+            )
         except GuardError:
             raise
         except Exception as exc:

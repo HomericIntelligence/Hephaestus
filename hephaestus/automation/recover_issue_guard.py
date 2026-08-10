@@ -32,6 +32,11 @@ def _build_parser() -> ArgumentParser:
     )
     parser.add_argument("--repo", required=True, metavar="OWNER/REPO")
     parser.add_argument("--issue", required=True, type=int)
+    parser.add_argument(
+        "--branch",
+        required=True,
+        help="Exact implementation branch carrying this issue guard",
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--inspect", action="store_true")
     mode.add_argument("--recover", action="store_true")
@@ -83,17 +88,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.issue <= 0:
             raise GuardError("issue must be positive")
         if args.inspect:
-            store = GitHubIssueGuardStore(repository)
+            store = GitHubIssueGuardStore(repository, branch=args.branch)
             print(json.dumps(_snapshot_json(repository, args.issue, store), sort_keys=True))
             return 0
         if args.expected_claim is None or not args.expected_oid or not args.reason:
             raise GuardError("--recover requires --expected-claim, --expected-oid, and --reason")
         environment, actors = _recovery_environment()
-        store = GitHubIssueGuardStore(repository, env=environment)
+        store = GitHubIssueGuardStore(repository, branch=args.branch, env=environment)
         actor = store.actor()
         if actor.casefold() not in actors:
             raise GuardError("authenticated actor is not in HEPHAESTUS_GUARD_RECOVERY_ACTORS")
-        snapshot = IssueGuard(store).recover(
+        snapshot = IssueGuard(store, branch=args.branch).recover(
             repository,
             args.issue,
             expected_claim=args.expected_claim,

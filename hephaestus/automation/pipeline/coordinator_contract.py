@@ -138,17 +138,19 @@ if TYPE_CHECKING:
         def _release_all_guards(self, reason: str) -> None:
             pass
 
-        def _claim_source_issue(self, repo: str, issue: int, stage: str) -> Any:
+        def _claim_source_issue(
+            self, repo: str, issue: int, stage: str, *, branch: str | None = None
+        ) -> Any:
             pass
+
+        def __getattr__(self, name: str) -> Any: return None  # fmt: skip
 
         def _externalize_repo_issue_source(self, item: WorkItem, source: RepoIssueSource) -> bool:
             pass
 
-        def _drain_repo_issue_sources(self) -> None:
-            pass
+        def _drain_repo_issue_sources(self) -> None: pass  # fmt: skip
 
-        def _seed_products(self, item: WorkItem) -> None:
-            pass
+        def _seed_products(self, item: WorkItem) -> None: pass  # fmt: skip
 
         def _push_item(
             self,
@@ -179,8 +181,7 @@ if TYPE_CHECKING:
         def _drain_direct_issue_source(self) -> int:
             pass
 
-        def _drain_direct_pr_source(self) -> int:
-            pass
+        def _drain_direct_pr_source(self) -> int: pass  # fmt: skip
 
         def _prepare_direct_item(
             self, entry: Any, repo: str, base_sha: str, run_nonce: str | None = None
@@ -218,8 +219,7 @@ if TYPE_CHECKING:
 
         def _admit(self, item: WorkItem) -> bool:
             pass
-
 else:
 
     class _CoordinatorHost:
-        """Runtime-empty base for the statically checked host contract."""
+        pass
