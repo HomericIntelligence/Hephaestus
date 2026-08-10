@@ -23,7 +23,7 @@ _No repository snapshots recorded yet._
 
 ## Defects
 
-_No follow-up defects recorded._
+- Follow-up issue #2738: Fresh Pi console processes had no external adapter bootstrap
 
 ## Publication
 

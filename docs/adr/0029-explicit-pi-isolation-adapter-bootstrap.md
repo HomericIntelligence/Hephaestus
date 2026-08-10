@@ -1,8 +1,13 @@
 # ADR-0029: Explicit Pi isolation-adapter bootstrap
 
 - Status: Accepted
+<<<<<<< HEAD
 - Date: 2026-08-19
 - Tracks: #2791, #2738
+=======
+- Date: 2026-08-10
+- Tracks: #2519, #2738
+>>>>>>> 13d70500 (fix(agents): bootstrap external Pi isolation adapters)
 - Extends: ADR-0019, ADR-0020
 
 ## Context
