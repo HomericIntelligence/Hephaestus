@@ -598,6 +598,12 @@ Codex, and the currently fail-closed Pi provider boundary. It provides:
   the library-only fleet-sync conflict fallback uses `claude_code_sdk` with the scoped call-site
   controls below.
 
+Athena `advise` and `learn` are host-owned operations, not agent-runtime
+operations. `AthenaSkillJob` routes them only to the Mnemosyne host executor.
+They do not invoke or validate Claude, Codex, Pi, or another harness. Provider
+package, policy, and isolation checks apply only when a job executes through
+that provider. See ADR-0025.
+
 Per-agent model/session/timeout configuration is centralised in
 `hephaestus.automation.agent_config`, all operator-tunable via explicit CLI flags
 on each automation command (e.g., `--agent-timeout`, `--poll-max-wait`,

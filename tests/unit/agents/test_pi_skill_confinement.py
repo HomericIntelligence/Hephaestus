@@ -1,12 +1,9 @@
 """Tests for Pi Athena skill capability confinement."""
 # ruff: noqa: D103
-# ruff: noqa: D103
 
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from hephaestus.agents.pi_plugins import (
     InventoryResult,
@@ -15,7 +12,6 @@ from hephaestus.agents.pi_plugins import (
     load_pi_package_catalog,
     prove_athena_skill_command,
 )
-from hephaestus.agents.runtime import PI_READ_ONLY_TOOLS, pi_athena_invocation_args
 
 
 def _ready_preflight(tmp_path: Path) -> PiPreflightResult:
@@ -32,7 +28,7 @@ def _ready_preflight(tmp_path: Path) -> PiPreflightResult:
     return PiPreflightResult.ready_result(inventory)
 
 
-def test_preflight_proves_athena_advise_and_learn_commands(tmp_path: Path) -> None:
+def test_preflight_inventory_records_pinned_athena_commands(tmp_path: Path) -> None:
     preflight = _ready_preflight(tmp_path)
     catalog = load_pi_package_catalog()
 
@@ -48,32 +44,3 @@ def test_preflight_proves_athena_advise_and_learn_commands(tmp_path: Path) -> No
     )
     assert learn.command == "skill:learn"
     assert learn.commit == catalog.packages[0].pin
-
-
-@pytest.mark.parametrize(
-    ("kind", "command"), [("advise", "skill:advise"), ("learn", "skill:learn")]
-)
-def test_pi_athena_args_grant_only_base_tools_and_one_skill_command(
-    tmp_path: Path,
-    kind: str,
-    command: str,
-) -> None:
-    args = pi_athena_invocation_args(kind, _ready_preflight(tmp_path))
-
-    assert args == ("--tools", PI_READ_ONLY_TOOLS, "--commands", command)
-    joined = ",".join(args)
-    assert "Mnemosyne" not in joined
-    assert "bash" not in joined
-    assert "gh" not in joined
-
-
-def test_missing_preflight_receipt_fails_closed() -> None:
-    preflight = PiPreflightResult(True, "ready", "")
-
-    with pytest.raises(ValueError, match="not proven"):
-        pi_athena_invocation_args("advise", preflight)
-
-
-def test_unsupported_athena_kind_is_rejected(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="Unsupported Pi Athena skill kind"):
-        pi_athena_invocation_args("pr-review", _ready_preflight(tmp_path))

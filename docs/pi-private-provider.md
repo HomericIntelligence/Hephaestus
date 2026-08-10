@@ -121,6 +121,10 @@ and reinstalling its prior exact pins; `pi update` is not an ownership path.
 Athena exposes its canonical `skills/` directory as Pi package resources.
 Mnemosyne remains a separately trusted repository dependency governed by
 Athena's canonical dependency-resolution contract; it is not a Pi package.
+This Pi package contract does not gate host-owned Athena `advise` or `learn`.
+Those operations use Hephaestus's provider-neutral Athena contract and do not
+invoke or preflight any agent harness. Pi validation applies only to work that
+actually executes through `--agent pi`.
 The reviewed external capabilities remain separate catalog-pinned packages:
 `pi-subagents` supplies delegation and `pi-web-access` supplies explicitly
 scoped web access. Athena bundles neither package.
