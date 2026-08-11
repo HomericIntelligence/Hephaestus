@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX
+from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.review_journal import (
     IssueComment,
     archived_new_plan,
@@ -47,8 +47,6 @@ class PlanJournalGitHub(Protocol):
         issue_number: int,
         marker: str,
         body: str,
-        *,
-        legacy_marker: str | None = None,
     ) -> None:
         """Replace an actor-owned canonical issue comment."""
         pass
@@ -67,7 +65,6 @@ def _upsert_pending_review(
         issue_number,
         PLAN_REVIEW_CANONICAL_MARKER,
         render_pending_review(revision=revision),
-        legacy_marker=PLAN_REVIEW_PREFIX,
     )
 
 

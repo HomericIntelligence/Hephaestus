@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from hypothesis import given, strategies as st
 
+from hephaestus.automation.review_journal import render_current_plan, render_current_review
 from hephaestus.automation.state.review import (
     MAX_UNPARSEABLE_VERDICT_PASSES,
     PLAN_REVIEW_PREFIX,
@@ -128,14 +129,14 @@ class TestExtractVerdictContext:
 def _review_comment(verdict: str | None, url: str | None = None) -> dict[str, Any]:
     """Build a plan-review comment. ``verdict`` is "GO"/"NOGO" or None (malformed)."""
     if verdict is None:
-        body = f"{PLAN_REVIEW_PREFIX}\n\nMalformed review with no verdict line.\n"
+        body = render_current_review("Malformed review with no verdict line.", revision=1)
     else:
         token = {
             "GO": "state:plan-go",
             "NOGO": "state:plan-no-go",
             "BLOCKED": "state:plan-blocked",
         }[verdict]
-        body = f"{PLAN_REVIEW_PREFIX}\n\nBody.\n\n{token}\n"
+        body = render_current_review(f"Body.\n\n{token}", revision=1)
     comment = {"body": body}
     if url is not None:
         comment["url"] = url
@@ -143,7 +144,7 @@ def _review_comment(verdict: str | None, url: str | None = None) -> dict[str, An
 
 
 def _plan_comment() -> dict[str, Any]:
-    return {"body": "# Implementation Plan\n\nSteps...\n"}
+    return {"body": render_current_plan("Steps...")}
 
 
 class TestIsPlanReviewGoWithComments:

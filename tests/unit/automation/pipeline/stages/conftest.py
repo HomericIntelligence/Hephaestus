@@ -29,9 +29,7 @@ from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARG
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
-    PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
-    PLAN_REVIEW_PREFIX,
 )
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -251,7 +249,6 @@ class FakeStageGitHub(FakeGitHub):
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
                 body,
-                legacy_marker=PLAN_REVIEW_PREFIX,
             )
 
     def get_pr_head_branch(self, pr_number: int) -> str | None:
@@ -422,7 +419,6 @@ class FakeStageGitHub(FakeGitHub):
             issue_number,
             PLAN_CANONICAL_MARKER,
             body,
-            legacy_marker=PLAN_COMMENT_MARKER,
         )
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:

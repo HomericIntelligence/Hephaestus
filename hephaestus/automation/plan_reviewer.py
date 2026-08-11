@@ -390,7 +390,6 @@ class PlanReviewer:
             issue_number,
             PLAN_REVIEW_CANONICAL_MARKER,
             body,
-            legacy_marker=_REVIEW_PREFIX,
             **self._repo_kwargs(),
         )
 
@@ -623,7 +622,6 @@ class PlanReviewer:
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
                 comment_body,
-                legacy_marker=_REVIEW_PREFIX,
                 **self._repo_kwargs(),
             )
             gh_issue_edit_labels(
@@ -645,7 +643,6 @@ class PlanReviewer:
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
                 comment_body,
-                legacy_marker=_REVIEW_PREFIX,
                 **self._repo_kwargs(),
             )
         logger.info("Posted plan review to issue #%s", issue_number)

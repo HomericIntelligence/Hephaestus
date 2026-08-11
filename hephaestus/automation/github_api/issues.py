@@ -16,6 +16,7 @@ import hephaestus.automation.github_api as _api
 from hephaestus.utils.helpers import strip_null_bytes
 
 from ..models import IssueInfo, IssueState
+from ..review_journal import has_exact_leading_marker
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
@@ -340,14 +341,13 @@ def gh_issue_upsert_comment(
     body: str,
     repo: tuple[str, str] | None = None,
 ) -> int | None:
-    """Create-or-update the single issue comment whose body starts with ``marker_prefix``.
+    """Create-or-update the single issue comment keyed by ``marker_prefix``.
 
-    Enforces the "one comment per role" invariant: the pipeline must keep at
-    most one PLAN comment (``# Implementation Plan``) and one REVIEW comment
-    (``## 🔍 Plan Review``) per issue, updated in place rather than appended.
+    The marker must be an opaque canonical marker at byte zero of the outgoing
+    body. Display headings and historical heading-only comments are inert.
 
     Behaviour:
-    - Find every existing comment whose body ``startswith(marker_prefix)``.
+    - Find every existing comment whose body has the exact leading marker.
     - If none: create a new comment.
     - If one or more: PATCH the newest matching comment with ``body`` and
       DELETE the older duplicates (one-time convergence for issues that
@@ -366,11 +366,14 @@ def gh_issue_upsert_comment(
         RuntimeError: If a create/update/delete call fails.
 
     """
+    if not has_exact_leading_marker(body, marker_prefix):
+        raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
     comments = _api._fetch_issue_comment_ids(issue_number, repo)
     matching = [
         c
         for c in comments
-        if str(c.get("body", "")).startswith(marker_prefix) and c.get("databaseId") is not None
+        if has_exact_leading_marker(str(c.get("body", "")), marker_prefix)
+        and c.get("databaseId") is not None
     ]
 
     if not matching:
@@ -414,8 +417,6 @@ def gh_issue_upsert_owned_comment(
     marker_prefix: str,
     body: str,
     repo: tuple[str, str] | None = None,
-    *,
-    legacy_marker: str | None = None,
 ) -> int | None:
     """Upsert only the authenticated actor's canonical comment.
 
@@ -423,6 +424,8 @@ def gh_issue_upsert_owned_comment(
     mutated, deleted, or treated as replay identity. This helper is the
     standalone automation equivalent of ``PipelineGitHub.upsert_issue_comment``.
     """
+    if not has_exact_leading_marker(body, marker_prefix):
+        raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
     viewer_login = (_api.gh_current_login() or "").lower()
     if not viewer_login:
         raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
@@ -434,19 +437,17 @@ def gh_issue_upsert_owned_comment(
         login = user.get("login") if isinstance(user, dict) else ""
         return bool(login) and str(login).lower() == viewer_login
 
-    def owned_with(comments: list[dict[str, Any]], prefix: str) -> list[dict[str, Any]]:
+    def owned_with(comments: list[dict[str, Any]], marker: str) -> list[dict[str, Any]]:
         return [
             comment
             for comment in comments
             if is_owned(comment)
-            and str(comment.get("body", "")).lstrip().startswith(prefix)
+            and has_exact_leading_marker(str(comment.get("body", "")), marker)
             and comment.get("databaseId") is not None
         ]
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
     owned = owned_with(comments, marker_prefix)
-    if not owned and legacy_marker is not None:
-        owned = owned_with(comments, legacy_marker)
     if not owned:
         _api.gh_issue_comment(issue_number, body, repo=repo)
         # Re-read after create. This closes the concurrent-create window and

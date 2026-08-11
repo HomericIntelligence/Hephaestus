@@ -2,6 +2,7 @@
 # ruff: noqa: F403, F405
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
+from .review_journal import has_exact_leading_marker
 
 
 class PipelineGitHubMutations(_PipelineGitHubHost):
@@ -126,12 +127,11 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         close_issue_as_covered(issue_number, pr_number)
 
     def upsert_plan_comment(self, issue_number: int, body: str) -> None:
-        """Upsert the actor-owned current plan, migrating the legacy heading key."""
+        """Upsert the actor-owned current plan by its opaque marker."""
         self.upsert_issue_comment(
             issue_number,
             PLAN_CANONICAL_MARKER,
             body,
-            legacy_marker=PLAN_COMMENT_MARKER,
         )
 
     def upsert_issue_comment(
@@ -139,36 +139,27 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         issue_number: int,
         marker: str,
         body: str,
-        *,
-        legacy_marker: str | None = None,
     ) -> None:
         """Upsert one actor-owned canonical comment keyed on an opaque marker.
 
         Human-authored marker collisions are inert: they are neither trusted,
-        patched, deleted, nor allowed to deny service. A legacy human-readable
-        marker may be supplied only as an actor-owned migration candidate.
+        patched, deleted, nor allowed to deny service. Historical
+        human-readable heading-only comments are never migration candidates.
         """
+        if not has_exact_leading_marker(body, marker):
+            raise ValueError(f"canonical comment body must start with marker {marker!r}")
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
-        if not body.lstrip().startswith(marker):
-            raise ValueError(f"canonical comment body must start with marker {marker!r}")
         comments = self._repo_issue_comments(issue_number)
-        exact = [c for c in comments if str(c.get("body", "")).lstrip().startswith(marker)]
+        exact = [c for c in comments if has_exact_leading_marker(str(c.get("body", "")), marker)]
         owned = [comment for comment in exact if self._comment_owned_by_viewer(comment)]
-        if not owned and legacy_marker is not None:
-            owned = [
-                comment
-                for comment in comments
-                if str(comment.get("body", "")).lstrip().startswith(legacy_marker)
-                and self._comment_owned_by_viewer(comment)
-            ]
         if not owned:
             self._post_issue_comment(issue_number, body)
             comments = self._repo_issue_comments(issue_number)
             owned = [
                 comment
                 for comment in comments
-                if str(comment.get("body", "")).lstrip().startswith(marker)
+                if has_exact_leading_marker(str(comment.get("body", "")), marker)
                 and self._comment_owned_by_viewer(comment)
             ]
             if not owned:
@@ -220,15 +211,15 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
 
     def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
         """Append an immutable actor-owned artifact once, failing on mismatched replay."""
+        if not has_exact_leading_marker(body, marker):
+            raise ValueError(f"immutable comment body must start with marker {marker!r}")
         if self._skip(f"append immutable {marker!r} comment on #{issue_number}"):
             return
-        if not body.lstrip().startswith(marker):
-            raise ValueError(f"immutable comment body must start with marker {marker!r}")
         comments = self._repo_issue_comments(issue_number)
         matching = [
             comment
             for comment in comments
-            if str(comment.get("body", "")).lstrip().startswith(marker)
+            if has_exact_leading_marker(str(comment.get("body", "")), marker)
             and self._comment_owned_by_viewer(comment)
         ]
         if matching:
@@ -242,7 +233,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         matching = [
             comment
             for comment in comments
-            if str(comment.get("body", "")).lstrip().startswith(marker)
+            if has_exact_leading_marker(str(comment.get("body", "")), marker)
             and self._comment_owned_by_viewer(comment)
         ]
         if any(str(comment.get("body", "")) != body for comment in matching):

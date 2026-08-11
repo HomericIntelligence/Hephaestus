@@ -49,8 +49,6 @@ class _CrashOnceJournalGitHub(FakeStageGitHub):
         issue_number: int,
         marker: str,
         body: str,
-        *,
-        legacy_marker: str | None = None,
     ) -> None:
         if marker == PLAN_REVIEW_CANONICAL_MARKER and "revision 2" in body:
             self._crash("pending_review")
@@ -58,7 +56,6 @@ class _CrashOnceJournalGitHub(FakeStageGitHub):
             issue_number,
             marker,
             body,
-            legacy_marker=legacy_marker,
         )
 
 
