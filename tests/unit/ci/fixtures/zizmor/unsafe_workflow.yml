@@ -1,0 +1,17 @@
+name: Unsafe fixture workflow
+"on": [push]
+
+permissions:
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke an unpinned action
+        uses: example/action@v1
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
