@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import queue
 import threading
 from dataclasses import FrozenInstanceError
@@ -77,6 +78,45 @@ def test_worker_dispatches_athena_skill_job_to_injected_executor(tmp_path: Path)
         receipt={"ok": True},
     )
     assert calls == [_request()]
+
+
+def test_worker_persists_typed_athena_result_when_evidence_is_enabled(tmp_path: Path) -> None:
+    """An evidence run receives the exact host-owned result from the queue worker."""
+
+    class Executor:
+        def execute(self, request: AthenaSkillRequest) -> AthenaSkillResult:
+            return AthenaSkillResult(
+                kind=request.kind,
+                context="selected skills",
+                receipt={"binding": "live"},
+            )
+
+    receipt_dir = tmp_path / "receipts"
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+        athena_skill_executor=Executor(),
+        evidence_receipt_dir=receipt_dir,
+    )
+    try:
+        result = pool._run(
+            AthenaSkillJob(request=_request(), descr="advise"),
+            claim_key="Hephaestus#42",
+            claim_stage="planning",
+        )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.ok is True
+    receipts = list(receipt_dir.glob("*.json"))
+    assert len(receipts) == 1
+    payload = json.loads(receipts[0].read_text())
+    assert payload["job_type"] == "athena"
+    assert payload["claim_stage"] == "planning"
+    assert payload["result"]["kind"] == "advise"
+    assert payload["result"]["receipt"] == {"binding": "live"}
 
 
 @pytest.mark.parametrize("kind", ["advise", "learn"])

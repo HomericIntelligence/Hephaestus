@@ -337,7 +337,7 @@ class PipelineConfig:
     # Product-layer breaker snapshot reader; keeps this module zero-I/O.
     circuit_breaker_snapshot_provider: Callable[[], dict[str, dict[str, Any]]] | None = None
     event_log_path: Path | None = None
-    athena_receipt_dir: Path | None = None
+    evidence_receipt_dir: Path | None = None
     # Recent local diagnostic retention.  These limits intentionally do not
     # alter the GitHub journal or restart behavior.
     event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY

@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import logging
 import os
 import queue as queue_mod
@@ -27,14 +28,14 @@ from collections.abc import Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TypeGuard, cast
 
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError
+from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -49,6 +50,7 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
+    AthenaSkillResult,
 )
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
@@ -1562,6 +1564,7 @@ class WorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: GitHubJobRunner | None = None,
         athena_skill_executor: AthenaSkillExecutor | None = None,
+        evidence_receipt_dir: Path | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1578,6 +1581,8 @@ class WorkerPool:
                 only ``bin/gh`` for checkout synchronization.
             github_job_runner: Closed worker-side GitHub operation runner.
             athena_skill_executor: Closed host-owned Athena skill executor.
+            evidence_receipt_dir: Optional private directory for bounded typed
+                agent and Athena result receipts.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1594,6 +1599,7 @@ class WorkerPool:
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
         self._athena_skill_executor = athena_skill_executor
+        self._evidence_receipt_dir = evidence_receipt_dir
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
@@ -1821,12 +1827,77 @@ class WorkerPool:
             if self._shutdown.is_set():
                 result = replace(result, interrupted=True, ok=False)
 
+        try:
+            self._persist_evidence_receipt(job, result, claim_key, claim_stage)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.error("failed to persist pipeline evidence receipt: %s", type(exc).__name__)
+            result = replace(result, ok=False, error="evidence_receipt_failed")
+
         return replace(
             result,
             duration_s=time.monotonic() - start,
             stdout_tail=result.stdout_tail[-_TAIL:] if result.stdout_tail else "",
             stderr_tail=result.stderr_tail[-_TAIL:] if result.stderr_tail else "",
             worker_id=worker_id,
+        )
+
+    def _persist_evidence_receipt(
+        self,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        result: JobResult,
+        claim_key: str,
+        claim_stage: str,
+    ) -> None:
+        """Persist one output-free typed receipt when explicitly configured."""
+        receipt_dir = self._evidence_receipt_dir
+        if receipt_dir is None or not isinstance(job, (AgentJob, AthenaSkillJob)):
+            return
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        receipt_dir.chmod(0o700)
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "claim_key": claim_key,
+            "claim_stage": claim_stage,
+            "repo": job.repo,
+            "issue": job.issue,
+            "descr": job.descr,
+            "ok": result.ok,
+            "interrupted": result.interrupted,
+        }
+        if isinstance(job, AthenaSkillJob):
+            payload["job_type"] = "athena"
+            if isinstance(result.value, AthenaSkillResult):
+                payload["result"] = asdict(result.value)
+        else:
+            payload.update(
+                {
+                    "job_type": "agent",
+                    "provider": job.agent,
+                    "session_id": (
+                        result.session_binding.session_id
+                        if result.session_binding is not None
+                        else result.session_id
+                    ),
+                }
+            )
+            if job.execution_request is not None:
+                request = job.execution_request
+                policy = resolve_policy(request)
+                payload["execution_request"] = {
+                    "role": request.role.value,
+                    "operation": request.operation.value,
+                    "lifecycle": request.lifecycle.value,
+                }
+                payload["tool_scopes"] = sorted(policy.builtins)
+            else:
+                payload["execution_request"] = None
+                payload["tool_scopes"] = sorted(
+                    scope.strip() for scope in (job.allowed_tools or "").split(",") if scope.strip()
+                )
+        filename = f"{time.time_ns()}-{threading.get_ident()}.json"
+        write_secure(
+            receipt_dir / filename,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
         )
 
     def _run_github(self, job: GitHubJob) -> JobResult:

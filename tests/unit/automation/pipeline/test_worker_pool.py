@@ -86,6 +86,58 @@ from hephaestus.utils.helpers import get_repo_root
 _WP = "hephaestus.automation.pipeline.worker_pool"
 
 
+def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) -> None:
+    """Opt-in evidence records the queue result without exposing provider output."""
+    receipt_dir = tmp_path / "receipts"
+    request = ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.PLAN,
+        SessionLifecycle.START_NEW,
+    )
+    job = AgentJob(
+        repo="Hephaestus",
+        issue=2519,
+        agent="pi",
+        model="pi-model",
+        prompt_builder=lambda: "private prompt",
+        cwd=tmp_path,
+        timeout_s=60,
+        execution_request=request,
+        descr="plan",
+    )
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+        evidence_receipt_dir=receipt_dir,
+    )
+    try:
+        with patch.object(
+            pool,
+            "_run_agent",
+            return_value=JobResult(ok=True, session_id="pi-session-2519"),
+        ):
+            result = pool._run(job, claim_key="Hephaestus#2519", claim_stage="planning")
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.ok is True
+    receipts = list(receipt_dir.glob("*.json"))
+    assert len(receipts) == 1
+    payload = json.loads(receipts[0].read_text())
+    assert payload["job_type"] == "agent"
+    assert payload["provider"] == "pi"
+    assert payload["session_id"] == "pi-session-2519"
+    assert payload["execution_request"] == {
+        "role": "planner",
+        "operation": "plan",
+        "lifecycle": "start_new",
+    }
+    assert payload["tool_scopes"] == ["find", "grep", "ls", "read"]
+    assert "private prompt" not in receipts[0].read_text()
+
+
 def _executable_path(name: str, *, path: str | None = None) -> str:
     """Resolve an executable expected to be available in this test environment."""
     executable = shutil.which(name, path=path)

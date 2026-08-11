@@ -113,6 +113,15 @@ def test_main_no_advise_propagates() -> None:
     assert captured["config"].no_advise is True
 
 
+def test_main_wires_private_evidence_receipt_directory(tmp_path: Any) -> None:
+    """The planner exposes the same opt-in queue evidence sink as the full loop."""
+    captured = _run_main_capturing_config(
+        ["--issues", "5", "--evidence-receipt-dir", str(tmp_path), "--dry-run"]
+    )
+
+    assert captured["config"].evidence_receipt_dir == tmp_path
+
+
 def test_main_dedupes_issue_list() -> None:
     """Duplicate --issues values are collapsed to a first-seen-ordered set."""
     captured = _run_main_capturing_config(["--issues", "5", "5", "9", "5", "--dry-run"])
