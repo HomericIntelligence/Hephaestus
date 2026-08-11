@@ -51,7 +51,7 @@ from .github_api import (
     gh_issue_remove_labels,
     gh_pr_create,
 )
-from .prompts import get_pr_description
+from .prompts import fence_content, get_pr_description
 from .session_naming import AGENT_COMMIT_MESSAGE, AGENT_PR_MESSAGE
 from .state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -273,14 +273,16 @@ def _commit_message_prompt(
     diff_stat: str,
 ) -> str:
     """Build a read-only prompt for the commit-message agent."""
+    fenced = fence_content()
     return PromptCatalog.current().render(
         "pr_management/commit_message.j2",
         allowed_types=", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES)),
         issue_number=issue_number,
-        issue_title=issue_title,
-        issue_body=issue_body or "(empty)",
-        changed_files=changed_files or "(none reported)",
-        diff_stat=diff_stat or "(none reported)",
+        issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body or "(empty)"),
+        changed_files_block=fenced.fence("CHANGED_FILES", changed_files or "(none reported)"),
+        diff_stat_block=fenced.fence("DIFF_STAT", diff_stat or "(none reported)"),
+        untrusted_notice=fenced.untrusted_notice,
     )
 
 
@@ -294,15 +296,17 @@ def _pr_message_prompt(
     commits: str,
 ) -> str:
     """Build a read-only prompt for the PR-message agent."""
+    fenced = fence_content()
     return PromptCatalog.current().render(
         "pr_management/pr_message.j2",
         allowed_types=", ".join(sorted(ALLOWED_CONVENTIONAL_TYPES)),
         issue_number=issue_number,
-        issue_title=issue_title,
-        issue_body=issue_body or "(empty)",
-        changed_files=changed_files or "(none reported)",
-        diff_stat=diff_stat or "(none reported)",
-        commits=commits or "(none reported)",
+        issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
+        issue_body_block=fenced.fence("ISSUE_BODY", issue_body or "(empty)"),
+        changed_files_block=fenced.fence("CHANGED_FILES", changed_files or "(none reported)"),
+        diff_stat_block=fenced.fence("DIFF_STAT", diff_stat or "(none reported)"),
+        commits_block=fenced.fence("COMMITS", commits or "(none reported)"),
+        untrusted_notice=fenced.untrusted_notice,
     )
 
 
