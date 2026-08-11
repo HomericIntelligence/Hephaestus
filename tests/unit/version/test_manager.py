@@ -2,6 +2,8 @@
 
 """Tests for hephaestus.version.manager module."""
 
+from pathlib import Path
+
 import pytest
 
 from hephaestus.version.manager import VersionManager, parse_version
@@ -356,6 +358,40 @@ def test_version_manager_update_pyproject_skips_hatch_vcs_dynamic(tmp_path):
     messages = [rec.getMessage() for rec in records]
     assert any("hatch-vcs" in m for m in messages)
     assert any("git tag -s v1.2.3" in m for m in messages)
+
+
+@pytest.mark.parametrize(
+    "pyproject_content",
+    [
+        '[project]\ndynamic = ["version"]\n\n[tool.hatch.version]\nsource = "vcs"\n',
+        '[project]\ndynamic = ["version"]\n',
+    ],
+)
+def test_version_manager_update_rejects_dynamic_version_without_mutation(
+    tmp_path: Path, pyproject_content: str
+) -> None:
+    """Aggregate updates fail closed for hatch-vcs and other dynamic projects."""
+    pyproject = tmp_path / "pyproject.toml"
+    existing_version = tmp_path / "VERSION"
+    missing_version = tmp_path / "SECONDARY_VERSION"
+    init_file = tmp_path / "__init__.py"
+    pyproject.write_text(pyproject_content)
+    existing_version.write_text("1.2.3\n")
+    init_file.write_text('__version__ = "1.2.3"\n')
+    before = {path: path.read_bytes() for path in (pyproject, existing_version, init_file)}
+
+    manager = VersionManager(
+        repo_root=tmp_path,
+        version_files=[existing_version, missing_version],
+        init_files=[init_file],
+        pyproject_file=pyproject,
+    )
+
+    with pytest.raises(ValueError, match=r"dynamic.*version"):
+        manager.update("2.0.0", verbose=False)
+
+    assert {path: path.read_bytes() for path in before} == before
+    assert not missing_version.exists()
 
 
 def test_version_manager_update_pyproject_still_writes_static_project(tmp_path):

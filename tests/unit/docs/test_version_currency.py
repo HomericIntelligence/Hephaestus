@@ -70,3 +70,16 @@ def test_migration_md_version_guard_fails_when_git_tags_are_absent(
 
     with pytest.raises(pytest.fail.Exception, match=r"No vX\.Y\.Z git tag reachable"):
         test_migration_md_version_does_not_trail_latest_git_tag()
+
+
+def test_release_docs_require_signed_tag_path_for_dynamic_versions() -> None:
+    """Keep all release-facing docs aligned with the fail-closed CLI contract."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    releasing = (REPO_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
+
+    assert "refuses hatch-vcs state" in readme
+    assert "fails closed" in contributing
+    assert "signed Auto Tag Release" in contributing
+    assert "fails closed before reading the current" in releasing
+    assert "Actions → Auto Tag Release → Run workflow" in releasing

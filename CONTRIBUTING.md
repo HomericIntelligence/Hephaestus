@@ -240,9 +240,11 @@ git tags, not stored in a file:
 
 ### Releasing a new version
 
-You do not edit a version field. A release is cut by creating a signed git tag —
-see [`docs/RELEASING.md`](docs/RELEASING.md) for the full workflow. `hephaestus-bump-version`
-computes the next semver string and prints the `git tag` commands to run.
+You do not edit a version field. A release is cut by the signed Auto Tag Release
+workflow — see [`docs/RELEASING.md`](docs/RELEASING.md) for the full workflow.
+`hephaestus-bump-version` is compute-only for static projects and fails closed
+for hatch-vcs/tag-derived projects; it never writes `VERSION`, `pyproject.toml`,
+or `hephaestus/__init__.py`.
 
 ## Dependency Updates
 

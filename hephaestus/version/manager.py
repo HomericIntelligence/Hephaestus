@@ -42,13 +42,14 @@ _HATCH_VCS_DYNAMIC_RE = re.compile(r'^\s*dynamic\s*=\s*\[\s*[^]]*"version"[^]]*\
 
 
 def _is_hatch_vcs_project(pyproject_content: str) -> bool:
-    """Return True if pyproject.toml declares a dynamic version via hatch-vcs.
+    """Return True if pyproject.toml declares a dynamic project version.
 
-    Detection is intentionally lenient: any ``dynamic = [..., "version", ...]``
-    declaration is sufficient. The narrower form
-    ``[tool.hatch.version] source = "vcs"`` is a stronger signal but the dynamic
-    declaration alone is enough to mean ``[project].version`` should not exist
-    and therefore should not be written.
+    Detection is intentionally broad: any ``dynamic = [..., "version", ...]``
+    declaration is enough to mean that a static ``VERSION`` or ``__version__``
+    update cannot be authoritative. Hephaestus uses this contract with
+    ``[tool.hatch.version] source = "vcs"``; refusing other dynamic providers
+    too keeps the aggregate updater fail closed rather than guessing how their
+    authoritative version is produced.
     """
     return bool(_HATCH_VCS_DYNAMIC_RE.search(pyproject_content))
 
@@ -132,6 +133,29 @@ class VersionManager:
                         self.init_files.append(init_file)
         else:
             self.init_files = init_files
+
+    def ensure_update_supported(self) -> None:
+        """Reject aggregate updates for projects with a dynamic version.
+
+        The aggregate updater writes secondary static version state. That state
+        cannot be authoritative when ``[project].dynamic`` contains
+        ``"version"`` (including Hephaestus's hatch-vcs/tag-derived contract),
+        so the check runs before version parsing or any file mutation.
+
+        Raises:
+            OSError: If an existing ``pyproject.toml`` cannot be read.
+            ValueError: If the project declares a dynamic version.
+
+        """
+        if self.pyproject_file is None or not self.pyproject_file.exists():
+            return
+
+        content = self.pyproject_file.read_text()
+        if _is_hatch_vcs_project(content):
+            raise ValueError(
+                "static version-file updates are unsupported when "
+                '[project].dynamic contains "version"'
+            )
 
     def update_pyproject_file(
         self, pyproject_file: Path, version: str, verbose: bool = True
@@ -246,6 +270,11 @@ class VersionManager:
             verbose: Print status messages
 
         """
+        # Fail before parsing or writing any aggregate version state. For a
+        # dynamic project, VERSION and __version__ would be misleading copies
+        # rather than authoritative release state.
+        self.ensure_update_supported()
+
         # Parse and validate version
         major, minor, patch = parse_version(version)
         if verbose:
