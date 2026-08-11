@@ -34,6 +34,7 @@ import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -97,15 +98,25 @@ class _HTTPSRedirectHandler(HTTPRedirectHandler):
 _HTTPS_OPENER = build_opener(_HTTPSRedirectHandler())
 
 
-# Per-file MD5 checksums for integrity verification. Values are the
+# Per-dataset MD5 checksums for integrity verification. Values are the
 # upstream-published MD5s used by torchvision; they detect MITM tampering and
 # CDN corruption. MD5 is fit-for-purpose here because the checksum comes from
-# a trusted source (the dataset distributor), not the network response.
-_DATASET_MD5: dict[str, str] = {
-    # CIFAR
+# a trusted source (the dataset distributor), not the network response. The
+# MNIST and Fashion-MNIST manifests intentionally contain the same filenames
+# with different digests.
+_CIFAR10_MD5: dict[str, str] = {
     "cifar-10-python.tar.gz": "c58f30108f718f92721af3b95e74349a",
+}
+_CIFAR100_MD5: dict[str, str] = {
     "cifar-100-python.tar.gz": "eb9058c3a382ffc7106e4002c42a8d85",
-    # Fashion-MNIST
+}
+_MNIST_MD5: dict[str, str] = {
+    "train-images-idx3-ubyte.gz": "f68b3c2dcbeaaa9fbdd348bbdeb94873",
+    "train-labels-idx1-ubyte.gz": "d53e105ee54ea40749a09fcbcd1e9432",
+    "t10k-images-idx3-ubyte.gz": "9fb629c4189551a2d022fa330f9573f3",
+    "t10k-labels-idx1-ubyte.gz": "ec29112dd5afa0611ce80d1b7f02629c",
+}
+_FASHION_MNIST_MD5: dict[str, str] = {
     "train-images-idx3-ubyte.gz": "8d4fb7e6c68d591d4c3dfef9ec88bf0d",
     "train-labels-idx1-ubyte.gz": "25c81989df183df01b3e8a0aad5dffbe",
     "t10k-images-idx3-ubyte.gz": "bef4ecab320f06d8554ea6380940ec79",
@@ -122,15 +133,22 @@ def _file_md5(path: Path) -> str:
     return h.hexdigest()
 
 
-def _verify_or_remove(path: Path, filename: str) -> bool:
-    """Verify *path* against the known MD5 for *filename*.
+def _verify_or_remove(path: Path, filename: str, checksums: Mapping[str, str]) -> bool:
+    """Verify *path* against the active dataset's MD5 for *filename*.
 
-    Returns True if the file matches the expected MD5 (or no checksum is known —
-    in which case the caller proceeds without verification, logged). Returns
-    False if the checksum is known and does not match; in that case the file is
-    removed so the next download attempt produces a fresh copy.
+    Args:
+        path: Downloaded file to verify.
+        filename: Downloaded filename.
+        checksums: Manifest belonging to the downloader that fetched the file.
+
+    Returns:
+        True if the file matches the expected MD5 (or no checksum is known — in
+        which case the caller proceeds without verification, logged). False if
+        the checksum is known and does not match; in that case the file is
+        removed so the next download attempt produces a fresh copy.
+
     """
-    expected = _DATASET_MD5.get(filename)
+    expected = checksums.get(filename)
     if expected is None:
         logger.warning("No checksum recorded for %s — skipping verification", filename)
         return True
@@ -154,7 +172,14 @@ def _extract_tar_safely(tf: tarfile.TarFile, destination: Path) -> None:
 
 
 class DatasetDownloader:
-    """Generic dataset downloader with retry logic and progress tracking."""
+    """Generic dataset downloader with retry logic and progress tracking.
+
+    Direct generic instances must declare their checksum policy explicitly via
+    ``checksum_manifest``. Dataset-specific subclasses inject their pinned
+    manifests so known files cannot silently bypass integrity verification.
+    """
+
+    _checksums: Mapping[str, str] = {}
 
     def __init__(
         self,
@@ -162,6 +187,8 @@ class DatasetDownloader:
         user_agent: str = "Mozilla/5.0 (compatible; Hephaestus/1.0)",
         max_retries: int = 3,
         retry_delays: list[float] | None = None,
+        *,
+        checksum_manifest: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize the dataset downloader.
 
@@ -170,12 +197,23 @@ class DatasetDownloader:
             user_agent: User-Agent header for HTTPS requests
             max_retries: Maximum number of retry attempts
             retry_delays: Delay times between retries (exponential backoff)
+            checksum_manifest: Mapping of filenames to expected MD5 digests.
+                Generic direct instances must pass this explicitly; use an
+                empty mapping only when no authoritative digest is available.
 
         """
+        if type(self) is DatasetDownloader and checksum_manifest is None:
+            raise ValueError(
+                "Generic DatasetDownloader requires an explicit checksum_manifest; "
+                "pass an authoritative filename-to-MD5 mapping, or {} only when "
+                "no checksum exists for the dataset."
+            )
+
         self.base_url = _validate_url_scheme(base_url.rstrip("/"))
         self.user_agent = user_agent
         self.max_retries = max_retries
         self.retry_delays = retry_delays or [1.0, 2.0, 4.0]
+        self._checksums = dict(self._checksums if checksum_manifest is None else checksum_manifest)
 
     def download_with_retry(
         self, filename: str, output_path: Path, max_retries: int | None = None
@@ -233,7 +271,7 @@ class DatasetDownloader:
                                 )
 
                 print()  # terminates the progress bar line
-                if not _verify_or_remove(output_path, filename):
+                if not _verify_or_remove(output_path, filename, self._checksums):
                     last_error = "checksum mismatch"
                     continue
                 return True
@@ -280,9 +318,14 @@ class DatasetDownloader:
 class MNISTDownloader(DatasetDownloader):
     """Specialized downloader for MNIST dataset."""
 
+    _checksums = _MNIST_MD5
+
     def __init__(self) -> None:
         """Initialize with the MNIST dataset URL."""
-        super().__init__("https://yann.lecun.com/exdb/mnist")
+        super().__init__(
+            "https://yann.lecun.com/exdb/mnist",
+            checksum_manifest=_MNIST_MD5,
+        )
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
             ("train-labels-idx1-ubyte.gz", "train_labels.idx"),
@@ -338,9 +381,14 @@ class MNISTDownloader(DatasetDownloader):
 class FashionMNISTDownloader(DatasetDownloader):
     """Specialized downloader for Fashion-MNIST dataset."""
 
+    _checksums = _FASHION_MNIST_MD5
+
     def __init__(self) -> None:
         """Initialize with the Fashion-MNIST dataset URL."""
-        super().__init__("https://fashion-mnist.s3-website.eu-central-1.amazonaws.com")
+        super().__init__(
+            "https://fashion-mnist.s3-website.eu-central-1.amazonaws.com",
+            checksum_manifest=_FASHION_MNIST_MD5,
+        )
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
             ("train-labels-idx1-ubyte.gz", "train_labels.idx"),
@@ -390,10 +438,14 @@ class CIFAR10Downloader(DatasetDownloader):
     """
 
     _CIFAR10_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
+    _checksums = _CIFAR10_MD5
 
     def __init__(self) -> None:
         """Initialize with CIFAR-10 dataset URL."""
-        super().__init__("https://www.cs.toronto.edu/~kriz")
+        super().__init__(
+            "https://www.cs.toronto.edu/~kriz",
+            checksum_manifest=_CIFAR10_MD5,
+        )
 
     def download_cifar10(self, output_dir: str = "datasets/cifar10") -> bool:
         """Download, extract, and convert CIFAR-10 to IDX format.
@@ -431,7 +483,7 @@ class CIFAR10Downloader(DatasetDownloader):
 
             # Recheck after download_with_retry returns so a replacement cannot
             # cross the verification-to-extraction seam unnoticed.
-            if not _verify_or_remove(tar_path, tarball_name):
+            if not _verify_or_remove(tar_path, tarball_name, self._checksums):
                 return False
 
             logger.info("Extracting CIFAR-10 tarball...")
@@ -469,7 +521,7 @@ class CIFAR10Downloader(DatasetDownloader):
 
         # NOTE: pickle can execute arbitrary code. This exception is confined to
         # download_cifar10(), which downloads the upstream CIFAR-10 archive,
-        # checks its pinned digest from _DATASET_MD5, rechecks it immediately
+        # checks its pinned digest from _CIFAR10_MD5, rechecks it immediately
         # before safe extraction, and converts its batches inside a private
         # temporary directory. The caller-selected output directory is not part
         # of the trust decision and receives only derived IDX writes from this
@@ -544,9 +596,14 @@ class CIFAR10Downloader(DatasetDownloader):
 class CIFAR100Downloader(DatasetDownloader):
     """Specialized downloader for CIFAR-100 dataset."""
 
+    _checksums = _CIFAR100_MD5
+
     def __init__(self) -> None:
         """Initialize with CIFAR-100 dataset URL."""
-        super().__init__("https://www.cs.toronto.edu/~kriz")
+        super().__init__(
+            "https://www.cs.toronto.edu/~kriz",
+            checksum_manifest=_CIFAR100_MD5,
+        )
 
     def download_cifar100(self, output_dir: str = "datasets/cifar100") -> bool:
         """Download and extract CIFAR-100 dataset.
@@ -596,7 +653,7 @@ class EMNISTDownloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with primary EMNIST URL."""
-        super().__init__(_EMNIST_URLS[0])
+        super().__init__(_EMNIST_URLS[0], checksum_manifest={})
         self._fallback_urls = _EMNIST_URLS[1:]
 
     def download_emnist(self, split: str = "balanced", output_dir: str = "datasets/emnist") -> bool:
