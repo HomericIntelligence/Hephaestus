@@ -521,14 +521,31 @@ def test_comparison_requires_distinct_provider_capture(tmp_path: Path) -> None:
     _, run_dir = _bootstrap_run(module, tmp_path)
     manifest = module._load_manifest(run_dir)
     manifest["commands"] = [
-        {"kind": "capture", "provider": "pi", "stage": "discovery-plan"},
-        {"kind": "capture", "provider": "codex", "stage": "discovery-plan"},
+        {
+            "id": "pi",
+            "kind": "capture",
+            "provider": "pi",
+            "stage": "discovery-plan",
+            "prompt_sha256": "a" * 64,
+            "revision": "b" * 40,
+        },
+        {
+            "id": "control",
+            "kind": "capture",
+            "provider": "codex",
+            "stage": "discovery-plan",
+            "prompt_sha256": "a" * 64,
+            "revision": "b" * 40,
+        },
     ]
     module._save_manifest(run_dir, manifest)
+    module._refresh_comparisons(run_dir)
+    manifest = module._load_manifest(run_dir)
 
     module._verify_comparison(manifest)
 
     manifest["commands"].pop()
+    manifest["comparisons"] = []
     with pytest.raises(ValueError, match="distinct provider"):
         module._verify_comparison(manifest)
 
@@ -538,15 +555,18 @@ def test_comparison_requires_distinct_provider_capture(tmp_path: Path) -> None:
             "provider": "pi",
             "stage": "discovery-plan",
             "prompt_sha256": "a" * 64,
+            "revision": "b" * 40,
         },
         {
             "kind": "capture",
             "provider": "codex",
             "stage": "implementation-review-handoff",
             "prompt_sha256": "a" * 64,
+            "revision": "b" * 40,
         },
     ]
-    with pytest.raises(ValueError, match="same stage and prompt"):
+    manifest["comparisons"] = []
+    with pytest.raises(ValueError, match="persisted Pi/control pair"):
         module._verify_comparison(manifest)
 
 
@@ -753,6 +773,8 @@ def test_pi_failure_probe_persists_called_process_error(
     probe = module._load_manifest(run_dir)["commands"][-1]
     assert probe["returncode"] == 7
     assert probe["timed_out"] is False
+    assert probe["kind"] == "failure_probe"
+    assert probe["status"] == "expected_failure"
     assert (run_dir / probe["artifacts"]["stderr"]).read_text() == "sanitized stderr"
 
 
@@ -899,6 +921,9 @@ def test_attestation_rebinds_exact_head_and_review_state_to_live_github(
     monkeypatch.setattr(module, "_verify_completion", lambda _manifest: None)
     monkeypatch.setattr(module, "_verify_publication", lambda *_args: None)
     monkeypatch.setattr(module, "_verify_athena_host_receipts", lambda *_args: None)
+    manifest = module._load_manifest(run_dir)
+    manifest["snapshots"] = [{"head": head}]
+    module._save_manifest(run_dir, manifest)
 
     assert (
         module._attest_publication(
@@ -971,6 +996,7 @@ def test_render_verify_and_publication_attestation(
             "status": "success",
             "returncode": 0,
             "prompt_sha256": module._prompt_digest(prompt),
+            "revision": head,
             "session_ids": [f"private-session-{index}"],
             "skill_calls": (
                 ["skill:advise"]
@@ -1010,6 +1036,7 @@ def test_render_verify_and_publication_attestation(
             "status": "success",
             "returncode": 0,
             "prompt_sha256": module._prompt_digest(prompt),
+            "revision": head,
             "session_ids": ["private-control-session"],
             "skill_calls": [],
             "tool_scopes": ["read"],
@@ -1034,6 +1061,9 @@ def test_render_verify_and_publication_attestation(
             "artifact": "defects/defect-1.json",
         }
     ]
+    module._save_manifest(run_dir, manifest)
+    module._refresh_comparisons(run_dir)
+    manifest = module._load_manifest(run_dir)
     module._save_manifest(run_dir, manifest)
     report = tmp_path / "docs" / "pi-e2e-2519-report.md"
     runbook = tmp_path / "docs" / "runbooks" / "pi-e2e-2519.md"
