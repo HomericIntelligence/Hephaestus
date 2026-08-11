@@ -7,6 +7,7 @@ import io
 import os
 import stat
 import tarfile
+from collections.abc import Callable
 from http.client import HTTPMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -281,6 +282,80 @@ class TestMNISTDownloader:
         assert success is False
 
 
+class TestChecksumScoping:
+    """Tests that same-named archives use the active dataset manifest."""
+
+    @pytest.mark.parametrize(
+        ("downloader_cls", "filename", "expected_md5"),
+        [
+            (
+                MNISTDownloader,
+                "train-images-idx3-ubyte.gz",
+                "f68b3c2dcbeaaa9fbdd348bbdeb94873",
+            ),
+            (
+                MNISTDownloader,
+                "train-labels-idx1-ubyte.gz",
+                "d53e105ee54ea40749a09fcbcd1e9432",
+            ),
+            (
+                MNISTDownloader,
+                "t10k-images-idx3-ubyte.gz",
+                "9fb629c4189551a2d022fa330f9573f3",
+            ),
+            (
+                MNISTDownloader,
+                "t10k-labels-idx1-ubyte.gz",
+                "ec29112dd5afa0611ce80d1b7f02629c",
+            ),
+            (
+                FashionMNISTDownloader,
+                "train-images-idx3-ubyte.gz",
+                "8d4fb7e6c68d591d4c3dfef9ec88bf0d",
+            ),
+            (
+                FashionMNISTDownloader,
+                "train-labels-idx1-ubyte.gz",
+                "25c81989df183df01b3e8a0aad5dffbe",
+            ),
+            (
+                FashionMNISTDownloader,
+                "t10k-images-idx3-ubyte.gz",
+                "bef4ecab320f06d8554ea6380940ec79",
+            ),
+            (
+                FashionMNISTDownloader,
+                "t10k-labels-idx1-ubyte.gz",
+                "bb300cfdad3c16e7a12a480ee83cd310",
+            ),
+        ],
+    )
+    def test_download_uses_dataset_specific_manifest(
+        self,
+        downloader_cls: Callable[[], DatasetDownloader],
+        filename: str,
+        expected_md5: str,
+        tmp_path: Path,
+    ) -> None:
+        """Each MNIST-family archive is checked against its source's digest."""
+        content = b"synthetic archive bytes"
+        response = MagicMock()
+        response.__enter__ = MagicMock(return_value=response)
+        response.__exit__ = MagicMock(return_value=False)
+        response.headers.get.return_value = str(len(content))
+        response.read.side_effect = [content, b""]
+        target = tmp_path / filename
+
+        with (
+            patch.object(downloader._HTTPS_OPENER, "open", return_value=response),
+            patch.object(downloader, "_file_md5", return_value=expected_md5) as file_md5,
+        ):
+            assert downloader_cls().download_with_retry(filename, target, max_retries=1)
+
+        file_md5.assert_called_once_with(target)
+        assert target.read_bytes() == content
+
+
 class TestMain:
     """Tests for the main() entry point."""
 
@@ -445,7 +520,7 @@ class TestCIFAR10Downloader:
 
         with (
             patch.dict(sys.modules, {"numpy": MagicMock()}),
-            patch.dict(downloader._DATASET_MD5, {tarball_name: expected_md5}),
+            patch.dict(downloader._CIFAR10_MD5, {tarball_name: expected_md5}),
             patch.object(subject, "download_with_retry", side_effect=fake_download),
             patch.object(subject, "_convert_batches", side_effect=observe_conversion),
             patch.object(
@@ -481,14 +556,14 @@ class TestCIFAR10Downloader:
             nonlocal staged_root
             assert max_retries is None
             path.write_bytes(verified_bytes)
-            assert downloader._verify_or_remove(path, filename) is True
+            assert downloader._verify_or_remove(path, filename, subject._checksums) is True
             path.write_bytes(replacement_bytes)
             staged_root = path.parent
             return True
 
         with (
             patch.dict(sys.modules, {"numpy": MagicMock()}),
-            patch.dict(downloader._DATASET_MD5, {tarball_name: expected_md5}),
+            patch.dict(downloader._CIFAR10_MD5, {tarball_name: expected_md5}),
             patch.object(
                 subject,
                 "download_with_retry",
@@ -528,38 +603,54 @@ class TestEMNISTDownloader:
 class TestSecurityHardening:
     """Regression tests for #478: checksum verification + safe tar extraction."""
 
-    def test_dataset_md5_includes_known_files(self) -> None:
-        """The per-file MD5 map covers CIFAR + Fashion-MNIST downloads."""
-        from hephaestus.datasets.downloader import _DATASET_MD5
+    def test_dataset_md5_manifests_pin_authentic_hashes(self) -> None:
+        """Each downloader manifest contains its upstream-published hashes."""
+        from hephaestus.datasets.downloader import (
+            _CIFAR10_MD5,
+            _CIFAR100_MD5,
+            _FASHION_MNIST_MD5,
+            _MNIST_MD5,
+        )
 
-        for name in (
-            "cifar-10-python.tar.gz",
-            "cifar-100-python.tar.gz",
-            "train-images-idx3-ubyte.gz",
-            "t10k-images-idx3-ubyte.gz",
-        ):
-            assert name in _DATASET_MD5
+        assert _CIFAR10_MD5 == {
+            "cifar-10-python.tar.gz": "c58f30108f718f92721af3b95e74349a",
+        }
+        assert _CIFAR100_MD5 == {
+            "cifar-100-python.tar.gz": "eb9058c3a382ffc7106e4002c42a8d85",
+        }
+        assert _MNIST_MD5 == {
+            "train-images-idx3-ubyte.gz": "f68b3c2dcbeaaa9fbdd348bbdeb94873",
+            "train-labels-idx1-ubyte.gz": "d53e105ee54ea40749a09fcbcd1e9432",
+            "t10k-images-idx3-ubyte.gz": "9fb629c4189551a2d022fa330f9573f3",
+            "t10k-labels-idx1-ubyte.gz": "ec29112dd5afa0611ce80d1b7f02629c",
+        }
+        assert _FASHION_MNIST_MD5 == {
+            "train-images-idx3-ubyte.gz": "8d4fb7e6c68d591d4c3dfef9ec88bf0d",
+            "train-labels-idx1-ubyte.gz": "25c81989df183df01b3e8a0aad5dffbe",
+            "t10k-images-idx3-ubyte.gz": "bef4ecab320f06d8554ea6380940ec79",
+            "t10k-labels-idx1-ubyte.gz": "bb300cfdad3c16e7a12a480ee83cd310",
+        }
 
     def test_verify_or_remove_passes_for_correct_md5(self, tmp_path: Path) -> None:
         """A file matching the known MD5 verifies True and is kept."""
-        from hephaestus.datasets.downloader import _DATASET_MD5, _verify_or_remove
+        from hephaestus.datasets.downloader import _verify_or_remove
 
         name = "cifar-10-python.tar.gz"
         target = tmp_path / name
-        target.write_bytes(b"")  # MD5 of empty = d41d8cd98f00b204e9800998ecf8427e
-        # Patch the expected MD5 to the digest of the bytes we just wrote.
-        with patch.dict(_DATASET_MD5, {name: "d41d8cd98f00b204e9800998ecf8427e"}):
-            assert _verify_or_remove(target, name) is True
+        content = b"known archive bytes"
+        target.write_bytes(content)
+        expected_md5 = hashlib.md5(content, usedforsecurity=False).hexdigest()
+        assert _verify_or_remove(target, name, {name: expected_md5}) is True
         assert target.exists()
 
     def test_verify_or_remove_removes_on_mismatch(self, tmp_path: Path) -> None:
         """A file failing the MD5 check is verified False AND deleted."""
-        from hephaestus.datasets.downloader import _verify_or_remove
+        from hephaestus.datasets.downloader import _CIFAR10_MD5, _verify_or_remove
 
         target = tmp_path / "cifar-10-python.tar.gz"
         target.write_bytes(b"tampered content")
-        # The real MD5 in _DATASET_MD5 will not match — the helper must remove.
-        assert _verify_or_remove(target, "cifar-10-python.tar.gz") is False
+        # The pinned CIFAR-10 MD5 will not match — the helper must remove.
+        assert _verify_or_remove(target, "cifar-10-python.tar.gz", _CIFAR10_MD5) is False
         assert not target.exists()
 
     def test_verify_or_remove_unknown_filename_passes_with_warning(self, tmp_path: Path) -> None:
@@ -568,7 +659,7 @@ class TestSecurityHardening:
 
         target = tmp_path / "novel.bin"
         target.write_bytes(b"x")
-        assert _verify_or_remove(target, "novel.bin") is True
+        assert _verify_or_remove(target, "novel.bin", {}) is True
         assert target.exists()
 
     def test_extract_tar_uses_data_filter(self, tmp_path: Path) -> None:
