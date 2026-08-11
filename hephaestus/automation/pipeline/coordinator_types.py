@@ -405,17 +405,17 @@ class _Paths:
 
 @dataclass(frozen=True)
 class _PendingHandoff:
-    """A completed route retained by its source-stage lease.
+    """A completed route retained by a source lease or bounded handoff slot.
 
     ``StageQueueLease`` keeps the source slot occupied until the destination
     accepts the item.  The coordinator records only the next intent here; it
     deliberately does not mutate ``WorkItem.stage``, ``state``, history, or a
     terminal result until that destination-first admission succeeds.  There
     can be at most one pending handoff per active lease, so this is bounded by
-    the fixed capacity of the coordinator's stage queues rather than acting as
-    a spill buffer.
+    fixed stage-queue capacity rather than acting as a spill buffer.
     """
 
+    item: WorkItem
     target: StageName
     enter: bool
     result: ItemResult | None = None

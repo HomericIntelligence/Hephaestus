@@ -35,8 +35,7 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
         if not records:
             return
         if not self.config.enable_learn:
-            for record in records:
-                journal.disable(str(record["key"]))
+            self._disable_valid_records(records, journal)
             return
         restored: list[LearningIntent] = []
         for record in records:
@@ -44,21 +43,38 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
                 restored.append(LearningIntent.from_journal(record))
             except (KeyError, TypeError, ValueError) as exc:
                 logger.warning(
-                    "learning:%s#%s: invalid journal identity disabled: %s",
+                    "learning:%s#%s: invalid journal identity ignored: %s",
                     item.repo,
                     item.issue,
                     exc,
                 )
-                journal.disable(str(record["key"]))
         if not restored:
             return
         item.learning_intents = restored
         item.learning_resume_stage = primary_stage
         if primary_stage is StageName.FINISHED:
             item.payload["_learning_primary_reason"] = primary_reason
-            if item.result is not None:
+            terminal_record = next(
+                (record for record in records if "post_processing" in record),
+                records[0],
+            )
+            restored_terminal = item.restore_post_processing(terminal_record)
+            if item.result is not None and not restored_terminal:
                 item.compact_for_post_processing(item.result)
         item.stage = StageName.LEARNING
+
+    @staticmethod
+    def _disable_valid_records(
+        records: list[dict[str, Any]], journal: LearningJournalStore
+    ) -> None:
+        """Disable records that contain a usable deterministic key."""
+        for record in records:
+            key = record.get("key")
+            if isinstance(key, str) and key:
+                if record.get("status") == "claimed" and journal.claim_is_active(key):
+                    logger.info("learning:%s: active claim belongs to another loop", key)
+                    continue
+                journal.disable(key)
 
     def _adopt_legacy_post_merge_intent(
         self,

@@ -23,168 +23,17 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from hephaestus.io.utils import write_secure
-from hephaestus.utils.file_lock import file_lock
 
 from ._review_utils import load_state_file
+from .learning_journal import LearningJournalError, LearningJournalStore
+
+__all__ = ["ArmingStateStore", "LearningJournalError", "LearningJournalStore"]
 
 logger = logging.getLogger(__name__)
-
-_LEARNING_STATUSES = frozenset({"pending", "claimed", "succeeded", "failed"})
-
-
-class LearningJournalStore:
-    """Persist strict, bounded state for auxiliary learning intents."""
-
-    def __init__(self, state_dir_provider: Callable[[], Path]) -> None:
-        """Use the current automation state directory on every operation."""
-        self._state_dir_provider = state_dir_provider
-
-    @staticmethod
-    def _digest(key: str) -> str:
-        """Return a path-safe stable identifier for an intent key."""
-        return sha256(key.encode("utf-8")).hexdigest()
-
-    def path(self, key: str) -> Path:
-        """Return the journal record path for ``key``."""
-        return self._state_dir_provider() / f"learning-intent-{self._digest(key)}.json"
-
-    def lock_path(self, key: str) -> Path:
-        """Return the stable sibling lock path for ``key``."""
-        return self.path(key).with_suffix(".lock")
-
-    def load(self, key: str) -> dict[str, Any] | None:
-        """Read one valid journal record, or return ``None``."""
-        path = self.path(key)
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except (OSError, json.JSONDecodeError, TypeError) as exc:
-            logger.warning("Could not read learning intent %s: %s", key, exc)
-            return None
-        if not isinstance(raw, dict) or raw.get("key") != key:
-            return None
-        if raw.get("status") not in _LEARNING_STATUSES:
-            return None
-        return dict(raw)
-
-    def ensure_pending(
-        self, key: str, *, kind: str, identity: dict[str, object] | None = None
-    ) -> dict[str, Any]:
-        """Create a pending record once and return its current value."""
-        if not key or not kind:
-            raise ValueError("learning intent key and kind must be non-empty")
-        with file_lock(self.lock_path(key), require_exclusive=True):
-            current = self.load(key)
-            if current is not None:
-                if current.get("kind") != kind:
-                    raise ValueError("learning intent key was reused for another kind")
-                return current
-            now = datetime.now(UTC).isoformat()
-            record = {
-                "key": key,
-                "kind": kind,
-                "status": "pending",
-                "attempts": 0,
-                "created_at": now,
-                "updated_at": now,
-                **dict(identity or {}),
-            }
-            self._write(key, record)
-            return record
-
-    def incomplete_for_issue(self, *, repo: str, issue: int) -> list[dict[str, Any]]:
-        """Return bounded nonterminal intent records for one issue."""
-        state_dir = self._state_dir_provider()
-        records: list[dict[str, Any]] = []
-        for path in sorted(state_dir.glob("learning-intent-*.json")):
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, TypeError):
-                continue
-            if (
-                isinstance(raw, dict)
-                and raw.get("repo") == repo
-                and raw.get("issue") == issue
-                and raw.get("status") in {"pending", "claimed"}
-            ):
-                records.append(dict(raw))
-        return records
-
-    def disable(self, key: str) -> dict[str, Any]:
-        """Mark reconstructed nonterminal work disabled without host dispatch."""
-        with file_lock(self.lock_path(key), require_exclusive=True):
-            record = self.load(key)
-            if record is None:
-                raise KeyError(key)
-            if record["status"] not in {"pending", "claimed"}:
-                return record
-            record["status"] = "failed"
-            record["error"] = "learning_disabled"
-            record["updated_at"] = datetime.now(UTC).isoformat()
-            self._write(key, record)
-            return record
-
-    def claim(self, key: str) -> bool:
-        """Commit ``pending → claimed`` and return whether this call won."""
-        with file_lock(self.lock_path(key), require_exclusive=True):
-            record = self.load(key)
-            if record is None:
-                raise KeyError(key)
-            if record["status"] != "pending":
-                return False
-            record["status"] = "claimed"
-            record["attempts"] = int(record.get("attempts", 0)) + 1
-            record["updated_at"] = datetime.now(UTC).isoformat()
-            self._write(key, record)
-            return True
-
-    def finish(
-        self,
-        key: str,
-        *,
-        succeeded: bool,
-        error: str = "",
-        receipt_summary: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Commit a claimed intent to a terminal result."""
-        with file_lock(self.lock_path(key), require_exclusive=True):
-            record = self.load(key)
-            if record is None:
-                raise KeyError(key)
-            if record["status"] != "claimed":
-                raise ValueError(f"cannot finish learning intent from {record['status']}")
-            record["status"] = "succeeded" if succeeded else "failed"
-            record["updated_at"] = datetime.now(UTC).isoformat()
-            if error:
-                record["error"] = error[:1000]
-            if receipt_summary:
-                record["receipt_summary"] = dict(receipt_summary)
-            self._write(key, record)
-            return record
-
-    def retry(self, key: str, *, error: str) -> dict[str, Any]:
-        """Return a known failed claim to pending for a bounded retry."""
-        with file_lock(self.lock_path(key), require_exclusive=True):
-            record = self.load(key)
-            if record is None:
-                raise KeyError(key)
-            if record["status"] != "claimed":
-                raise ValueError(f"cannot retry learning intent from {record['status']}")
-            record["status"] = "pending"
-            record["updated_at"] = datetime.now(UTC).isoformat()
-            record["error"] = error[:1000]
-            self._write(key, record)
-            return record
-
-    def _write(self, key: str, record: dict[str, Any]) -> None:
-        write_secure(self.path(key), json.dumps(record, indent=2, sort_keys=True) + "\n")
 
 
 class ArmingStateStore:

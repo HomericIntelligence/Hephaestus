@@ -199,6 +199,66 @@ class WorkItem:
     post_processing: PostProcessingRecord | None = None
     result: ItemResult | None = None
 
+    def learning_journal_identity(self, intent: LearningIntent) -> dict[str, object]:
+        """Return restart identity plus bounded terminal cleanup state."""
+        identity = intent.journal_identity()
+        if self.post_processing is None:
+            return identity
+        result = self.post_processing.result
+        identity["post_processing"] = {
+            "worktree": self.worktree,
+            "branch": self.branch,
+            "resume_stage": self.post_processing.resume_stage.value,
+            "cleanup_payload": dict(self.post_processing.cleanup_payload),
+            "result": {
+                "passed": result.passed,
+                "reason": result.reason,
+                "final_stage": result.final_stage.value,
+            },
+        }
+        return identity
+
+    def restore_post_processing(self, record: dict[str, Any]) -> bool:
+        """Restore validated terminal cleanup state from a journal record."""
+        raw = record.get("post_processing")
+        if not isinstance(raw, dict):
+            return False
+        cleanup = raw.get("cleanup_payload")
+        result_raw = raw.get("result")
+        if not isinstance(cleanup, dict) or not isinstance(result_raw, dict):
+            raise ValueError("invalid post-processing journal state")
+        unknown = set(cleanup).difference(_POST_PROCESSING_PAYLOAD_KEYS)
+        if unknown:
+            raise ValueError("post-processing journal has unsupported cleanup fields")
+        passed = result_raw.get("passed")
+        reason = result_raw.get("reason")
+        final_stage = result_raw.get("final_stage")
+        resume_stage_raw = raw.get("resume_stage")
+        if (
+            not isinstance(passed, bool)
+            or not isinstance(reason, str)
+            or not isinstance(final_stage, str)
+            or not isinstance(resume_stage_raw, str)
+        ):
+            raise ValueError("post-processing journal has invalid result fields")
+        result = ItemResult(
+            passed=passed,
+            reason=reason,
+            final_stage=StageName(final_stage),
+        )
+        resume_stage = StageName(resume_stage_raw)
+        self.worktree = str(raw.get("worktree") or "")
+        self.branch = str(raw.get("branch") or "")
+        self.payload.update(cleanup)
+        self.result = result
+        self.post_processing = PostProcessingRecord(
+            result=result,
+            resume_stage=resume_stage,
+            intent_keys=tuple(intent.key for intent in self.learning_intents),
+            cleanup_payload=dict(cleanup),
+        )
+        return True
+
     def compact_for_post_processing(self, result: ItemResult) -> None:
         """Drop stage-local payload after terminal main work completes."""
         cleanup_payload = {

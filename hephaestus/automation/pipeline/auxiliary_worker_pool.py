@@ -92,7 +92,7 @@ class AuxiliaryWorkerPool:
     def _publish(self, handle: JobHandle, future: Future[JobResult]) -> None:
         try:
             result = future.result()
-        except BaseException as exc:
+        except Exception as exc:
             result = JobResult(ok=False, error=f"worker_crash: {type(exc).__name__}: {exc}")
         try:
             self._completion_q.put_nowait((handle, result))
@@ -107,4 +107,7 @@ class AuxiliaryWorkerPool:
         """Stop pending work and optionally mark active work interrupted."""
         if mark_interrupted:
             self._shutdown.set()
+        cancel = getattr(self._athena_skill_executor, "cancel", None)
+        if callable(cancel):
+            cancel()
         self._executor.shutdown(wait=False, cancel_futures=True)

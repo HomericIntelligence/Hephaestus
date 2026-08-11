@@ -137,17 +137,53 @@ def test_valid_receipt_terminalizes_learning_success(
     assert record["receipt_summary"]["pr_number"] == 1
 
 
-def test_restart_does_not_repeat_unknown_claim(
+def test_restart_does_not_repeat_inactive_unknown_claim(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
     """A restart marks an ambiguous claim failed instead of repeating it."""
     stage, item, ctx, journal = _claimed_learning(tmp_path, make_ctx, make_work_item)
+    journal._release_claim_lock(item.learning_intents[0].key)
     item.state = "CLAIM"
 
     assert stage.step(item, ctx) == Continue(next_state="CLAIM")
     record = journal.load(item.learning_intents[0].key)
     assert record is not None and record["status"] == "failed"
     assert item.payload["learning_failures"][0]["error"] == "outcome_unknown"
+
+
+def test_live_claim_is_ejected_without_terminalizing_owner(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A second loop does not change a claim held by a live owner."""
+    owner = LearningJournalStore(lambda: tmp_path)
+    observer = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(
+        learning_journal=observer,
+        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+    )
+    item = make_work_item(issue=2705, state="CLAIM")
+    intent = LearningIntent.approved_plan(
+        repo=item.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint="abc",
+    )
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.IMPLEMENTATION
+    owner.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
+    assert owner.claim(intent.key)
+
+    stage = stages.LearningStage()
+    assert stage.step(item, ctx) == Continue(next_state="CLAIM")
+    assert stage.step(item, ctx) == StageOutcome(
+        Disposition.FAIL_BACK,
+        "resume_implementation",
+    )
+
+    record = observer.load(intent.key)
+    assert record is not None and record["status"] == "claimed"
+    assert item.payload["learning_external_claims"] == [intent.key]
+    owner.finish(intent.key, succeeded=True)
 
 
 def test_cancellation_before_host_start_returns_claim_to_pending(

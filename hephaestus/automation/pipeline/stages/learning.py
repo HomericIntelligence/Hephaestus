@@ -145,7 +145,10 @@ class LearningStage:
 
     def _next_intent(self, item: WorkItem, ctx: Any) -> LearningIntent | None:
         journal = self._journal(ctx)
+        external_claims = set(item.payload.get("learning_external_claims", []))
         for intent in item.learning_intents:
+            if intent.key in external_claims:
+                continue
             record = journal.load(intent.key)
             if record is None or record["status"] not in {"succeeded", "failed"}:
                 return intent
@@ -169,6 +172,9 @@ class LearningStage:
     ) -> Continue | None:
         """Handle terminal, ambiguous, and stale-plan records before claim."""
         if record["status"] == "claimed":
+            if journal.claim_is_active(intent.key):
+                item.payload.setdefault("learning_external_claims", []).append(intent.key)
+                return Continue(next_state=CLAIM)
             journal.finish(intent.key, succeeded=False, error="outcome_unknown")
             item.payload.setdefault("learning_failures", []).append(
                 {"key": intent.key, "error": "outcome_unknown"}

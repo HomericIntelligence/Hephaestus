@@ -77,7 +77,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             journal.ensure_pending(
                 intent.key,
                 kind=intent.kind.value,
-                identity=intent.journal_identity(),
+                identity=item.learning_journal_identity(intent),
             )
 
     def _submit(self, item: WorkItem, request: JobRequest) -> None:
@@ -210,6 +210,24 @@ class ExecutionCoordinator(_CoordinatorHost):
             logger.exception(
                 "on_job_done poisoned item %s at %s", self._item_key(item), item.stage.value
             )
+            if item.stage is StageName.LEARNING:
+                item.payload.setdefault("learning_failures", []).append(
+                    {
+                        "key": "journal",
+                        "error": "journal_completion_failed",
+                    }
+                )
+                if item.post_processing is not None:
+                    self._handoff_item(
+                        item,
+                        StageName.FINISHED,
+                        enter=True,
+                        result=item.post_processing.result,
+                    )
+                    return
+                if item.learning_resume_stage is not None:
+                    self._handoff_item(item, item.learning_resume_stage, enter=True)
+                    return
             self._finish(item, passed=False, reason="poisoned: on_job_done raised")
             return
         self._register_pipeline_writer_worktree(item, handle.job, result)

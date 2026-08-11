@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, plan_review
@@ -1193,6 +1194,40 @@ class TestDurableWriteOrdering:
         # Mutations are recorded at the moment the advancing outcome exists.
         assert github.mutation_log[0][0] == "gh_issue_upsert_comment"
         assert github.mutation_log[1][0] == "edit_labels"
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+
+    def test_learning_intent_is_durable_before_plan_go_label(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A crash after plan-GO cannot lose its approved-plan learning intent."""
+        events: list[str] = []
+
+        class OrderedJournal(LearningJournalStore):
+            def ensure_pending(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                events.append("journal")
+                return super().ensure_pending(*args, **kwargs)
+
+        class OrderedGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                events.append("label")
+                super().edit_labels(issue_number, add=add, remove=remove)
+
+        journal = OrderedJournal(lambda: tmp_path)
+        github = OrderedGitHub()
+        ctx = make_ctx(github=github, learning_journal=journal)
+        item = make_work_item(issue=11, state="EVAL")
+        item.payload.update(
+            {
+                "review_verdict": _verdict("GO"),
+                "plan_text": "Implement the durable learning lane.",
+                "plan_revision": 4,
+            }
+        )
+
+        result = PlanReviewStage().step(item, ctx)
+
+        assert events == ["journal", "label"]
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 

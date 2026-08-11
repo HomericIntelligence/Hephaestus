@@ -80,7 +80,7 @@ points at the emission chokepoint in `coordinator_runtime.py`.
 | `hephaestus_pipeline_inflight_jobs` | gauge | — | 1 | Jobs currently owned by both worker pools. |
 | `hephaestus_pipeline_lane_queue_depth` | gauge | `lane`: `main`, `auxiliary` | 2 | Queued work items partitioned by worker lane. |
 | `hephaestus_pipeline_lane_inflight_jobs` | gauge | `lane`: `main`, `auxiliary` | 2 | In-flight jobs partitioned by worker lane. |
-| `hephaestus_pipeline_inflight_per_repo` | gauge | `repo`: open repository names | 100 | In-flight jobs partitioned by repository. |
+| `hephaestus_pipeline_inflight_per_repo` | gauge | `repo`: open repository names | 100 | Main-lane in-flight jobs partitioned by repository. Use the lane gauges for auxiliary work. |
 | `hephaestus_pipeline_loops_total` | gauge | — | 1 | Reseed passes run by this coordinator process. |
 | `hephaestus_pipeline_stalled_ticks` | gauge | — | 1 | Consecutive drain ticks without pipeline progress. |
 | `hephaestus_circuit_breaker_state` | gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | Circuit-breaker lifecycle state (the active state has value `1`, others `0`). |

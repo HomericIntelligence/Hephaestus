@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -59,3 +60,54 @@ def test_learning_journal_rejects_invalid_terminal_transition(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="cannot finish"):
         store.finish("key", succeeded=True)
+
+
+def test_learning_journal_does_not_overwrite_corrupt_record(tmp_path: Path) -> None:
+    """A present invalid record is evidence, not an absent intent."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    path = store.path("key")
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(arming_state.LearningJournalError, match="invalid JSON"):
+        store.ensure_pending("key", kind="approved_plan")
+
+    assert path.read_text(encoding="utf-8") == "{not-json"
+
+
+def test_learning_journal_identity_cannot_replace_reserved_fields(tmp_path: Path) -> None:
+    """Caller identity cannot change journal protocol fields."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+
+    with pytest.raises(ValueError, match="reserved"):
+        store.ensure_pending(
+            "key",
+            kind="approved_plan",
+            identity={"key": "other", "status": "succeeded"},
+        )
+
+    assert store.load("key") is None
+
+
+def test_learning_journal_exposes_live_claim_until_finish(tmp_path: Path) -> None:
+    """A retained claim lock proves that the owning process is still active."""
+    owner = arming_state.LearningJournalStore(lambda: tmp_path)
+    observer = arming_state.LearningJournalStore(lambda: tmp_path)
+    owner.ensure_pending("key", kind="approved_plan")
+
+    assert owner.claim("key") is True
+    assert observer.claim_is_active("key") is True
+
+    owner.finish("key", succeeded=True)
+    assert observer.claim_is_active("key") is False
+
+
+def test_learning_journal_validates_required_identity(tmp_path: Path) -> None:
+    """A syntactically valid but incomplete record is corrupt evidence."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    store.path("key").write_text(
+        json.dumps({"key": "key", "kind": "approved_plan", "status": "pending"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(arming_state.LearningJournalError, match="missing fields"):
+        store.load("key")

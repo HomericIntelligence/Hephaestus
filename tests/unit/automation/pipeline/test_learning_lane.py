@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 import inspect
+import json
 import queue
+import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import hephaestus.agents.runtime as agent_runtime
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillResult
+from hephaestus.automation.pipeline.athena_skill_jobs import (
+    AthenaSkillJob,
+    AthenaSkillRequest,
+    AthenaSkillResult,
+)
 from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import GitJob, JobHandle
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
-from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, LearningIntent, WorkItem
 from hephaestus.automation.state_labels import STATE_PLAN_GO
+from hephaestus.utils import subprocess_registry
+from hephaestus.utils.helpers import run_subprocess
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -98,6 +110,51 @@ def test_learning_cleanup_does_not_wait_for_main_capacity(tmp_path: Path) -> Non
     assert coordinator._admit(learning)
 
 
+def test_opposite_lane_handoffs_do_not_deadlock_at_capacity_one(tmp_path: Path) -> None:
+    """An auxiliary return lets a main item enter the full auxiliary lane."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    returning = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=1,
+        stage=StageName.LEARNING,
+    )
+    entering = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2,
+        stage=StageName.PLAN_REVIEW,
+    )
+    assert coordinator._push_item(returning, StageName.LEARNING, enter=True)
+    assert coordinator._push_item(entering, StageName.PLAN_REVIEW, enter=True)
+    assert coordinator._claim_item(StageName.LEARNING) is returning
+    assert coordinator._claim_item(StageName.PLAN_REVIEW) is entering
+
+    assert not coordinator._handoff_item(returning, StageName.IMPLEMENTATION, enter=True)
+    assert coordinator.learning_work_count == 0
+    assert coordinator._handoff_item(entering, StageName.LEARNING, enter=True)
+    assert coordinator.live_work_count == 0
+
+    coordinator._drain_pending_handoffs()
+
+    assert returning.stage is StageName.IMPLEMENTATION
+    assert id(returning) not in coordinator._pending_handoffs
+    assert coordinator.live_work_count == 1
+
+
 def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
     """A planning-only run does not escape its selected stage scope."""
     from hephaestus.automation.pipeline.routing import PipelineScope
@@ -154,6 +211,115 @@ def test_restart_reconstructs_pending_intent_before_primary_stage(tmp_path: Path
     assert item.stage is StageName.LEARNING
     assert item.learning_intents == [intent]
     assert item.learning_resume_stage is StageName.FINISHED
+
+
+def test_restart_restores_post_merge_cleanup_obligation(tmp_path: Path) -> None:
+    """A new item recovers the branch, worktree, and confirmed merge result."""
+    repo_root = tmp_path / "repo"
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+            repo_roots={"repo": repo_root},
+        ),
+        github=FakeStageGitHub(pr_state={"state": "MERGED"}),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    original = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2705,
+        pr=12,
+        stage=StageName.MERGE_WAIT,
+        worktree="build/.worktrees/issue-2705",
+        branch="2705-fix",
+    )
+    original.payload["_direct_scope_local_branch_cleanup"] = True
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    original.learning_intents.append(intent)
+    original.compact_for_post_processing(
+        ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+    )
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(
+        intent.key,
+        kind=intent.kind.value,
+        identity=original.learning_journal_identity(intent),
+    )
+    recovered = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2705,
+        pr=12,
+        stage=StageName.FINISHED,
+    )
+
+    coordinator._restore_learning_intents(recovered, StageName.FINISHED, "already merged")
+
+    assert recovered.worktree == original.worktree
+    assert recovered.branch == original.branch
+    assert recovered.post_processing is not None
+    assert recovered.post_processing.result.passed
+    assert recovered.payload["_direct_scope_local_branch_cleanup"] is True
+
+
+def test_post_merge_recovery_rejects_non_boolean_result() -> None:
+    """Recovery rejects text that could invert a stored merge result."""
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2705)
+    record = {
+        "post_processing": {
+            "worktree": "",
+            "branch": "",
+            "resume_stage": StageName.FINISHED.value,
+            "cleanup_payload": {},
+            "result": {
+                "passed": "false",
+                "reason": "failed",
+                "final_stage": StageName.MERGE_WAIT.value,
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="invalid result fields"):
+        item.restore_post_processing(record)
+
+
+def test_malformed_recovery_record_does_not_poison_source_item(tmp_path: Path) -> None:
+    """A journal object without a key is reported and left untouched."""
+    repo_root = tmp_path / "repo"
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+            repo_roots={"repo": repo_root},
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    malformed = journal.path("unknown")
+    malformed.parent.mkdir(parents=True, exist_ok=True)
+    malformed.write_text(
+        json.dumps(
+            {
+                "repo": "repo",
+                "issue": 2705,
+                "status": "pending",
+                "kind": "post_merge",
+            }
+        ),
+        encoding="utf-8",
+    )
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2705, stage=StageName.PLANNING)
+
+    coordinator._restore_learning_intents(item, StageName.PLANNING, "primary")
+
+    assert item.stage is StageName.PLANNING
+    assert malformed.exists()
 
 
 def test_merged_legacy_item_reconstructs_missing_post_merge_intent(tmp_path: Path) -> None:
@@ -315,6 +481,55 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
     auxiliary.shutdown(mark_interrupted=False)
 
 
+@pytest.mark.skipif(not subprocess_registry.supported(), reason="requires POSIX process groups")
+def test_forced_auxiliary_shutdown_stops_active_host_process() -> None:
+    """Forced shutdown ends active host work and releases its worker thread."""
+
+    class ProcessHost:
+        def execute(self, request: object) -> AthenaSkillResult:
+            del request
+            run_subprocess(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                check=False,
+                timeout=60,
+                track_process_group=True,
+            )
+            return AthenaSkillResult(kind="learn", error="interrupted")
+
+        def cancel(self) -> None:
+            subprocess_registry.terminate_all()
+
+    completions: queue.Queue = queue.Queue(maxsize=1)
+    pool = AuxiliaryWorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completions,
+        athena_skill_executor=ProcessHost(),
+    )
+    request = AthenaSkillJob(
+        request=AthenaSkillRequest(
+            kind="learn",
+            repo="repo",
+            issue=1,
+            agent="codex",
+            model="default",
+            cwd=Path.cwd(),
+            timeout_s=60,
+        )
+    )
+    pool.submit(request, "DONE")
+    deadline = time.monotonic() + 3
+    while subprocess_registry.live_count() == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert subprocess_registry.live_count() == 1
+
+    pool.shutdown()
+
+    _handle, result = completions.get(timeout=3)
+    assert result.interrupted
+    assert subprocess_registry.live_count() == 0
+
+
 def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: Path) -> None:
     """Post-merge learning drops review data and keeps the merge outcome."""
     coordinator = Coordinator(
@@ -345,6 +560,55 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
     assert item.result.passed
     assert item.result.reason == "merged"
     assert item.result.final_stage is StageName.MERGE_WAIT
+
+
+def test_learning_completion_exception_preserves_confirmed_merge(tmp_path: Path) -> None:
+    """A journal callback error cannot rewrite a confirmed merge as failed."""
+
+    class RaisingStage:
+        def on_job_done(self, item: WorkItem, result: object, ctx: object) -> None:
+            del item, result, ctx
+            raise OSError("journal unavailable")
+
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    item = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=1,
+        pr=7,
+        stage=StageName.LEARNING,
+    )
+    primary = ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+    item.learning_intents.append(LearningIntent.post_merge(repo="repo", issue=1, pr=7))
+    item.compact_for_post_processing(primary)
+    assert coordinator._push_item(item, StageName.LEARNING, enter=True)
+    assert coordinator._claim_item(StageName.LEARNING) is item
+    request = AthenaSkillJob(
+        request=AthenaSkillRequest(
+            kind="learn",
+            repo="repo",
+            issue=1,
+            agent="codex",
+            model="default",
+            cwd=tmp_path,
+            timeout_s=60,
+        )
+    )
+    handle = JobHandle(job=request, on_done_state="RESULT")
+    coordinator.auxiliary_in_flight[handle] = item
+    coordinator.stages[StageName.LEARNING] = RaisingStage()  # type: ignore[assignment]
+
+    coordinator._handle_completion(handle, JobResult(ok=False, error="disk"), auxiliary=True)
+
+    assert item.stage is StageName.FINISHED
+    assert item.result == primary
+    assert item.payload["learning_failures"][0]["error"] == "journal_completion_failed"
 
 
 def test_learning_completion_capacity_covers_all_learning_workers(tmp_path: Path) -> None:

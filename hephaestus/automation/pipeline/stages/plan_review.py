@@ -683,12 +683,6 @@ class PlanReviewStage(Stage):
         """Apply GO, record auxiliary learning, and release the main stage."""
         assert item.issue is not None  # noqa: S101 - _eval narrows the issue
         logger.info("plan_review:%d: GO verdict; applying label and advancing", item.issue)
-        self._write_verdict_labels(item.issue, ctx, is_go=True)
-        if not is_exclusive_plan_state(
-            _require_issue_labels(item, ctx),
-            STATE_PLAN_GO,
-        ):
-            return StageOutcome(Disposition.RETRY, "plan-go label was not confirmed")
         if ctx.config.enable_learn:
             plan_text = str(item.payload.get("plan_text") or "")
             intent = LearningIntent.approved_plan(
@@ -706,6 +700,12 @@ class PlanReviewStage(Stage):
                     identity=intent.journal_identity(),
                 )
             item.learning_resume_stage = StageName.IMPLEMENTATION
+        self._write_verdict_labels(item.issue, ctx, is_go=True)
+        if not is_exclusive_plan_state(
+            _require_issue_labels(item, ctx),
+            STATE_PLAN_GO,
+        ):
+            return StageOutcome(Disposition.RETRY, "plan-go label was not confirmed")
         return StageOutcome(Disposition.ADVANCE, "plan approved")
 
     @staticmethod

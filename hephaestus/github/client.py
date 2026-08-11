@@ -403,6 +403,7 @@ def _gh_call_impl(
     log_on_error: bool = True,
     timeout: int | None = None,
     env: Mapping[str, str] | None = None,
+    track_process_group: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -417,6 +418,7 @@ def _gh_call_impl(
             foreign-authored comment that the caller recovers via a shadow post).
         timeout: Optional per-call timeout override. Defaults to
             :func:`gh_cli_timeout`.
+        track_process_group: Make the child available to host shutdown.
 
     Returns:
         CompletedProcess instance
@@ -437,6 +439,7 @@ def _gh_call_impl(
                 timeout=timeout if timeout is not None else gh_cli_timeout(),
                 log_on_error=log_on_error,
                 env=dict(env) if env is not None else None,
+                track_process_group=track_process_group,
             )
             return result
         except subprocess.CalledProcessError as e:
@@ -511,6 +514,7 @@ def _gh_call(
     log_on_error: bool = True,
     timeout: int | None = None,
     env: Mapping[str, str] | None = None,
+    track_process_group: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -551,6 +555,8 @@ def _gh_call(
         }
         if env is not None:
             kwargs["env"] = env
+        if track_process_group:
+            kwargs["track_process_group"] = True
         return _GH_BREAKER.call(_gh_call_impl, args, **kwargs)
     except CircuitBreakerOpenError as exc:
         # Translate to a domain exception (RuntimeError subclass) so existing

@@ -156,7 +156,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         self._emit_lane_gauges(registry, snapshot)
         inflight_by_repo = registry.gauge(
             "hephaestus_pipeline_inflight_per_repo",
-            "Pipeline jobs currently in flight by repository.",
+            "Main-lane pipeline jobs currently in flight by repository.",
             allowed_labels={"repo": None},
             series_cap=_DYNAMIC_METRIC_SERIES_CAP,
         )
@@ -572,10 +572,17 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._progress = True
             return True
 
-        pending = _PendingHandoff(target=target, enter=enter, result=result)
+        pending = _PendingHandoff(item=item, target=target, enter=enter, result=result)
         existing = self._pending_handoffs.setdefault(id(item), pending)
         if existing != pending:  # pragma: no cover - no item can route twice while leased
             raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
+        if self._is_auxiliary_stage(item.stage) and not self._is_auxiliary_stage(target):
+            # The bounded handoff record now owns the item. Release the source
+            # queue slot and auxiliary permit so a main-lane item can enter
+            # learning and release the main permit that this return needs.
+            # Keeping either source capacity creates a capacity-one cycle.
+            self._leases.pop(id(item)).release()
+            self._learning_work_permit_ids.discard(id(item))
         self._record_event(
             "handoff_pending",
             item.stage.value,
@@ -588,15 +595,18 @@ class CoordinatorRuntime(_CoordinatorHost):
         """Retry every retained route whose destination may have opened."""
         for item_id, pending in list(self._pending_handoffs.items()):
             lease = self._leases.get(item_id)
-            if lease is None:  # pragma: no cover - defensive bookkeeping repair
-                self._pending_handoffs.pop(item_id, None)
-                continue
-            item = lease.item
+            item = pending.item
             if not self._lane_handoff_capacity(item, pending.target):
                 continue
-            if not lease.handoff(self.queues[pending.target]):
+            accepted = (
+                lease.handoff(self.queues[pending.target])
+                if lease is not None
+                else self.queues[pending.target].offer(item)
+            )
+            if not accepted:
                 continue
-            self._leases.pop(item_id, None)
+            if lease is not None:
+                self._leases.pop(item_id, None)
             self._pending_handoffs.pop(item_id, None)
             self._activate_handoff(
                 item,
@@ -964,13 +974,13 @@ class CoordinatorRuntime(_CoordinatorHost):
             if item.stage is StageName.MERGE_WAIT and item.learning_intents:
                 primary_reason = outcome.note or "merged"
                 item.payload["_learning_primary_reason"] = primary_reason
-                self._persist_learning_intents(item)
                 terminal_result = ItemResult(
                     passed=True,
                     reason=primary_reason,
                     final_stage=StageName.MERGE_WAIT,
                 )
                 item.compact_for_post_processing(terminal_result)
+                self._persist_learning_intents(item)
                 self._handoff_item(
                     item,
                     StageName.LEARNING,
@@ -1300,6 +1310,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         leftovers.extend(self.in_flight.values())
         leftovers.extend(self.auxiliary_in_flight.values())
         leftovers.extend(lease.item for lease in self._leases.values())
+        leftovers.extend(pending.item for pending in self._pending_handoffs.values())
         seen: set[int] = set()
         for item in leftovers:
             if id(item) in seen:

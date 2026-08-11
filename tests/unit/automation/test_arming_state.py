@@ -8,6 +8,7 @@ inline ``_load/_save/_clear_arming_state`` methods provided.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -95,3 +96,15 @@ def test_clear_existing_removes_file(tmp_path: Path) -> None:
     assert store.path(11).exists()
     store.clear(11)
     assert not store.path(11).exists()
+
+
+def test_clear_failure_warns_without_raising(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A cleanup I/O failure remains best-effort and visible."""
+    store = _store(tmp_path)
+
+    with patch.object(Path, "unlink", side_effect=OSError("busy")), caplog.at_level("WARNING"):
+        store.clear(11)
+
+    assert "Could not delete arming record" in caplog.text
