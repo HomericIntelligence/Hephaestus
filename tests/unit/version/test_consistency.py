@@ -281,6 +281,28 @@ def test_bump_version_refuses_dynamic_project_before_tag_lookup(
     assert {path: path.read_bytes() for path in before} == before
 
 
+def test_bump_version_refuses_single_quoted_dynamic_project_before_tag_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A valid TOML literal string cannot bypass the dynamic-version preflight."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[project]\ndynamic = ['version']\n\n[tool.hatch.version]\nsource = 'vcs'\n"
+    )
+    monkeypatch.setattr(
+        consistency,
+        "_get_canonical_version",
+        lambda _root: pytest.fail("dynamic-project preflight must precede tag lookup"),
+    )
+
+    assert consistency.bump_version(tmp_path, "patch", verbose=True) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "signed Auto Tag Release workflow" in captured.err
+    assert not (tmp_path / "VERSION").exists()
+
+
 @pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
 def test_bump_version_main_refuses_dynamic_project_without_output(
     tmp_path: Path,

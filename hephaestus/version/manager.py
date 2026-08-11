@@ -21,6 +21,7 @@ The project version is derived exclusively from Git tags through hatch-vcs.
 """
 
 import re
+import tomllib
 from pathlib import Path
 from typing import cast
 
@@ -38,20 +39,22 @@ class _UnsetType:
 _UNSET = _UnsetType()  # sentinel: use default pyproject_file path
 
 
-_HATCH_VCS_DYNAMIC_RE = re.compile(r'^\s*dynamic\s*=\s*\[\s*[^]]*"version"[^]]*\]', re.MULTILINE)
-
-
 def _is_hatch_vcs_project(pyproject_content: str) -> bool:
     """Return True if pyproject.toml declares a dynamic project version.
 
-    Detection is intentionally broad: any ``dynamic = [..., "version", ...]``
-    declaration is enough to mean that a static ``VERSION`` or ``__version__``
-    update cannot be authoritative. Hephaestus uses this contract with
-    ``[tool.hatch.version] source = "vcs"``; refusing other dynamic providers
-    too keeps the aggregate updater fail closed rather than guessing how their
-    authoritative version is produced.
+    Detection is intentionally broad: any valid TOML
+    ``[project].dynamic`` array containing ``"version"`` is enough to mean
+    that a static ``VERSION`` or ``__version__`` update cannot be authoritative.
+    Hephaestus uses this contract with ``[tool.hatch.version] source = "vcs"``;
+    refusing other dynamic providers too keeps the aggregate updater fail
+    closed rather than guessing how their authoritative version is produced.
     """
-    return bool(_HATCH_VCS_DYNAMIC_RE.search(pyproject_content))
+    project = tomllib.loads(pyproject_content).get("project")
+    if not isinstance(project, dict):
+        return False
+
+    dynamic = project.get("dynamic")
+    return isinstance(dynamic, list) and "version" in dynamic
 
 
 def parse_version(version: str) -> tuple[int, int, int]:
@@ -97,7 +100,8 @@ class VersionManager:
             init_files: List of __init__.py files to update.
                 Defaults to [repo_root/<package>/__init__.py].
             pyproject_file: Path to pyproject.toml. Defaults to repo_root/pyproject.toml.
-                Pass ``None`` explicitly to skip pyproject.toml updates entirely.
+                Pass ``None`` explicitly to skip pyproject.toml updates entirely. The
+                repository's pyproject.toml is still inspected before aggregate writes.
 
         """
         self.repo_root = repo_root or get_repo_root()
@@ -147,15 +151,19 @@ class VersionManager:
             ValueError: If the project declares a dynamic version.
 
         """
-        if self.pyproject_file is None or not self.pyproject_file.exists():
-            return
+        repository_pyproject = self.repo_root / "pyproject.toml"
+        inspection_files = [repository_pyproject]
+        if self.pyproject_file is not None and self.pyproject_file != repository_pyproject:
+            inspection_files.append(self.pyproject_file)
 
-        content = self.pyproject_file.read_text()
-        if _is_hatch_vcs_project(content):
-            raise ValueError(
-                "static version-file updates are unsupported when "
-                '[project].dynamic contains "version"'
-            )
+        for pyproject_file in inspection_files:
+            if not pyproject_file.exists():
+                continue
+            if _is_hatch_vcs_project(pyproject_file.read_text()):
+                raise ValueError(
+                    "static version-file updates are unsupported when "
+                    '[project].dynamic contains "version"'
+                )
 
     def update_pyproject_file(
         self, pyproject_file: Path, version: str, verbose: bool = True
