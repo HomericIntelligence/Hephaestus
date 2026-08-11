@@ -39,6 +39,8 @@ import argparse
 import hashlib
 import io
 import json
+import os
+import stat
 import sys
 import tarfile
 from datetime import UTC, datetime
@@ -58,20 +60,69 @@ class RestoreError(Exception):
     """Raised when a restore cannot be performed safely (fail closed)."""
 
 
+class BackupError(Exception):
+    """Raised when inventory cannot be archived as safe regular files."""
+
+
 def _sha256_bytes(data: bytes) -> str:
     """Return the hex SHA-256 digest of ``data``."""
     return hashlib.sha256(data).hexdigest()
 
 
-def _iter_inventory_files(repo_root: Path) -> list[Path]:
-    """Return every regular file under any INVENTORY prefix, sorted by path."""
-    files: list[Path] = []
+def _read_regular_inventory_file(path: Path) -> bytes:
+    """Read one unchanged regular file without following a symbolic link."""
+    try:
+        expected = path.lstat()
+    except OSError as exc:
+        raise BackupError(f"cannot inspect inventory path {path}: {exc}") from exc
+    if not stat.S_ISREG(expected.st_mode):
+        raise BackupError(f"inventory path is not a regular file: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise BackupError(f"cannot safely open inventory file {path}: {exc}") from exc
+
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (expected.st_dev, expected.st_ino):
+            raise BackupError(f"inventory file changed while being opened: {path}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            return stream.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _inventory_members(repo_root: Path) -> list[tuple[str, bytes]]:
+    """Return safe regular inventory members and their bytes, sorted by name."""
+    members: list[tuple[str, bytes]] = []
     for prefix in INVENTORY:
         base = repo_root / prefix
+        current = repo_root
+        for part in PurePosixPath(prefix).parts:
+            current /= part
+            if current.is_symlink():
+                raise BackupError(f"inventory path is a symbolic link: {current}")
+
         if not base.exists():
             continue
-        files.extend(p for p in base.rglob("*") if p.is_file())
-    return sorted(files)
+        if not base.is_dir():
+            raise BackupError(f"inventory root is not a directory: {base}")
+
+        for path in base.rglob("*"):
+            if path.is_symlink():
+                raise BackupError(f"inventory path is a symbolic link: {path}")
+            if path.is_dir():
+                continue
+            rel = path.relative_to(repo_root).as_posix()
+            members.append((rel, _read_regular_inventory_file(path)))
+    return sorted(members)
 
 
 def cmd_backup(repo_root: Path, output_dir: Path, timestamp: str) -> Path:
@@ -79,6 +130,8 @@ def cmd_backup(repo_root: Path, output_dir: Path, timestamp: str) -> Path:
 
     The archive stores each file under its repo-relative POSIX path plus a
     ``manifest.json`` mapping every member to its SHA-256 digest and byte size.
+    Symbolic links are rejected before the archive is created; hard-linked
+    files are materialized as independent regular members.
     A repo with no tier-3 state produces a valid archive with an empty member
     map (an empty backup is a legitimate state, not an error).
 
@@ -91,17 +144,23 @@ def cmd_backup(repo_root: Path, output_dir: Path, timestamp: str) -> Path:
     Returns:
         The path to the written archive.
 
+    Raises:
+        BackupError: If an inventory path is a symlink, is not a regular file,
+            or changes while being opened.
+
     """
+    inventory_members = _inventory_members(repo_root)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"{_ARCHIVE_PREFIX}{timestamp}.tar.gz"
 
     members: dict[str, dict[str, object]] = {}
     with tarfile.open(archive_path, "w:gz") as tar:
-        for file_path in _iter_inventory_files(repo_root):
-            rel = file_path.relative_to(repo_root).as_posix()
-            data = file_path.read_bytes()
+        for rel, data in inventory_members:
             members[rel] = {"sha256": _sha256_bytes(data), "size": len(data)}
-            tar.add(file_path, arcname=rel)
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
 
         manifest = json.dumps({"members": members}, indent=2, sort_keys=True).encode("utf-8")
         info = tarfile.TarInfo(MANIFEST_NAME)
@@ -436,7 +495,11 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = args.repo_root or _default_repo_root()
         output_dir = args.output or _default_output_dir()
         timestamp = args.timestamp or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive = cmd_backup(repo_root, output_dir, timestamp)
+        try:
+            archive = cmd_backup(repo_root, output_dir, timestamp)
+        except BackupError as exc:
+            print(f"Backup refused: {exc}", file=sys.stderr)
+            return 2
         print(f"Wrote backup: {archive}")
         return 0
 

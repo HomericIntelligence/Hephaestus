@@ -266,6 +266,78 @@ def test_verify_passes_on_untampered_archive(tmp_path: Path) -> None:
     assert backup_state.cmd_verify(archive) == 0
 
 
+def test_backup_rejects_inventory_symlink_without_creating_archive(tmp_path: Path) -> None:
+    """Backup refuses symlinked state instead of producing an unverifiable archive."""
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "build" / ".issue_implementer"
+    state_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside state")
+    (state_dir / "linked.json").symlink_to(outside)
+    output_dir = tmp_path / "backups"
+
+    with pytest.raises(backup_state.BackupError):
+        backup_state.cmd_backup(repo_root, output_dir, FIXED_TIMESTAMP)
+
+    assert not output_dir.exists()
+
+
+def test_cli_backup_rejects_inventory_symlink_without_success_message(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The backup CLI reports refusal and does not claim a symlink backup succeeded."""
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "build" / ".issue_implementer"
+    state_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside state")
+    (state_dir / "linked.json").symlink_to(outside)
+    output_dir = tmp_path / "backups"
+
+    rc = backup_state.main(
+        [
+            "backup",
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(output_dir),
+            "--timestamp",
+            FIXED_TIMESTAMP,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "Backup refused" in captured.err
+    assert "Wrote backup" not in captured.out
+    assert not output_dir.exists()
+
+
+def test_backup_materializes_hard_links_as_verifiable_regular_members(tmp_path: Path) -> None:
+    """Hard-linked state is stored as regular bytes and passes backup verification."""
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "build" / ".issue_implementer"
+    state_dir.mkdir(parents=True)
+    original = state_dir / "original.json"
+    original.write_bytes(b"shared state")
+    linked = state_dir / "linked.json"
+    linked.hardlink_to(original)
+
+    archive = backup_state.cmd_backup(repo_root, tmp_path / "backups", FIXED_TIMESTAMP)
+
+    assert backup_state.cmd_verify(archive) == 0
+    with tarfile.open(archive, "r:gz") as tar:
+        data_members = [
+            member for member in tar.getmembers() if member.name != backup_state.MANIFEST_NAME
+        ]
+    assert {member.name for member in data_members} == {
+        "build/.issue_implementer/linked.json",
+        "build/.issue_implementer/original.json",
+    }
+    assert all(member.isreg() for member in data_members)
+
+
 def _repack_with_tampered_member(archive: Path, dest: Path, target_suffix: str) -> None:
     """Copy ``archive`` to ``dest``, flipping one byte of the member ending in suffix."""
     with tarfile.open(archive, "r:gz") as src, tarfile.open(dest, "w:gz") as out:
