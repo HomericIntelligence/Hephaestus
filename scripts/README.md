@@ -43,6 +43,8 @@ through installed `hephaestus-*` console scripts.
 - **`shell/install.sh`** — HomericIntelligence ecosystem installer: check (and
   optionally install) all mesh dependencies by role
   (see `../docs/INSTALLER_ARCHITECTURE.md`).
+- **`shell/cleanup-stale-worktrees.sh`** — Remove clean linked worktrees for
+  closed issues or merged branches, preserving paths with spaces.
 - **`shell/lib/install_helpers.sh`** — Sourceable helper library (colors,
   counters, check helpers) shared by the installer scripts.
 
