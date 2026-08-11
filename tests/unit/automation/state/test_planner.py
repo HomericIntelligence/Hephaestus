@@ -11,11 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
+from hephaestus.automation.models import PlannerOptions
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
     PlanDiscoveryStatus,
+    render_current_plan,
 )
 from hephaestus.automation.state.planner import PlannerStateManager
 from hephaestus.github.client import GitHubRateLimitError
@@ -59,7 +60,7 @@ def _make_options(issues: list[int] | None = None) -> PlannerOptions:
 
 
 def _plan_body() -> str:
-    return f"{PLAN_COMMENT_MARKER}\n\nStep 1: do the thing.\n"
+    return render_current_plan("Step 1: do the thing.")
 
 
 def _other_body() -> str:

@@ -44,7 +44,7 @@ from hephaestus.automation.agent_config import (
 )
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
-from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER, PLAN_REVIEW_PREFIX
+from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -302,7 +302,6 @@ def _publish_plan_blocked(
         issue_number,
         PLAN_REVIEW_CANONICAL_MARKER,
         render_current_review(raw_review, revision=revision),
-        legacy_marker=PLAN_REVIEW_PREFIX,
     )
     return True
 

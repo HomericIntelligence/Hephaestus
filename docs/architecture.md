@@ -798,7 +798,13 @@ stateDiagram-v2
 Architectural contract:
 
 - The first automation journal role is the canonical implementation plan,
-  identified by an opaque marker and updated only by its owning GitHub actor.
+  identified only when its opaque marker is the exact first raw line and
+  updated only by its owning GitHub actor. The human-readable `# Implementation
+  Plan` heading remains display text on the next line; heading-only,
+  whitespace-prefixed, and same-line-suffix lookalikes are inert audit text.
+- If no canonical plan pointer exists, an upsert creates a new canonical
+  comment beside any historical heading-only comment. It never patches,
+  deletes, or migrates that historical display record.
 - A restarted rejected plan receives only its bounded current canonical plan
   and paired current review. Superseded revisions are not public comments; the
   latest plan carries bounded prior fingerprints for no-progress detection.
@@ -875,7 +881,9 @@ stateDiagram-v2
 Architectural contract:
 
 - The second automation journal role is the canonical plan review, identified
-  by an opaque marker and updated only by its owning GitHub actor.
+  only when its opaque marker is the exact first raw line and updated only by
+  its owning GitHub actor. The human-readable `## 🔍 Plan Review` heading is
+  display text only; heading-only history cannot be reconstructed or mutated.
 - Marker collisions authored by other actors are inert. They cannot become
   canonical artifacts, establish replay identity, or stop an owned write.
 - Canonical comments are replaced in place. On restart, a stale or missing

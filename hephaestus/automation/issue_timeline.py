@@ -14,6 +14,7 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     archived_new_plan,
     archived_old_plan,
+    has_exact_leading_marker,
     is_plan_comment,
     is_plan_review_comment,
     journal_snapshot,
@@ -82,7 +83,7 @@ def issue_comments_from_metadata(
 def _validate_legacy_markers(comments: Sequence[IssueComment]) -> None:
     """Reject prefix collisions before planning any destructive mutation."""
     for comment in comments:
-        first_line = comment.body.lstrip().partition("\n")[0].strip()
+        first_line = comment.body.partition("\n")[0]
         if (
             first_line.startswith(HISTORY_MARKER_PREFIX)
             and HISTORY_RE.fullmatch(first_line) is None
@@ -97,19 +98,18 @@ def _validate_legacy_markers(comments: Sequence[IssueComment]) -> None:
 
 def _is_obsolete_automation_comment(body: str) -> bool:
     """Return whether an owned comment belongs to a removable automation role."""
-    stripped = body.lstrip()
     return bool(
-        is_plan_comment(stripped)
-        or is_plan_review_comment(stripped)
-        or stripped.startswith(HISTORY_MARKER_PREFIX)
-        or stripped.startswith(SKIP_REASON_MARKER)
-        or stripped.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
+        is_plan_comment(body)
+        or is_plan_review_comment(body)
+        or body.startswith(HISTORY_MARKER_PREFIX)
+        or body.startswith(SKIP_REASON_MARKER)
+        or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
     )
 
 
 def _has_exact_leading_marker(body: str, marker: str) -> bool:
-    """Return whether the first non-whitespace line is exactly *marker*."""
-    return body.lstrip().partition("\n")[0].strip() == marker
+    """Return whether *marker* is the exact first raw line of *body*."""
+    return has_exact_leading_marker(body, marker)
 
 
 def plan_issue_timeline_compaction(

@@ -19,11 +19,9 @@ from ..state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 
 logger = logging.getLogger(__name__)
 
-# Comment-body prefix used when posting plan-review comments. We identify
-# "plan review comments" by this prefix on ``body.startswith(...)``. The
-# canonical definition (alongside PLAN_COMMENT_MARKER) lives in
-# :mod:`hephaestus.automation.protocol`; re-exported here for backward
-# compatibility with the historical import path.
+# Human-readable heading used when rendering plan-review comments. Identity is
+# decided by :func:`is_plan_review_comment`, which requires the opaque marker
+# at byte zero; this heading is display text only.
 
 _STATE_RESULTS = {
     "state:plan-go": "GO",
@@ -47,8 +45,7 @@ def latest_verdict(review_body: str) -> str | None:
     authorization source; :func:`is_plan_review_go` reads issue labels only.
 
     Args:
-        review_body: Full text of a plan-review comment (starting with
-            :data:`PLAN_REVIEW_PREFIX`).
+        review_body: Full text of a canonical plan-review comment.
 
     Returns:
         ``"GO"``, ``"NOGO"``, or ``"BLOCKED"`` (last matching line), or
@@ -95,11 +92,10 @@ def _extract_verdict_context(review_body: str) -> str:
 def count_unparseable_verdict_passes(comments: list[dict[str, Any]]) -> int:
     """Count how many plan-review comments lack a parseable verdict.
 
-    Scans all plan-review comments (those whose ``body`` starts with
-    :data:`PLAN_REVIEW_PREFIX`) in chronological order and counts the ones
-    where :func:`latest_verdict` returns ``None``.  This is the number of
+    Scans canonical plan-review comments in chronological order and counts the
+    ones where :func:`latest_verdict` returns ``None``. This is the number of
     passes in which a reviewer posted a comment but :func:`latest_verdict`
-    could not find a plan-state token.
+    could not find a plan-state token. Heading-only historical text is inert.
 
     A non-zero count indicates malformed historical reviewer output. This is
     diagnostic information only and must never drive pipeline routing.

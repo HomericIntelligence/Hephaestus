@@ -100,8 +100,8 @@ def test_malformed_legacy_marker_fails_before_planning_deletion() -> None:
         plan_issue_timeline_compaction(comments)
 
 
-def test_existing_canonical_pointer_is_kept_when_newer_legacy_comment_exists() -> None:
-    """Migration updates the canonical ID then deletes a later legacy source."""
+def test_existing_canonical_pointer_ignores_newer_legacy_comment() -> None:
+    """Historical heading-only text remains inert beside the canonical pointer."""
     comments = [
         _comment(1, render_current_plan("Older canonical", revision=1)),
         _comment(2, f"{PLAN_COMMENT_MARKER}\n\nLatest legacy plan"),
@@ -109,6 +109,7 @@ def test_existing_canonical_pointer_is_kept_when_newer_legacy_comment_exists() -
 
     result = plan_issue_timeline_compaction(comments)
 
-    assert "Latest legacy plan" in (result.plan_body or "")
-    assert result.plan_needs_update
-    assert result.delete_comment_ids == (2,)
+    assert result.plan_body is not None
+    assert "Older canonical" in result.plan_body
+    assert result.plan_needs_update is False
+    assert result.delete_comment_ids == ()

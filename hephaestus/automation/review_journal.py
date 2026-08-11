@@ -144,18 +144,18 @@ def comment_body(comment: IssueComment | str) -> str:
 
 
 def is_plan_comment(body: str) -> bool:
-    """Recognize current and legacy canonical plan comments."""
-    stripped = body.lstrip()
-    first_line = stripped.splitlines()[0].strip() if stripped else ""
-    return first_line in {PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER}
+    """Recognize a plan comment only by its opaque leading marker."""
+    return has_exact_leading_marker(body, PLAN_CANONICAL_MARKER)
 
 
 def is_plan_review_comment(body: str) -> bool:
-    """Recognize current and legacy canonical plan-review comments."""
-    stripped = body.lstrip()
-    return stripped.startswith(PLAN_REVIEW_CANONICAL_MARKER) or stripped.startswith(
-        PLAN_REVIEW_PREFIX
-    )
+    """Recognize a plan-review comment only by its opaque leading marker."""
+    return has_exact_leading_marker(body, PLAN_REVIEW_CANONICAL_MARKER)
+
+
+def has_exact_leading_marker(body: str, marker: str) -> bool:
+    """Return whether *marker* occupies the complete first raw line of *body*."""
+    return bool(marker) and (body == marker or body.startswith(f"{marker}\n"))
 
 
 def normalize_issue_comments(

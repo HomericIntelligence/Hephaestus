@@ -138,8 +138,8 @@ def test_amend_history_excludes_superseded_review_artifacts() -> None:
         [
             "<!-- hephaestus-plan-history:revision=1:kind=plan -->\nPlan v1",
             "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1",
-            f"{PLAN_COMMENT_MARKER}\n<!-- revision: 2 -->\n\nPlan v2",
-            "## 🔍 Plan Review\n<!-- revision: 1 -->\n\nReview v1",
+            render_current_plan("Plan v2", revision=2),
+            render_current_review("Review v1", revision=1),
         ]
     )
 
@@ -239,8 +239,6 @@ class TestPlanReviewStageOnEnter:
                 issue_number: int,
                 marker: str,
                 body: str,
-                *,
-                legacy_marker: str | None = None,
             ) -> None:
                 if self.fail_once and "Review pending for implementation plan revision 2" in body:
                     self.fail_once = False
@@ -249,7 +247,6 @@ class TestPlanReviewStageOnEnter:
                     issue_number,
                     marker,
                     body,
-                    legacy_marker=legacy_marker,
                 )
 
         stage = PlanReviewStage()
@@ -1079,7 +1076,7 @@ class TestPlanReviewStageOnJobDone:
     ) -> None:
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        github.comments[2] = [f"{PLAN_COMMENT_MARKER}\n\nPlan v1"]
+        github.comments[2] = [render_current_plan("Plan v1", revision=1)]
         ctx = make_ctx(github=github)
         item = make_work_item(issue=2, state="EVAL")
         item.payload.update(
@@ -1201,7 +1198,7 @@ class TestPlanReviewStageOnJobDone:
         github.comments[8] = [
             "<!-- hephaestus-plan-history:revision=1:kind=plan -->\nPlan v1",
             "<!-- hephaestus-plan-history:revision=1:kind=review -->\nReview v1",
-            f"{PLAN_COMMENT_MARKER}\n<!-- revision: 2 -->\n\nPlan v2",
+            render_current_plan("Plan v2", revision=2),
         ]
         ctx = make_ctx(github=github)
         item = make_work_item(issue=8, state="REVIEW_WAIT")
@@ -1807,7 +1804,7 @@ class TestReviewFlowWithFakePool:
 
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        github.comments[21] = [f"{PLAN_COMMENT_MARKER}\n\n# Plan v1"]
+        github.comments[21] = [render_current_plan("# Plan v1", revision=1)]
         ctx = make_ctx(github=github)
         ctx.config.enable_learn = True
         item = make_work_item(issue=21, state="ENTER")
