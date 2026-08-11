@@ -7,6 +7,7 @@ import io
 import os
 import stat
 import tarfile
+from collections.abc import Callable
 from http.client import HTTPMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -43,23 +44,32 @@ class TestDatasetDownloader:
 
     def test_init_strips_trailing_slash(self) -> None:
         """Base URL trailing slash is stripped."""
-        d = DatasetDownloader("https://example.com/data/")
+        d = DatasetDownloader("https://example.com/data/", checksum_manifest={})
         assert d.base_url == "https://example.com/data"
+
+    def test_init_requires_explicit_checksum_manifest_for_generic_downloader(self) -> None:
+        """Generic direct instances must not silently default to no checksums."""
+        with pytest.raises(ValueError, match="checksum_manifest"):
+            DatasetDownloader("https://example.com")
 
     def test_init_defaults(self) -> None:
         """Default values are set correctly."""
-        d = DatasetDownloader("https://example.com")
+        d = DatasetDownloader("https://example.com", checksum_manifest={})
         assert d.max_retries == 3
         assert len(d.retry_delays) == 3
 
     def test_init_custom_retries(self) -> None:
         """Custom retry count is respected."""
-        d = DatasetDownloader("https://example.com", max_retries=5)
+        d = DatasetDownloader("https://example.com", max_retries=5, checksum_manifest={})
         assert d.max_retries == 5
 
     def test_init_custom_user_agent(self) -> None:
         """Custom user agent is stored."""
-        d = DatasetDownloader("https://example.com", user_agent="TestAgent/1.0")
+        d = DatasetDownloader(
+            "https://example.com",
+            user_agent="TestAgent/1.0",
+            checksum_manifest={},
+        )
         assert d.user_agent == "TestAgent/1.0"
 
     @pytest.mark.parametrize(
@@ -76,7 +86,7 @@ class TestDatasetDownloader:
     def test_init_rejects_non_https_scheme(self, bad_url: str) -> None:
         """Constructing with an insecure or non-web base URL raises ValueError."""
         with pytest.raises(ValueError):
-            DatasetDownloader(bad_url)
+            DatasetDownloader(bad_url, checksum_manifest={})
 
     @pytest.mark.parametrize("base_url", ["http://example.com", "file:///etc"])
     def test_download_rejects_non_https_scheme_after_reassignment(
@@ -87,7 +97,7 @@ class TestDatasetDownloader:
         Guards the EMNIST mirror-fallback path, which mutates ``base_url``
         after construction and would otherwise bypass the constructor check.
         """
-        downloader = DatasetDownloader("https://example.com")
+        downloader = DatasetDownloader("https://example.com", checksum_manifest={})
         downloader.base_url = base_url
         with pytest.raises(ValueError, match="non-HTTPS"):
             downloader.download_with_retry("passwd", tmp_path / "out")
@@ -113,7 +123,7 @@ class TestDatasetDownloader:
         with gzip.open(gz_path, "wb") as f:
             f.write(content)
 
-        downloader = DatasetDownloader("https://example.com")
+        downloader = DatasetDownloader("https://example.com", checksum_manifest={})
         success = downloader.decompress_gz(gz_path, out_path)
 
         assert success is True
@@ -125,13 +135,17 @@ class TestDatasetDownloader:
         bad_gz.write_bytes(b"not gzip data")
         out_path = tmp_path / "out.txt"
 
-        downloader = DatasetDownloader("https://example.com")
+        downloader = DatasetDownloader("https://example.com", checksum_manifest={})
         success = downloader.decompress_gz(bad_gz, out_path)
         assert success is False
 
     def test_download_with_retry_failure(self, tmp_path: Path) -> None:
         """download_with_retry returns False when all attempts fail."""
-        downloader = DatasetDownloader("https://localhost:1", max_retries=1)
+        downloader = DatasetDownloader(
+            "https://localhost:1",
+            max_retries=1,
+            checksum_manifest={},
+        )
         downloader.retry_delays = [0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("nonexistent.bin", output, max_retries=1)
@@ -148,11 +162,36 @@ class TestDatasetDownloader:
         mock_response.read.side_effect = [content, b""]
         mock_urlopen.return_value = mock_response
 
-        downloader = DatasetDownloader("https://example.com")
+        downloader = DatasetDownloader("https://example.com", checksum_manifest={})
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=1)
         assert success is True
         assert output.exists()
+
+    @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
+    def test_generic_download_rejects_and_deletes_checksum_mismatch(
+        self, mock_urlopen, tmp_path: Path
+    ) -> None:
+        """A generic downloader with a manifest rejects corrupt known files."""
+        content = b"corrupt bytes"
+        filename = "known.bin"
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.headers.get.return_value = str(len(content))
+        mock_response.read.side_effect = [content, b""]
+        mock_urlopen.return_value = mock_response
+
+        downloader = DatasetDownloader(
+            "https://example.com",
+            checksum_manifest={filename: "0" * 32},
+        )
+        output = tmp_path / filename
+
+        success = downloader.download_with_retry(filename, output, max_retries=1)
+
+        assert success is False
+        assert not output.exists()
 
     @patch("hephaestus.datasets.downloader._HTTPS_OPENER.open")
     def test_download_retries_on_http_error(self, mock_urlopen, tmp_path: Path) -> None:
@@ -164,7 +203,11 @@ class TestDatasetDownloader:
             hdrs=HTTPMessage(),
             fp=None,
         )
-        downloader = DatasetDownloader("https://example.com", max_retries=2)
+        downloader = DatasetDownloader(
+            "https://example.com",
+            max_retries=2,
+            checksum_manifest={},
+        )
         downloader.retry_delays = [0, 0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=2)
@@ -175,7 +218,11 @@ class TestDatasetDownloader:
     def test_download_retries_on_url_error(self, mock_urlopen, tmp_path: Path) -> None:
         """download_with_retry retries on URLError."""
         mock_urlopen.side_effect = URLError(reason="connection refused")
-        downloader = DatasetDownloader("https://example.com", max_retries=2)
+        downloader = DatasetDownloader(
+            "https://example.com",
+            max_retries=2,
+            checksum_manifest={},
+        )
         downloader.retry_delays = [0, 0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=2)
@@ -192,7 +239,7 @@ class TestDatasetDownloader:
         mock_response.read.side_effect = [content, b""]
         mock_urlopen.return_value = mock_response
 
-        downloader = DatasetDownloader("https://example.com")
+        downloader = DatasetDownloader("https://example.com", checksum_manifest={})
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=1)
         assert success is True
@@ -201,7 +248,11 @@ class TestDatasetDownloader:
     def test_download_retries_on_oserror(self, mock_urlopen, tmp_path: Path) -> None:
         """download_with_retry retries on OSError."""
         mock_urlopen.side_effect = OSError("disk write failed")
-        downloader = DatasetDownloader("https://example.com", max_retries=2)
+        downloader = DatasetDownloader(
+            "https://example.com",
+            max_retries=2,
+            checksum_manifest={},
+        )
         downloader.retry_delays = [0, 0]
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=2)
@@ -212,7 +263,11 @@ class TestDatasetDownloader:
     def test_download_retry_delay_clamped_to_last(self, mock_urlopen, tmp_path: Path) -> None:
         """When attempt index exceeds retry_delays length, last delay is used."""
         mock_urlopen.side_effect = URLError(reason="refused")
-        downloader = DatasetDownloader("https://example.com", max_retries=4)
+        downloader = DatasetDownloader(
+            "https://example.com",
+            max_retries=4,
+            checksum_manifest={},
+        )
         downloader.retry_delays = [0, 0]  # fewer delays than retries
         output = tmp_path / "file.bin"
         success = downloader.download_with_retry("test.bin", output, max_retries=4)
@@ -279,6 +334,80 @@ class TestMNISTDownloader:
             (mnist_dir / gz_filename).write_bytes(b"dummy")
         success = d.download_mnist(str(mnist_dir))
         assert success is False
+
+
+class TestChecksumScoping:
+    """Tests that same-named archives use the active dataset manifest."""
+
+    @pytest.mark.parametrize(
+        ("downloader_cls", "filename", "expected_md5"),
+        [
+            (
+                MNISTDownloader,
+                "train-images-idx3-ubyte.gz",
+                "f68b3c2dcbeaaa9fbdd348bbdeb94873",
+            ),
+            (
+                MNISTDownloader,
+                "train-labels-idx1-ubyte.gz",
+                "d53e105ee54ea40749a09fcbcd1e9432",
+            ),
+            (
+                MNISTDownloader,
+                "t10k-images-idx3-ubyte.gz",
+                "9fb629c4189551a2d022fa330f9573f3",
+            ),
+            (
+                MNISTDownloader,
+                "t10k-labels-idx1-ubyte.gz",
+                "ec29112dd5afa0611ce80d1b7f02629c",
+            ),
+            (
+                FashionMNISTDownloader,
+                "train-images-idx3-ubyte.gz",
+                "8d4fb7e6c68d591d4c3dfef9ec88bf0d",
+            ),
+            (
+                FashionMNISTDownloader,
+                "train-labels-idx1-ubyte.gz",
+                "25c81989df183df01b3e8a0aad5dffbe",
+            ),
+            (
+                FashionMNISTDownloader,
+                "t10k-images-idx3-ubyte.gz",
+                "bef4ecab320f06d8554ea6380940ec79",
+            ),
+            (
+                FashionMNISTDownloader,
+                "t10k-labels-idx1-ubyte.gz",
+                "bb300cfdad3c16e7a12a480ee83cd310",
+            ),
+        ],
+    )
+    def test_download_uses_dataset_specific_manifest(
+        self,
+        downloader_cls: Callable[[], DatasetDownloader],
+        filename: str,
+        expected_md5: str,
+        tmp_path: Path,
+    ) -> None:
+        """Each MNIST-family archive is checked against its source's digest."""
+        content = b"synthetic archive bytes"
+        response = MagicMock()
+        response.__enter__ = MagicMock(return_value=response)
+        response.__exit__ = MagicMock(return_value=False)
+        response.headers.get.return_value = str(len(content))
+        response.read.side_effect = [content, b""]
+        target = tmp_path / filename
+
+        with (
+            patch.object(downloader._HTTPS_OPENER, "open", return_value=response),
+            patch.object(downloader, "_file_md5", return_value=expected_md5) as file_md5,
+        ):
+            assert downloader_cls().download_with_retry(filename, target, max_retries=1)
+
+        file_md5.assert_called_once_with(target)
+        assert target.read_bytes() == content
 
 
 class TestMain:
@@ -415,7 +544,7 @@ class TestCIFAR10Downloader:
         (caller_batch_dir / "data_batch_1").write_bytes(b"caller replacement")
 
         staged_root: Path | None = None
-        subject = CIFAR10Downloader()
+        subject: CIFAR10Downloader
 
         def fake_download(
             filename: str,
@@ -445,16 +574,19 @@ class TestCIFAR10Downloader:
 
         with (
             patch.dict(sys.modules, {"numpy": MagicMock()}),
-            patch.dict(downloader._DATASET_MD5, {tarball_name: expected_md5}),
-            patch.object(subject, "download_with_retry", side_effect=fake_download),
-            patch.object(subject, "_convert_batches", side_effect=observe_conversion),
+            patch.dict(downloader._CIFAR10_MD5, {tarball_name: expected_md5}),
             patch.object(
                 downloader,
                 "_extract_tar_safely",
                 wraps=downloader._extract_tar_safely,
             ) as extract,
         ):
-            assert subject.download_cifar10(str(tmp_path)) is True
+            subject = CIFAR10Downloader()
+            with (
+                patch.object(subject, "download_with_retry", side_effect=fake_download),
+                patch.object(subject, "_convert_batches", side_effect=observe_conversion),
+            ):
+                assert subject.download_cifar10(str(tmp_path)) is True
 
         extract.assert_called_once()
         assert staged_root is not None
@@ -471,7 +603,7 @@ class TestCIFAR10Downloader:
         expected_md5 = hashlib.md5(verified_bytes, usedforsecurity=False).hexdigest()
 
         staged_root: Path | None = None
-        subject = CIFAR10Downloader()
+        subject: CIFAR10Downloader
 
         def replace_after_verification(
             filename: str,
@@ -481,23 +613,26 @@ class TestCIFAR10Downloader:
             nonlocal staged_root
             assert max_retries is None
             path.write_bytes(verified_bytes)
-            assert downloader._verify_or_remove(path, filename) is True
+            assert downloader._verify_or_remove(path, filename, subject._checksums) is True
             path.write_bytes(replacement_bytes)
             staged_root = path.parent
             return True
 
         with (
             patch.dict(sys.modules, {"numpy": MagicMock()}),
-            patch.dict(downloader._DATASET_MD5, {tarball_name: expected_md5}),
-            patch.object(
-                subject,
-                "download_with_retry",
-                side_effect=replace_after_verification,
-            ),
+            patch.dict(downloader._CIFAR10_MD5, {tarball_name: expected_md5}),
             patch.object(downloader, "_extract_tar_safely") as extract,
-            patch.object(subject, "_convert_batches") as convert,
         ):
-            assert subject.download_cifar10(str(tmp_path)) is False
+            subject = CIFAR10Downloader()
+            with (
+                patch.object(
+                    subject,
+                    "download_with_retry",
+                    side_effect=replace_after_verification,
+                ),
+                patch.object(subject, "_convert_batches") as convert,
+            ):
+                assert subject.download_cifar10(str(tmp_path)) is False
 
         extract.assert_not_called()
         convert.assert_not_called()
@@ -528,38 +663,54 @@ class TestEMNISTDownloader:
 class TestSecurityHardening:
     """Regression tests for #478: checksum verification + safe tar extraction."""
 
-    def test_dataset_md5_includes_known_files(self) -> None:
-        """The per-file MD5 map covers CIFAR + Fashion-MNIST downloads."""
-        from hephaestus.datasets.downloader import _DATASET_MD5
+    def test_dataset_md5_manifests_pin_authentic_hashes(self) -> None:
+        """Each downloader manifest contains its upstream-published hashes."""
+        from hephaestus.datasets.downloader import (
+            _CIFAR10_MD5,
+            _CIFAR100_MD5,
+            _FASHION_MNIST_MD5,
+            _MNIST_MD5,
+        )
 
-        for name in (
-            "cifar-10-python.tar.gz",
-            "cifar-100-python.tar.gz",
-            "train-images-idx3-ubyte.gz",
-            "t10k-images-idx3-ubyte.gz",
-        ):
-            assert name in _DATASET_MD5
+        assert _CIFAR10_MD5 == {
+            "cifar-10-python.tar.gz": "c58f30108f718f92721af3b95e74349a",
+        }
+        assert _CIFAR100_MD5 == {
+            "cifar-100-python.tar.gz": "eb9058c3a382ffc7106e4002c42a8d85",
+        }
+        assert _MNIST_MD5 == {
+            "train-images-idx3-ubyte.gz": "f68b3c2dcbeaaa9fbdd348bbdeb94873",
+            "train-labels-idx1-ubyte.gz": "d53e105ee54ea40749a09fcbcd1e9432",
+            "t10k-images-idx3-ubyte.gz": "9fb629c4189551a2d022fa330f9573f3",
+            "t10k-labels-idx1-ubyte.gz": "ec29112dd5afa0611ce80d1b7f02629c",
+        }
+        assert _FASHION_MNIST_MD5 == {
+            "train-images-idx3-ubyte.gz": "8d4fb7e6c68d591d4c3dfef9ec88bf0d",
+            "train-labels-idx1-ubyte.gz": "25c81989df183df01b3e8a0aad5dffbe",
+            "t10k-images-idx3-ubyte.gz": "bef4ecab320f06d8554ea6380940ec79",
+            "t10k-labels-idx1-ubyte.gz": "bb300cfdad3c16e7a12a480ee83cd310",
+        }
 
     def test_verify_or_remove_passes_for_correct_md5(self, tmp_path: Path) -> None:
         """A file matching the known MD5 verifies True and is kept."""
-        from hephaestus.datasets.downloader import _DATASET_MD5, _verify_or_remove
+        from hephaestus.datasets.downloader import _verify_or_remove
 
         name = "cifar-10-python.tar.gz"
         target = tmp_path / name
-        target.write_bytes(b"")  # MD5 of empty = d41d8cd98f00b204e9800998ecf8427e
-        # Patch the expected MD5 to the digest of the bytes we just wrote.
-        with patch.dict(_DATASET_MD5, {name: "d41d8cd98f00b204e9800998ecf8427e"}):
-            assert _verify_or_remove(target, name) is True
+        content = b"known archive bytes"
+        target.write_bytes(content)
+        expected_md5 = hashlib.md5(content, usedforsecurity=False).hexdigest()
+        assert _verify_or_remove(target, name, {name: expected_md5}) is True
         assert target.exists()
 
     def test_verify_or_remove_removes_on_mismatch(self, tmp_path: Path) -> None:
         """A file failing the MD5 check is verified False AND deleted."""
-        from hephaestus.datasets.downloader import _verify_or_remove
+        from hephaestus.datasets.downloader import _CIFAR10_MD5, _verify_or_remove
 
         target = tmp_path / "cifar-10-python.tar.gz"
         target.write_bytes(b"tampered content")
-        # The real MD5 in _DATASET_MD5 will not match — the helper must remove.
-        assert _verify_or_remove(target, "cifar-10-python.tar.gz") is False
+        # The pinned CIFAR-10 MD5 will not match — the helper must remove.
+        assert _verify_or_remove(target, "cifar-10-python.tar.gz", _CIFAR10_MD5) is False
         assert not target.exists()
 
     def test_verify_or_remove_unknown_filename_passes_with_warning(self, tmp_path: Path) -> None:
@@ -568,7 +719,7 @@ class TestSecurityHardening:
 
         target = tmp_path / "novel.bin"
         target.write_bytes(b"x")
-        assert _verify_or_remove(target, "novel.bin") is True
+        assert _verify_or_remove(target, "novel.bin", {}) is True
         assert target.exists()
 
     def test_extract_tar_uses_data_filter(self, tmp_path: Path) -> None:
