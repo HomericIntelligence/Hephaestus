@@ -1288,8 +1288,8 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "5. Retain the typed Athena and provider receipts emitted by those queue runs.",
             "6. Capture any failure probes that demonstrate the stage boundary.",
             "7. Record defects as live-linked follow-up issues.",
-            "8. Render the report and runbook from the manifest.",
-            "9. Attest publication readiness against the live PR head.",
+            "8. Snapshot the final publication commit, then render the report and runbook.",
+            "9. Attest that exact commit against the live PR head.",
             "",
             "## Verification Matrix",
             "",
@@ -1324,6 +1324,10 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             (
                 f"uv run python scripts/{script_name} record-defect --run-id <run-id> "
                 '--summary "<summary>" --follow-up-issue <issue-number>'
+            ),
+            (
+                f"uv run python scripts/{script_name} snapshot --run-id <run-id> "
+                "--label publication-snapshot"
             ),
             f"uv run python scripts/{script_name} render --run-id <run-id>",
             (
