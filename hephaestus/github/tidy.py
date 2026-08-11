@@ -113,22 +113,22 @@ def _repo_root() -> Path:
 
 
 def _worktree_porcelain() -> str:
-    """Return the current repository's worktree inventory."""
-    return run_git(["worktree", "list", "--porcelain"]).stdout
+    """Return the current repository's NUL-delimited worktree inventory."""
+    return run_git(["worktree", "list", "--porcelain", "-z"]).stdout
 
 
 def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]:
-    """Return attached, non-primary worktrees from ``git worktree`` output."""
+    """Return attached, non-primary worktrees from NUL-delimited output."""
     worktrees: list[tuple[Path, str]] = []
     path: Path | None = None
     branch: str | None = None
-    for line in [*output.splitlines(), ""]:
-        if line.startswith("worktree "):
-            path = Path(line.removeprefix("worktree "))
+    for field in [*output.split("\0"), ""]:
+        if field.startswith("worktree "):
+            path = Path(field.removeprefix("worktree "))
             branch = None
-        elif line.startswith("branch refs/heads/"):
-            branch = line.removeprefix("branch refs/heads/")
-        elif not line:
+        elif field.startswith("branch refs/heads/"):
+            branch = field.removeprefix("branch refs/heads/")
+        elif not field:
             if path is not None and branch is not None and path != root:
                 worktrees.append((path, branch))
             path = None
@@ -170,12 +170,12 @@ def _worktree_is_dirty(path: Path) -> bool:
 def _worktree_is_locked(path: Path, porcelain: str) -> bool:
     """Return whether *path* is locked in the supplied worktree inventory."""
     stanza = False
-    for line in [*porcelain.splitlines(), ""]:
-        if line.startswith("worktree "):
-            stanza = Path(line.removeprefix("worktree ")) == path
-        elif not line:
+    for field in [*porcelain.split("\0"), ""]:
+        if field.startswith("worktree "):
+            stanza = Path(field.removeprefix("worktree ")) == path
+        elif not field:
             stanza = False
-        elif stanza and line.startswith("locked"):
+        elif stanza and field.startswith("locked"):
             return True
     return False
 
