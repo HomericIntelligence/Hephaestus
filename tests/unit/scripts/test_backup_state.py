@@ -7,9 +7,13 @@ fail-closed tamper and path-traversal guards. Nothing here touches live state.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import json
+import shutil
 import tarfile
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -31,6 +35,163 @@ def _load_module() -> ModuleType:
 backup_state = _load_module()
 
 FIXED_TIMESTAMP = "20260718T120000Z"
+_STATE_MEMBER = "build/.issue_implementer/state.json"
+_STATE_BYTES = b"state payload"
+
+
+def _regular_member(name: str, data: bytes) -> tarfile.TarInfo:
+    """Return a regular tar member whose size matches ``data``."""
+    member = tarfile.TarInfo(name)
+    member.size = len(data)
+    return member
+
+
+def _manifest_for(entries: dict[str, bytes]) -> bytes:
+    """Build valid manifest bytes for a mapping of archive names to payloads."""
+    return json.dumps(
+        {
+            "members": {
+                name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                for name, data in entries.items()
+            }
+        }
+    ).encode("utf-8")
+
+
+def _write_test_archive(
+    path: Path,
+    entries: Sequence[tuple[tarfile.TarInfo, bytes | None]],
+    manifest: bytes,
+    *,
+    include_manifest: bool = True,
+) -> Path:
+    """Write an archive with caller-controlled members and manifest bytes."""
+    with tarfile.open(path, "w:gz") as tar:
+        if include_manifest:
+            manifest_info = tarfile.TarInfo(backup_state.MANIFEST_NAME)
+            manifest_info.size = len(manifest)
+            tar.addfile(manifest_info, io.BytesIO(manifest))
+        for member, data in entries:
+            stream = io.BytesIO(data) if data is not None else None
+            tar.addfile(member, stream)
+    return path
+
+
+def _archive_with_regular_members(path: Path, entries: dict[str, bytes]) -> Path:
+    """Write a valid archive containing exactly the supplied regular members."""
+    members = [(_regular_member(name, data), data) for name, data in entries.items()]
+    return _write_test_archive(path, members, _manifest_for(entries))
+
+
+def _write_invalid_archive(path: Path, case: str) -> Path:
+    """Write one explicitly malformed archive-index case for restore tests."""
+    data = _STATE_BYTES
+
+    if case in {"absolute", "parent_traversal", "backslash", "unauthorized"}:
+        names = {
+            "absolute": "/tmp/pwned",
+            "parent_traversal": "../pwned",
+            "backslash": "build\\.issue_implementer\\state.json",
+            "unauthorized": "pyproject.toml",
+        }
+        name = names[case]
+        return _archive_with_regular_members(path, {name: data})
+
+    if case == "undeclared":
+        member = _regular_member(_STATE_MEMBER, data)
+        return _write_test_archive(path, [(member, data)], b'{"members": {}}')
+
+    if case == "missing":
+        manifest = _manifest_for({_STATE_MEMBER: data})
+        return _write_test_archive(path, [], manifest)
+
+    if case == "duplicate":
+        entries = [
+            (_regular_member(_STATE_MEMBER, data), data),
+            (_regular_member(_STATE_MEMBER, data), data),
+        ]
+        return _write_test_archive(path, entries, _manifest_for({_STATE_MEMBER: data}))
+
+    if case == "normalized_duplicate":
+        equivalent = "build/.issue_implementer/./state.json"
+        entries = [
+            (_regular_member(_STATE_MEMBER, data), data),
+            (_regular_member(equivalent, data), data),
+        ]
+        return _write_test_archive(path, entries, _manifest_for({_STATE_MEMBER: data}))
+
+    if case == "duplicate_manifest":
+        duplicate = _regular_member(backup_state.MANIFEST_NAME, b"{}")
+        return _write_test_archive(
+            path,
+            [(duplicate, b"{}")],
+            _manifest_for({}),
+        )
+
+    if case == "nonregular_manifest":
+        manifest_link = tarfile.TarInfo(backup_state.MANIFEST_NAME)
+        manifest_link.type = tarfile.SYMTYPE
+        manifest_link.linkname = _STATE_MEMBER
+        return _write_test_archive(
+            path,
+            [(manifest_link, None)],
+            b'{"members": {}}',
+            include_manifest=False,
+        )
+
+    if case in {"directory", "symbolic_link", "hard_link", "device"}:
+        member = tarfile.TarInfo(_STATE_MEMBER)
+        if case == "directory":
+            member.type = tarfile.DIRTYPE
+        elif case == "symbolic_link":
+            member.type = tarfile.SYMTYPE
+            member.linkname = "outside"
+        elif case == "hard_link":
+            member.type = tarfile.LNKTYPE
+            member.linkname = "outside"
+        else:
+            member.type = tarfile.CHRTYPE
+            member.devmajor = 1
+            member.devminor = 3
+        return _write_test_archive(
+            path,
+            [(member, None)],
+            _manifest_for({_STATE_MEMBER: b""}),
+        )
+
+    raise AssertionError(f"unknown invalid archive case: {case}")
+
+
+MALFORMED_MANIFESTS: list[bytes] = [
+    b"\xff",
+    b"{not-json",
+    b"[]",
+    b"{}",
+    b'{"members": []}',
+    b'{"members": {}, "extra": true}',
+    b'{"members": {"build/.issue_implementer/state.json": []}}',
+    b'{"members": {"build/.issue_implementer/state.json": {}}}',
+    b'{"members": {"build/.issue_implementer/state.json": {"sha256": "' + b"0" * 64 + b'"}}}',
+    b'{"members": {"build/.issue_implementer/state.json": {"size": 1}}}',
+    b'{"members": {"build/.issue_implementer/state.json": {"sha256": "short", "size": 1}}}',
+    b'{"members": {"build/.issue_implementer/state.json": '
+    b'{"sha256": "' + b"z" * 64 + b'", "size": 1}}}',
+    b'{"members": {"build/.issue_implementer/state.json": '
+    b'{"sha256": "' + b"0" * 64 + b'", "size": true}}}',
+    b'{"members": {"build/.issue_implementer/state.json": '
+    b'{"sha256": "' + b"0" * 64 + b'", "size": -1}}}',
+    b'{"members": {"build/.issue_implementer/state.json": '
+    b'{"sha256": "' + b"0" * 64 + b'", "size": 1.5}}}',
+    b'{"members": {"pyproject.toml": {"sha256": "' + b"0" * 64 + b'", "size": 1}}}',
+    b'{"members": {"build/.issue_implementer/state.json": '
+    b'{"sha256": "' + b"0" * 64 + b'", "size": 1}, '
+    b'"build/.issue_implementer/./state.json": '
+    b'{"sha256": "' + b"0" * 64 + b'", "size": 1}}}',
+    b'{"members": {}, "members": {}}',
+    b'{"members": {"build/.issue_implementer/state.json": '
+    b'{"sha256": "' + b"0" * 64 + b'", "sha256": "' + b"1" * 64 + b'", '
+    b'"size": 1}}}',
+]
 
 
 def _seed_state(repo_root: Path) -> Path:
@@ -70,8 +231,6 @@ def test_backup_restore_round_trip(tmp_path: Path) -> None:
     assert archive.name == f"hephaestus-state-{FIXED_TIMESTAMP}.tar.gz"
 
     # Destroy live state.
-    import shutil
-
     shutil.rmtree(state_dir)
     assert not state_dir.exists()
 
@@ -105,6 +264,78 @@ def test_verify_passes_on_untampered_archive(tmp_path: Path) -> None:
     _seed_state(repo_root)
     archive = backup_state.cmd_backup(repo_root, tmp_path / "backups", FIXED_TIMESTAMP)
     assert backup_state.cmd_verify(archive) == 0
+
+
+def test_backup_rejects_inventory_symlink_without_creating_archive(tmp_path: Path) -> None:
+    """Backup refuses symlinked state instead of producing an unverifiable archive."""
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "build" / ".issue_implementer"
+    state_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside state")
+    (state_dir / "linked.json").symlink_to(outside)
+    output_dir = tmp_path / "backups"
+
+    with pytest.raises(backup_state.BackupError):
+        backup_state.cmd_backup(repo_root, output_dir, FIXED_TIMESTAMP)
+
+    assert not output_dir.exists()
+
+
+def test_cli_backup_rejects_inventory_symlink_without_success_message(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The backup CLI reports refusal and does not claim a symlink backup succeeded."""
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "build" / ".issue_implementer"
+    state_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside state")
+    (state_dir / "linked.json").symlink_to(outside)
+    output_dir = tmp_path / "backups"
+
+    rc = backup_state.main(
+        [
+            "backup",
+            "--repo-root",
+            str(repo_root),
+            "--output",
+            str(output_dir),
+            "--timestamp",
+            FIXED_TIMESTAMP,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "Backup refused" in captured.err
+    assert "Wrote backup" not in captured.out
+    assert not output_dir.exists()
+
+
+def test_backup_materializes_hard_links_as_verifiable_regular_members(tmp_path: Path) -> None:
+    """Hard-linked state is stored as regular bytes and passes backup verification."""
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "build" / ".issue_implementer"
+    state_dir.mkdir(parents=True)
+    original = state_dir / "original.json"
+    original.write_bytes(b"shared state")
+    linked = state_dir / "linked.json"
+    linked.hardlink_to(original)
+
+    archive = backup_state.cmd_backup(repo_root, tmp_path / "backups", FIXED_TIMESTAMP)
+
+    assert backup_state.cmd_verify(archive) == 0
+    with tarfile.open(archive, "r:gz") as tar:
+        data_members = [
+            member for member in tar.getmembers() if member.name != backup_state.MANIFEST_NAME
+        ]
+    assert {member.name for member in data_members} == {
+        "build/.issue_implementer/linked.json",
+        "build/.issue_implementer/original.json",
+    }
+    assert all(member.isreg() for member in data_members)
 
 
 def _repack_with_tampered_member(archive: Path, dest: Path, target_suffix: str) -> None:
@@ -210,6 +441,142 @@ def test_restore_rejects_path_traversal(tmp_path: Path) -> None:
     with pytest.raises(backup_state.RestoreError):
         backup_state.cmd_restore(dest_root, archive, force=True)
     assert not (tmp_path / "escape.txt").exists()
+
+
+@pytest.mark.parametrize("name", ["", ".", "\x00", "build/\x00/state"])
+def test_canonical_member_name_rejects_empty_or_nul(name: str) -> None:
+    """Empty, current-directory, and NUL-containing names fail closed."""
+    with pytest.raises(backup_state.RestoreError):
+        backup_state._canonical_member_name(name)
+
+
+def test_restore_rejects_in_repo_member_outside_inventory_without_writing(
+    tmp_path: Path,
+) -> None:
+    """A digest-valid archive cannot overwrite an unauthorized repo file."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    protected = repo_root / "pyproject.toml"
+    protected.write_bytes(b"SAFE")
+
+    archive = _archive_with_regular_members(
+        tmp_path / "evil.tar.gz",
+        {"pyproject.toml": b"PWNED"},
+    )
+
+    with pytest.raises(backup_state.RestoreError):
+        backup_state.cmd_restore(repo_root, archive, force=True)
+
+    assert protected.read_bytes() == b"SAFE"
+    assert not (repo_root / "build" / ".issue_implementer").exists()
+
+
+def test_restore_rejects_inventory_symlink_redirect_without_writing(tmp_path: Path) -> None:
+    """An authorized-looking member cannot follow an inventory symlink outside it."""
+    repo_root = tmp_path / "repo"
+    inventory = repo_root / "build" / ".issue_implementer"
+    inventory.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (inventory / "redirect").symlink_to(outside, target_is_directory=True)
+
+    payload = b"PWNED"
+    name = "build/.issue_implementer/redirect/state.json"
+    archive = _archive_with_regular_members(tmp_path / "redirect.tar.gz", {name: payload})
+
+    with pytest.raises(backup_state.RestoreError):
+        backup_state.cmd_restore(repo_root, archive, force=True)
+
+    assert not (outside / "state.json").exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "absolute",
+        "parent_traversal",
+        "backslash",
+        "unauthorized",
+        "undeclared",
+        "missing",
+        "duplicate",
+        "normalized_duplicate",
+        "duplicate_manifest",
+        "nonregular_manifest",
+        "directory",
+        "symbolic_link",
+        "hard_link",
+        "device",
+    ],
+)
+def test_restore_rejects_invalid_archive_members(tmp_path: Path, case: str) -> None:
+    """Unsafe, unknown, duplicate, and non-regular members fail closed."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    archive = _write_invalid_archive(tmp_path / f"{case}.tar.gz", case)
+
+    with pytest.raises(backup_state.RestoreError):
+        backup_state.cmd_restore(repo_root, archive, force=True)
+
+    assert not (repo_root / "build" / ".issue_implementer").exists()
+
+
+@pytest.mark.parametrize("manifest", MALFORMED_MANIFESTS)
+def test_restore_rejects_malformed_manifest_as_restore_error(
+    tmp_path: Path,
+    manifest: bytes,
+) -> None:
+    """Malformed manifests use the fail-closed RestoreError boundary."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    archive = _write_test_archive(tmp_path / "bad.tar.gz", [], manifest)
+
+    with pytest.raises(backup_state.RestoreError):
+        backup_state.cmd_restore(repo_root, archive, force=True)
+
+    assert not (repo_root / "build").exists()
+
+
+def test_verify_rejects_structurally_invalid_archive(tmp_path: Path) -> None:
+    """Verify reports an unauthorized archive member as a structural failure."""
+    archive = _write_invalid_archive(tmp_path / "bad.tar.gz", "unauthorized")
+    assert backup_state.cmd_verify(archive) == 1
+
+
+def test_verify_rejects_manifest_size_mismatch(tmp_path: Path) -> None:
+    """Verify returns one when a valid member's declared size is wrong."""
+    payload = b"payload"
+    name = _STATE_MEMBER
+    manifest = json.dumps(
+        {
+            "members": {
+                name: {
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size": len(payload) + 1,
+                }
+            }
+        }
+    ).encode("utf-8")
+    archive = _write_test_archive(
+        tmp_path / "wrong-size.tar.gz",
+        [(_regular_member(name, payload), payload)],
+        manifest,
+    )
+    assert backup_state.cmd_verify(archive) == 1
+
+
+def test_verify_rejects_malformed_manifest(tmp_path: Path) -> None:
+    """Verify reports structural failure instead of leaking a parsing exception."""
+    archive = _write_test_archive(tmp_path / "bad.tar.gz", [], b"{not-json")
+    assert backup_state.cmd_verify(archive) == 1
+
+
+def test_cli_restore_malformed_manifest_returns_two(tmp_path: Path) -> None:
+    """The CLI keeps its usage/refusal exit code for malformed restores."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    archive = _write_test_archive(tmp_path / "bad.tar.gz", [], b"{not-json")
+    assert backup_state.main(["restore", str(archive), "--repo-root", str(repo_root)]) == 2
 
 
 def test_backup_only_archives_inventory_paths(tmp_path: Path) -> None:
