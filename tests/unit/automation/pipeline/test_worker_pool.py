@@ -22,9 +22,11 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
+    ExecutionPolicy,
     ExecutionRequest,
     SessionLifecycle,
 )
@@ -6439,6 +6441,87 @@ class TestOnFutureDone:
 )
 class TestShutdownReapsSubprocess:
     """WorkerPool.shutdown() SIGTERMs in-flight agent process groups (#2059)."""
+
+    def test_shutdown_terminates_registered_pi_adapter_subprocess_fast(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A registered Pi adapter exposes its child to worker-pool cleanup."""
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+        class Adapter:
+            def invoke(
+                self,
+                *,
+                policy: ExecutionPolicy,
+                command: list[str],
+                prompt: str,
+                cwd: Path,
+                timeout: int,
+                model: str,
+                session_id: str | None,
+                process_tracker: agent_runtime.ProcessTracker | None,
+            ) -> AgentRunResult:
+                del policy, prompt, model, session_id
+                assert process_tracker is not None
+                process = subprocess.Popen(
+                    sleeper,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                with process_tracker(process.pid):
+                    stdout, stderr = process.communicate(timeout=timeout)
+                if process.returncode:
+                    raise subprocess.CalledProcessError(
+                        process.returncode,
+                        command,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+                return AgentRunResult(
+                    stdout=stdout,
+                    stderr=stderr,
+                    session_id="pi-session",
+                )
+
+        monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+        monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+        agent_runtime.register_pi_isolation_adapter(Adapter())
+        request = ExecutionRequest(
+            AgentRole.IMPLEMENTER,
+            AgentOperation.IMPLEMENT,
+            SessionLifecycle.START_NEW,
+        )
+        job = _agent_job(
+            agent="pi",
+            model="reap-test",
+            timeout_s=60,
+            session_agent="implementer",
+            cwd=Path.cwd(),
+            execution_request=request,
+        )
+
+        with patch(f"{_WP}.resolve_agent", return_value="pi"):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            deadline = time.monotonic() + 10
+            while subprocess_registry.live_count() == 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert subprocess_registry.live_count() == 1, "Pi subprocess never registered"
+
+            t0 = time.monotonic()
+            pool.shutdown()
+            _handle, result = completion_q.get(timeout=10)
+            elapsed = time.monotonic() - t0
+
+        assert elapsed < 15, f"shutdown did not reap Pi fast ({elapsed:.1f}s)"
+        assert subprocess_registry.live_count() == 0
+        assert result.ok is False
+        assert result.interrupted is True
 
     def test_shutdown_terminates_running_codex_subprocess_fast(
         self,

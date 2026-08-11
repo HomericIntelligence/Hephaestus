@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -155,7 +155,9 @@ class PiIsolationAdapter(Protocol):
 
     Pi's native tool allowlist is model-visible only.  An implementation of
     this protocol must enforce the filesystem mount and network relay named by
-    ``policy`` before it starts the provider process.
+    ``policy`` before it starts the provider process.  It must also enter the
+    supplied ``process_tracker`` around each live provider child when the host
+    supplies one, so queue shutdown can terminate the child's process group.
     """
 
     def invoke(
@@ -168,8 +170,9 @@ class PiIsolationAdapter(Protocol):
         timeout: int,
         model: str,
         session_id: str | None,
+        process_tracker: ProcessTracker | None,
     ) -> AgentRunResult:
-        """Start Pi with externally enforced filesystem and network constraints."""
+        """Start Pi with external constraints and host-owned process tracking."""
         raise NotImplementedError
 
 
@@ -258,6 +261,7 @@ def _supports_pi_isolation_adapter_invoke_contract(adapter: object) -> bool:
             timeout=0,
             model="",
             session_id=None,
+            process_tracker=None,
         )
     except Exception:
         return False
@@ -1956,6 +1960,7 @@ def _run_pi_with_policy(
     model: str,
     policy: ExecutionPolicy,
     session_id: str | None = None,
+    process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Run Pi through the verified OS-isolation adapter for ``policy``.
 
@@ -1981,6 +1986,7 @@ def _run_pi_with_policy(
         timeout=timeout,
         model=model,
         session_id=session_id,
+        process_tracker=process_tracker,
     )
 
 
@@ -1999,10 +2005,8 @@ def run_agent_text(
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
         policy = _require_pi_request(execution_request)
-        if (
-            execution_request is None
-            or execution_request.lifecycle is not SessionLifecycle.ONE_SHOT
-        ):
+        pi_request = cast(ExecutionRequest, execution_request)
+        if pi_request.lifecycle is not SessionLifecycle.ONE_SHOT:
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
     if is_codex(agent):
         return run_codex_text(
@@ -2046,14 +2050,13 @@ def run_agent_session(
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
         policy = _require_pi_request(execution_request)
-        if execution_request is None:
-            raise AssertionError("unreachable")
-        if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        pi_request = cast(ExecutionRequest, execution_request)
+        if pi_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
                 raise PiSessionBindingError(
                     "Pi resume-required execution is missing a session binding"
                 )
-            validate_pi_binding(resume_binding, cwd=cwd, role=execution_request.role, model=model)
+            validate_pi_binding(resume_binding, cwd=cwd, role=pi_request.role, model=model)
         elif resume_binding is not None:
             raise PiSessionBindingError(
                 "Pi start-new or one-shot execution must not receive a session binding"
@@ -2078,6 +2081,7 @@ def run_agent_session(
             model=model,
             policy=policy,
             session_id=resume_binding.session_id if resume_binding is not None else None,
+            process_tracker=process_tracker,
         )
         if execution_request.lifecycle is SessionLifecycle.ONE_SHOT:
             return AgentRunResult(stdout=result.stdout, stderr=result.stderr)
@@ -2115,16 +2119,14 @@ def resume_agent_session(
     if is_pi(agent):
         _require_pi_automation_admission(cwd)
         policy = _require_pi_request(execution_request)
-        if (
-            execution_request is None
-            or execution_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED
-        ):
+        pi_request = cast(ExecutionRequest, execution_request)
+        if pi_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(
                 "Pi session resume requires a RESUME_REQUIRED ExecutionRequest"
             )
         if resume_binding is None:
             raise PiSessionBindingError("Pi session resume requires a complete session binding")
-        validate_pi_binding(resume_binding, cwd=cwd, role=execution_request.role, model=model)
+        validate_pi_binding(resume_binding, cwd=cwd, role=pi_request.role, model=model)
         if session_id != resume_binding.session_id:
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
     if is_codex(agent):
@@ -2148,6 +2150,7 @@ def resume_agent_session(
             model=model,
             policy=policy,
             session_id=resume_binding.session_id,
+            process_tracker=process_tracker,
         )
         return AgentRunResult(
             stdout=result.stdout,

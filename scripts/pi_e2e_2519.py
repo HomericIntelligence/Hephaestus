@@ -44,6 +44,7 @@ from hephaestus.agents.runtime import (
     run_agent_text,
 )
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
+from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import slugify
 
@@ -67,18 +68,18 @@ PROXY_TOOL_NAMES = ("pi", "codex")
 REQUIRED_SKILL_COMMANDS = ("skill:advise", "skill:learn", "skill:pr-review")
 REQUIRED_E2E_STAGES = (
     "discovery",
-    "advise",
     "planning",
     "implementation",
     "tests",
     "commit-pr",
     "review",
-    "handoff",
 )
 SKILL_COMMAND_RE = re.compile(r"(?:\$athena:|/athena:|skill:)[A-Za-z0-9._:/-]+")
 SAFE_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+FOLLOW_UP_PARENT_LINE_RE = re.compile(rf"^Parent: #{ISSUE_NUMBER}[ \t]*$", re.MULTILINE)
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 600
+DEFAULT_INVENTORY_TIMEOUT_SECONDS = 30
 MAX_ATHENA_HOST_RECEIPT_BYTES = 64 * 1024
 MAX_STAGE_RECEIPT_BYTES = 128 * 1024
 PI_PROVIDER_NAME = "pi"
@@ -103,11 +104,6 @@ PI_EVIDENCE_STAGE_REQUESTS = {
     "discovery": ExecutionRequest(
         AgentRole.PLAN_REVIEWER,
         AgentOperation.PLAN_REVIEW,
-        SessionLifecycle.ONE_SHOT,
-    ),
-    "advise": ExecutionRequest(
-        AgentRole.ADVISOR,
-        AgentOperation.ADVISE,
         SessionLifecycle.ONE_SHOT,
     ),
     "planning": ExecutionRequest(
@@ -135,41 +131,104 @@ PI_EVIDENCE_STAGE_REQUESTS = {
         AgentOperation.PR_REVIEW,
         SessionLifecycle.ONE_SHOT,
     ),
-    "handoff": ExecutionRequest(
-        AgentRole.LEARNER,
-        AgentOperation.LEARN,
-        SessionLifecycle.START_NEW,
-    ),
+}
+ATHENA_HOST_RECEIPT_CAPTURE_STAGES = {
+    "advise": "planning",
+    "learn": "review",
 }
 PI_STAGE_COORDINATOR_STAGES = {
     "discovery": "repo",
-    "advise": "planning",
     "planning": "planning",
     "implementation": "implementation",
     "tests": "implementation",
     "commit-pr": "implementation",
     "review": "pr_review",
-    "handoff": "finished",
 }
 PI_STAGE_COORDINATOR_JOBS = {
     "discovery": "GitHubJob",
-    "advise": "AthenaSkillJob",
     "planning": "AgentJob",
     "implementation": "AgentJob",
     "tests": "BuildTestJob",
     "commit-pr": "GitJob",
     "review": "AgentJob",
-    "handoff": "AthenaSkillJob",
 }
 PI_STAGE_LIFECYCLE_KINDS = {
     "discovery": "fixture-discovery",
-    "advise": "athena-advise",
     "planning": "fixture-plan",
     "implementation": "fixture-diff",
     "tests": "fixture-test",
     "commit-pr": "commit-pr-readback",
     "review": "review-readback",
-    "handoff": "learn-handoff",
+}
+PI_STAGE_COORDINATOR_FIELDS = frozenset(
+    {
+        "source",
+        "pipeline_stage",
+        "job_kind",
+        "sequence",
+        "outcome",
+        "receipt_id",
+        "worker_id",
+        "completed_at",
+    }
+)
+PI_STAGE_PROVIDER_EVIDENCE_FIELDS = frozenset(
+    {
+        "execution_policy",
+        "tool_scopes",
+        "skill_grants",
+        "session_ids",
+        "invocation_id",
+        "stdout_sha256",
+        "stderr_sha256",
+        "session_binding_sha256",
+        "resumed_from_capture_id",
+    }
+)
+PI_STAGE_WORKTREE_FIELDS = frozenset(
+    {
+        "root",
+        "git_dir",
+        "git_common_dir",
+        "isolated",
+        "branch",
+        "head",
+        "clean",
+        "status_sha256",
+        "observed_at",
+    }
+)
+PI_STAGE_PULL_REQUEST_FIELDS = frozenset(
+    {
+        "repository",
+        "number",
+        "url",
+        "state",
+        "branch",
+        "head_sha",
+        "closes_issue",
+    }
+)
+_PI_STAGE_LIFECYCLE_BASE_FIELDS = frozenset({"kind", "fixture_sha256", "head_sha", "success"})
+PI_STAGE_LIFECYCLE_FIELDS = {
+    "discovery": _PI_STAGE_LIFECYCLE_BASE_FIELDS | {"paths", "all_paths_found"},
+    "planning": _PI_STAGE_LIFECYCLE_BASE_FIELDS | {"athena_receipt_sha256", "plan_sha256"},
+    "implementation": _PI_STAGE_LIFECYCLE_BASE_FIELDS | {"changed_paths", "diff_sha256"},
+    "tests": _PI_STAGE_LIFECYCLE_BASE_FIELDS | {"argv", "returncode", "timed_out", "result_sha256"},
+    "commit-pr": _PI_STAGE_LIFECYCLE_BASE_FIELDS
+    | {"pull_request", "commit_sha", "signed_commit", "dco_signed_off"},
+    "review": _PI_STAGE_LIFECYCLE_BASE_FIELDS
+    | {
+        "pull_request",
+        "reviewed_head_sha",
+        "implementation_go",
+        "implementation_no_go",
+        "unresolved_threads",
+        "native_auto_merge",
+        "review_receipt_id",
+        "learn_receipt_sha256",
+        "finished_handoff",
+    },
 }
 
 
@@ -259,11 +318,14 @@ def _validated_run_dir(run_root: Path, run_id: str) -> Path:
 
     resolved_run_root = run_root.resolve()
     run_dir = resolved_run_root / run_id
+    resolved_run_dir = run_dir.resolve()
     try:
-        run_dir.resolve().relative_to(resolved_run_root)
+        relative_run_dir = resolved_run_dir.relative_to(resolved_run_root)
     except ValueError as exc:
         raise ValueError("run ID resolves outside the configured run root") from exc
-    return run_dir
+    if not relative_run_dir.parts:
+        raise ValueError("run ID resolves outside the configured run root")
+    return resolved_run_dir
 
 
 def _resolve_run_dir(run_root: Path, run_id: str) -> Path:
@@ -417,7 +479,8 @@ def _session_ids_from_events(events: Iterable[dict[str, Any]]) -> tuple[str, ...
     return tuple(dict.fromkeys(session_ids))
 
 
-def _skill_calls_from_events(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+def _skill_mentions_from_events(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    """Return untrusted skill-name mentions found in provider-controlled events."""
     matches: list[str] = []
     for event in events:
         rendered = json.dumps(event, sort_keys=True, ensure_ascii=False)
@@ -429,14 +492,27 @@ def _skill_calls_from_events(events: Iterable[dict[str, Any]]) -> tuple[str, ...
 def _proxy_tool_scopes_from_argv(argv: Sequence[str]) -> tuple[str, ...]:
     scopes: list[str] = []
     for index, token in enumerate(argv):
-        if token in {"--tools", "--allowedTools", "--commands"}:
+        if token in {"--tools", "--allowedTools"}:
             if index + 1 < len(argv):
                 scopes.extend(part for part in argv[index + 1].split(",") if part)
             continue
-        for flag in ("--tools=", "--allowedTools=", "--commands="):
+        for flag in ("--tools=", "--allowedTools="):
             if token.startswith(flag):
                 scopes.extend(part for part in token.split("=", 1)[1].split(",") if part)
     return tuple(dict.fromkeys(scopes))
+
+
+def _proxy_requested_skill_grants_from_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    """Return requested skill command grants without treating them as invocations."""
+    grants: list[str] = []
+    for index, argument in enumerate(argv):
+        values: Iterable[str] = ()
+        if argument == "--commands" and index + 1 < len(argv):
+            values = argv[index + 1].split(",")
+        elif argument.startswith("--commands="):
+            values = argument.split("=", 1)[1].split(",")
+        grants.extend(value for value in values if value.startswith("skill:"))
+    return tuple(dict.fromkeys(grants))
 
 
 def _proxy_events(path: Path) -> list[dict[str, Any]]:
@@ -481,17 +557,18 @@ def _capture_analysis(
     proxy_events = _proxy_events(proxy_log)
     proxy_invocations = _proxy_invocations(proxy_events)
     session_ids = _session_ids_from_events(all_events)
-    skill_calls = tuple(
+    provider_skill_mentions = tuple(
         dict.fromkeys(
             [
-                *(_skill_calls_from_events(all_events)),
-                *(
-                    match
-                    for invocation in proxy_invocations
-                    for match in _proxy_tool_scopes_from_argv(invocation["argv"])
-                    if match.startswith("skill:")
-                ),
+                *(_skill_mentions_from_events(all_events)),
             ]
+        )
+    )
+    requested_skill_grants = tuple(
+        dict.fromkeys(
+            grant
+            for invocation in proxy_invocations
+            for grant in _proxy_requested_skill_grants_from_argv(invocation["argv"])
         )
     )
     tool_scopes = tuple(
@@ -507,7 +584,11 @@ def _capture_analysis(
     )
     return {
         "session_ids": list(session_ids),
-        "skill_calls": list(skill_calls),
+        # Provider text and requested command grants are intentionally not execution
+        # evidence. Actual Athena/Mnemosyne execution is proven later by host receipts.
+        "observed_skill_invocations": [],
+        "provider_skill_mentions": list(provider_skill_mentions),
+        "requested_skill_grants": list(requested_skill_grants),
         "tool_scopes": list(tool_scopes),
         "proxy_invocations": list(proxy_invocations),
         "stdout_digest": _sha256_text(stdout),
@@ -573,34 +654,47 @@ def _provider_proxy_env(proxy_dir: Path, log_path: Path) -> dict[str, str]:
     return env
 
 
-def _probe_command_version(binary: str) -> str:
+def _probe_command_version(binary: str) -> tuple[str, bool]:
+    """Return the command version and whether its bounded probe timed out."""
     resolved = shutil.which(binary)
     if resolved is None:
-        return ""
-    result = subprocess.run(
-        [resolved, "--version"],
-        cwd=_repo_root(),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+        return "", False
+    try:
+        result = subprocess.run(
+            [resolved, "--version"],
+            cwd=_repo_root(),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=DEFAULT_INVENTORY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return "", True
     output = (result.stdout or result.stderr or "").strip()
-    return output
+    return output, False
 
 
 def _record_inventory(run_dir: Path) -> int:
     repo_root = Path(_load_manifest(run_dir)["repo_root"])
     catalog = load_pi_package_catalog()
     pi_inventory = inspect_pi_package_inventory(repo_root, catalog)
+    version, version_probe_timed_out = _probe_command_version("pi")
+    inventory_ready = pi_inventory.ready and not version_probe_timed_out
+    inventory_status = "version_probe_timeout" if version_probe_timed_out else pi_inventory.status
+    inventory_detail = pi_inventory.detail
+    if version_probe_timed_out:
+        inventory_detail = (
+            f"Pi --version timed out after {DEFAULT_INVENTORY_TIMEOUT_SECONDS} seconds"
+        )
     manifest = _load_manifest(run_dir)
     manifest["pi"] = {
-        "version": _probe_command_version("pi"),
+        "version": version,
         "binary": shutil.which("pi") or "",
         "skill_commands": list(catalog.required_commands),
         "package_inventory": {
-            "ready": pi_inventory.ready,
-            "status": pi_inventory.status,
-            "detail": pi_inventory.detail,
+            "ready": inventory_ready,
+            "status": inventory_status,
+            "detail": inventory_detail,
             "roots": {key: str(value) for key, value in pi_inventory.roots.items()},
             "scopes": pi_inventory.scopes,
         },
@@ -612,11 +706,14 @@ def _record_inventory(run_dir: Path) -> int:
         {
             "id": f"inventory-{len(manifest['commands']) + 1:02d}",
             "kind": "inventory",
-            "status": "success" if pi_inventory.ready else "failure",
-            "returncode": 0 if pi_inventory.ready else 1,
+            "status": "success" if inventory_ready else "failure",
+            "returncode": 0 if inventory_ready else 1,
             "provider": "pi",
             "session_ids": [],
-            "skill_calls": list(catalog.required_commands),
+            "available_skill_commands": list(catalog.required_commands),
+            "observed_skill_invocations": [],
+            "provider_skill_mentions": [],
+            "requested_skill_grants": [],
             "tool_scopes": [],
             "prompt_sha256": "",
             "stdout_digest": "",
@@ -626,7 +723,7 @@ def _record_inventory(run_dir: Path) -> int:
             "artifacts": {"inventory": str(Path(ARTIFACTS_DIR_NAME) / "inventory.json")},
         },
     )
-    return 0 if pi_inventory.ready else 1
+    return 0 if inventory_ready else 1
 
 
 def _record_snapshot(run_dir: Path, label: str) -> int:
@@ -741,7 +838,7 @@ def _pi_policy_evidence(
         "filesystem": policy.filesystem.value,
         "network": policy.network.value,
         "tool_scopes": sorted(policy.builtins),
-        "skill_calls": sorted(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills),
+        "skill_grants": sorted(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills),
     }
 
 
@@ -777,6 +874,8 @@ def _record_command(
     pi_result: AgentRunResult | None = None
     pi_policy: ExecutionPolicy | None = None
     pi_request: ExecutionRequest | None = None
+    if provider == PI_PROVIDER_NAME:
+        write_secure(proxy_log, "")
     try:
         if provider == PI_PROVIDER_NAME:
             pi_result, pi_policy, pi_request = _run_pi_stage(
@@ -789,7 +888,6 @@ def _record_command(
             returncode = 0
             stdout = pi_result.stdout
             stderr = pi_result.stderr
-            write_secure(proxy_log, "")
         else:
             proxy_dir = _prepare_provider_proxy_dir(run_dir)
             env = _provider_proxy_env(proxy_dir, proxy_log)
@@ -806,6 +904,11 @@ def _record_command(
             stdout = completed.stdout or ""
             stderr = completed.stderr or ""
         timed_out = False
+    except subprocess.CalledProcessError as exc:
+        returncode = exc.returncode
+        stdout = _timeout_output(exc.stdout)
+        stderr = _timeout_output(exc.stderr)
+        timed_out = False
     except subprocess.TimeoutExpired as exc:
         returncode = 124
         stdout = _timeout_output(exc.stdout)
@@ -821,14 +924,14 @@ def _record_command(
             analysis["session_ids"] = list(
                 dict.fromkeys([*analysis["session_ids"], pi_result.session_id])
             )
-        analysis["skill_calls"] = list(
-            dict.fromkeys([*analysis["skill_calls"], *policy_evidence["skill_calls"]])
+        analysis["requested_skill_grants"] = list(
+            dict.fromkeys([*analysis["requested_skill_grants"], *policy_evidence["skill_grants"]])
         )
         analysis["tool_scopes"] = policy_evidence["tool_scopes"]
         analysis["execution_policy"] = {
             key: value
             for key, value in policy_evidence.items()
-            if key not in {"skill_calls", "tool_scopes"}
+            if key not in {"skill_grants", "tool_scopes"}
         }
     analysis.update(
         {
@@ -865,7 +968,9 @@ def _record_command(
         "timed_out": timed_out,
         "prompt_sha256": _prompt_digest(prompt),
         "session_ids": analysis["session_ids"],
-        "skill_calls": analysis["skill_calls"],
+        "observed_skill_invocations": analysis["observed_skill_invocations"],
+        "provider_skill_mentions": analysis["provider_skill_mentions"],
+        "requested_skill_grants": analysis["requested_skill_grants"],
         "tool_scopes": analysis["tool_scopes"],
         "stdout_digest": analysis["stdout_digest"],
         "stderr_digest": analysis["stderr_digest"],
@@ -966,11 +1071,11 @@ def _capture_entry_by_id(manifest: dict[str, Any], entry_id: str) -> dict[str, A
         entry
         for entry in manifest.get("commands", [])
         if isinstance(entry, dict)
-        and entry.get("kind") == "capture"
+        and entry.get("kind") in {"capture", FAILURE_PROBE_KIND}
         and entry.get("id") == entry_id
     ]
     if len(matches) != 1:
-        raise ValueError(f"comparison entry must identify one captured command: {entry_id}")
+        raise ValueError(f"comparison entry must identify one provider run: {entry_id}")
     return cast(dict[str, Any], matches[0])
 
 
@@ -1005,17 +1110,39 @@ def _capture_artifact_sha256(run_dir: Path, entry: dict[str, Any], stream: str) 
 
 
 def _capture_outcome(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    kind = entry.get("kind")
     status = entry.get("status")
     returncode = entry.get("returncode")
     timed_out = entry.get("timed_out")
     stdout_digest = entry.get("stdout_digest")
     stderr_digest = entry.get("stderr_digest")
-    if status not in {"success", "failure"}:
+    if kind not in {"capture", FAILURE_PROBE_KIND}:
+        raise ValueError(f"capture {entry.get('id', 'unknown')} has an invalid kind")
+    if kind == "capture" and status not in {"success", "failure"}:
         raise ValueError(f"capture {entry.get('id', 'unknown')} has an invalid status")
     if not isinstance(returncode, int) or isinstance(returncode, bool):
         raise ValueError(f"capture {entry.get('id', 'unknown')} has no return code")
     if not isinstance(timed_out, bool):
         raise ValueError(f"capture {entry.get('id', 'unknown')} has no timeout outcome")
+    expected_outcome: dict[str, Any] | None = None
+    if kind == FAILURE_PROBE_KIND:
+        expected_fields = _expected_failure_probe_fields(returncode, timed_out)
+        for field in (
+            "evidence_kind",
+            "status",
+            "expected_outcome",
+            "observed_outcome",
+            "validation",
+        ):
+            if entry.get(field) != expected_fields[field]:
+                raise ValueError(
+                    f"capture {entry.get('id', 'unknown')} has an invalid expected-failure outcome"
+                )
+        if expected_fields["validation"]["matches_expectation"] is not True:
+            raise ValueError(
+                f"capture {entry.get('id', 'unknown')} did not observe its expected failure"
+            )
+        expected_outcome = cast(dict[str, Any], expected_fields["expected_outcome"])
     for stream, digest in (("stdout", stdout_digest), ("stderr", stderr_digest)):
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             raise ValueError(
@@ -1026,13 +1153,18 @@ def _capture_outcome(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"capture {entry.get('id', 'unknown')} {stream} artifact digest mismatch"
             )
-    return {
+    outcome = {
+        "kind": kind,
         "status": status,
         "returncode": returncode,
         "timed_out": timed_out,
         "stdout_sha256": stdout_digest,
         "stderr_sha256": stderr_digest,
     }
+    if expected_outcome is not None:
+        outcome["expected_outcome"] = expected_outcome
+        outcome["matches_expectation"] = True
+    return outcome
 
 
 def _comparison_payload(
@@ -1049,6 +1181,10 @@ def _comparison_payload(
     control_provider = control_entry.get("provider")
     if not isinstance(control_provider, str) or control_provider == PI_PROVIDER_NAME:
         raise ValueError("comparison control entry must use a non-Pi provider")
+
+    entry_kind = pi_entry.get("kind")
+    if entry_kind not in {"capture", FAILURE_PROBE_KIND} or control_entry.get("kind") != entry_kind:
+        raise ValueError("comparison runs must use the same evidence kind")
 
     fixture_sha256 = _fixture_digest(manifest)
     if {
@@ -1083,22 +1219,35 @@ def _comparison_payload(
 
     pi_outcome = _capture_outcome(run_dir, pi_entry)
     control_outcome = _capture_outcome(run_dir, control_entry)
+    if entry_kind == FAILURE_PROBE_KIND:
+        outcomes_match = (
+            pi_outcome.get("matches_expectation") is True
+            and control_outcome.get("matches_expectation") is True
+            and pi_outcome.get("expected_outcome") == control_outcome.get("expected_outcome")
+        )
+    else:
+        outcomes_match = (
+            pi_outcome["status"] == control_outcome["status"]
+            and pi_outcome["returncode"] == control_outcome["returncode"]
+            and pi_outcome["timed_out"] == control_outcome["timed_out"]
+        )
     return {
         "fixture_sha256": fixture_sha256,
         "stage": stage,
         "revision": revision,
         "prompt_sha256": prompt_sha256,
+        "comparison_basis": (
+            "artifacts"
+            if pi_outcome["status"] == control_outcome["status"] == "success"
+            else "failure_behavior"
+        ),
         "pi_entry_id": pi_entry_id,
         "control_entry_id": control_entry_id,
         "pi_provider": PI_PROVIDER_NAME,
         "control_provider": control_provider,
         "pi_outcome": pi_outcome,
         "control_outcome": control_outcome,
-        "outcomes_match": (
-            pi_outcome["status"] == control_outcome["status"]
-            and pi_outcome["returncode"] == control_outcome["returncode"]
-            and pi_outcome["timed_out"] == control_outcome["timed_out"]
-        ),
+        "outcomes_match": outcomes_match,
         "artifact_comparison": {
             "stdout_matches": (pi_outcome["stdout_sha256"] == control_outcome["stdout_sha256"]),
             "stderr_matches": (pi_outcome["stderr_sha256"] == control_outcome["stderr_sha256"]),
@@ -1178,15 +1327,14 @@ def _record_stage_receipt(
     *,
     capture_id: str,
     receipt_path: Path,
-    athena_host_receipt_path: Path | None,
 ) -> int:
-    """Ingest host/coordinator receipts and bind them to one exact Pi capture."""
+    """Ingest a coordinator receipt and bind it to one exact Pi capture."""
     manifest = _load_manifest(run_dir)
     entry = _capture_entry_by_id(manifest, capture_id)
     if entry.get("provider") != PI_PROVIDER_NAME:
         raise ValueError("stage receipts may be attached only to Pi captures")
-    if "stage_receipt" in entry or "athena_host_receipt" in entry:
-        raise ValueError("capture already has persisted host receipt evidence")
+    if "stage_receipt" in entry:
+        raise ValueError("capture already has persisted coordinator receipt evidence")
 
     stage_payload = _receipt_payload_from_path(
         receipt_path,
@@ -1199,22 +1347,51 @@ def _record_stage_receipt(
         "stage-receipt.json",
         stage_payload,
     )
-    if athena_host_receipt_path is not None:
-        athena_payload = _receipt_payload_from_path(
-            athena_host_receipt_path,
-            label="Athena host receipt",
-            size_limit=MAX_ATHENA_HOST_RECEIPT_BYTES,
-        )
-        entry["athena_host_receipt"] = _persist_receipt_payload(
-            run_dir,
-            capture_id,
-            "athena-host-receipt.json",
-            athena_payload,
-        )
-
     # Validate before making the descriptor durable in the manifest. The
-    # by a corrected retry.
+    # persisted artifact remains private and can be replaced by a corrected retry.
     _verify_pi_stage_receipt(manifest, run_dir, entry)
+    _save_manifest(run_dir, manifest)
+    return 0
+
+
+def _record_athena_host_receipt(
+    run_dir: Path,
+    *,
+    kind: str,
+    correlated_capture_id: str,
+    receipt_path: Path,
+) -> int:
+    """Persist one typed host result and correlate it to a provider-backed job."""
+    expected_stage = ATHENA_HOST_RECEIPT_CAPTURE_STAGES[kind]
+    manifest = _load_manifest(run_dir)
+    entry = _capture_entry_by_id(manifest, correlated_capture_id)
+    if (
+        entry.get("kind") != "capture"
+        or entry.get("provider") != PI_PROVIDER_NAME
+        or entry.get("stage") != expected_stage
+        or entry.get("status") != "success"
+    ):
+        raise ValueError(
+            f"Athena {kind} receipt must correlate to a successful Pi {expected_stage} capture"
+        )
+    descriptors = entry.setdefault("athena_host_receipts", {})
+    if not isinstance(descriptors, dict):
+        raise ValueError("capture has invalid Athena host receipt descriptors")
+    if kind in descriptors:
+        raise ValueError(f"capture already has a persisted Athena {kind} host receipt")
+
+    payload = _receipt_payload_from_path(
+        receipt_path,
+        label=f"Athena {kind} host receipt",
+        size_limit=MAX_ATHENA_HOST_RECEIPT_BYTES,
+    )
+    descriptors[kind] = _persist_receipt_payload(
+        run_dir,
+        correlated_capture_id,
+        f"athena-{kind}-host-receipt.json",
+        payload,
+    )
+    _verify_host_athena_receipt(run_dir, entry, expected_kind=kind)
     _save_manifest(run_dir, manifest)
     return 0
 
@@ -1222,11 +1399,23 @@ def _record_stage_receipt(
 def _record_defect(
     run_dir: Path,
     *,
+    repo_root: Path,
     summary: str,
     follow_up_issue: int,
     details: str,
     source_entry: str = "",
 ) -> int:
+    manifest = _load_manifest(run_dir)
+    defects = manifest.get("defects")
+    if not isinstance(defects, list):
+        raise ValueError("run manifest defects are invalid")
+    for entry in defects:
+        if not isinstance(entry, dict):
+            raise ValueError("run manifest contains an invalid defect record")
+        if entry.get("follow_up_issue") == follow_up_issue:
+            raise ValueError(f"duplicate follow-up issue #{follow_up_issue}")
+
+    follow_up_identity = _resolve_follow_up_issue_identity(repo_root, follow_up_issue)
     defect_id = (
         f"{_utc_now().replace(':', '').replace('-', '')}-{slugify(summary)[:48] or 'defect'}"
     )
@@ -1235,6 +1424,7 @@ def _record_defect(
         "id": defect_id,
         "summary": summary,
         "follow_up_issue": follow_up_issue,
+        "follow_up_issue_identity": follow_up_identity,
         "details": details,
         "source_entry": source_entry,
         "created_at": _utc_now(),
@@ -1248,6 +1438,87 @@ def _record_defect(
         },
     )
     return 0
+
+
+def _resolve_follow_up_issue_identity(repo_root: Path, issue_number: int) -> dict[str, Any]:
+    """Resolve one open #2519 follow-up through the repository-scoped GitHub seam."""
+    owner, name = PROJECT_REPOSITORY.split("/", 1)
+    github = PipelineGitHub(owner, repo=name, repo_root=repo_root)
+    identities: list[dict[str, Any]] = []
+    for _read in range(2):
+        try:
+            issue = github.gh_issue_json(issue_number)
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+            raise ValueError(
+                f"could not resolve follow-up issue #{issue_number} in {PROJECT_REPOSITORY}"
+            ) from exc
+        identities.append(_validated_follow_up_issue_identity(issue, issue_number))
+    if identities[0] != identities[1]:
+        raise ValueError(f"follow-up issue #{issue_number} live identity did not stabilize")
+    return identities[1]
+
+
+def _validated_follow_up_issue_identity(
+    issue: object,
+    issue_number: int,
+) -> dict[str, Any]:
+    """Validate exact repository identity, open state, and #2519 linkage."""
+    expected_url = f"https://github.com/{PROJECT_REPOSITORY}/issues/{issue_number}"
+    if (
+        not isinstance(issue, dict)
+        or issue.get("number") != issue_number
+        or issue.get("url") != expected_url
+        or not isinstance(issue.get("id"), str)
+        or not issue["id"]
+    ):
+        raise ValueError(f"follow-up issue #{issue_number} has mismatched GitHub identity")
+    if issue.get("state") != "OPEN":
+        raise ValueError(f"follow-up issue #{issue_number} must be open")
+    body = issue.get("body")
+    if not isinstance(body, str) or FOLLOW_UP_PARENT_LINE_RE.search(body) is None:
+        raise ValueError(f"follow-up issue #{issue_number} must link to #{ISSUE_NUMBER}")
+    return {
+        "repository": PROJECT_REPOSITORY,
+        "node_id": issue["id"],
+        "number": issue_number,
+        "url": expected_url,
+        "state": "OPEN",
+        "parent_issue": ISSUE_NUMBER,
+    }
+
+
+def _verify_defect_follow_ups(
+    manifest: dict[str, Any],
+    repo_root: Path,
+) -> list[dict[str, Any]]:
+    """Rebind every persisted defect to a unique current GitHub follow-up."""
+    defects = manifest.get("defects")
+    if not isinstance(defects, list):
+        raise ValueError("run manifest defects are invalid")
+    verified: list[dict[str, Any]] = []
+    seen_numbers: set[int] = set()
+    seen_urls: set[str] = set()
+    for entry in defects:
+        if not isinstance(entry, dict):
+            raise ValueError("run manifest contains an invalid defect record")
+        issue_number = entry.get("follow_up_issue")
+        if isinstance(issue_number, bool) or not isinstance(issue_number, int) or issue_number <= 0:
+            raise ValueError("one or more defects lacks a valid follow-up issue")
+        if issue_number in seen_numbers:
+            raise ValueError(f"duplicate follow-up issue #{issue_number}")
+        live_identity = _resolve_follow_up_issue_identity(repo_root, issue_number)
+        stored_identity = entry.get("follow_up_issue_identity")
+        if stored_identity != live_identity:
+            raise ValueError(
+                f"follow-up issue #{issue_number} identity or live state/linkage is stale"
+            )
+        issue_url = live_identity["url"]
+        if issue_url in seen_urls:
+            raise ValueError(f"duplicate follow-up issue URL: {issue_url}")
+        seen_numbers.add(issue_number)
+        seen_urls.add(issue_url)
+        verified.append(live_identity)
+    return verified
 
 
 def _render_report(
@@ -1292,11 +1563,12 @@ def _render_report(
                 "Missing required acceptance evidence:",
                 "",
                 "- A repository snapshot bound to the Pi run.",
-                "- Successful isolated Pi planning, implementation, tests, commit/PR "
-                "creation, review, and handoff stage receipts.",
+                "- Successful isolated Pi planning, implementation, tests, commit/PR creation, "
+                "and review stage receipts, including host-owned advice and learning handoff.",
                 "- Pi/control comparison evidence for the same fixture, prompt, recorded "
                 "revision, and persisted success artifacts or failure behavior.",
-                "- Mnemosyne advise/learn delivery receipts bound to the Pi workflow.",
+                "- Typed Mnemosyne advise/learn host receipts correlated to the relevant Pi "
+                "planning and review jobs.",
                 "- Publication attestation for the rendered report and runbook.",
                 "",
                 "Host receipts or a control-provider run do not substitute for the missing "
@@ -1315,9 +1587,9 @@ def _render_report(
             [
                 (
                     "| Stage | Provider | Status | Returncode | Session evidence | "
-                    "Tool scopes | Skill calls |"
+                    "Tool scopes | Requested skill grants | Provider skill mentions |"
                 ),
-                "| --- | --- | --- | --- | --- | --- | --- |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         has_unverified_control = False
@@ -1343,7 +1615,8 @@ def _render_report(
                         ", ".join(f"`{session_id}`" for session_id in entry.get("session_ids", []))
                         or "none",
                         ", ".join(entry.get("tool_scopes", [])) or "n/a",
-                        ", ".join(entry.get("skill_calls", [])) or "n/a",
+                        ", ".join(entry.get("requested_skill_grants", [])) or "n/a",
+                        ", ".join(entry.get("provider_skill_mentions", [])) or "n/a",
                     ]
                 )
                 + " |"
@@ -1495,6 +1768,11 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
                 "--capture-id <pi-entry-id> --receipt <coordinator-receipt.json>"
             ),
             (
+                f"uv run python scripts/{script_name} record-athena-host-receipt "
+                "--run-id <run-id> --kind <advise|learn> "
+                "--correlated-capture-id <pi-entry-id> --receipt <athena-result.json>"
+            ),
+            (
                 f"uv run python scripts/{script_name} record-defect --run-id <run-id> "
                 '--summary "<summary>" --follow-up-issue <issue-number>'
             ),
@@ -1524,8 +1802,8 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
                 "matching success artifact digests or matching failure behavior."
             ),
             (
-                "- `mnemosyne` requires persisted Pi-bound Athena advise and learning host "
-                "receipts, including matching Mnemosyne PR readback evidence."
+                "- `mnemosyne` requires typed host-owned Athena advise and learning receipts "
+                "correlated to Pi planning and review jobs, including Mnemosyne PR readback."
             ),
             "- `publication` requires deterministic manifest-to-document rendering.",
             (
@@ -1651,16 +1929,9 @@ def _verify_comparison(manifest: dict[str, Any], run_dir: Path) -> None:
                 raise ValueError("comparison record does not match its captured outcomes")
         if comparison.get("outcomes_match") is not True:
             raise ValueError("paired Pi and control outcomes do not match")
-        artifacts = comparison.get("artifact_comparison")
-        pi_outcome = comparison.get("pi_outcome")
-        control_outcome = comparison.get("control_outcome")
-        if (
-            isinstance(pi_outcome, dict)
-            and isinstance(control_outcome, dict)
-            and pi_outcome.get("status") == "success"
-            and control_outcome.get("status") == "success"
-            and artifacts != {"stdout_matches": True, "stderr_matches": True}
-        ):
+        if comparison.get("comparison_basis") == "artifacts" and comparison.get(
+            "artifact_comparison"
+        ) != {"stdout_matches": True, "stderr_matches": True}:
             raise ValueError("successful Pi/control comparison artifacts do not match")
 
 
@@ -1726,32 +1997,27 @@ def _load_private_receipt(
 def _load_athena_host_receipt(
     run_dir: Path,
     entry: dict[str, Any],
+    kind: str,
 ) -> dict[str, Any]:
+    descriptors = _receipt_dict(entry.get("athena_host_receipts"), "artifact descriptors")
     return _load_private_receipt(
         run_dir,
-        entry.get("athena_host_receipt"),
-        label="Athena host receipt",
+        descriptors.get(kind),
+        label=f"Athena {kind} host receipt",
         size_limit=MAX_ATHENA_HOST_RECEIPT_BYTES,
     )
 
 
 def _verify_contract_and_binding(
-    command_receipt: dict[str, Any],
     result_receipt: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     contract = _receipt_dict(result_receipt.get("contract"), "Athena contract")
     binding = _receipt_dict(result_receipt.get("binding"), "Mnemosyne binding")
-    athena_repository = _receipt_string(contract, "athena_repository")
-    athena_commit = _receipt_sha(contract, "athena_commit", 40)
+    _receipt_string(contract, "athena_repository")
+    _receipt_sha(contract, "athena_commit", 40)
     for field in ("advise_sha256", "learn_sha256", "dependency_resolution_sha256"):
         _receipt_sha(contract, field, 64)
     _receipt_string(contract, "trust_source")
-    if (
-        command_receipt.get("repository") != athena_repository
-        or command_receipt.get("commit") != athena_commit
-    ):
-        raise ValueError("Pi command receipt is not bound to the Athena contract")
-
     _receipt_string(binding, "root")
     _receipt_string(binding, "repository")
     _receipt_string(binding, "default_branch")
@@ -1842,64 +2108,53 @@ def _verify_learn_delivery_receipt(
         raise ValueError("LearnDeliveryReceipt lacks signed, DCO-attested durable delivery")
 
 
-def _verify_pi_bound_athena_receipt(
+def _verify_host_athena_receipt(
     run_dir: Path,
     entry: dict[str, Any],
+    *,
+    expected_kind: str,
 ) -> str:
-    payload = _load_athena_host_receipt(run_dir, entry)
-    stage = entry.get("stage")
-    if not isinstance(stage, str):
-        raise ValueError("Athena host receipt capture lacks a stage")
-    expected = {
-        "advise": ("advise", "advisor", "advise", "one_shot"),
-        "handoff": ("learn", "learner", "learn", "start_new"),
-    }.get(stage)
-    if expected is None:
-        raise ValueError("Athena host receipt is attached to an unsupported capture stage")
-    kind, role, operation, lifecycle = expected
-    policy = _receipt_dict(entry.get("execution_policy"), "execution policy")
+    expected_stage = ATHENA_HOST_RECEIPT_CAPTURE_STAGES[expected_kind]
+    request = PI_EVIDENCE_STAGE_REQUESTS[expected_stage]
+    expected_policy = _pi_policy_evidence(resolve_policy(request), request)
+    entry_policy = _receipt_dict(entry.get("execution_policy"), "execution policy")
     if (
         entry.get("kind") != "capture"
         or entry.get("provider") != PI_PROVIDER_NAME
         or entry.get("status") != "success"
-        or policy.get("role") != role
-        or policy.get("operation") != operation
-        or policy.get("lifecycle") != lifecycle
+        or entry.get("stage") != expected_stage
+        or entry_policy
+        != {
+            key: value
+            for key, value in expected_policy.items()
+            if key not in {"skill_grants", "tool_scopes"}
+        }
     ):
-        raise ValueError("Athena host receipt is not bound to a successful Pi capture policy")
+        raise ValueError(
+            f"Athena {expected_kind} receipt is not correlated to its successful Pi "
+            f"{expected_stage} job"
+        )
+    payload = _load_athena_host_receipt(run_dir, entry, expected_kind)
+    if set(payload) != {"kind", "context", "receipt", "delivery_receipt", "error"}:
+        raise ValueError("Athena host receipt is not a typed AthenaSkillResult")
+    host_result = payload
     if (
-        payload.get("schema_version") != 1
-        or payload.get("provider") != PI_PROVIDER_NAME
-        or payload.get("capture_id") != entry.get("id")
-        or payload.get("stage") != stage
-    ):
-        raise ValueError("Athena host receipt artifact is not bound to its Pi capture")
-
-    command_receipt = _receipt_dict(payload.get("pi_command_receipt"), "Pi Athena command receipt")
-    if (
-        command_receipt.get("command") != f"skill:{kind}"
-        or command_receipt.get("package_key") != "athena"
-        or not Path(_receipt_string(command_receipt, "package_root")).is_absolute()
-    ):
-        raise ValueError("Athena host receipt lacks canonical Pi command provenance")
-    host_result = _receipt_dict(payload.get("host_result"), "Athena host result")
-    if (
-        host_result.get("kind") != kind
+        host_result.get("kind") != expected_kind
         or host_result.get("error") is not None
         or not isinstance(host_result.get("context", ""), str)
     ):
         raise ValueError("Athena host result is unsuccessful or has the wrong kind")
     result_receipt = _receipt_dict(host_result.get("receipt"), "Athena result receipt")
-    contract, binding = _verify_contract_and_binding(command_receipt, result_receipt)
-    if kind == "advise":
+    contract, binding = _verify_contract_and_binding(result_receipt)
+    if expected_kind == "advise":
         _verify_advise_receipt(host_result, result_receipt, contract, binding)
     else:
         _verify_learn_delivery_receipt(host_result, binding)
-    return kind
+    return expected_kind
 
 
 def _verify_mnemosyne(manifest: dict[str, Any], run_dir: Path) -> None:
-    required_stages = {"advise", "review", "handoff"}
+    required_stages = set(ATHENA_HOST_RECEIPT_CAPTURE_STAGES.values())
     verified_stages: set[str] = set()
     verified_athena: set[str] = set()
     for entry in manifest.get("commands", []):
@@ -1912,17 +2167,26 @@ def _verify_mnemosyne(manifest: dict[str, Any], run_dir: Path) -> None:
             raise ValueError(f"duplicate persisted Pi {stage} stage receipt")
         _verify_pi_stage_receipt(manifest, run_dir, cast(dict[str, Any], entry))
         verified_stages.add(cast(str, stage))
-        if stage == "advise":
-            verified_athena.add("advise")
-        elif stage == "handoff":
-            verified_athena.add("learn")
+        expected_athena_kind = {
+            value: key for key, value in ATHENA_HOST_RECEIPT_CAPTURE_STAGES.items()
+        }.get(stage)
+        if (
+            expected_athena_kind is not None
+            and _verify_host_athena_receipt(
+                run_dir,
+                entry,
+                expected_kind=expected_athena_kind,
+            )
+            == expected_athena_kind
+        ):
+            verified_athena.add(expected_athena_kind)
 
     missing_stages = required_stages.difference(verified_stages)
     missing_athena = {"advise", "learn"}.difference(verified_athena)
     if missing_stages or missing_athena:
         raise ValueError(
-            "Mnemosyne verification requires persisted Pi-bound coordinator review, "
-            "Athena advise, and LearnDeliveryReceipt host evidence"
+            "Mnemosyne verification requires typed host-owned Athena advise and "
+            "LearnDeliveryReceipt evidence correlated to Pi planning and review jobs"
         )
 
 
@@ -1964,11 +2228,22 @@ def _stage_receipt_string_list(data: dict[str, Any], field: str) -> list[str]:
     return cast(list[str], value)
 
 
+def _require_stage_receipt_schema(
+    data: dict[str, Any],
+    field: str,
+    expected_fields: frozenset[str],
+) -> None:
+    """Reject generic or union-shaped receipt sections at stage boundaries."""
+    if set(data) != expected_fields:
+        raise ValueError(f"Pi stage receipt has unsupported {field} schema")
+
+
 def _verify_stage_worktree(
     manifest: dict[str, Any],
     entry: dict[str, Any],
     worktree: dict[str, Any],
 ) -> dict[str, Any]:
+    _require_stage_receipt_schema(worktree, "worktree", PI_STAGE_WORKTREE_FIELDS)
     root = Path(_stage_receipt_string(worktree, "root"))
     git_dir = Path(_stage_receipt_string(worktree, "git_dir"))
     common_dir = Path(_stage_receipt_string(worktree, "git_common_dir"))
@@ -2009,6 +2284,11 @@ def _verify_stage_provider_evidence(
     worktree: dict[str, Any],
     provider_evidence: dict[str, Any],
 ) -> dict[str, Any]:
+    _require_stage_receipt_schema(
+        provider_evidence,
+        "provider_evidence",
+        PI_STAGE_PROVIDER_EVIDENCE_FIELDS,
+    )
     outcome = _capture_outcome(run_dir, entry)
     if outcome["status"] != "success":
         raise ValueError("Pi stage receipt is not bound to a successful provider capture")
@@ -2022,7 +2302,7 @@ def _verify_stage_provider_evidence(
     expected_entry_policy = {
         key: value
         for key, value in expected_policy.items()
-        if key not in {"skill_calls", "tool_scopes"}
+        if key not in {"skill_grants", "tool_scopes"}
     }
     if entry.get("execution_policy") != expected_entry_policy:
         raise ValueError("Pi capture policy is not bound to its stage receipt")
@@ -2030,12 +2310,11 @@ def _verify_stage_provider_evidence(
     tool_scopes = _stage_receipt_string_list(provider_evidence, "tool_scopes")
     if tool_scopes != expected_policy["tool_scopes"] or entry.get("tool_scopes") != tool_scopes:
         raise ValueError("Pi stage receipt lacks its own observed tool-scope evidence")
-    skill_calls = _stage_receipt_string_list(provider_evidence, "skill_calls")
-    if skill_calls != expected_policy["skill_calls"]:
-        raise ValueError("Pi stage receipt skill evidence does not match the host policy")
-    entry_skill_calls = entry.get("skill_calls")
-    if not isinstance(entry_skill_calls, list) or not set(skill_calls).issubset(entry_skill_calls):
-        raise ValueError("Pi capture lacks its host-observed required skill calls")
+    skill_grants = _stage_receipt_string_list(provider_evidence, "skill_grants")
+    if skill_grants != expected_policy["skill_grants"]:
+        raise ValueError("Pi stage receipt skill grants do not match the host policy")
+    if entry.get("requested_skill_grants") != skill_grants:
+        raise ValueError("Pi capture skill grants are not bound to its stage receipt")
 
     session_ids = _stage_receipt_string_list(provider_evidence, "session_ids")
     if not session_ids:
@@ -2091,12 +2370,136 @@ def _verify_stage_provider_evidence(
     }
 
 
+def _validated_live_pr_state(value: object) -> dict[str, Any]:
+    """Return one complete live PR-state response or fail closed."""
+    if not isinstance(value, dict):
+        raise ValueError("live GitHub pull-request state readback failed")
+    state = cast(dict[str, Any], value)
+    required_fields = {
+        "state",
+        "headRefOid",
+        "mergedAt",
+        "baseRefName",
+        "autoMergeRequest",
+    }
+    auto_merge = state.get("autoMergeRequest")
+    head = state.get("headRefOid")
+    if (
+        not required_fields.issubset(state)
+        or not isinstance(state.get("state"), str)
+        or not isinstance(head, str)
+        or FULL_COMMIT_SHA_RE.fullmatch(head) is None
+        or not isinstance(state.get("baseRefName"), str)
+        or not state["baseRefName"]
+        or (auto_merge is not None and not isinstance(auto_merge, dict))
+    ):
+        raise ValueError("live GitHub pull-request state readback is incomplete")
+    return state
+
+
+def _live_unresolved_thread_ids(threads: object) -> frozenset[str]:
+    """Return unique IDs from one host-stabilized unresolved-thread read."""
+    if not isinstance(threads, list):
+        raise ValueError("live GitHub review-thread readback failed")
+    ids: list[str] = []
+    for thread in threads:
+        if not isinstance(thread, dict):
+            raise ValueError("live GitHub review-thread readback is malformed")
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("live GitHub review-thread readback is malformed")
+        ids.append(thread_id)
+    if len(set(ids)) != len(ids):
+        raise ValueError("live GitHub review-thread readback contains duplicate IDs")
+    return frozenset(ids)
+
+
+def _validated_live_implementation_labels(value: object) -> tuple[bool, bool]:
+    """Return the two exclusive implementation-label flags or fail closed."""
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or any(not isinstance(item, bool) for item in value)
+    ):
+        raise ValueError("live GitHub implementation-label readback failed")
+    return cast(tuple[bool, bool], value)
+
+
+def _live_pull_request_readback(
+    repository: str,
+    pr_number: int,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Read and stabilize completion facts from the scoped GitHub host seam.
+
+    The caller supplies only the target identity. All acceptance facts come
+    from fresh GitHub reads, with PR state, labels, and unresolved-thread IDs
+    repeated around the snapshot so an in-flight transition fails closed.
+    """
+    if repository != PROJECT_REPOSITORY:
+        raise ValueError("live GitHub readback targets the wrong repository")
+    owner, name = repository.split("/", 1)
+    github = PipelineGitHub(owner, repo=name, repo_root=repo_root)
+
+    initial_state = _validated_live_pr_state(github.gh_pr_state(pr_number))
+    initial_context = github.pr_review_context(pr_number)
+    if not isinstance(initial_context, dict):
+        raise ValueError("live GitHub pull-request context readback failed")
+    initial_branch = github.get_pr_head_branch(pr_number)
+    if not isinstance(initial_branch, str) or not initial_branch:
+        raise ValueError("live GitHub pull-request branch readback failed")
+    initial_closes_issue = github.find_issue_for_pr(pr_number)
+
+    initial_labels = _validated_live_implementation_labels(
+        github.pr_has_implementation_state_label(pr_number)
+    )
+    initial_threads = _live_unresolved_thread_ids(github.list_unresolved_review_threads(pr_number))
+    final_threads = _live_unresolved_thread_ids(github.list_unresolved_review_threads(pr_number))
+    final_labels = _validated_live_implementation_labels(
+        github.pr_has_implementation_state_label(pr_number)
+    )
+    final_branch = github.get_pr_head_branch(pr_number)
+    final_closes_issue = github.find_issue_for_pr(pr_number)
+    final_context = github.pr_review_context(pr_number)
+    final_state = _validated_live_pr_state(github.gh_pr_state(pr_number))
+
+    if (
+        initial_state != final_state
+        or initial_context != final_context
+        or initial_branch != final_branch
+        or initial_closes_issue != final_closes_issue
+        or initial_labels != final_labels
+        or initial_threads != final_threads
+        or initial_context.get("pr_head_sha") != final_state["headRefOid"]
+    ):
+        raise ValueError("live GitHub pull-request readback did not stabilize")
+
+    return {
+        "repository": repository,
+        "number": pr_number,
+        "url": f"https://github.com/{repository}/pull/{pr_number}",
+        "state": final_state["state"],
+        "branch": final_branch,
+        "head_sha": final_state["headRefOid"],
+        "closes_issue": final_closes_issue,
+        "implementation_go": final_labels[0],
+        "implementation_no_go": final_labels[1],
+        "unresolved_threads": len(final_threads),
+        "native_auto_merge": final_state["autoMergeRequest"] is not None,
+    }
+
+
 def _verify_stage_pr_readback(
     lifecycle: dict[str, Any],
     *,
     expected_head: str,
 ) -> tuple[int, str, str]:
     pull_request = _stage_receipt_dict(lifecycle.get("pull_request"), "pull_request")
+    _require_stage_receipt_schema(
+        pull_request,
+        "pull_request",
+        PI_STAGE_PULL_REQUEST_FIELDS,
+    )
     repository = _stage_receipt_string(pull_request, "repository")
     if repository != PROJECT_REPOSITORY:
         raise ValueError("Pi stage receipt pull request targets the wrong repository")
@@ -2108,11 +2511,40 @@ def _verify_stage_pr_readback(
         pull_request.get("state") != "OPEN"
         or pull_request.get("head_sha") != expected_head
         or pull_request.get("closes_issue") != ISSUE_NUMBER
-        or pull_request.get("readback_verified") is not True
     ):
-        raise ValueError("Pi stage receipt lacks exact open pull-request readback evidence")
+        raise ValueError("Pi stage receipt lacks an exact open pull-request claim")
     branch = _stage_receipt_string(pull_request, "branch")
     return pr_number, pr_url, branch
+
+
+def _verify_live_stage_pr_readback(
+    manifest: dict[str, Any],
+    lifecycle: dict[str, Any],
+    stage: str,
+    *,
+    expected_head: str,
+) -> None:
+    """Rebind a caller-provided stage receipt to current GitHub facts."""
+    pull_request = _stage_receipt_dict(lifecycle.get("pull_request"), "pull_request")
+    repository = _stage_receipt_string(pull_request, "repository")
+    pr_number = _stage_receipt_positive_int(pull_request, "number")
+    live = _live_pull_request_readback(
+        repository,
+        pr_number,
+        Path(_stage_receipt_string(manifest, "repo_root")),
+    )
+    claimed_pr = {field: pull_request[field] for field in PI_STAGE_PULL_REQUEST_FIELDS}
+    live_pr = {field: live[field] for field in PI_STAGE_PULL_REQUEST_FIELDS}
+    if claimed_pr != live_pr or live["head_sha"] != expected_head:
+        raise ValueError("Pi stage receipt does not match live GitHub pull-request readback")
+    if stage == "review" and (
+        lifecycle.get("reviewed_head_sha") != live["head_sha"]
+        or lifecycle.get("implementation_go") is not live["implementation_go"]
+        or lifecycle.get("implementation_no_go") is not live["implementation_no_go"]
+        or lifecycle.get("unresolved_threads") != live["unresolved_threads"]
+        or lifecycle.get("native_auto_merge") is not live["native_auto_merge"]
+    ):
+        raise ValueError("review receipt does not match live GitHub label and thread readback")
 
 
 def _verify_stage_lifecycle(
@@ -2123,6 +2555,11 @@ def _verify_stage_lifecycle(
     worktree: dict[str, Any],
     lifecycle: dict[str, Any],
 ) -> tuple[int, str, str] | None:
+    _require_stage_receipt_schema(
+        lifecycle,
+        f"{stage} lifecycle",
+        PI_STAGE_LIFECYCLE_FIELDS[stage],
+    )
     if lifecycle.get("kind") != PI_STAGE_LIFECYCLE_KINDS[stage]:
         raise ValueError("Pi stage receipt has the wrong lifecycle evidence kind")
     if (
@@ -2138,13 +2575,13 @@ def _verify_stage_lifecycle(
             or lifecycle.get("all_paths_found") is not True
         ):
             raise ValueError("discovery lacks host-observed fixture paths")
-    elif stage == "advise":
-        descriptor = _receipt_dict(entry.get("athena_host_receipt"), "artifact descriptor")
-        if lifecycle.get("athena_receipt_sha256") != descriptor.get("sha256"):
-            raise ValueError("advise lifecycle is not bound to its Athena host receipt")
-        if _verify_pi_bound_athena_receipt(run_dir, entry) != "advise":
-            raise ValueError("advise lifecycle has the wrong Athena host receipt")
     elif stage == "planning":
+        descriptors = _receipt_dict(entry.get("athena_host_receipts"), "artifact descriptors")
+        advise_descriptor = _receipt_dict(descriptors.get("advise"), "advise descriptor")
+        if lifecycle.get("athena_receipt_sha256") != advise_descriptor.get("sha256"):
+            raise ValueError("planning lifecycle is not bound to its Athena advise host receipt")
+        if _verify_host_athena_receipt(run_dir, entry, expected_kind="advise") != "advise":
+            raise ValueError("planning lifecycle has the wrong Athena host receipt")
         if lifecycle.get("plan_sha256") != entry.get("stdout_digest"):
             raise ValueError("planning lifecycle is not bound to the captured plan artifact")
     elif stage == "implementation":
@@ -2171,28 +2608,24 @@ def _verify_stage_lifecycle(
         return _verify_stage_pr_readback(lifecycle, expected_head=worktree["head"])
     elif stage == "review":
         pr_identity = _verify_stage_pr_readback(lifecycle, expected_head=worktree["head"])
+        descriptors = _receipt_dict(entry.get("athena_host_receipts"), "artifact descriptors")
+        learn_descriptor = _receipt_dict(descriptors.get("learn"), "learn descriptor")
         if (
             lifecycle.get("reviewed_head_sha") != worktree["head"]
             or lifecycle.get("implementation_go") is not True
             or lifecycle.get("implementation_no_go") is not False
             or lifecycle.get("unresolved_threads") != 0
             or lifecycle.get("native_auto_merge") is not False
-            or worktree["clean"] is not True
-        ):
-            raise ValueError("review lacks exact-head host review and label readback evidence")
-        _stage_receipt_sha(lifecycle, "review_receipt_id")
-        return pr_identity
-    elif stage == "handoff":
-        pr_identity = _verify_stage_pr_readback(lifecycle, expected_head=worktree["head"])
-        descriptor = _receipt_dict(entry.get("athena_host_receipt"), "artifact descriptor")
-        if (
-            lifecycle.get("learn_receipt_sha256") != descriptor.get("sha256")
+            or lifecycle.get("learn_receipt_sha256") != learn_descriptor.get("sha256")
             or lifecycle.get("finished_handoff") is not True
             or worktree["clean"] is not True
         ):
-            raise ValueError("handoff lacks exact PR and learning delivery evidence")
-        if _verify_pi_bound_athena_receipt(run_dir, entry) != "learn":
-            raise ValueError("handoff lifecycle has the wrong Athena host receipt")
+            raise ValueError(
+                "review lacks exact-head review, label, and host learning handoff evidence"
+            )
+        _stage_receipt_sha(lifecycle, "review_receipt_id")
+        if _verify_host_athena_receipt(run_dir, entry, expected_kind="learn") != "learn":
+            raise ValueError("review lifecycle has the wrong Athena learn host receipt")
         return pr_identity
     return None
 
@@ -2241,6 +2674,11 @@ def _verify_pi_stage_receipt(
         raise ValueError("Pi stage coordinator receipt is not bound to its successful capture")
 
     coordinator = _stage_receipt_dict(payload.get("coordinator"), "coordinator")
+    _require_stage_receipt_schema(
+        coordinator,
+        "coordinator",
+        PI_STAGE_COORDINATOR_FIELDS,
+    )
     sequence = REQUIRED_E2E_STAGES.index(stage) + 1
     if (
         coordinator.get("source") != "hephaestus.automation.pipeline.coordinator"
@@ -2274,6 +2712,13 @@ def _verify_pi_stage_receipt(
         worktree,
         _stage_receipt_dict(payload.get("lifecycle"), "lifecycle"),
     )
+    if pr_identity is not None:
+        _verify_live_stage_pr_readback(
+            manifest,
+            _stage_receipt_dict(payload.get("lifecycle"), "lifecycle"),
+            stage,
+            expected_head=worktree["head"],
+        )
     descriptor = _receipt_dict(entry.get("stage_receipt"), "artifact descriptor")
     return {
         "capture_id": entry["id"],
@@ -2353,21 +2798,19 @@ def _verify_stage_receipts(manifest: dict[str, Any], run_dir: Path) -> dict[str,
     ):
         raise ValueError("tests stage is not bound to its implementation Pi session")
 
-    new_session_stages = ("planning", "implementation", "handoff")
+    new_session_stages = ("planning", "implementation")
     new_bindings = [
         by_stage[stage]["provider"]["session_binding_sha256"] for stage in new_session_stages
     ]
     if len(set(new_bindings)) != len(new_bindings):
         raise ValueError("independent Pi stages reuse pooled session bindings")
 
-    pr_identities = [by_stage[stage]["pr_identity"] for stage in ("commit-pr", "review", "handoff")]
+    pr_identities = [by_stage[stage]["pr_identity"] for stage in ("commit-pr", "review")]
     if pr_identities[0] is None or any(identity != pr_identities[0] for identity in pr_identities):
         raise ValueError("GitHub lifecycle receipts do not identify one exact pull request")
     committed_head = by_stage["commit-pr"]["worktree"]["head"]
-    if any(
-        by_stage[stage]["worktree"]["head"] != committed_head for stage in ("review", "handoff")
-    ):
-        raise ValueError("review and handoff are not bound to the committed PR head")
+    if by_stage["review"]["worktree"]["head"] != committed_head:
+        raise ValueError("review and learning handoff are not bound to the committed PR head")
     return by_stage
 
 
@@ -2432,6 +2875,19 @@ def _verify_publication(
     for field, expected in evidence.items():
         if publication.get(field) != expected:
             raise ValueError(f"publication {field} does not match its local evidence")
+    verified_defects = publication.get("verified_defects")
+    if not isinstance(verified_defects, bool):
+        raise ValueError("publication verified_defects flag is invalid")
+    verified_follow_ups = publication.get("verified_follow_up_issues")
+    if verified_defects:
+        live_follow_ups = _verify_defect_follow_ups(
+            manifest,
+            Path(_stage_receipt_string(manifest, "repo_root")),
+        )
+        if verified_follow_ups != live_follow_ups:
+            raise ValueError("publication follow-up issue proof is stale")
+    elif verified_follow_ups != []:
+        raise ValueError("publication contains unverified follow-up issue proof")
 
 
 def _verify_run(
@@ -2478,11 +2934,33 @@ def _full_commit_sha(value: object, *, label: str) -> str:
     return value
 
 
+def _github_repository_from_remote(value: str) -> str:
+    """Return an owner/repository slug from a canonical GitHub remote URL."""
+    normalized = value.strip().removesuffix("/").removesuffix(".git")
+    for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
+        if normalized.startswith(prefix):
+            repository = normalized.removeprefix(prefix)
+            if re.fullmatch(r"[A-Za-z0-9.-]+/[A-Za-z0-9._-]+", repository):
+                return repository
+    return ""
+
+
 def _resolve_publication_commit(repo_root: Path, ref: str) -> str:
     """Resolve a publication ref and require it to be the immutable commit name."""
     if not isinstance(ref, str) or not ref:
         raise ValueError("publication ref must identify an existing commit")
     try:
+        remote_result = subprocess.run(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        repository = _github_repository_from_remote(remote_result.stdout)
+        if remote_result.returncode != 0 or repository.casefold() != PROJECT_REPOSITORY.casefold():
+            raise ValueError(
+                "publication checkout does not identify the configured GitHub repository"
+            )
         result = subprocess.run(
             [
                 "git",
@@ -2524,7 +3002,7 @@ def _publication_attestation_evidence(
         raise ValueError("publication commit does not match the captured snapshot")
 
     workflow_receipts: list[dict[str, Any]] = []
-    for stage in ("commit-pr", "review", "handoff"):
+    for stage in ("commit-pr", "review"):
         receipt = stage_receipts.get(stage)
         if not isinstance(receipt, dict):
             raise ValueError(f"publication lacks the required {stage} workflow receipt")
@@ -2575,13 +3053,9 @@ def _attest_publication(
         raise ValueError("publication manifest lacks a configured repository path")
     commit_sha = _resolve_publication_commit(Path(repo_root_value), ref)
     evidence = _publication_attestation_evidence(manifest, stage_receipts, commit_sha)
-    if verify_defects:
-        defects = cast(list[dict[str, Any]], manifest.get("defects", []))
-        if not all(
-            isinstance(entry.get("follow_up_issue"), int) and entry["follow_up_issue"] > 0
-            for entry in defects
-        ):
-            raise ValueError("one or more defects lacks a valid follow-up issue")
+    verified_follow_ups = (
+        _verify_defect_follow_ups(manifest, Path(repo_root_value)) if verify_defects else []
+    )
     publication = {
         "repo": repo,
         "ref": commit_sha,
@@ -2590,6 +3064,7 @@ def _attest_publication(
         "report": str(report_path),
         "runbook": str(runbook_path),
         "verified_defects": verify_defects,
+        "verified_follow_up_issues": verified_follow_ups,
         "attested_at": _utc_now(),
     }
     _update_manifest(run_dir, {"publication": publication})
@@ -2664,7 +3139,15 @@ def build_parser() -> argparse.ArgumentParser:
     stage_receipt.add_argument("--run-id", required=True)
     stage_receipt.add_argument("--capture-id", required=True)
     stage_receipt.add_argument("--receipt", type=Path, required=True)
-    stage_receipt.add_argument("--athena-host-receipt", type=Path)
+
+    athena_receipt = subparsers.add_parser(
+        "record-athena-host-receipt",
+        help="persist a typed host receipt and correlate it to a Pi-backed job",
+    )
+    athena_receipt.add_argument("--run-id", required=True)
+    athena_receipt.add_argument("--kind", choices=("advise", "learn"), required=True)
+    athena_receipt.add_argument("--correlated-capture-id", required=True)
+    athena_receipt.add_argument("--receipt", type=Path, required=True)
 
     render = subparsers.add_parser("render", help="render the report and runbook")
     render.add_argument("--run-id", required=True)
@@ -2758,6 +3241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "record-defect":
             return _record_defect(
                 run_dir,
+                repo_root=repo_root,
                 summary=args.summary,
                 follow_up_issue=args.follow_up_issue,
                 details=args.details,
@@ -2774,7 +3258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_dir,
                 capture_id=args.capture_id,
                 receipt_path=args.receipt,
-                athena_host_receipt_path=args.athena_host_receipt,
+            )
+        if args.command == "record-athena-host-receipt":
+            return _record_athena_host_receipt(
+                run_dir,
+                kind=args.kind,
+                correlated_capture_id=args.correlated_capture_id,
+                receipt_path=args.receipt,
             )
         if args.command == "render":
             return _render_artifacts(run_dir, args.report, args.runbook)

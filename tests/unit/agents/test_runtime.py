@@ -2120,6 +2120,35 @@ def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Pa
     resume_pi_session.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "invoke",
+    (
+        lambda cwd: agent_runtime.run_agent_text("pi", "prompt", cwd=cwd, timeout=30),
+        lambda cwd: agent_runtime.run_agent_session("pi", "prompt", cwd=cwd, timeout=30),
+        lambda cwd: agent_runtime.resume_agent_session(
+            "pi", "pi-session-123", "prompt", cwd=cwd, timeout=30
+        ),
+    ),
+    ids=("text", "session", "resume"),
+)
+def test_admitted_pi_requires_execution_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invoke: Any,
+) -> None:
+    """Admitted Pi dispatches preserve the missing-request policy error."""
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+
+    with patch("hephaestus.agents.runtime._run_pi_with_policy") as run_pi:
+        with pytest.raises(
+            ExecutionPolicyError,
+            match="Pi automation requires an ExecutionRequest",
+        ):
+            invoke(tmp_path)
+
+    run_pi.assert_not_called()
+
+
 def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
     """Claude stage execution should share the agents runtime boundary."""
     captured: dict[str, Any] = {}
