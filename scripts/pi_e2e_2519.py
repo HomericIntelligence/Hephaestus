@@ -197,6 +197,67 @@ def _append_defect_entry(run_dir: Path, entry: dict[str, Any]) -> dict[str, Any]
     return manifest
 
 
+def _latest_snapshot_head(manifest: dict[str, Any]) -> str:
+    for snapshot in reversed(manifest.get("snapshots", [])):
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("head"), str):
+            return cast(str, snapshot["head"])
+    return ""
+
+
+def _comparison_payload(pi_entry: dict[str, Any], control_entry: dict[str, Any]) -> dict[str, Any]:
+    """Return one paired, manifest-verifiable provider comparison."""
+    keys = ("stage", "prompt_sha256", "revision")
+    if any(not pi_entry.get(key) or pi_entry.get(key) != control_entry.get(key) for key in keys):
+        raise ValueError("comparison requires the same stage, prompt, and revision")
+
+    def outcome(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": entry.get("status"),
+            "returncode": entry.get("returncode"),
+            "timed_out": entry.get("timed_out"),
+            "stdout_digest": entry.get("stdout_digest"),
+            "stderr_digest": entry.get("stderr_digest"),
+        }
+
+    pi_outcome = outcome(pi_entry)
+    control_outcome = outcome(control_entry)
+    return {
+        "pi_entry_id": pi_entry.get("id"),
+        "control_entry_id": control_entry.get("id"),
+        "stage": pi_entry["stage"],
+        "prompt_sha256": pi_entry["prompt_sha256"],
+        "revision": pi_entry["revision"],
+        "pi_outcome": pi_outcome,
+        "control_outcome": control_outcome,
+        "outcomes_match": (
+            pi_outcome["status"] == control_outcome["status"]
+            and pi_outcome["returncode"] == control_outcome["returncode"]
+            and pi_outcome["timed_out"] == control_outcome["timed_out"]
+        ),
+        "stdout_matches": pi_outcome["stdout_digest"] == control_outcome["stdout_digest"],
+        "stderr_matches": pi_outcome["stderr_digest"] == control_outcome["stderr_digest"],
+    }
+
+
+def _refresh_comparisons(run_dir: Path) -> None:
+    """Persist every newly available Pi/control pair exactly once."""
+    manifest = _load_manifest(run_dir)
+    captures = [entry for entry in manifest["commands"] if entry.get("kind") == "capture"]
+    comparisons: list[dict[str, Any]] = []
+    for pi_entry in captures:
+        if pi_entry.get("provider") != PI_PROVIDER_NAME:
+            continue
+        for control_entry in captures:
+            if control_entry.get("provider") in {None, PI_PROVIDER_NAME}:
+                continue
+            try:
+                comparisons.append(_comparison_payload(pi_entry, control_entry))
+            except ValueError:
+                continue
+    manifest["comparisons"] = comparisons
+    _save_manifest(run_dir, manifest)
+
+
 def _update_manifest(run_dir: Path, patch: dict[str, Any]) -> dict[str, Any]:
     manifest = _load_manifest(run_dir)
     manifest.update(patch)
@@ -759,6 +820,7 @@ def _record_command(
         "timeout_seconds": timeout_seconds,
         "timed_out": timed_out,
         "prompt_sha256": _prompt_digest(prompt),
+        "revision": _latest_snapshot_head(manifest),
         "session_ids": analysis["session_ids"],
         "observed_skill_invocations": analysis["observed_skill_invocations"],
         "provider_skill_mentions": analysis["provider_skill_mentions"],
@@ -780,6 +842,7 @@ def _record_command(
         "finished_at": _utc_now(),
     }
     _append_command_entry(run_dir, entry)
+    _refresh_comparisons(run_dir)
     sys.stdout.write(stdout)
     sys.stderr.write(stderr)
     return returncode
@@ -804,8 +867,24 @@ def _record_failure_probe(
         timeout_seconds=timeout_seconds,
     )
     if rc == 0:
+        manifest = _load_manifest(run_dir)
+        manifest["commands"][-1]["kind"] = "failure_probe"
+        manifest["commands"][-1]["status"] = "unexpected_success"
+        _save_manifest(run_dir, manifest)
+        _refresh_comparisons(run_dir)
         print("error: failure probe unexpectedly succeeded", file=sys.stderr)
         return 1
+    manifest = _load_manifest(run_dir)
+    probe = manifest["commands"][-1]
+    probe["kind"] = "failure_probe"
+    if probe.get("timed_out") is True:
+        probe["status"] = "unexpected_timeout"
+        _save_manifest(run_dir, manifest)
+        _refresh_comparisons(run_dir)
+        return 1
+    probe["status"] = "expected_failure"
+    _save_manifest(run_dir, manifest)
+    _refresh_comparisons(run_dir)
     return 0
 
 
@@ -1362,18 +1441,32 @@ def _verify_comparison(manifest: dict[str, Any]) -> None:
     providers = {entry.get("provider") for entry in capture_entries if entry.get("provider")}
     if len(providers) < 2:
         raise ValueError("comparison requires at least two distinct provider runs")
-    pi_keys = {
-        (entry.get("stage"), entry.get("prompt_sha256"))
-        for entry in capture_entries
-        if entry.get("provider") == PI_PROVIDER_NAME
-    }
-    control_keys = {
-        (entry.get("stage"), entry.get("prompt_sha256"))
-        for entry in capture_entries
-        if entry.get("provider") not in {None, PI_PROVIDER_NAME}
-    }
-    if not pi_keys.intersection(control_keys):
-        raise ValueError("comparison requires Pi and control runs for the same stage and prompt")
+    comparisons = manifest.get("comparisons")
+    if not isinstance(comparisons, list) or not comparisons:
+        raise ValueError("comparison requires a persisted Pi/control pair")
+    by_id = {entry.get("id"): entry for entry in capture_entries}
+    for comparison in comparisons:
+        if not isinstance(comparison, dict):
+            raise ValueError("comparison record is malformed")
+        pi_entry = by_id.get(comparison.get("pi_entry_id"))
+        control_entry = by_id.get(comparison.get("control_entry_id"))
+        if pi_entry is None or control_entry is None:
+            raise ValueError("comparison references a missing capture")
+        if comparison != _comparison_payload(pi_entry, control_entry):
+            raise ValueError("comparison no longer matches its paired captures")
+
+
+def _verify_failure_probes(manifest: dict[str, Any]) -> None:
+    for probe in manifest.get("commands", []):
+        if probe.get("kind") != "failure_probe":
+            continue
+        if (
+            probe.get("status") != "expected_failure"
+            or probe.get("timed_out") is not False
+            or not isinstance(probe.get("returncode"), int)
+            or probe["returncode"] == 0
+        ):
+            raise ValueError("failure probe did not record its expected nonzero outcome")
 
 
 def _verify_mnemosyne(manifest: dict[str, Any]) -> None:
@@ -1393,6 +1486,7 @@ def _verify_completion(manifest: dict[str, Any]) -> None:
     _verify_workflow(manifest)
     _verify_capture(manifest)
     _verify_comparison(manifest)
+    _verify_failure_probes(manifest)
     _verify_mnemosyne(manifest)
     pi = cast(dict[str, Any], manifest.get("pi", {}))
     inventory = cast(dict[str, Any], pi.get("package_inventory", {}))
@@ -1502,6 +1596,11 @@ def _attest_publication(
         raise ValueError(f"publication repository must be {PROJECT_REPOSITORY}")
     if FULL_COMMIT_SHA_RE.fullmatch(ref) is None:
         raise ValueError("publication ref must be a full immutable commit SHA")
+    snapshot_heads = {
+        entry.get("head") for entry in manifest.get("snapshots", []) if isinstance(entry, dict)
+    }
+    if ref not in snapshot_heads:
+        raise ValueError("publication ref must match a recorded repository snapshot")
     live_pr = _stable_live_pull_request(Path(manifest["repo_root"]), pr_number)
     if live_pr["head_sha"] != ref:
         raise ValueError("publication ref does not match the live pull-request head")
