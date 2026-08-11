@@ -1939,6 +1939,14 @@ def _require_pi_request(execution_request: ExecutionRequest | None) -> Execution
     return resolve_policy(execution_request)
 
 
+def _require_admitted_pi_policy(
+    cwd: Path, execution_request: ExecutionRequest | None
+) -> ExecutionPolicy:
+    """Require Pi admission before resolving its caller-supplied execution policy."""
+    _require_pi_automation_admission(cwd)
+    return _require_pi_request(execution_request)
+
+
 def _pi_policy_args(policy: ExecutionPolicy) -> list[str]:
     """Translate a reviewed policy to Pi's model-visible capability flags.
 
@@ -2003,8 +2011,7 @@ def run_agent_text(
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
     if is_pi(agent):
-        _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
+        policy = _require_admitted_pi_policy(cwd, execution_request)
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is not SessionLifecycle.ONE_SHOT:
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
@@ -2048,8 +2055,7 @@ def run_agent_session(
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     if is_pi(agent):
-        _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
+        policy = _require_admitted_pi_policy(cwd, execution_request)
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
@@ -2117,8 +2123,7 @@ def resume_agent_session(
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     if is_pi(agent):
-        _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
+        policy = _require_admitted_pi_policy(cwd, execution_request)
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(

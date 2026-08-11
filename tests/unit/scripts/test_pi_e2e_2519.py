@@ -36,6 +36,7 @@ def _successful_live_pr_readback(
         "implementation_go": True,
         "implementation_no_go": False,
         "unresolved_threads": 0,
+        "unresolved_thread_ids": [],
         "native_auto_merge": False,
     }
 
@@ -223,6 +224,7 @@ def _host_athena_receipt(
 def _attach_host_athena_receipt(
     module: ModuleType,
     run_dir: Path,
+    manifest: dict[str, Any],
     entry: dict[str, Any],
     *,
     kind: str,
@@ -232,15 +234,31 @@ def _attach_host_athena_receipt(
         kind=kind,
         readback_head_sha=readback_head_sha,
     )
-    relative_path = Path("commands") / entry["id"] / f"athena-{kind}-host-receipt.json"
+    host_jobs = manifest.setdefault("athena_skill_jobs", [])
+    receipt_id = f"athena-skill-{len(host_jobs) + 1:02d}"
+    relative_path = (
+        Path(module.ATHENA_SKILL_JOBS_DIR_NAME) / receipt_id / f"athena-{kind}-host-receipt.json"
+    )
     receipt_path = run_dir / relative_path
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     receipt_path.write_bytes(content)
-    entry.setdefault("athena_host_receipts", {})[kind] = {
-        "artifact": str(relative_path),
-        "sha256": module._sha256_bytes(content),
-    }
+    stage = entry["stage"]
+    host_jobs.append(
+        {
+            "id": receipt_id,
+            "job_kind": "AthenaSkillJob",
+            "kind": kind,
+            "correlated_capture_id": entry["id"],
+            "correlated_stage": stage,
+            "correlated_role": module.ATHENA_SKILL_JOB_CORRELATIONS[stage][1],
+            "result": {
+                "artifact": str(relative_path),
+                "sha256": module._sha256_bytes(content),
+            },
+            "recorded_at": "2026-08-10T00:02:00Z",
+        }
+    )
 
 
 def _attach_capture_artifacts(
@@ -324,14 +342,52 @@ def _attach_stage_receipt(
         binding_sha = module._sha256_bytes(binding_path.read_bytes())
     entry["session_ids"] = session_ids
 
-    if stage == "planning":
-        _attach_host_athena_receipt(module, run_dir, entry, kind="advise")
-    elif stage == "review":
-        _attach_host_athena_receipt(module, run_dir, entry, kind="learn")
+    analysis = {
+        "provider": entry["provider"],
+        "stage": stage,
+        "command": [],
+        "returncode": entry["returncode"],
+        "timeout_seconds": 600,
+        "timed_out": entry["timed_out"],
+        "started_at": entry["started_at"],
+        "finished_at": entry["finished_at"],
+        "prompt_sha256": entry["prompt_sha256"],
+        "session_ids": session_ids,
+        "observed_skill_invocations": [],
+        "provider_skill_mentions": [],
+        "requested_skill_grants": entry["requested_skill_grants"],
+        "tool_scopes": entry["tool_scopes"],
+        "proxy_invocations": [],
+        "stdout_digest": entry["stdout_digest"],
+        "stderr_digest": entry["stderr_digest"],
+        "stdout_event_count": 0,
+        "stderr_event_count": 0,
+        "execution_policy": entry["execution_policy"],
+        "stdout_path": entry["artifacts"]["stdout"],
+        "stderr_path": entry["artifacts"]["stderr"],
+        "proxy_log_path": f"commands/{entry['id']}/provider-proxy.jsonl",
+        "outcome": "success",
+    }
+    analysis_path = run_dir / "commands" / entry["id"] / "analysis.json"
+    analysis_path.write_text(
+        json.dumps(analysis, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    entry["artifacts"]["analysis"] = str(analysis_path.relative_to(run_dir))
+    analysis_sha = module._sha256_bytes(analysis_path.read_bytes())
+    invocation_id = module._observed_provider_invocation_id(entry, analysis_sha)
 
     head = entry["revision"]
+    coordinator_receipt_id = module._sha256_text(f"coordinator-{stage}")
+    worktree_receipt_id = module._sha256_text(f"worktree-{stage}")
+    lifecycle_receipt_id = module._sha256_text(f"lifecycle-{stage}")
     lifecycle: dict[str, Any] = {
         "kind": module.PI_STAGE_LIFECYCLE_KINDS[stage],
+        "receipt_id": lifecycle_receipt_id,
+        "capture_id": entry["id"],
+        "coordinator_receipt_id": coordinator_receipt_id,
+        "worktree_receipt_id": worktree_receipt_id,
+        "provider_invocation_id": invocation_id,
         "fixture_sha256": module._fixture_digest(manifest),
         "head_sha": head,
         "success": True,
@@ -339,7 +395,6 @@ def _attach_stage_receipt(
     if stage == "discovery":
         lifecycle.update(paths=list(module.FIXTURE_PATHS), all_paths_found=True)
     elif stage == "planning":
-        lifecycle["athena_receipt_sha256"] = entry["athena_host_receipts"]["advise"]["sha256"]
         lifecycle["plan_sha256"] = entry["stdout_digest"]
     elif stage == "implementation":
         lifecycle.update(
@@ -355,6 +410,8 @@ def _attach_stage_receipt(
         )
     else:
         lifecycle["pull_request"] = {
+            "receipt_id": module._sha256_text(f"pull-request-{stage}"),
+            "lifecycle_receipt_id": lifecycle_receipt_id,
             "repository": module.PROJECT_REPOSITORY,
             "number": 2519,
             "url": f"https://github.com/{module.PROJECT_REPOSITORY}/pull/2519",
@@ -373,8 +430,19 @@ def _attach_stage_receipt(
                 unresolved_threads=0,
                 native_auto_merge=False,
                 review_receipt_id=module._sha256_text("review-receipt"),
-                learn_receipt_sha256=entry["athena_host_receipts"]["learn"]["sha256"],
-                finished_handoff=True,
+                handoff={
+                    "source": "hephaestus.automation.pipeline.coordinator",
+                    "destination_stage": "finished",
+                    "outcome": "accepted",
+                    "receipt_id": module._sha256_text("finished-handoff"),
+                    "coordinator_receipt_id": coordinator_receipt_id,
+                    "worktree_receipt_id": worktree_receipt_id,
+                    "provider_invocation_id": invocation_id,
+                    "review_receipt_id": module._sha256_text("review-receipt"),
+                    "head_sha": head,
+                    "pr_number": 2519,
+                    "completed_at": "2026-08-10T00:02:00Z",
+                },
             )
 
     payload = {
@@ -391,22 +459,28 @@ def _attach_stage_receipt(
             "job_kind": module.PI_STAGE_COORDINATOR_JOBS[stage],
             "sequence": sequence,
             "outcome": "success",
-            "receipt_id": module._sha256_text(f"coordinator-{stage}"),
+            "receipt_id": coordinator_receipt_id,
             "worker_id": f"worker-{sequence}",
             "completed_at": f"2026-08-10T00:00:{sequence:02d}Z",
         },
         "provider_evidence": {
+            "capture_id": entry["id"],
+            "coordinator_receipt_id": coordinator_receipt_id,
+            "capture_analysis_sha256": analysis_sha,
             "execution_policy": policy,
             "tool_scopes": policy["tool_scopes"],
             "skill_grants": policy["skill_grants"],
             "session_ids": session_ids,
-            "invocation_id": module._sha256_text(f"invocation-{stage}"),
+            "invocation_id": invocation_id,
             "stdout_sha256": entry["stdout_digest"],
             "stderr_sha256": entry["stderr_digest"],
             "session_binding_sha256": binding_sha,
             "resumed_from_capture_id": resumed_from,
         },
         "worktree": {
+            "receipt_id": worktree_receipt_id,
+            "capture_id": entry["id"],
+            "coordinator_receipt_id": coordinator_receipt_id,
             "root": str(Path(manifest["repo_root"]).resolve()),
             "git_dir": str(Path(manifest["repo_root"]).resolve() / ".git/worktrees/fixture"),
             "git_common_dir": str(Path(manifest["repo_root"]).resolve() / ".git"),
@@ -465,6 +539,9 @@ def _manifest_with_stage_receipts(
     ]
     for entry in manifest["commands"]:
         _attach_stage_receipt(module, run_dir, manifest, entry)
+    for stage, (kind, _role) in module.ATHENA_SKILL_JOB_CORRELATIONS.items():
+        entry = next(value for value in manifest["commands"] if value["stage"] == stage)
+        _attach_host_athena_receipt(module, run_dir, manifest, entry, kind=kind)
     module._save_manifest(run_dir, manifest)
     return run_dir, manifest
 
@@ -506,6 +583,7 @@ def _manifest_with_completion_evidence(
         "session_ids": ["private-control-session"],
         "skill_calls": [],
         "tool_scopes": ["read"],
+        "artifacts": {},
         "provider_invocations": [],
     }
     control.pop("stage_receipt", None)
@@ -524,6 +602,43 @@ def _manifest_with_completion_evidence(
             run_dir,
             pi_entry_id=planning["id"],
             control_entry_id=control["id"],
+        )
+        == 0
+    )
+    manifest = module._load_manifest(run_dir)
+    probe_prompt_sha256 = module._prompt_digest("expected failure comparison")
+    probes = []
+    for entry_id, provider, returncode in (
+        ("10-pi-failure-probe", "pi", 7),
+        ("11-control-failure-probe", "codex", 9),
+    ):
+        probe = {
+            "id": entry_id,
+            "kind": module.FAILURE_PROBE_KIND,
+            "provider": provider,
+            "stage": "review",
+            "fixture_sha256": module._fixture_digest(manifest),
+            "revision": revision,
+            "returncode": returncode,
+            "timed_out": False,
+            "prompt_sha256": probe_prompt_sha256,
+            **module._expected_failure_probe_fields(returncode, False),
+        }
+        _attach_capture_artifacts(
+            module,
+            run_dir,
+            probe,
+            stdout=f"{provider} expected failure",
+            stderr=f"{provider} expected failure details",
+        )
+        probes.append(probe)
+    manifest["commands"].extend(probes)
+    module._save_manifest(run_dir, manifest)
+    assert (
+        module._record_comparison(
+            run_dir,
+            pi_entry_id=probes[0]["id"],
+            control_entry_id=probes[1]["id"],
         )
         == 0
     )
@@ -548,36 +663,23 @@ def _rewrite_stage_receipt(
 def _rewrite_athena_host_receipt(
     module: ModuleType,
     run_dir: Path,
+    manifest: dict[str, Any],
     entry: dict[str, Any],
     mutate: Any,
 ) -> None:
     kind = {"planning": "advise", "review": "learn"}[entry["stage"]]
-    descriptor = entry["athena_host_receipts"][kind]
+    host_job = next(
+        job
+        for job in manifest["athena_skill_jobs"]
+        if job["correlated_capture_id"] == entry["id"] and job["kind"] == kind
+    )
+    descriptor = host_job["result"]
     receipt_path = run_dir / descriptor["artifact"]
     payload = json.loads(receipt_path.read_text(encoding="utf-8"))
     mutate(payload)
     content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     receipt_path.write_bytes(content)
     descriptor["sha256"] = module._sha256_bytes(content)
-    stage = entry.get("stage")
-    lifecycle_field = (
-        {
-            "planning": "athena_receipt_sha256",
-            "review": "learn_receipt_sha256",
-        }.get(stage)
-        if isinstance(stage, str)
-        else None
-    )
-    if lifecycle_field is not None and "stage_receipt" in entry:
-        _rewrite_stage_receipt(
-            module,
-            run_dir,
-            entry,
-            lambda payload: payload["lifecycle"].__setitem__(
-                lifecycle_field,
-                descriptor["sha256"],
-            ),
-        )
 
 
 def test_init_creates_private_manifest_and_owner_only_directory(
@@ -594,6 +696,57 @@ def test_init_creates_private_manifest_and_owner_only_directory(
     assert manifest["fixture"]["title"] == "fix(utils): reject negative byte sizes"
     assert run_dir.name == "run-1"
     assert stat.S_IMODE(run_dir.stat().st_mode) & 0o077 == 0
+
+
+def test_init_uses_only_resolved_contained_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """init() must mkdir, chmod, and write through resolved contained paths."""
+    module = _load_module()
+    resolved_run_root = tmp_path / "private-runs"
+    run_root_alias = tmp_path / "run-root-alias"
+    resolved_run_root.mkdir()
+    run_root_alias.symlink_to(resolved_run_root, target_is_directory=True)
+    ensured_paths: list[Path] = []
+    written_paths: list[Path] = []
+    ensure_owner_only_dir = module._ensure_owner_only_dir
+    write_secure = module.write_secure
+
+    def record_ensure(path: Path) -> Path:
+        ensured_paths.append(path)
+        return ensure_owner_only_dir(path)
+
+    def record_write(path: Path, content: str) -> None:
+        written_paths.append(path)
+        write_secure(path, content)
+
+    monkeypatch.setattr(module, "_ensure_owner_only_dir", record_ensure)
+    monkeypatch.setattr(module, "write_secure", record_write)
+
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(tmp_path / "repo"),
+                "--run-root",
+                str(run_root_alias),
+                "init",
+                "--run-id",
+                "run-1",
+            ]
+        )
+        == 0
+    )
+
+    assert ensured_paths
+    assert all(path == path.resolve() for path in ensured_paths)
+    assert ensured_paths[0] == resolved_run_root.resolve()
+    assert all(
+        path == resolved_run_root.resolve() or path.is_relative_to(resolved_run_root.resolve())
+        for path in ensured_paths
+    )
+    assert written_paths == [resolved_run_root.resolve() / "run-1" / "run.json"]
 
 
 @pytest.mark.parametrize(
@@ -878,7 +1031,7 @@ def test_failure_probe_rejects_generic_direct_pi_command(tmp_path: Path) -> None
     assert module._load_manifest(run_dir)["commands"] == []
 
 
-@pytest.mark.parametrize("stage", ("advise", "handoff"))
+@pytest.mark.parametrize("stage", ("advise", "learn"))
 def test_host_owned_athena_stages_never_call_pi_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -939,7 +1092,11 @@ def test_typed_host_receipt_is_collected_independently_and_correlated(
     evidence_root.mkdir()
     run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
     planning = next(entry for entry in manifest["commands"] if entry["stage"] == "planning")
-    planning.pop("athena_host_receipts")
+    manifest["athena_skill_jobs"] = [
+        job
+        for job in manifest["athena_skill_jobs"]
+        if job["correlated_capture_id"] != planning["id"]
+    ]
     module._save_manifest(run_dir, manifest)
     receipt_path = tmp_path / "advise-result.json"
     receipt_path.write_text(
@@ -970,14 +1127,25 @@ def test_typed_host_receipt_is_collected_independently_and_correlated(
 
     recorded = module._load_manifest(run_dir)
     correlated = next(entry for entry in recorded["commands"] if entry["id"] == planning["id"])
-    payload = module._load_athena_host_receipt(run_dir, correlated, "advise")
+    assert "athena_host_receipts" not in correlated
+    host_jobs = recorded["athena_skill_jobs"]
+    assert len(host_jobs) == 3
+    host_job = next(job for job in host_jobs if job["correlated_capture_id"] == planning["id"])
+    assert host_job["job_kind"] == "AthenaSkillJob"
+    assert host_job["kind"] == "advise"
+    assert host_job["correlated_capture_id"] == planning["id"]
+    assert host_job["correlated_stage"] == "planning"
+    assert host_job["correlated_role"] == "planner"
+    assert "provider" not in host_job
+    assert "execution_policy" not in host_job
+    payload = module._load_athena_host_receipt(run_dir, host_job)
     assert set(payload) == {"kind", "context", "receipt", "delivery_receipt", "error"}
     assert "provider" not in payload
     assert "pi_command_receipt" not in payload
     assert (
         module._verify_host_athena_receipt(
             run_dir,
-            correlated,
+            host_job,
             expected_kind="advise",
         )
         == "advise"
@@ -1371,9 +1539,8 @@ def test_mnemosyne_verification_rejects_forged_provider_prose(
     """Provider-controlled skill names are not Athena/Mnemosyne receipts."""
     module = _load_module()
     run_dir, manifest = _manifest_with_stage_receipts(module, tmp_path)
+    manifest["athena_skill_jobs"] = []
     for entry in manifest["commands"]:
-        if entry["stage"] in {"planning", "review"}:
-            entry.pop("athena_host_receipts")
         entry["provider_skill_mentions"] = list(module.REQUIRED_SKILL_COMMANDS)
         entry["observed_skill_invocations"] = list(module.REQUIRED_SKILL_COMMANDS)
     module._save_manifest(run_dir, manifest)
@@ -1402,9 +1569,8 @@ def test_mnemosyne_verification_rejects_requested_command_grants(
     """Requested --commands grants are not Athena/Mnemosyne receipts."""
     module = _load_module()
     run_dir, manifest = _manifest_with_stage_receipts(module, tmp_path)
+    manifest["athena_skill_jobs"] = []
     for entry in manifest["commands"]:
-        if entry["stage"] in {"planning", "review"}:
-            entry.pop("athena_host_receipts")
         entry["provider_invocations"] = [
             {
                 "tool": "pi",
@@ -1432,11 +1598,20 @@ def test_mnemosyne_verification_rejects_requested_command_grants(
 
 
 def test_mnemosyne_verification_accepts_pi_bound_host_and_stage_receipts(tmp_path: Path) -> None:
-    """Canonical stage, advise, review, and PR-readback learn receipts are sufficient."""
+    """Independent host receipts correlate to the Pi planner, implementer, and reviewer."""
     module = _load_module()
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
     run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+    assert {
+        (job["kind"], job["correlated_stage"], job["correlated_role"])
+        for job in manifest["athena_skill_jobs"]
+    } == {
+        ("advise", "planning", "planner"),
+        ("advise", "implementation", "implementer"),
+        ("learn", "review", "pr_reviewer"),
+    }
+    assert all("athena_host_receipts" not in entry for entry in manifest["commands"])
 
     assert (
         module.main(
@@ -1498,6 +1673,7 @@ def test_mnemosyne_verification_rejects_learn_receipt_without_matching_readback(
     _rewrite_athena_host_receipt(
         module,
         run_dir,
+        manifest,
         review,
         lambda payload: payload["delivery_receipt"].__setitem__(
             "readback_head_sha",
@@ -1536,13 +1712,122 @@ def test_stage_receipts_reject_noop_labels_and_pooled_evidence(tmp_path: Path) -
     labels_only = json.loads(json.dumps(manifest))
     for entry in labels_only["commands"]:
         entry.pop("stage_receipt", None)
-    with pytest.raises(ValueError, match="artifact descriptor"):
+    with pytest.raises(ValueError, match="required Pi stages are missing"):
         module._verify_stage_receipts(labels_only, run_dir)
 
     pooled = json.loads(json.dumps(manifest))
     pooled["commands"][1]["stage_receipt"] = pooled["commands"][0]["stage_receipt"]
     with pytest.raises(ValueError, match="not bound to its successful capture"):
         module._verify_stage_receipts(pooled, run_dir)
+
+
+def test_stage_receipts_reject_caller_relabeling_of_coordinator_observation(
+    tmp_path: Path,
+) -> None:
+    """Caller stage strings cannot reclassify a coordinator-observed provider job."""
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+    discovery = next(entry for entry in manifest["commands"] if entry["stage"] == "discovery")
+    discovery["stage"] = "planning"
+    _rewrite_stage_receipt(
+        module,
+        run_dir,
+        discovery,
+        lambda payload: payload.__setitem__("stage", "planning"),
+    )
+
+    with pytest.raises(ValueError, match="caller stage label"):
+        module._verify_stage_receipts(manifest, run_dir)
+
+
+def test_stage_receipts_reject_unobserved_unique_provider_invocation(
+    tmp_path: Path,
+) -> None:
+    """Unique caller values cannot replace a capture-owned provider observation."""
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+    planning = next(entry for entry in manifest["commands"] if entry["stage"] == "planning")
+    fabricated_invocation_id = module._sha256_text("caller-fabricated-unique-invocation")
+
+    def fabricate(payload: dict[str, Any]) -> None:
+        payload["provider_evidence"]["invocation_id"] = fabricated_invocation_id
+        payload["lifecycle"]["provider_invocation_id"] = fabricated_invocation_id
+
+    _rewrite_stage_receipt(module, run_dir, planning, fabricate)
+
+    with pytest.raises(ValueError, match="not host-observed"):
+        module._verify_stage_receipts(manifest, run_dir)
+
+
+def test_stage_receipts_reject_pooled_capture_artifacts(tmp_path: Path) -> None:
+    """Each provider stage must retain analysis and output artifacts under its capture ID."""
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+    discovery = next(entry for entry in manifest["commands"] if entry["stage"] == "discovery")
+    review = next(entry for entry in manifest["commands"] if entry["stage"] == "review")
+    review["artifacts"]["stdout"] = discovery["artifacts"]["stdout"]
+    review["stdout_digest"] = discovery["stdout_digest"]
+    _rewrite_stage_receipt(
+        module,
+        run_dir,
+        review,
+        lambda payload: payload["provider_evidence"].__setitem__(
+            "stdout_sha256", discovery["stdout_digest"]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="stdout artifact is not capture-owned"):
+        module._verify_stage_receipts(manifest, run_dir)
+
+
+def test_stage_receipts_reject_pooled_worktree_and_github_receipt_ids(
+    tmp_path: Path,
+) -> None:
+    """Worktree and GitHub readbacks remain distinct stage-specific receipts."""
+    module = _load_module()
+    for target in ("worktree", "pull-request"):
+        evidence_root = tmp_path / target
+        evidence_root.mkdir()
+        run_dir, manifest = _manifest_with_stage_receipts(module, evidence_root)
+        discovery = next(entry for entry in manifest["commands"] if entry["stage"] == "discovery")
+        planning = next(entry for entry in manifest["commands"] if entry["stage"] == "planning")
+        commit_pr = next(entry for entry in manifest["commands"] if entry["stage"] == "commit-pr")
+        review = next(entry for entry in manifest["commands"] if entry["stage"] == "review")
+        if target == "worktree":
+            discovery_payload = json.loads(
+                (run_dir / discovery["stage_receipt"]["artifact"]).read_text(encoding="utf-8")
+            )
+            pooled_id = discovery_payload["worktree"]["receipt_id"]
+
+            def pool(payload: dict[str, Any], receipt_id: str = pooled_id) -> None:
+                payload["worktree"]["receipt_id"] = receipt_id
+                payload["lifecycle"]["worktree_receipt_id"] = receipt_id
+
+            _rewrite_stage_receipt(module, run_dir, planning, pool)
+            message = "pooled worktree receipt evidence"
+        else:
+            commit_payload = json.loads(
+                (run_dir / commit_pr["stage_receipt"]["artifact"]).read_text(encoding="utf-8")
+            )
+            pooled_id = commit_payload["lifecycle"]["pull_request"]["receipt_id"]
+            _rewrite_stage_receipt(
+                module,
+                run_dir,
+                review,
+                lambda payload, receipt_id=pooled_id: payload["lifecycle"][
+                    "pull_request"
+                ].__setitem__("receipt_id", receipt_id),
+            )
+            message = "one exact pull request"
+
+        with pytest.raises(ValueError, match=message):
+            module._verify_stage_receipts(manifest, run_dir)
 
 
 @pytest.mark.parametrize(
@@ -1604,7 +1889,10 @@ def test_stage_receipts_reject_pooled_lifecycle_and_github_schemas(
         ),
     )
 
-    with pytest.raises(ValueError, match=message):
+    expected_message = (
+        "stage-specific coordinator observation" if target == "lifecycle" else message
+    )
+    with pytest.raises(ValueError, match=expected_message):
         module._verify_stage_receipts(manifest, run_dir)
 
 
@@ -1634,7 +1922,7 @@ def test_stage_receipts_reject_duplicate_capture_ids_and_pooled_sessions(
             list(discovery["session_ids"]),
         ),
     )
-    with pytest.raises(ValueError, match="pooled session evidence"):
+    with pytest.raises(ValueError, match="analysis session_ids"):
         module._verify_stage_receipts(manifest, run_dir)
 
 
@@ -1659,7 +1947,7 @@ def test_stage_receipts_require_per_stage_session_policy_and_artifact_readback(
                     ),
                 ),
             ),
-            "observed session evidence",
+            "analysis session_ids",
         ),
         (
             "missing-policy",
@@ -1804,6 +2092,7 @@ def test_stage_receipt_rebinds_review_claims_to_live_github(
     live["implementation_go"] = False
     live["implementation_no_go"] = True
     live["unresolved_threads"] = 1
+    live["unresolved_thread_ids"] = ["PRRT_adversarial-unresolved-thread"]
     module._live_pull_request_readback = lambda *_args: dict(live)  # type: ignore[attr-defined]
 
     with pytest.raises(ValueError, match="live GitHub label and thread readback"):
@@ -1913,6 +2202,53 @@ def test_stage_receipt_verification_performs_a_final_live_rebind(
     assert live_reads >= 2
 
 
+def test_publication_attestation_performs_a_final_live_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A PR head changed after completion verification cannot be attested."""
+    module = _load_module()
+    run_dir, manifest = _manifest_with_stage_receipts(module, tmp_path)
+    commit_sha = "a" * 40
+    manifest["snapshots"] = [{"head": commit_sha}]
+    module._save_manifest(run_dir, manifest)
+
+    live_reads = 0
+
+    def moving_head(repository: str, pr_number: int, repo_root: Path) -> dict[str, Any]:
+        nonlocal live_reads
+        live_reads += 1
+        readback = _successful_live_pr_readback(repository, pr_number, repo_root)
+        if live_reads > 2:
+            readback["head_sha"] = "b" * 40
+        return readback
+
+    module._live_pull_request_readback = moving_head  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        module,
+        "_verify_completion",
+        lambda current_manifest, current_run_dir: module._verify_stage_receipts(
+            current_manifest,
+            current_run_dir,
+        ),
+    )
+    monkeypatch.setattr(module, "_verify_publication", lambda *_args: None)
+    monkeypatch.setattr(module, "_resolve_publication_commit", lambda *_args: commit_sha)
+
+    with pytest.raises(ValueError, match="does not match live GitHub"):
+        module._attest_publication(
+            run_dir,
+            repo=module.PROJECT_REPOSITORY,
+            ref=commit_sha,
+            report_path=tmp_path / "report.md",
+            runbook_path=tmp_path / "runbook.md",
+            verify_defects=False,
+        )
+
+    assert live_reads >= 3
+    assert module._load_manifest(run_dir)["publication"] == {}
+
+
 def test_stage_receipts_require_worktree_test_github_and_handoff_readbacks(
     tmp_path: Path,
 ) -> None:
@@ -1946,8 +2282,8 @@ def test_stage_receipts_require_worktree_test_github_and_handoff_readbacks(
         (
             "handoff",
             "review",
-            lambda payload: payload["lifecycle"].__setitem__("finished_handoff", False),
-            "host learning handoff evidence",
+            lambda payload: payload["lifecycle"]["handoff"].__setitem__("outcome", "rejected"),
+            "stage-bound finished handoff receipt",
         ),
     )
     for name, stage, mutate, message in scenarios:
@@ -2069,6 +2405,8 @@ def test_record_comparison_rejects_unpaired_capture_metadata(
     [
         ("codex", "codex"),
         ("pi", "pi"),
+        ("pi", "claude"),
+        ("pi", "unrelated-provider"),
     ],
 )
 def test_record_comparison_rejects_unpaired_provider_roles(
@@ -2612,6 +2950,11 @@ def test_failure_probe_persists_an_admitted_pi_runtime_failure(
     assert (run_dir / probe["artifacts"]["stderr"]).read_text(encoding="utf-8") == (
         "durable pi stderr\n"
     )
+    analysis = json.loads((run_dir / probe["artifacts"]["analysis"]).read_text(encoding="utf-8"))
+    assert analysis["stdout_path"] == probe["artifacts"]["stdout"]
+    assert analysis["stderr_path"] == probe["artifacts"]["stderr"]
+    assert analysis["returncode"] == 7
+    assert analysis["timed_out"] is False
 
 
 def test_failure_probe_verification_rejects_an_unexpected_success() -> None:
@@ -2653,35 +2996,37 @@ def test_completion_accepts_expected_failure_probe_as_distinct_evidence(tmp_path
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
     run_dir, manifest = _manifest_with_completion_evidence(module, evidence_root)
-    manifest["commands"].append(
-        {
-            "id": "10-review-boundary-probe",
-            "kind": "failure_probe",
-            "evidence_kind": "expected_failure_probe",
-            "provider": "pi",
-            "stage": "review",
-            "fixture_sha256": module._fixture_digest(manifest),
-            "revision": "a" * 40,
-            "status": "expected_failure",
-            "returncode": 7,
-            "timed_out": False,
-            "expected_outcome": {
-                "returncode": "nonzero",
-                "timed_out": False,
-            },
-            "observed_outcome": {
-                "returncode": 7,
-                "timed_out": False,
-            },
-            "validation": {
-                "matches_expectation": True,
-                "result": "matched_expected_nonzero",
-            },
-        }
-    )
+
+    stage_capture_ids = {
+        receipt["capture_id"] for receipt in module._verify_completion(manifest, run_dir).values()
+    }
+    probe_ids = {
+        entry["id"]
+        for entry in manifest["commands"]
+        if entry.get("kind") == module.FAILURE_PROBE_KIND
+    }
+    assert probe_ids
+    assert stage_capture_ids.isdisjoint(probe_ids)
+
+
+def test_completion_requires_expected_failure_probe_comparison(tmp_path: Path) -> None:
+    """A successful workflow comparison cannot replace expected-failure evidence."""
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    run_dir, manifest = _manifest_with_completion_evidence(module, evidence_root)
+    manifest["comparisons"] = [
+        comparison
+        for comparison in manifest["comparisons"]
+        if comparison["pi_outcome"]["kind"] != module.FAILURE_PROBE_KIND
+    ]
     module._save_manifest(run_dir, manifest)
 
-    assert module._verify_completion(module._load_manifest(run_dir), run_dir)
+    with pytest.raises(
+        ValueError,
+        match="completion requires a paired expected failure probe comparison",
+    ):
+        module._verify_completion(module._load_manifest(run_dir), run_dir)
 
 
 def test_completion_rejects_unexpected_successful_failure_probe(tmp_path: Path) -> None:
@@ -2945,21 +3290,68 @@ def test_record_defect_rejects_unstable_live_follow_up_state(
     assert module._load_manifest(run_dir)["defects"] == []
 
 
+def test_follow_up_resolution_fails_closed_without_the_scoped_host_seam(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unavailable host seam must not degrade to caller-authored issue facts."""
+    module = _load_module()
+    monkeypatch.setattr(module, "PipelineGitHub", None)
+
+    with pytest.raises(ValueError, match="scoped GitHub host seam is unavailable"):
+        module._resolve_follow_up_issue_identity(tmp_path, 2600)
+
+
+def test_follow_up_identity_rejects_plain_manifest_shaped_data() -> None:
+    """Serializable issue claims cannot impersonate process-local host provenance."""
+    module = _load_module()
+
+    with pytest.raises(ValueError, match="host-derived live readback receipt"):
+        module._follow_up_identity_from_live_receipt(
+            {
+                "repository": "HomericIntelligence/Hephaestus",
+                "node_id": "I_kwDOQww0as52600",
+                "number": 2600,
+                "url": "https://github.com/HomericIntelligence/Hephaestus/issues/2600",
+                "state": "OPEN",
+                "parent_issue": 2519,
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("live_payload", "defect_count", "stored_node_id", "error"),
     [
+        (
+            RuntimeError("issue not found"),
+            1,
+            "I_kwDOQww0as52600",
+            "could not resolve",
+        ),
+        (
+            _follow_up_issue_payload(url="https://github.com/Elsewhere/Other/issues/2600"),
+            1,
+            "I_kwDOQww0as52600",
+            "mismatched GitHub identity",
+        ),
         (
             _follow_up_issue_payload(state="CLOSED"),
             1,
             "I_kwDOQww0as52600",
             "must be open",
         ),
+        (
+            _follow_up_issue_payload(body="Parent: #999\n"),
+            1,
+            "I_kwDOQww0as52600",
+            "must link to #2519",
+        ),
         (_follow_up_issue_payload(), 2, "I_kwDOQww0as52600", "duplicate follow-up issue"),
         (_follow_up_issue_payload(), 1, "I_stale_identity", "identity or live state/linkage"),
     ],
 )
 def test_publication_attestation_rejects_stale_or_duplicate_follow_up_proof(
-    live_payload: dict[str, Any],
+    live_payload: dict[str, Any] | Exception,
     defect_count: int,
     stored_node_id: str,
     error: str,
@@ -3129,6 +3521,7 @@ def test_render_verify_and_publication_attestation(
             "returncode": 7,
             "timed_out": False,
             "session_ids": ["private-probe-session"],
+            "artifacts": {},
             "expected_outcome": {
                 "returncode": "nonzero",
                 "timed_out": False,
@@ -3140,6 +3533,19 @@ def test_render_verify_and_publication_attestation(
             "validation": {
                 "matches_expectation": True,
                 "result": "matched_expected_nonzero",
+            },
+        }
+    )
+    manifest["commands"].append(
+        {
+            **manifest["commands"][-1],
+            "id": "12-control-review-boundary-probe",
+            "provider": "codex",
+            "returncode": 9,
+            "artifacts": {},
+            "observed_outcome": {
+                "returncode": 9,
+                "timed_out": False,
             },
         }
     )
@@ -3158,6 +3564,17 @@ def test_render_verify_and_publication_attestation(
                 stdout="stdout-planning",
                 stderr="stderr-planning",
             )
+        elif entry.get("kind") == module.FAILURE_PROBE_KIND:
+            _attach_capture_artifacts(
+                module,
+                run_dir,
+                entry,
+                stdout=f"{entry['provider']} expected failure",
+                stderr=f"{entry['provider']} expected failure details",
+            )
+    for stage, (kind, _role) in module.ATHENA_SKILL_JOB_CORRELATIONS.items():
+        entry = next(value for value in manifest["commands"] if value.get("stage") == stage)
+        _attach_host_athena_receipt(module, run_dir, manifest, entry, kind=kind)
     manifest["defects"] = [
         {
             "id": "defect-1",
@@ -3193,6 +3610,24 @@ def test_render_verify_and_publication_attestation(
                 "02-planning",
                 "--control-entry",
                 "10-control",
+            ]
+        )
+        == 0
+    )
+    assert (
+        module.main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "--run-root",
+                str(tmp_path / "build" / "pi-e2e-2519"),
+                "record-comparison",
+                "--run-id",
+                run_dir.name,
+                "--pi-entry",
+                "11-review-boundary-probe",
+                "--control-entry",
+                "12-control-review-boundary-probe",
             ]
         )
         == 0
@@ -3317,7 +3752,7 @@ def test_render_verify_and_publication_attestation(
             "--end-of-options",
         ]
         resolved_publication_refs.append(command[6])
-        assert command[6] in {"main^{commit}", f"{publication_sha}^{{commit}}"}
+        assert command[6] == f"{publication_sha}^{{commit}}"
         assert kwargs["check"] is False
         return subprocess.CompletedProcess(command, 0, f"{publication_sha}\n", "")
 
@@ -3368,7 +3803,7 @@ def test_render_verify_and_publication_attestation(
         )
         == 0
     )
-    assert resolved_publication_refs == ["main^{commit}", f"{publication_sha}^{{commit}}"]
+    assert resolved_publication_refs == [f"{publication_sha}^{{commit}}"]
     publication_path = run_dir / "artifacts" / "publication.json"
     publication = json.loads(publication_path.read_text(encoding="utf-8"))
     assert publication["repo"] == "HomericIntelligence/Hephaestus"
@@ -3415,7 +3850,42 @@ def test_render_verify_and_publication_attestation(
         )
 
 
-def test_publication_commit_resolution_rejects_symbolic_unresolved_and_mismatched_refs(
+@pytest.mark.parametrize(
+    "ref",
+    (
+        "main",
+        "feature/2519-publication",
+        "HEAD",
+        "refs/heads/main",
+        "a" * 39,
+        "a" * 41,
+    ),
+)
+def test_publication_commit_resolution_rejects_noncanonical_refs_without_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ref: str,
+) -> None:
+    """Branches, symbolic refs, and abbreviated object IDs never reach Git."""
+    module = _load_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    calls: list[list[str]] = []
+
+    def _run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "a" * 40, "")
+
+    monkeypatch.setattr(module.subprocess, "run", _run)
+
+    with pytest.raises(ValueError, match="full immutable commit SHA"):
+        module._resolve_publication_commit(repo_root, ref)
+
+    assert calls == []
+
+
+def test_publication_commit_resolution_rejects_unresolved_and_mismatched_shas(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3441,14 +3911,6 @@ def test_publication_commit_resolution_rejects_symbolic_unresolved_and_mismatche
                 "",
             )
         return subprocess.CompletedProcess(command, returncode, stdout, stderr)
-
-    monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda command, **kwargs: _resolve_as(command, stdout=f"{requested_sha}\n"),
-    )
-    with pytest.raises(ValueError, match="resolved immutable commit SHA"):
-        module._resolve_publication_commit(repo_root, "main")
 
     monkeypatch.setattr(
         module.subprocess,
@@ -3506,12 +3968,22 @@ def test_publication_attestation_rejects_snapshot_and_workflow_receipt_mismatche
     stage_receipts = {
         stage: {
             "capture_id": f"capture-{stage}",
+            "stage": stage,
             "receipt_id": "b" * 64,
+            "lifecycle_receipt_id": ("e" if stage == "commit-pr" else "f") * 64,
             "worktree": {"head": commit_sha},
             "pr_identity": (
                 2519,
                 "https://github.com/HomericIntelligence/Hephaestus/pull/2519",
-                "2519",
+                "2519-pi-e2e",
+                ("c" if stage == "commit-pr" else "d") * 64,
+            ),
+            "live_pr_readback": module._provenance_bound_live_pr_receipt(
+                _successful_live_pr_readback(
+                    module.PROJECT_REPOSITORY,
+                    2519,
+                    Path("unused"),
+                )
             ),
         }
         for stage in ("commit-pr", "review")
@@ -3525,6 +3997,110 @@ def test_publication_attestation_rejects_snapshot_and_workflow_receipt_mismatche
     stage_receipts["review"]["worktree"] = {"head": "d" * 40}
     with pytest.raises(ValueError, match="review workflow receipt"):
         module._publication_attestation_evidence(manifest, stage_receipts, commit_sha)
+
+
+def test_publication_attestation_records_exact_workflow_and_pr_receipts() -> None:
+    """The attestation records the host-derived PR, label, and conversation facts."""
+    module = _load_module()
+    commit_sha = "a" * 40
+    stage_receipts = {
+        stage: {
+            "capture_id": f"capture-{stage}",
+            "stage": stage,
+            "receipt_id": ("b" if stage == "commit-pr" else "c") * 64,
+            "lifecycle_receipt_id": ("d" if stage == "commit-pr" else "e") * 64,
+            "worktree": {"head": commit_sha},
+            "pr_identity": (
+                2519,
+                "https://github.com/HomericIntelligence/Hephaestus/pull/2519",
+                "2519-pi-e2e",
+                ("f" if stage == "commit-pr" else "0") * 64,
+            ),
+            "live_pr_readback": module._provenance_bound_live_pr_receipt(
+                _successful_live_pr_readback(
+                    module.PROJECT_REPOSITORY,
+                    2519,
+                    Path("unused"),
+                )
+            ),
+        }
+        for stage in ("commit-pr", "review")
+    }
+
+    evidence = module._publication_attestation_evidence(
+        {"snapshots": [{"head": commit_sha}]},
+        stage_receipts,
+        commit_sha,
+    )
+
+    assert evidence["snapshot_sha"] == commit_sha
+    assert evidence["workflow_receipts"] == [
+        {
+            "stage": "commit-pr",
+            "capture_id": "capture-commit-pr",
+            "receipt_id": "b" * 64,
+            "lifecycle_receipt_id": "d" * 64,
+            "pr_receipt_id": "f" * 64,
+            "head_sha": commit_sha,
+            "pr_number": 2519,
+            "pr_url": "https://github.com/HomericIntelligence/Hephaestus/pull/2519",
+            "branch": "2519-pi-e2e",
+            "repository": "HomericIntelligence/Hephaestus",
+            "pr_state": "OPEN",
+            "closes_issue": 2519,
+            "implementation_go": True,
+            "implementation_no_go": False,
+            "unresolved_thread_ids": [],
+            "native_auto_merge": False,
+        },
+        {
+            "stage": "review",
+            "capture_id": "capture-review",
+            "receipt_id": "c" * 64,
+            "lifecycle_receipt_id": "e" * 64,
+            "pr_receipt_id": "0" * 64,
+            "head_sha": commit_sha,
+            "pr_number": 2519,
+            "pr_url": "https://github.com/HomericIntelligence/Hephaestus/pull/2519",
+            "branch": "2519-pi-e2e",
+            "repository": "HomericIntelligence/Hephaestus",
+            "pr_state": "OPEN",
+            "closes_issue": 2519,
+            "implementation_go": True,
+            "implementation_no_go": False,
+            "unresolved_thread_ids": [],
+            "native_auto_merge": False,
+        },
+    ]
+
+
+def test_publication_attestation_rejects_caller_only_pr_identity() -> None:
+    """Caller-authored PR fields cannot substitute for a host-derived readback."""
+    module = _load_module()
+    commit_sha = "a" * 40
+    stage_receipts = {
+        stage: {
+            "capture_id": f"capture-{stage}",
+            "stage": stage,
+            "receipt_id": ("b" if stage == "commit-pr" else "c") * 64,
+            "lifecycle_receipt_id": ("d" if stage == "commit-pr" else "e") * 64,
+            "worktree": {"head": commit_sha},
+            "pr_identity": (
+                2519,
+                "https://github.com/HomericIntelligence/Hephaestus/pull/2519",
+                "2519-pi-e2e",
+                ("f" if stage == "commit-pr" else "0") * 64,
+            ),
+        }
+        for stage in ("commit-pr", "review")
+    }
+
+    with pytest.raises(ValueError, match="host-derived live PR readback"):
+        module._publication_attestation_evidence(
+            {"snapshots": [{"head": commit_sha}]},
+            stage_receipts,
+            commit_sha,
+        )
 
 
 def test_incomplete_run_is_truthful_private_and_cannot_be_attested(
