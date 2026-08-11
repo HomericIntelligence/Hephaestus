@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import hephaestus.automation.pipeline.stages as stages
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillJob,
@@ -13,7 +12,12 @@ from hephaestus.automation.pipeline.athena_skill_jobs import (
 )
 from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import StageName
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    JobRequest,
+    LearningStage,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.stages.base import Disposition
 from hephaestus.automation.pipeline.work_item import LearningIntent
 from hephaestus.automation.state_labels import STATE_PLAN_GO
@@ -24,7 +28,7 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
     """The auxiliary stage claims durable work and emits only AthenaSkillJob."""
-    assert hasattr(stages, "LearningStage")
+    assert LearningStage is not None
     journal = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(
         learning_journal=journal,
@@ -41,7 +45,7 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     )
     item.learning_resume_stage = StageName.IMPLEMENTATION
 
-    stage = stages.LearningStage()
+    stage = LearningStage()
     assert stage.on_enter(item, ctx) is None
     entered = stage.step(item, ctx)
     assert entered == Continue(next_state="CLAIM")
@@ -75,7 +79,7 @@ def _claimed_learning(
         )
     )
     item.learning_resume_stage = StageName.IMPLEMENTATION
-    stage = stages.LearningStage()
+    stage = LearningStage()
     stage.on_enter(item, ctx)
     item.state = "CLAIM"
     assert isinstance(stage.step(item, ctx), JobRequest)
@@ -173,7 +177,7 @@ def test_live_claim_is_ejected_without_terminalizing_owner(
     owner.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
     assert owner.claim(intent.key)
 
-    stage = stages.LearningStage()
+    stage = LearningStage()
     assert stage.step(item, ctx) == Continue(next_state="CLAIM")
     assert stage.step(item, ctx) == StageOutcome(
         Disposition.FAIL_BACK,
@@ -220,7 +224,7 @@ def test_cleanup_barrier_waits_for_every_intent(
         ]
     )
     item.learning_resume_stage = StageName.FINISHED
-    stage = stages.LearningStage()
+    stage = LearningStage()
     stage.on_enter(item, ctx)
     item.state = "CLAIM"
     first = stage.step(item, ctx)
@@ -250,7 +254,7 @@ def test_stale_plan_authority_skips_host_and_returns_to_review(
     )
     item.learning_intents.append(intent)
     item.learning_resume_stage = StageName.IMPLEMENTATION
-    stage = stages.LearningStage()
+    stage = LearningStage()
     stage.on_enter(item, ctx)
 
     item.state = "CLAIM"
@@ -280,7 +284,7 @@ def test_unavailable_plan_read_is_ancillary_and_does_not_block_implementation(
     )
     item.learning_intents.append(intent)
     item.learning_resume_stage = StageName.IMPLEMENTATION
-    stage = stages.LearningStage()
+    stage = LearningStage()
     stage.on_enter(item, ctx)
 
     item.state = "CLAIM"
