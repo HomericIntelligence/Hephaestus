@@ -2774,7 +2774,7 @@ class TestGitOps:
                 "force": True,
             },
         )
-        with patch(f"{_WP}.git_utils.run") as mock_run:
+        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
@@ -2811,9 +2811,10 @@ class TestGitOps:
             },
         )
         with (
-            patch(f"{_WP}.git_utils.run"),
+            patch("hephaestus.automation.pipeline.git_cleanup.run"),
             patch(
-                f"{_WP}.git_utils.delete_local_branch_if_unchanged", return_value=True
+                "hephaestus.automation.pipeline.git_cleanup.delete_local_branch_if_unchanged",
+                return_value=True,
             ) as release,
         ):
             pool.submit(job, StageName.FINISHED)
@@ -3539,7 +3540,7 @@ class TestGitOps:
             },
         )
         with patch(
-            "hephaestus.automation.git_utils.delete_reserved_branch_if_unchanged",
+            "hephaestus.automation.pipeline.git_cleanup.delete_reserved_branch_if_unchanged",
             return_value=False,
         ) as release:
             pool.submit(job, StageName.FINISHED)

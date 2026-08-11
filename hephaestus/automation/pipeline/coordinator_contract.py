@@ -85,6 +85,8 @@ if TYPE_CHECKING:
         _seq: int
         _agent_job_count: int
         _agent_job_time_s: float
+        _auxiliary_job_count: int
+        _auxiliary_job_time_s: float
 
         @property
         def live_work_count(self) -> int:
@@ -96,7 +98,7 @@ if TYPE_CHECKING:
         def _record_event(self, event: str, *fields: Any) -> None:
             pass
 
-        def _try_acquire_work_permit(self, item: WorkItem) -> bool:
+        def _try_acquire_work_permit(self, item: WorkItem, stage: StageName | None = None) -> bool:
             pass
 
         def _release_work_permit(self, item: WorkItem) -> None:

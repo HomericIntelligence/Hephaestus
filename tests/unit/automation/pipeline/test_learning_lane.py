@@ -1,0 +1,366 @@
+"""Coordinator behavior tests for the independent learning lane."""
+
+from __future__ import annotations
+
+import inspect
+import queue
+import threading
+from pathlib import Path
+from typing import Any
+
+import hephaestus.agents.runtime as agent_runtime
+from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillResult
+from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
+from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
+from hephaestus.automation.pipeline.jobs import GitJob, JobHandle
+from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
+from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
+from hephaestus.automation.state_labels import STATE_PLAN_GO
+from tests.unit.automation.pipeline.conftest import FakeWorkerPool
+from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+
+def test_coordinator_exposes_independent_learning_capacity(tmp_path: Path) -> None:
+    """Learning capacity is configured separately from the main work window."""
+    assert "auxiliary_pool" in inspect.signature(Coordinator).parameters
+    config = PipelineConfig(
+        org="org",
+        repos=["repo"],
+        max_workers=1,
+        learning_workers=2,
+        learning_queue_capacity=3,
+        projects_dir=tmp_path,
+    )
+    assert config.learning_workers == 2
+    assert config.learning_queue_capacity == 3
+
+
+def test_single_main_worker_progresses_while_learning_is_queued(tmp_path: Path) -> None:
+    """A learning handoff releases the only main permit for unrelated work."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    learning = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLAN_REVIEW)
+    unrelated = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.PLANNING)
+    assert coordinator._push_item(learning, StageName.PLAN_REVIEW, enter=True)
+    assert coordinator._claim_item(StageName.PLAN_REVIEW) is learning
+
+    assert coordinator._handoff_item(learning, StageName.LEARNING, enter=True)
+
+    assert coordinator.live_work_count == 0
+    assert coordinator.learning_work_count == 1
+    assert coordinator._push_item(unrelated, StageName.PLANNING, enter=True)
+
+
+def test_learning_cleanup_does_not_wait_for_main_capacity(tmp_path: Path) -> None:
+    """The learning-to-finished handoff keeps its auxiliary permit."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    learning = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING)
+    unrelated = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.PLANNING)
+    assert coordinator._push_item(learning, StageName.LEARNING, enter=True)
+    assert coordinator._push_item(unrelated, StageName.PLANNING, enter=True)
+    assert coordinator._claim_item(StageName.LEARNING) is learning
+
+    assert coordinator._handoff_item(learning, StageName.FINISHED, enter=True)
+
+    main_handle = JobHandle(
+        job=GitJob(repo="repo", op="push", timeout_s=1),
+        on_done_state="DONE",
+    )
+    coordinator.in_flight[main_handle] = unrelated
+    coordinator.inflight_per_repo["repo"] = 1
+    assert coordinator.live_work_count == 1
+    assert coordinator.learning_work_count == 1
+    assert len(coordinator.queues[StageName.FINISHED]) == 1
+    assert coordinator._admit(learning)
+
+
+def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
+    """A planning-only run does not escape its selected stage scope."""
+    from hephaestus.automation.pipeline.routing import PipelineScope
+
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+            scope=PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})),
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLAN_REVIEW)
+    item.learning_intents.append(
+        LearningIntent.approved_plan(repo="repo", issue=1, plan_revision=1, plan_fingerprint="abc")
+    )
+
+    coordinator._route(item, StageOutcome(Disposition.ADVANCE, "plan approved"))
+
+    assert item.stage is StageName.LEARNING
+    assert item.learning_resume_stage is StageName.FINISHED
+
+    coordinator._route(item, StageOutcome(Disposition.ADVANCE, "learning terminal"))
+
+    assert item.stage is StageName.FINISHED
+    assert item.result is not None
+    assert item.result.passed
+
+
+def test_restart_reconstructs_pending_intent_before_primary_stage(tmp_path: Path) -> None:
+    """A new coordinator routes a durable pending claim back to learning."""
+    repo_root = tmp_path / "repo"
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+            repo_roots={"repo": repo_root},
+        ),
+        github=FakeStageGitHub(pr_state={"state": "MERGED"}),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2705, stage=StageName.FINISHED)
+
+    coordinator._restore_learning_intents(item, StageName.FINISHED, "already merged")
+
+    assert item.stage is StageName.LEARNING
+    assert item.learning_intents == [intent]
+    assert item.learning_resume_stage is StageName.FINISHED
+
+
+def test_merged_legacy_item_reconstructs_missing_post_merge_intent(tmp_path: Path) -> None:
+    """A merged item without a new journal record enters learning once."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(pr_state={"state": "MERGED"}),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    item = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2705,
+        pr=12,
+        stage=StageName.FINISHED,
+    )
+
+    coordinator._restore_learning_intents(item, StageName.FINISHED, "already merged")
+
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    assert item.stage is StageName.LEARNING
+    assert item.learning_intents == [intent]
+    record = coordinator._ctx_for_repo("repo").learning_journal.load(intent.key)
+    assert record is not None and record["status"] == "pending"
+
+
+def test_merged_discovery_skips_terminal_learning_intent(tmp_path: Path) -> None:
+    """Repeated discovery does not rebuild a completed auxiliary detour."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(pr_state={"state": "MERGED"}),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
+    assert journal.claim(intent.key)
+    journal.finish(intent.key, succeeded=True)
+    item = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2705,
+        pr=12,
+        stage=StageName.FINISHED,
+    )
+
+    coordinator._restore_learning_intents(item, StageName.FINISHED, "already merged")
+
+    assert item.stage is StageName.FINISHED
+    assert item.learning_intents == []
+
+
+def test_no_learn_disables_recovered_intent_and_keeps_primary_route(tmp_path: Path) -> None:
+    """The no-learn switch records a terminal skip without a host request."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+            enable_learn=False,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2705, stage=StageName.FINISHED)
+
+    coordinator._restore_learning_intents(item, StageName.FINISHED, "already merged")
+
+    assert item.stage is StageName.FINISHED
+    assert item.learning_intents == []
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["status"] == "failed"
+    assert record["error"] == "learning_disabled"
+
+
+class _BlockingLearningHost:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def execute(self, request: object) -> AthenaSkillResult:
+        self.started.set()
+        assert self.release.wait(timeout=2)
+        sha = "a" * 40
+        return AthenaSkillResult(
+            kind="learn",
+            delivery_receipt={
+                "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/1",
+                "pr_number": 1,
+                "commit_sha": sha,
+                "readback_head_sha": sha,
+            },
+        )
+
+
+def test_single_main_worker_progresses_while_learning_is_blocked(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A blocked host call does not retain the one main-lane permit."""
+
+    def _harness_forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("learning called an agent harness")
+
+    monkeypatch.setattr(agent_runtime, "run_agent_text", _harness_forbidden)
+    monkeypatch.setattr(agent_runtime, "run_agent_session", _harness_forbidden)
+    monkeypatch.setattr(agent_runtime, "run_pi_text", _harness_forbidden)
+    monkeypatch.setattr(agent_runtime, "run_pi_session", _harness_forbidden)
+    monkeypatch.setattr(agent_runtime, "preflight_pi_environment", _harness_forbidden)
+    host = _BlockingLearningHost()
+    completions: queue.Queue = queue.Queue(maxsize=1)
+    auxiliary = AuxiliaryWorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=completions,
+        athena_skill_executor=host,
+    )
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=auxiliary,
+        install_signals=False,
+    )
+    learning = WorkItem(
+        repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING, state="ENTER"
+    )
+    learning.learning_intents.append(
+        LearningIntent.approved_plan(repo="repo", issue=1, plan_revision=1, plan_fingerprint="abc")
+    )
+    learning.learning_resume_stage = StageName.IMPLEMENTATION
+    assert coordinator._push_item(learning, StageName.LEARNING, enter=True)
+    claimed = coordinator._claim_item(StageName.LEARNING)
+    assert claimed is learning
+    coordinator._run_item(learning)
+    assert host.started.wait(timeout=2)
+
+    unrelated = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.PLANNING)
+    assert coordinator._push_item(unrelated, StageName.PLANNING, enter=True)
+    assert coordinator.live_work_count == 1
+    assert coordinator.learning_work_count == 1
+
+    host.release.set()
+    done, result = coordinator.auxiliary_completion_q.get(timeout=2)
+    coordinator._handle_completion(done, result, auxiliary=True)
+    auxiliary.shutdown(mark_interrupted=False)
+
+
+def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: Path) -> None:
+    """Post-merge learning drops review data and keeps the merge outcome."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, pr=7, stage=StageName.MERGE_WAIT)
+    item.payload.update({"pr_diff": "large raw diff", "review_audit": {"large": "value"}})
+    item.learning_intents.append(LearningIntent.post_merge(repo="repo", issue=1, pr=7))
+
+    coordinator._route(item, StageOutcome(Disposition.FINISH_PASS, "merged"))
+
+    assert item.stage is StageName.LEARNING
+    assert item.payload["_learning_primary_reason"] == "merged"
+    assert "pr_diff" not in item.payload
+    assert "review_audit" not in item.payload
+    assert item.post_processing is not None
+    assert item.post_processing.result.passed
+    assert item.post_processing.result.final_stage is StageName.MERGE_WAIT
+
+    item.payload["learning_failures"] = [{"key": "intent", "error": "host failed"}]
+    coordinator._route(item, StageOutcome(Disposition.ADVANCE, "learning terminal"))
+
+    assert item.stage is StageName.FINISHED
+    assert item.result is not None
+    assert item.result.passed
+    assert item.result.reason == "merged"
+    assert item.result.final_stage is StageName.MERGE_WAIT
+
+
+def test_learning_completion_capacity_covers_all_learning_workers(tmp_path: Path) -> None:
+    """A small backlog setting cannot make valid completions disappear."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            learning_workers=3,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+
+    assert coordinator.auxiliary_completion_q.maxsize == 3

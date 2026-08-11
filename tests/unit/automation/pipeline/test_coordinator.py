@@ -3094,6 +3094,7 @@ class TestDurableEventLog:
                 "duration_s": 0.0,
                 "error": None,
                 "interrupted": False,
+                "lane": "main",
                 "ok": True,
             },
         ]
@@ -3319,10 +3320,11 @@ class TestPipelineScopeWiring:
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
         )
 
-        # Only the two in-scope stages plus the always-present FINISHED sink.
+        # Auxiliary learning and the FINISHED sink are implicit in every scope.
         assert set(coordinator._routes) == {
             StageName.PLANNING,
             StageName.PLAN_REVIEW,
+            StageName.LEARNING,
             StageName.FINISHED,
         }
         # PLANNING.next (PLAN_REVIEW) stays in scope; PLAN_REVIEW.next

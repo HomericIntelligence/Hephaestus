@@ -293,6 +293,14 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "no_advise",
             "Skip the advise step (don't search team knowledge base before planning)",
         ),
+        _action_spec(("--learning-workers",), "learning_workers", "_StoreAction", 1),
+        _action_spec(
+            ("--learning-queue-capacity",),
+            "learning_queue_capacity",
+            "_StoreAction",
+            1,
+        ),
+        _action_spec(("--no-learn",), "no_learn", "_StoreTrueAction", False, nargs=0),
         _timeout_spec(
             "--agent-timeout",
             "agent_timeout",
@@ -429,6 +437,14 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "learn_timeout",
             "Timeout for the /learn agent session (default: 7200).",
         ),
+        _action_spec(("--learning-workers",), "learning_workers", "_StoreAction", 1),
+        _action_spec(
+            ("--learning-queue-capacity",),
+            "learning_queue_capacity",
+            "_StoreAction",
+            1,
+        ),
+        _action_spec(("--no-learn",), "no_learn", "_StoreTrueAction", False, nargs=0),
         *_github_throttle_specs(),
         _json_spec(),
         _version_spec(),
@@ -483,6 +499,13 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "--no-learn",
             "no_learn",
             "Disable /learn after implementation (enabled by default)",
+        ),
+        _action_spec(("--learning-workers",), "learning_workers", "_StoreAction", 1),
+        _action_spec(
+            ("--learning-queue-capacity",),
+            "learning_queue_capacity",
+            "_StoreAction",
+            1,
         ),
         _store_true(
             "--no-follow-up",
@@ -575,6 +598,20 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Repos processed in parallel per loop iteration (default: 1)",
         ),
         _action_spec(
+            ("--learning-workers",),
+            "learning_workers",
+            "_StoreAction",
+            1,
+            help_text="Independent host-learning workers (default: 1)",
+        ),
+        _action_spec(
+            ("--learning-queue-capacity",),
+            "learning_queue_capacity",
+            "_StoreAction",
+            1,
+            help_text="Bounded auxiliary learning queue capacity (default: 1)",
+        ),
+        _action_spec(
             ("--issue-limit",),
             "issue_limit",
             "_StoreAction",
@@ -621,6 +658,11 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "--no-advise",
             "no_advise",
             "Pass --no-advise to phases that support the advise preflight",
+        ),
+        _store_true(
+            "--no-learn",
+            "no_learn",
+            "Do not create or execute auxiliary learning intents",
         ),
         _action_spec(
             ("--no-serialize-file-overlap",),

@@ -1,5 +1,4 @@
 import sys
-from typing import Any
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
@@ -158,7 +157,8 @@ class SourceCoordinator(_CoordinatorHost):
                         reason=entry.reason,
                         final_stage=StageName.FINISHED,
                     )
-                elif new_item.stage is not StageName.REPO:
+                self._restore_learning_intents(new_item, entry.stage, entry.reason)
+                if new_item.stage not in {StageName.REPO, StageName.FINISHED, StageName.LEARNING}:
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
@@ -218,6 +218,9 @@ class SourceCoordinator(_CoordinatorHost):
         for it in self.in_flight.values():
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
+        for it in self.auxiliary_in_flight.values():
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
         for lease in self._leases.values():
             it = lease.item
             if it.kind is ItemKind.ISSUE and it.issue is not None:
@@ -263,7 +266,7 @@ class SourceCoordinator(_CoordinatorHost):
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return False
-        if is_new_item and not self._try_acquire_work_permit(item):
+        if is_new_item and not self._try_acquire_work_permit(item, stage):
             logger.debug(
                 "global live-work capacity reached (%d); deferring %s",
                 _work_window(self.config),
@@ -480,6 +483,7 @@ class SourceCoordinator(_CoordinatorHost):
             logger.info("seed excluded: %s", entry.reason)
             return None, False
         item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
+        self._restore_learning_intents(item, entry.stage, entry.reason)
         if existing_pr is not None:
             item.branch = branch
         if source.wave_lease is not None:
@@ -578,6 +582,7 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
 
             item = self._prepare_direct_item(entry, source.repo, source.base_sha)
+            self._restore_learning_intents(item, entry.stage, entry.reason)
             if source.wave_lease is not None:
                 item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
             if self._push_item(item, item.stage, enter=True):

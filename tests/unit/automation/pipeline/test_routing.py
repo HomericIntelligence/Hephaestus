@@ -27,6 +27,7 @@ class TestStageName:
             "implementation",
             "pr_review",
             "merge_wait",
+            "learning",
             "finished",
         }
         assert {s.value for s in StageName} == expected
@@ -153,6 +154,14 @@ class TestROUTES:
         expected = set(StageName)
         assert stages == expected
 
+    def test_learning_is_an_implicit_auxiliary_route(self) -> None:
+        """Learning is available but does not break main-scope contiguity."""
+        assert ROUTES[StageName.LEARNING].next is StageName.FINISHED
+        scope = PipelineScope(frozenset({StageName.PLANNING, StageName.PLAN_REVIEW}))
+        routes = scope.trimmed_routes()
+        assert StageName.LEARNING in routes
+        assert routes[StageName.LEARNING].next is StageName.FINISHED
+
     def test_routes_structure(self) -> None:
         """Each ROUTES entry is a Route dataclass."""
         for _stage, route in ROUTES.items():
@@ -230,6 +239,15 @@ class TestROUTES:
                 },
                 budgets={"merge": routing.DEFAULT_DRIVE_GREEN_LOOPS},
             ),
+            StageName.LEARNING: Route(
+                next=StageName.FINISHED,
+                fail_routes={
+                    "resume_implementation": StageName.IMPLEMENTATION,
+                    "resume_plan_review": StageName.PLAN_REVIEW,
+                    "*": StageName.FINISHED,
+                },
+                budgets={"learn": 2},
+            ),
             StageName.FINISHED: Route(next=StageName.FINISHED),
         }
         assert expected == ROUTES
@@ -275,7 +293,9 @@ class TestPipelineScope:
         scope = PipelineScope(stages)
         trimmed = scope.trimmed_routes()
 
-        assert len(trimmed) == 4
+        assert len(trimmed) == 6
+        assert StageName.LEARNING in trimmed
+        assert StageName.FINISHED in trimmed
         assert StageName.REPO not in trimmed
         assert StageName.MERGE_WAIT not in trimmed
 
@@ -353,4 +373,5 @@ class TestPipelineScope:
         """A FINISHED-only scope is valid (empty ordered prefix) and terminal."""
         scope = PipelineScope(frozenset({StageName.FINISHED}))
         trimmed = scope.trimmed_routes()
-        assert trimmed == {StageName.FINISHED: ROUTES[StageName.FINISHED]}
+        assert set(trimmed) == {StageName.LEARNING, StageName.FINISHED}
+        assert trimmed[StageName.FINISHED] == ROUTES[StageName.FINISHED]

@@ -201,6 +201,8 @@ Examples:
         action="store_true",
         help="Disable /learn after implementation (enabled by default)",
     )
+    parser.add_argument("--learning-workers", type=int, default=1)
+    parser.add_argument("--learning-queue-capacity", type=int, default=1)
     parser.add_argument(
         "--no-follow-up",
         action="store_true",
@@ -529,9 +531,12 @@ def main() -> int:
         loops=1,
         # --max-workers maps to the pipeline worker-pool size.
         max_workers=args.max_workers,
+        learning_workers=args.learning_workers,
+        learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
         no_advise=args.no_advise,
+        enable_learn=not args.no_learn,
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,

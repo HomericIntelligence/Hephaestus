@@ -35,6 +35,7 @@ class StageName(StrEnum):
     IMPLEMENTATION = "implementation"
     PR_REVIEW = "pr_review"
     MERGE_WAIT = "merge_wait"
+    LEARNING = "learning"
     FINISHED = "finished"
 
 
@@ -42,7 +43,19 @@ class StageName(StrEnum):
 #: has no pipeline stage: normal review may collect its evidence for a binary
 #: verdict, but the loop does not change CI/CD and it never independently
 #: authorizes an approval.
-PIPELINE_ORDER: tuple[StageName, ...] = tuple(StageName)
+MAIN_PIPELINE_ORDER: tuple[StageName, ...] = (
+    StageName.REPO,
+    StageName.PLANNING,
+    StageName.PLAN_REVIEW,
+    StageName.IMPLEMENTATION,
+    StageName.PR_REVIEW,
+    StageName.MERGE_WAIT,
+)
+AUXILIARY_PIPELINE_ORDER: tuple[StageName, ...] = (
+    StageName.LEARNING,
+    StageName.FINISHED,
+)
+PIPELINE_ORDER: tuple[StageName, ...] = MAIN_PIPELINE_ORDER + AUXILIARY_PIPELINE_ORDER
 
 
 class Disposition(StrEnum):
@@ -146,6 +159,15 @@ ROUTES: dict[StageName, Route] = {
         },
         budgets={"merge": DEFAULT_DRIVE_GREEN_LOOPS},
     ),
+    StageName.LEARNING: Route(
+        next=StageName.FINISHED,
+        fail_routes={
+            "resume_implementation": StageName.IMPLEMENTATION,
+            "resume_plan_review": StageName.PLAN_REVIEW,
+            "*": StageName.FINISHED,
+        },
+        budgets={"learn": 2},
+    ),
     StageName.FINISHED: Route(next=StageName.FINISHED),
 }
 
@@ -184,7 +206,7 @@ class PipelineScope:
         """
         if not stages:
             raise ValueError("PipelineScope requires at least one stage")
-        ordered = [s for s in PIPELINE_ORDER if s in stages and s != StageName.FINISHED]
+        ordered = [s for s in MAIN_PIPELINE_ORDER if s in stages]
         # An ALL-FINISHED scope is by-design: ``_compute_trimmed_routes`` reduces
         # it to ``{StageName.FINISHED: ROUTES[StageName.FINISHED]}`` (a no-op
         # trim).  ``test_pipeline_scope_finished_only`` pins this contract, so
@@ -192,8 +214,8 @@ class PipelineScope:
         # universal-sink sentinel.   re-analysis tried to reject and
         # was reverted.
         if ordered:
-            first = PIPELINE_ORDER.index(ordered[0])
-            last = PIPELINE_ORDER.index(ordered[-1])
+            first = MAIN_PIPELINE_ORDER.index(ordered[0])
+            last = MAIN_PIPELINE_ORDER.index(ordered[-1])
             if last - first + 1 != len(ordered):
                 raise ValueError(
                     f"PipelineScope stages must be contiguous in pipeline order; "
@@ -222,21 +244,15 @@ class PipelineScope:
 
     def _compute_trimmed_routes(self) -> dict[StageName, Route]:
         result = {}
+        implicit = {StageName.LEARNING, StageName.FINISHED}
+        available = self.stages | implicit
         for stage, route in ROUTES.items():
-            if stage not in self.stages:
+            if stage not in available:
                 continue
 
-            new_next = (
-                route.next
-                if route.next in self.stages or route.next == StageName.FINISHED
-                else StageName.FINISHED
-            )
+            new_next = route.next if route.next in available else StageName.FINISHED
             new_fail_routes = {
-                key: (
-                    target
-                    if target in self.stages or target == StageName.FINISHED
-                    else StageName.FINISHED
-                )
+                key: (target if target in available else StageName.FINISHED)
                 for key, target in route.fail_routes.items()
             }
             result[stage] = Route(

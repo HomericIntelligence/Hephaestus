@@ -1,0 +1,93 @@
+"""Shared low-level cleanup operations for both pipeline worker lanes."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from hephaestus.automation.git_utils import (
+    delete_local_branch_if_unchanged,
+    delete_reserved_branch_if_unchanged,
+    run,
+)
+from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.helpers import get_repo_root
+
+from .git_jobs import GitJob
+from .job_results import JobResult
+
+
+def _is_full_commit_sha(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
+def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager) -> JobResult:
+    """Run one validated worktree or reservation cleanup operation."""
+    if job.op == "release_branch_reservation":
+        branch_name = str(job.kwargs.get("branch") or "")
+        base_sha = str(job.kwargs.get("base_sha") or "")
+        repo_root_value = job.kwargs.get("repo_root")
+        repo_root = Path(str(repo_root_value)) if repo_root_value else None
+        if (
+            not branch_name
+            or not _is_full_commit_sha(base_sha)
+            or repo_root is None
+            or not repo_root.is_dir()
+        ):
+            return JobResult(
+                ok=False,
+                error="release_branch_reservation requires branch, base_sha, and repo_root",
+            )
+        released = delete_reserved_branch_if_unchanged(
+            branch_name,
+            base_sha,
+            repo_root,
+            timeout=job.timeout_s,
+        )
+        return JobResult(ok=True, value=released)
+
+    if job.op != "remove_worktree":
+        raise TypeError(f"unsupported cleanup Git operation: {job.op}")
+    if job.kwargs.get("worktree_path"):
+        worktree_path = Path(str(job.kwargs["worktree_path"]))
+        repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
+        with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
+            command = ["git", "worktree", "remove", str(worktree_path)]
+            if job.kwargs.get("force"):
+                command.append("--force")
+            run(command, cwd=repo_root, timeout=job.timeout_s)
+            run(
+                ["git", "worktree", "prune"],
+                cwd=repo_root,
+                check=False,
+                timeout=job.timeout_s,
+            )
+            local_cleanup = job.kwargs.get("local_branch_cleanup")
+            if local_cleanup is not None:
+                if not isinstance(local_cleanup, dict):
+                    return JobResult(ok=False, error="local branch cleanup receipt is invalid")
+                cleanup_branch = local_cleanup.get("branch")
+                expected_sha = str(local_cleanup.get("base_sha") or "")
+                if not isinstance(cleanup_branch, str) or not _is_full_commit_sha(expected_sha):
+                    return JobResult(ok=False, error="local branch cleanup receipt is invalid")
+                deleted = delete_local_branch_if_unchanged(
+                    cleanup_branch,
+                    expected_sha,
+                    repo_root,
+                    timeout=job.timeout_s,
+                )
+                return JobResult(ok=True, value={"local_branch_deleted": deleted})
+        return JobResult(ok=True)
+    fallback_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
+    fallback_kwargs = dict(job.kwargs)
+    fallback_kwargs.pop("repo_root", None)
+    worktree_manager_type(repo_root=fallback_root).remove_worktree(
+        **fallback_kwargs,
+        timeout=job.timeout_s,
+    )
+    return JobResult(ok=True)

@@ -80,7 +80,12 @@ _ALLOWLIST: frozenset[str] = frozenset()
 # Worker-side modules: code that executes ON worker threads. These may not
 # import github_api or pr_manager at all (not even non-mutator helpers) so
 # that gh_call/run/skip_epics-style mutators can never sneak in.
-_WORKER_SIDE_MODULES = ("worker_pool.py", "jobs.py")
+_WORKER_SIDE_MODULES = (
+    "auxiliary_worker_pool.py",
+    "git_cleanup.py",
+    "jobs.py",
+    "worker_pool.py",
+)
 _FORBIDDEN_WORKER_MODULES = ("github_api", "pr_manager")
 
 

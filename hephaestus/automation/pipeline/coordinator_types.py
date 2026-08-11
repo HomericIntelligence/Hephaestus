@@ -132,6 +132,7 @@ from hephaestus.automation.pipeline.stages import (
     FinishedStage,
     ImplementationStage,
     JobRequest,
+    LearningStage,
     MergeWaitStage,
     PlanningStage,
     PlanReviewStage,
@@ -167,7 +168,6 @@ from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PL
 from hephaestus.prompts import PromptCatalog
 
 logger = logging.getLogger(__name__)
-
 
 #: Warn when any stage.step() call exceeds this duration (seconds) — the
 #: stage protocol promises short (<~60s) main-thread steps. 15s proved too
@@ -228,6 +228,7 @@ _SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 #: finished sink drains first of all so results are recorded promptly).
 _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
+    StageName.LEARNING,
     StageName.MERGE_WAIT,
     StageName.PR_REVIEW,
     StageName.IMPLEMENTATION,
@@ -303,6 +304,8 @@ class PipelineConfig:
     loops: int = 1
     max_workers: int = 1
     parallel_repos: int = 1
+    learning_workers: int = 1
+    learning_queue_capacity: int = 1
     dry_run: bool = False
     grace_s: float = _DEFAULT_GRACE_S
     phase_timeout_s: float | None = None
@@ -355,9 +358,7 @@ class PipelineConfig:
     # when True, issues already at-or-past ``state:plan-go`` are re-routed to
     # PLANNING instead of being classified past the scope (and thus skipped).
     force: bool = False
-    # Optional staged issue-wave selector.  It is intentionally appended after
-    # the historical fields so existing positional construction keeps its
-    # third argument as ``repo_source_factory``.
+    # Appended so positional construction keeps ``repo_source_factory`` third.
     issue_limit: int | None = None
     enable_learn: bool = True
 
@@ -491,7 +492,7 @@ __all__ = [
     'DIRECT_SCOPE_BASE_SHA_KEY', 'DIRECT_SCOPE_BOOTSTRAP_KEY', 'DIRECT_SCOPE_WORKTREE_NONCE_KEY', 'PIPELINE_ORDER', 'PRE_PR_TEST_ARGV', 'ROUTES', 'STATE_IMPLEMENTATION_GO', 'STATE_PLAN_BLOCKED', 'WAVE_LEASE_PAYLOAD', 'WORKTREE_MATERIALIZED_KEY',  # noqa: E501
     '_DEFAULT_EVENT_LOG_CAPACITY', '_DEFAULT_GRACE_S', '_DEFAULT_TERMINAL_DETAIL_CAPACITY', '_DIRECT_ISSUE_ENTRY_STAGES', '_DRAIN_ORDER', '_FAIL_BACK_CAP', '_FILE_CLAIM_STAGES', '_FILE_OVERLAP_BLOCKED_CLAIMS_KEY', '_FILE_OVERLAP_DEFERRALS_KEY', '_FILE_OVERLAP_WARNING_THRESHOLD',  # noqa: E501
     '_IDLE_POLL_S', '_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD', '_MAX_STEPS_PER_TICK', '_PROMPT_PREFLIGHT_ERROR', '_PROMPT_PREFLIGHT_TEMPLATE', '_REALIZED_DIFF_CLAIM_STAGES', '_SOURCE_REGISTRY_RETRY_DELAY_S', '_STALL_TICKS_BEFORE_FORCE', '_STEP_WATCHDOG_S', 'AgentJob', 'Any', 'BranchWorktreeOwnerStatus', 'Callable',  # noqa: E501
-    'CompletionQueue', 'Continue', 'Counter', 'Disposition', 'FinishedStage', 'GitJob', 'ImplementationStage', 'IssueInfo', 'IssueWaveError', 'IssueWaveStore', 'ItemKind', 'ItemResult', 'Iterable', 'Iterator', 'JobHandle', 'JobRequest', 'JobResult', 'MergeWaitStage',  # noqa: E501
+    'CompletionQueue', 'Continue', 'Counter', 'Disposition', 'FinishedStage', 'GitJob', 'ImplementationStage', 'IssueInfo', 'IssueWaveError', 'IssueWaveStore', 'ItemKind', 'ItemResult', 'Iterable', 'Iterator', 'JobHandle', 'JobRequest', 'JobResult', 'LearningStage', 'MergeWaitStage',  # noqa: E501
     'OrderedDict', 'Path', 'PipelineConfig', 'PipelineScope', 'PlanReviewStage', 'PlanningStage', 'PrReviewStage', 'PreservedWorktree', 'PromptCatalog', 'RepoIssueSource', 'RepoStage', 'Route', 'RunStats', 'Stage', 'StageContext', 'StageEvent', 'StageGitHub', 'StageName',  # noqa: E501
     'StageOutcome', 'StageQueue', 'StageQueueLease', 'StageStepResult', 'TemplateNotFound', 'TerminalSummary', 'WaveLease', 'WorkItem', '_ActiveRepoIssueSource', '_DirectIssueSource', '_DirectPrSource', '_Paths', '_PendingHandoff', '_RepoEntrySource', '_StageRunConfig',  # noqa: E501
     '_admission', '_budget_lookup', '_effective_repo_root', '_json_safe', '_preflight_prompt_catalog', '_seeding', '_work_window', 'annotations', 'dataclass', 'deque', 'encode_stage_event', 'field', 'heapq', 'is_epic', 'is_full_commit_sha', 'is_inspection_only_detached_push_failure', 'json',  # noqa: E501

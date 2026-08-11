@@ -2031,6 +2031,12 @@ class WorkerPool:
                 stderr_tail=(exc.stderr or "")[-_TAIL:],
             )
 
+    def _run_cleanup_git(self, job: GitJob) -> JobResult:
+        """Run one cleanup job through the existing serialized Git boundary."""
+        if job.op not in {"remove_worktree", "release_branch_reservation"}:
+            raise TypeError(f"unsupported cleanup Git operation: {job.op}")
+        return self._run_git(job)
+
     def _dispatch_git_op(self, job: GitJob) -> JobResult:  # noqa: C901
         """Dispatch a git operation to its handler.
 
@@ -2044,7 +2050,9 @@ class WorkerPool:
             return self._git_verify_pr_review_checkout(job)
 
         elif job.op == "remove_worktree":
-            return self._git_remove_worktree(job)
+            from .git_cleanup import run_cleanup_job
+
+            return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
 
         elif job.op == "rebase":
             return self._git_rebase(job)
@@ -2063,27 +2071,9 @@ class WorkerPool:
             return self._git_commit_push(job)
 
         elif job.op == "release_branch_reservation":
-            branch_name = str(job.kwargs.get("branch") or "")
-            base_sha = job.kwargs.get("base_sha")
-            repo_root_value = job.kwargs.get("repo_root")
-            repo_root = Path(str(repo_root_value)) if repo_root_value else None
-            if (
-                not branch_name
-                or not _is_full_commit_sha(base_sha)
-                or repo_root is None
-                or not repo_root.is_dir()
-            ):
-                return JobResult(
-                    ok=False,
-                    error="release_branch_reservation requires branch, base_sha, and repo_root",
-                )
-            released = git_utils.delete_reserved_branch_if_unchanged(
-                branch_name,
-                base_sha,
-                repo_root,
-                timeout=job.timeout_s,
-            )
-            return JobResult(ok=True, value=released)
+            from .git_cleanup import run_cleanup_job
+
+            return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
 
         elif job.op == "clone":
             # gh repo clone <repo> <dest>
@@ -3260,45 +3250,9 @@ class WorkerPool:
 
     def _git_remove_worktree(self, job: GitJob) -> JobResult:
         """Remove a worktree by known path, or fall back to manager state."""
-        if job.kwargs.get("worktree_path"):
-            worktree_path = Path(str(job.kwargs["worktree_path"]))
-            repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
-            # This is the same lock create_worktree takes. Keep it across
-            # removal, prune, and local cleanup so pipeline workers cannot
-            # attach the branch between those operations. The final
-            # ``git branch -d`` check also refuses an externally checked-out
-            # branch.
-            with file_lock(WorktreeManager.git_metadata_lock_path(repo_root)):
-                cmd = ["git", "worktree", "remove", str(worktree_path)]
-                if job.kwargs.get("force"):
-                    cmd.append("--force")
-                git_utils.run(cmd, cwd=repo_root, timeout=job.timeout_s)
-                git_utils.run(
-                    ["git", "worktree", "prune"],
-                    cwd=repo_root,
-                    check=False,
-                    timeout=job.timeout_s,
-                )
-                local_cleanup = job.kwargs.get("local_branch_cleanup")
-                if local_cleanup is not None:
-                    if not isinstance(local_cleanup, dict):
-                        return JobResult(ok=False, error="local branch cleanup receipt is invalid")
-                    branch_name = local_cleanup.get("branch")
-                    expected_sha = local_cleanup.get("base_sha")
-                    if not isinstance(branch_name, str) or not _is_full_commit_sha(expected_sha):
-                        return JobResult(ok=False, error="local branch cleanup receipt is invalid")
-                    deleted = git_utils.delete_local_branch_if_unchanged(
-                        branch_name,
-                        expected_sha,
-                        repo_root,
-                        timeout=job.timeout_s,
-                    )
-                    return JobResult(ok=True, value={"local_branch_deleted": deleted})
-            return JobResult(ok=True)
-        fallback_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
-        manager = WorktreeManager(repo_root=fallback_root)
-        manager.remove_worktree(**job.kwargs, timeout=job.timeout_s)
-        return JobResult(ok=True)
+        from .git_cleanup import run_cleanup_job
+
+        return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
 
     def _git_commit_push(self, job: GitJob) -> JobResult:
         """Commit pending changes in a worktree, then push its branch.

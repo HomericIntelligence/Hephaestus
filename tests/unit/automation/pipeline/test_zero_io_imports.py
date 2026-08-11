@@ -37,9 +37,10 @@ _FORBIDDEN_PREFIXES = (
 )
 
 # Modules exempt from the zero-I/O guard entirely.
-# worker_pool.py is the ONLY place that executes jobs (agent, git, build/test),
-# so it must import I/O modules; all other workers offload to it.
-_ALLOWLIST = frozenset({"worker_pool.py"})
+# These closed worker-side modules execute I/O. The main pool owns general
+# jobs. The auxiliary pool owns host learning and cleanup only. git_cleanup
+# is the shared low-level implementation of its two accepted Git operations.
+_ALLOWLIST = frozenset({"auxiliary_worker_pool.py", "git_cleanup.py", "worker_pool.py"})
 
 # Capability-scoped exemptions: seeding.py and admission.py are the sanctioned
 # "thin fetch over github_api" layer (epic #1809 PR-4): they READ GitHub facts
@@ -145,10 +146,9 @@ def test_pipeline_modules_have_zero_io_imports() -> None:
     inside function bodies), not just at the top level. This catches
     conditional and lazy imports that a text-scan would miss.
 
-    Exceptions: worker_pool.py is the only place that executes jobs
-    (agent, git, build/test), so it must import I/O modules; seeding.py and
-    admission.py get a capability-scoped exemption for their sanctioned
-    read seams only (see ``_CAPABILITY_EXEMPT``).
+    Exceptions: the two closed worker pools and the shared cleanup helper
+    execute I/O. Seeding and admission get a capability-scoped exemption for
+    their sanctioned read seams only (see ``_CAPABILITY_EXEMPT``).
     """
     violations: list[str] = []
     # rglob so future pipeline/ subpackages (e.g. stages/) stay guarded.

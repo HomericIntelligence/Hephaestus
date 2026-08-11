@@ -34,11 +34,11 @@ def test_learn_scopes_prepare_athena_only_when_learn_enabled() -> None:
     assert pipeline_requires_athena_executor(_config(stages=frozenset({StageName.MERGE_WAIT})))
 
 
-def test_dry_run_and_unrelated_scopes_do_not_prepare_mnemosyne() -> None:
+def test_dry_run_skips_host_but_every_live_scope_can_recover_learning() -> None:
     assert not pipeline_requires_athena_executor(_config(dry_run=True))
-    assert not pipeline_requires_athena_executor(_config(stages=frozenset({StageName.REPO})))
-    assert not pipeline_requires_athena_executor(_config(stages=frozenset({StageName.PR_REVIEW})))
-    assert not pipeline_requires_athena_executor(_config(stages=frozenset({StageName.FINISHED})))
+    assert pipeline_requires_athena_executor(_config(stages=frozenset({StageName.REPO})))
+    assert pipeline_requires_athena_executor(_config(stages=frozenset({StageName.PR_REVIEW})))
+    assert pipeline_requires_athena_executor(_config(stages=frozenset({StageName.FINISHED})))
 
 
 def test_advise_disabled_scope_does_not_prepare_for_advise_only_stage() -> None:

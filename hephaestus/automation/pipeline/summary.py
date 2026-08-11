@@ -33,6 +33,9 @@ class RunStats:
     agent_job_count: int
     agent_job_time_s: float
     wall_s: float
+    auxiliary_job_count: int = 0
+    auxiliary_job_time_s: float = 0.0
+    auxiliary_job_failure_count: int = 0
 
     @property
     def interrupted(self) -> bool:
@@ -260,6 +263,12 @@ def print_summary(
         stats.wall_s,
         stats.interrupted,
     )
+    logger.info(
+        "  auxiliary jobs: %d (%.1fs total, %d failed)",
+        stats.auxiliary_job_count,
+        stats.auxiliary_job_time_s,
+        stats.auxiliary_job_failure_count,
+    )
 
     for line in format_preserved_worktrees(preserved, sys.argv[0]):
         logger.info("%s", line)
@@ -279,6 +288,9 @@ def print_summary(
             loops_run=stats.loops_run,
             agent_jobs=stats.agent_job_count,
             agent_job_time_s=round(stats.agent_job_time_s, 1),
+            auxiliary_jobs=stats.auxiliary_job_count,
+            auxiliary_job_time_s=round(stats.auxiliary_job_time_s, 1),
+            auxiliary_job_failures=stats.auxiliary_job_failure_count,
             wall_s=round(stats.wall_s, 1),
             resumable=resumable,
             preserved_worktrees=[[number, path] for _, number, path in preserved],

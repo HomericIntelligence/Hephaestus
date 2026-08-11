@@ -10,6 +10,7 @@ from typing import Any
 from hephaestus.observability.alerts import evaluate_alerts
 
 from .coordinator_types import _json_safe
+from .routing import AUXILIARY_PIPELINE_ORDER, MAIN_PIPELINE_ORDER
 
 
 def record_event(
@@ -54,10 +55,21 @@ def observability_snapshot(coordinator: Any, *, logger: logging.Logger) -> dict[
             logger.exception("circuit-breaker snapshot provider failed")
             snapshot_errors.append("circuit_breaker_snapshot_provider_failed")
 
+    queue_depths = {name.value: len(queue) for name, queue in coordinator.queues.items()}
+    lane_queue_depths = {
+        "main": sum(queue_depths[stage.value] for stage in MAIN_PIPELINE_ORDER),
+        "auxiliary": sum(queue_depths[stage.value] for stage in AUXILIARY_PIPELINE_ORDER),
+    }
+    inflight_by_lane = {
+        "main": len(coordinator.in_flight),
+        "auxiliary": len(coordinator.auxiliary_in_flight),
+    }
     snapshot = {
-        "queue_depths": {name.value: len(queue) for name, queue in coordinator.queues.items()},
+        "queue_depths": queue_depths,
+        "lane_queue_depths": lane_queue_depths,
         "inflight_per_repo": dict(coordinator.inflight_per_repo),
-        "inflight_jobs": len(coordinator.in_flight),
+        "inflight_by_lane": inflight_by_lane,
+        "inflight_jobs": sum(inflight_by_lane.values()),
         "circuit_breakers": circuit_breakers,
         "loops_run": coordinator._loops_run,
         "stalled_ticks": coordinator._stalled_ticks,

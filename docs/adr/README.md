@@ -37,3 +37,4 @@ numbered, and listed here.
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Accepted |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
+| [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |

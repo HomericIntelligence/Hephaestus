@@ -130,6 +130,9 @@ Examples:
         action="store_true",
         help="Skip the advise step (don't search team knowledge base before planning)",
     )
+    parser.add_argument("--learning-workers", type=int, default=1)
+    parser.add_argument("--learning-queue-capacity", type=int, default=1)
+    parser.add_argument("--no-learn", action="store_true")
     add_agent_timeout_arg(parser)
     add_advise_timeout_arg(parser)
     add_git_message_timeout_arg(parser)
@@ -235,9 +238,12 @@ def main() -> int:
         loops=1,
         # --parallel maps to the pipeline worker-pool size.
         max_workers=args.parallel,
+        learning_workers=args.learning_workers,
+        learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
         no_advise=args.no_advise,
+        enable_learn=not args.no_learn,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,
         scope=PipelineScope(_PLANNER_SCOPE_STAGES),

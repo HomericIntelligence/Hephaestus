@@ -220,6 +220,8 @@ class LoopConfig:
     review_iterations: int | None = None
     max_workers: int = LOOP_DEFAULT_MAX_WORKERS
     parallel_repos: int = 1
+    learning_workers: int = 1
+    learning_queue_capacity: int = 1
     # Dataclass default covers ONLY the iteration phases (``ALL_PHASES`` =
     # plan, implement), deliberately excluding drive-green — a bare
     # ``LoopConfig()`` gets a quiet plan+implement run. The CLI ``--phases``
@@ -239,6 +241,7 @@ class LoopConfig:
     prs: list[int] = field(default_factory=list)
     dry_run: bool = False
     no_advise: bool = False
+    no_learn: bool = False
     nitpick: bool = False
     # Retained CLI/config compatibility option. It does not expand the queue's
     # linked-issue repository discovery into an unrelated open-PR sweep.
@@ -332,6 +335,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Repos processed in parallel per loop iteration (default: 1)",
     )
     p.add_argument(
+        "--learning-workers",
+        type=_parse_positive_int,
+        default=1,
+        help="Independent host-learning workers (default: 1)",
+    )
+    p.add_argument(
+        "--learning-queue-capacity",
+        type=_parse_positive_int,
+        default=1,
+        help="Bounded auxiliary learning queue capacity (default: 1)",
+    )
+    p.add_argument(
         "--issue-limit",
         type=_parse_positive_int,
         default=None,
@@ -373,6 +388,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-advise",
         action="store_true",
         help="Pass --no-advise to phases that support the advise preflight",
+    )
+    p.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Do not create or execute auxiliary learning intents",
     )
     p.add_argument(
         "--no-serialize-file-overlap",
@@ -775,6 +795,8 @@ def _build_pipeline_config(
         loops=cfg.loops,
         max_workers=cfg.max_workers,
         parallel_repos=cfg.parallel_repos,
+        learning_workers=cfg.learning_workers,
+        learning_queue_capacity=cfg.learning_queue_capacity,
         dry_run=cfg.dry_run,
         grace_s=30.0,  # Default grace period
         phase_timeout_s=cfg.phase_timeout_s,
@@ -788,6 +810,7 @@ def _build_pipeline_config(
         implementer_reasoning_effort=cfg.implementer_reasoning_effort,
         gh_extra_path_root=cfg.gh_extra_path_root,
         no_advise=cfg.no_advise,
+        enable_learn=not cfg.no_learn,
         nitpick=cfg.nitpick,
         drive_green_all=cfg.drive_green_all,
         include_bot_prs=True,
@@ -939,6 +962,8 @@ def main(argv: list[str] | None = None) -> int:
         loops=args.loops,
         review_iterations=args.review_iterations,
         max_workers=args.max_workers,
+        learning_workers=args.learning_workers,
+        learning_queue_capacity=args.learning_queue_capacity,
         drive_green_loops=args.drive_green_loops,
         serialize_file_overlap=args.serialize_file_overlap,
         parallel_repos=args.parallel_repos,
@@ -949,6 +974,7 @@ def main(argv: list[str] | None = None) -> int:
         issue_limit=args.issue_limit,
         dry_run=args.dry_run,
         no_advise=args.no_advise,
+        no_learn=args.no_learn,
         nitpick=args.nitpick,
         drive_green_all=args.drive_green_all,
         run_pre_pr_tests=args.run_pre_pr_tests,

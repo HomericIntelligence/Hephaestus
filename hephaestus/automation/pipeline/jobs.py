@@ -16,32 +16,20 @@ from typing import Any
 
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
-from hephaestus.automation.pipeline.routing import StageName
 
-from .athena_skill_jobs import AthenaSkillJob
-from .github_jobs import GitHubJob
+from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
+from .job_results import JobHandle, JobResult
 
-GIT_OPS: frozenset[str] = frozenset(
-    {
-        "clone",
-        "sync_checkout",
-        "verify_issue_wave_ancestry",
-        "create_worktree",
-        "verify_pr_review_checkout",
-        "remove_worktree",
-        "rebase",
-        "continue_rebase",
-        "push",
-        "commit_push",
-        "release_branch_reservation",
-    }
-)
-
-#: Structured failed ``create_worktree`` results set this only after a
-#: checkout was created but a later adopted-branch preparation step failed.
-#: The coordinator retains that physical checkout as first-writer evidence
-#: while its transient retry is pending.
-WORKTREE_MATERIALIZED_KEY = "worktree_materialized"
+__all__ = [
+    "GIT_OPS",
+    "WORKTREE_MATERIALIZED_KEY",
+    "AgentJob",
+    "BuildTestJob",
+    "CompactJob",
+    "GitJob",
+    "JobHandle",
+    "JobResult",
+]
 
 
 @dataclass(frozen=True)
@@ -107,27 +95,6 @@ class BuildTestJob:
 
 
 @dataclass(frozen=True)
-class GitJob:
-    """Job to perform a git operation.
-
-    Security: ``kwargs`` values are forwarded to git/worktree helpers that
-    shell out, so they MUST NOT carry untrusted (issue-body-derived) strings.
-    Only the coordinator may construct these jobs, from vetted values.
-    """
-
-    repo: str
-    op: str
-    timeout_s: int
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    descr: str = ""
-
-    def __post_init__(self) -> None:
-        """Validate that op is a recognized git operation."""
-        if self.op not in GIT_OPS:
-            raise ValueError(f"unknown git op {self.op!r}; expected one of {sorted(GIT_OPS)}")
-
-
-@dataclass(frozen=True)
 class CompactJob:
     """Best-effort compaction of one resumable agent session.
 
@@ -151,35 +118,3 @@ class CompactJob:
     execution_request: ExecutionRequest | None = None
     session_binding: AgentSessionBinding | None = None
     descr: str = "compact_session"
-
-
-@dataclass(frozen=True)
-class JobResult:
-    """Result of a completed job."""
-
-    ok: bool
-    value: Any = None
-    stdout_tail: str = ""
-    stderr_tail: str = ""
-    error: str | None = None
-    interrupted: bool = False
-    duration_s: float = 0.0
-    worker_id: str = ""
-    session_id: str | None = None
-    session_binding: AgentSessionBinding | None = None
-
-
-@dataclass(frozen=True, eq=False)
-class JobHandle:
-    """Handle to a submitted job, used to correlate its completion.
-
-    Identity semantics (``eq=False``): each ``submit()`` mints a distinct
-    handle that hashes and compares by object identity, NOT by field value.
-    Two submissions of identical job specs therefore produce two distinct
-    handles, so the coordinator can key dicts/sets by handle without
-    collisions, and unhashable field values (``dict`` kwargs, callables)
-    never break hashing.
-    """
-
-    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob
-    on_done_state: str | StageName

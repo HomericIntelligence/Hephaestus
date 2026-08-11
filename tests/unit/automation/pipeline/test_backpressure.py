@@ -12,6 +12,7 @@ import pytest
 
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.jobs import JobHandle
+from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -56,10 +57,10 @@ def _config(
     )
 
 
-def test_coordinator_uses_one_capacity_for_all_queues_and_worker_pool(
+def test_coordinator_uses_independent_main_and_learning_capacities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every coordinator-owned queue and its worker pool use C exactly."""
+    """Main queues use C while learning uses its own bounded capacity."""
     from hephaestus.automation.pipeline import worker_pool as worker_pool_mod
 
     monkeypatch.setattr(worker_pool_mod, "WorkerPool", _RecordingWorkerPool)
@@ -68,8 +69,13 @@ def test_coordinator_uses_one_capacity_for_all_queues_and_worker_pool(
 
     coordinator = Coordinator(config, github=FakeStageGitHub(), install_signals=False)
 
-    assert {queue.capacity for queue in coordinator.queues.values()} == {capacity}
+    main_capacities = {
+        queue.capacity for stage, queue in coordinator.queues.items() if stage.value != "learning"
+    }
+    assert main_capacities == {capacity}
+    assert coordinator.queues[StageName.LEARNING].capacity == config.learning_queue_capacity
     assert coordinator.completion_q.maxsize == capacity
+    assert coordinator.auxiliary_completion_q.maxsize == config.learning_queue_capacity
     assert coordinator.pool.size == capacity
     assert coordinator.pool.completion_q is coordinator.completion_q
     assert coordinator.pool.gh_extra_path_root is None

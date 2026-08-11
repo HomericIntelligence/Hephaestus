@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from .coordinator_dispatch import ImplementationDispatcher
+from .coordinator_execution import ExecutionCoordinator
+from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
 from .coordinator_types import *
@@ -19,6 +21,8 @@ logger = logging.getLogger(__name__)
 _COORDINATOR_METRIC_NAMES = (
     "hephaestus_pipeline_queue_depth",
     "hephaestus_pipeline_inflight_jobs",
+    "hephaestus_pipeline_lane_queue_depth",
+    "hephaestus_pipeline_lane_inflight_jobs",
     "hephaestus_pipeline_inflight_per_repo",
     "hephaestus_pipeline_loops_total",
     "hephaestus_pipeline_stalled_ticks",
@@ -26,18 +30,26 @@ _COORDINATOR_METRIC_NAMES = (
     "hephaestus_pipeline_alert_active",
     "hephaestus_pipeline_jobs_total",
     "hephaestus_pipeline_agent_job_seconds_total",
+    "hephaestus_pipeline_auxiliary_job_seconds_total",
 )
 
 
-class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatcher):
+class Coordinator(
+    CoordinatorRuntime,
+    SourceCoordinator,
+    ImplementationDispatcher,
+    ExecutionCoordinator,
+    LearningRecoveryCoordinator,
+):
     """Assemble the coordinator's type, runtime, source, and dispatch seams."""
 
-    def __init__(
+    def __init__(  # noqa: C901 - assembles two closed worker lanes
         self,
         config: PipelineConfig,
         *,
         github: StageGitHub,
         pool: Any | None = None,
+        auxiliary_pool: Any | None = None,
         stages: dict[StageName, Stage] | None = None,
         github_factory: Callable[[str, Path], StageGitHub] | None = None,
         install_signals: bool = True,
@@ -63,6 +75,10 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
             raise ValueError("event_log_capacity must be positive")
         if config.terminal_detail_capacity < 1:
             raise ValueError("terminal_detail_capacity must be positive")
+        if config.learning_workers < 1:
+            raise ValueError("learning_workers must be positive")
+        if config.learning_queue_capacity < 1:
+            raise ValueError("learning_queue_capacity must be positive")
         self.shutdown = threading.Event()
         # These latches are the control plane for the bounded completion
         # queue.  They carry no WorkItem/JobResult payload and therefore
@@ -71,6 +87,10 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self._completion_saturation = threading.Event()
         work_window = _work_window(config)
         self.completion_q: CompletionQueue = queue_mod.Queue(maxsize=work_window)
+        self.auxiliary_completion_q: CompletionQueue = queue_mod.Queue(
+            maxsize=max(config.learning_queue_capacity, config.learning_workers)
+        )
+        athena_executor: Any | None = None
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
@@ -119,11 +139,43 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
                 saturation=self._completion_saturation,
             )
 
+        if auxiliary_pool is None and athena_executor is not None:
+            from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
+
+            auxiliary_pool = AuxiliaryWorkerPool(
+                size=config.learning_workers,
+                shutdown=self.shutdown,
+                completion_q=self.auxiliary_completion_q,
+                athena_skill_executor=athena_executor,
+                cleanup_runner=getattr(pool, "_run_cleanup_git", None),
+            )
+        elif auxiliary_pool is None:
+            # Injected test pools keep their historical single-channel shape
+            # unless a test exercises the independent auxiliary lane.
+            auxiliary_pool = pool
+            self.auxiliary_completion_q = self.completion_q
+        else:
+            auxiliary_pool.completion_q = self.auxiliary_completion_q
+            if hasattr(auxiliary_pool, "_completion_q"):
+                auxiliary_pool._completion_q = self.auxiliary_completion_q
+        self.auxiliary_pool: Any = auxiliary_pool
+        self._auxiliary_pool_separate = auxiliary_pool is not pool
+        auxiliary_notifiers = getattr(auxiliary_pool, "set_completion_notifiers", None)
+        if self._auxiliary_pool_separate and callable(auxiliary_notifiers):
+            auxiliary_notifiers(
+                wakeup=self._completion_wakeup,
+                saturation=self._completion_saturation,
+            )
+
         self.queues: dict[StageName, StageQueue] = {
-            name: StageQueue(work_window) for name in StageName
+            name: StageQueue(
+                config.learning_queue_capacity if name is StageName.LEARNING else work_window
+            )
+            for name in StageName
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}
+        self.auxiliary_in_flight: dict[JobHandle, WorkItem] = {}
         # A holder path reported by Git becomes a safe supersession signal
         # only after a successful create-worktree completion registered it
         # here.  Paths discovered from Git alone can belong to a human or a
@@ -159,6 +211,7 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         # only after the finished sink completes.  The set is therefore
         # bounded by ``_work_window(config)``, not by the number of stages.
         self._live_work_permit_ids: set[int] = set()
+        self._learning_work_permit_ids: set[int] = set()
         self.ledger: list[ItemResult] = []
         self.preserved: list[PreservedWorktree] = []
         # Recovery checkouts are intentionally distinct from failed-item
@@ -198,12 +251,13 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         # Route table for this run: the full ROUTES, or a scope-trimmed copy
         # (out-of-scope next/fail targets rewritten to FINISHED) when the
         # config pins a contiguous stage subset. Computed once — trimming is
-        # pure and the scope is immutable for the run's lifetime. FINISHED is
-        # the universal sink: ``trimmed_routes`` omits it unless it is in the
-        # scope set, so its terminal route is re-added here — every item
-        # eventually routes into FINISHED and _route must find it.
+        # pure and the scope is immutable for the run's lifetime. Learning is
+        # an implicit auxiliary detour and FINISHED is the universal sink, so
+        # both control routes remain available outside the selected main-lane
+        # scope.
         if config.scope is not None:
             self._routes = config.scope.trimmed_routes()
+            self._routes.setdefault(StageName.LEARNING, ROUTES[StageName.LEARNING])
             self._routes.setdefault(StageName.FINISHED, ROUTES[StageName.FINISHED])
         else:
             # Copy, not alias: ``ROUTES`` is a module-level shared table, so an
@@ -217,6 +271,9 @@ class Coordinator(CoordinatorRuntime, SourceCoordinator, ImplementationDispatche
         self._immediate = False
         self._agent_job_count = 0
         self._agent_job_time_s = 0.0
+        self._auxiliary_job_count = 0
+        self._auxiliary_job_time_s = 0.0
+        self._auxiliary_job_failure_count = 0
         self._loops_run = 0
         self._pass_work_count = 0
         self._progress = False

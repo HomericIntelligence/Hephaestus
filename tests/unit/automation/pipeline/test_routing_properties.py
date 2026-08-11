@@ -21,7 +21,7 @@ from hephaestus.automation.pipeline import (
     StageName,
     WorkItem,
 )
-from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, budget_keys
+from hephaestus.automation.pipeline.routing import MAIN_PIPELINE_ORDER, budget_keys
 from hephaestus.automation.pipeline.work_item import ItemKind
 
 NON_TERMINAL = [s for s in StageName if s != StageName.FINISHED]
@@ -60,6 +60,8 @@ _REASON_BUDGET: dict[str, str | None] = {
     "reviewed_head_drift": None,
     "merge_conflicting": None,
     "post_review_rebase_required": None,
+    "resume_implementation": None,
+    "resume_plan_review": None,
     "missing_worktree": None,
     "no_pr": None,
     # #2054 terminalizes every open merge-wait item after containment.
@@ -196,7 +198,7 @@ def test_budget_exhaustion_is_always_finite(budget_key: str) -> None:
 @st.composite
 def contiguous_scopes(draw: st.DrawFn) -> frozenset[StageName]:
     """Generate contiguous, non-empty stage subsets in pipeline order."""
-    non_finished = [s for s in PIPELINE_ORDER if s != StageName.FINISHED]
+    non_finished = list(MAIN_PIPELINE_ORDER)
     start = draw(st.integers(min_value=0, max_value=len(non_finished) - 1))
     end = draw(st.integers(min_value=start, max_value=len(non_finished) - 1))
     include_finished = draw(st.booleans())
@@ -211,9 +213,9 @@ def contiguous_scopes(draw: st.DrawFn) -> frozenset[StageName]:
 def test_scope_closure_over_generated_subsets(stages: frozenset[StageName]) -> None:
     """(d) Every trimmed route targets scope ∪ {FINISHED} for ANY contiguous scope."""
     scope = PipelineScope(stages)
-    allowed = set(stages) | {StageName.FINISHED}
+    allowed = set(stages) | {StageName.LEARNING, StageName.FINISHED}
     for stage, route in scope.trimmed_routes().items():
-        assert stage in stages
+        assert stage in allowed
         assert route.next in allowed
         for target in route.fail_routes.values():
             assert target in allowed

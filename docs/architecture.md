@@ -24,10 +24,10 @@ Optimization"), file paths are repo-relative.
 ## Table of contents
 
 1. [Goals, non-goals and design principles](#1-goals-non-goals-and-design-principles)
-2. [System overview: single coordinator, seven queues, one worker pool](#2-system-overview)
+2. [System overview: one coordinator, eight queues, two worker pools](#2-system-overview)
 3. [Cross-cutting invariants](#3-cross-cutting-invariants)
 4. [WorkItem and the durable journal](#4-workitem-and-the-durable-journal)
-5. [The seven queue stages](#5-the-seven-queue-stages)
+5. [The eight queue stages](#5-the-eight-queue-stages)
 
 - [5.1 Repo intake](#51-repo-intake)
 - [5.2 Planning](#52-planning)
@@ -35,7 +35,8 @@ Optimization"), file paths are repo-relative.
 - [5.4 Implementation](#54-implementation)
 - [5.5 PR review](#55-pr-review)
 - [5.6 Merge wait](#56-merge-wait)
-- [5.7 Finished](#57-finished)
+- [5.7 Learning](#57-learning)
+- [5.8 Finished](#58-finished)
 
 1. [The ROUTES table — single source of truth](#6-the-routes-table)
 2. [Seeding and restart reconstruction](#7-seeding-and-restart-reconstruction)
@@ -52,9 +53,9 @@ Optimization"), file paths are repo-relative.
 
 ### Goals
 
-- **Single durable journal.** GitHub labels, comments, PR state and
- `ArmingStateStore` records are the normal crash-resistant truth. The one
- explicit exception is the repository-scoped issue-wave checkpoint, which
+- **Durable journals.** GitHub labels, comments, and PR state are the normal
+ crash-resistant truth. `LearningJournalStore` records auxiliary intent
+ claims and terminal results. The repository-scoped issue-wave checkpoint
  records only immutable selected issue identifiers, terminal outcomes, merge
  receipts, and verified main revisions. Stages may not persist any other
  state. Restart =
@@ -140,11 +141,12 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
 The default path is **`hephaestus-automation-loop`**, the queue-based
 in-process pipeline whose coordinator lives at
 [`hephaestus.automation.pipeline.coordinator`](../hephaestus/automation/pipeline/coordinator.py).
-The coordinator owns **seven in-memory stage queues** and dispatches
-agent / build-test / git-network jobs to a single `WorkerPool`. Each agent
+The coordinator owns **eight bounded in-memory stage queues**. It dispatches
+ordinary agent, build-test, Git, and GitHub jobs to `WorkerPool`. It dispatches
+host learning and terminal cleanup to `AuxiliaryWorkerPool`. Each agent
 job runs Claude or Codex, chosen by `--agent` (default Claude).
 
-#### Seven-stage queue block diagram
+#### Main and auxiliary queue block diagram
 
 ```mermaid
 flowchart LR
@@ -153,7 +155,10 @@ flowchart LR
     plan_review --> implementation["4. Implementation"]
     implementation --> pr_review["5. PR review"]
     pr_review --> merge_wait["6. Merge wait"]
-    merge_wait --> finished["7. Finished"]
+    plan_review -. "approved-plan intent" .-> learning["7. Learning"]
+    merge_wait -. "post-merge intent" .-> learning
+    learning --> implementation
+    learning --> finished["8. Finished"]
 
     plan_review -. "nogo (iter 3 / plan_cycles 2)" .-> planning
     implementation -. "agent_error" .-> implementation
@@ -169,7 +174,7 @@ reason vocabulary" stages must reference verbatim in `StageOutcome.note`.
 
 The main thread (coordinator) OWNS:
 
-- all seven stage queues ([`self.queues`](../hephaestus/automation/pipeline/coordinator.py))
+- all eight stage queues ([`self.queues`](../hephaestus/automation/pipeline/coordinator.py))
 - the timer heap ([`self.timers`](../hephaestus/automation/pipeline/coordinator.py))
 - the in-flight registry ([`self.in_flight`](../hephaestus/automation/pipeline/coordinator.py))
 - all routing and disposition semantics ([`_route`](../hephaestus/automation/pipeline/coordinator.py))
@@ -179,7 +184,7 @@ The main thread (coordinator) OWNS:
  auto-merge)
 It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
-The single worker pool ([`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py))
+The main worker pool ([`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py))
 executes everything else: agent invocations (Claude or Codex), build/test
 subprocesses, git operations, and the closed worker-owned GitHub operations.
 `StageContext.github` remains coordinator-thread-owned and never crosses this
@@ -216,9 +221,13 @@ queue capacity
 [`Coordinator._wake_completion_wait`](../hephaestus/automation/pipeline/coordinator.py)).
 The idle coordinator may wait on that event for its bounded poll interval
 ([`_IDLE_POLL_S = 1.0`](../hephaestus/automation/pipeline/coordinator.py)); it
-does not make a producer or signal handler wait. Pool size = `parallel_repos × max_workers`.
-Each stage-queue capacity and the
-completion-queue capacity are `C = max(1, parallel_repos × max_workers)`
+does not make a producer or signal handler wait. Main pool size is
+`parallel_repos × max_workers`. The auxiliary pool size is
+`learning_workers`. Main queue capacity is
+`C = max(1, parallel_repos × max_workers)`. Learning queue and permit capacity
+use `learning_queue_capacity`. Auxiliary completion capacity is the larger of
+`learning_queue_capacity` and `learning_workers`, so every running worker owns
+a completion slot. Lane permits are independent.
 ([`_work_window`](../hephaestus/automation/pipeline/coordinator.py),
 [`WorkerPool(size=…)`](../hephaestus/automation/pipeline/worker_pool.py)).
 
@@ -306,10 +315,12 @@ disposition to the queue.
 Let `C = max(1, parallel_repos × max_workers)`. `C` is a global live-work
 window, not a per-stage concurrency target. Every stage queue and the
 completion queue have capacity `C`, while the coordinator holds one global
-permit for every nonterminal `WorkItem`. Consequently, seven stage queues do
-not permit `7C` simultaneous work items: an item holds the same permit as it
-moves through the pipeline and releases it only after `finished` records its
-outcome.
+permit for every nonterminal main-lane `WorkItem`. The auxiliary lane has its
+own permit bound. Consequently, eight stage queues do not permit a multiple of
+`C` simultaneous work items. An item keeps its lane permit while it moves
+within that lane. A cross-lane handoff transfers permit ownership only after
+the destination accepts the item. The auxiliary permit is released after
+`finished` records the outcome.
 
 Queue draining claims an item through a
 [`StageQueueLease`](../hephaestus/automation/pipeline/queues.py). The lease keeps
@@ -641,9 +652,9 @@ seeding reads labels and PR state, never reviewer decision prose.
 
 ---
 
-## 5. The seven queue stages
+## 5. The eight queue stages
 
-The seven stages are architectural responsibilities, not implementation
+The eight stages are architectural responsibilities, not implementation
 modules. This section describes boundaries, durable state, and transitions.
 Worker types, helper functions, payload fields, and source-code structure are
 intentionally omitted.
@@ -658,7 +669,10 @@ flowchart LR
     V --> I["4. Implementation"]
     I --> Q["5. PR review"]
     Q --> M["6. Merge wait"]
-    M --> F["7. Finished"]
+    V -. "approved-plan intent" .-> L["7. Learning"]
+    M -. "post-merge intent" .-> L
+    L --> I
+    L --> F["8. Finished"]
 
     V -. "revision needed" .-> P
     V -. "external intervention needed" .-> H["Operator or dependency"]
@@ -1166,7 +1180,23 @@ Architectural contract:
   transport ambiguity, and every actual request remain subject to fresh
   lifecycle, head, label, thread, and protection checks.
 
-### 5.7 `finished`
+### 5.7 `learning`
+
+Learning is an implicit auxiliary stage for every main-stage scope. Plan review
+emits an approved-plan intent after the plan label is confirmed. Merge wait
+emits a post-merge intent only after merge confirmation. The stage writes the
+intent journal before dispatch, claims one deterministic key, and submits only
+a host-owned `AthenaSkillJob`. Known failures retry within the `learn` budget.
+An ambiguous crash-left claim becomes terminal `failed` with
+`outcome_unknown`; it is not submitted twice. Learning failure is ancillary
+and cannot change a confirmed main result.
+
+Main and learning permits are separate. Handoffs reserve the bounded
+destination before they release the source. Approved-plan work returns to the
+scope-trimmed main destination. Post-merge work continues to `finished` only
+after all intents are terminal.
+
+### 5.8 `finished`
 
 Finished records the final outcome exactly once and applies workspace retention
 policy. It does not change issue, review, or merge verdicts.
@@ -1226,6 +1256,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `rebase_conflict = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error`, `empty_pr_diff`, or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |
+| `learning` | `FINISHED` | `resume_implementation` → `IMPLEMENTATION`; `resume_plan_review` → `PLAN_REVIEW`; `*` → `FINISHED` | `learn = 2` |
 | `finished` | `FINISHED` | — (terminal) | — |
 
 Budget provenance (cross-check):
@@ -1233,7 +1264,7 @@ Budget provenance (cross-check):
 - `plan_review_iter = 3`, `pr_review_iter = 3`, and `pr_review_hard = 6`
   are defined in [`pipeline/routing.py`](../hephaestus/automation/pipeline/routing.py),
   with the latter as the progress-aware extension cap.
-- `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`,
+- `clone = 2`, `plan = 2`, `plan_cycles = 2`, `implement = 2`, `learn = 2`,
   `rebase_conflict = 2`, and `test_fix = 1` are fixed stage budgets.
 - `merge = DEFAULT_DRIVE_GREEN_LOOPS = 5` ←
  [`loop_runner.py LoopConfig.drive_green_loops`](../hephaestus/automation/loop_runner.py).
@@ -1341,8 +1372,8 @@ and require operator handling.
 
 ## 8. The worker pool and job contract
 
-[`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py) is the
-single executor. It receives frozen specs and returns bounded
+`WorkerPool` is the main executor. `AuxiliaryWorkerPool` is the closed
+host-learning and cleanup executor. Both receive frozen specs and return bounded
 [`JobResult`](../hephaestus/automation/pipeline/jobs.py) tuples. Workers never
 touch `WorkItem`s or stage queues. GitHub I/O is allowed only through the
 closed typed runner; generic worker code does not import the GitHub
@@ -1384,6 +1415,15 @@ implementation.
 - [`CompactJob`](../hephaestus/automation/pipeline/jobs.py) — a best-effort
  `/compact` turn for a persisted Claude, Codex, or Pi session; it never blocks
  the retry lifecycle.
+- [`AthenaSkillJob(kind="learn")`](../hephaestus/automation/pipeline/athena_skill_jobs.py)
+ is the only learning job accepted by the auxiliary pool. That pool also
+ accepts only `remove_worktree` and `release_branch_reservation` Git cleanup.
+ It has no generic agent-dispatch path.
+
+After a confirmed merge, the coordinator creates a compact
+`PostProcessingRecord`. It retains the primary result, intent keys, resume
+stage, and cleanup receipts. It removes PR diffs, review audits, prompt text,
+and other stage-local payloads before the auxiliary queue accepts the item.
 
 ### Result semantics
 
@@ -1514,6 +1554,10 @@ repository checkpoint verifies the previous wave. It also accepts
 `--max-workers` and per-agent `--agent` plus per-phase reasoning
 controls:
 
+- `--learning-workers N` controls host-learning concurrency (default `1`).
+- `--learning-queue-capacity N` bounds auxiliary backlog (default `1`).
+- `--no-learn` creates no new learning intent.
+
 - `--planner-reasoning-effort`
 - `--implementer-reasoning-effort`
 - `--reviewer-reasoning-effort`
@@ -1565,7 +1609,7 @@ are reported through `hephaestus_metrics_series_overflow_total`.
 
 | Gauge | Type | Labels and allowed values | Cap | Default | Semantics |
 |-------------------------------------------|--------|-----------|-----:|---------|-----------|
-| `hephaestus_pipeline_queue_depth` | Gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `finished` | 7 | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
+| `hephaestus_pipeline_queue_depth` | Gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `learning`, `finished` | 8 | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
 | `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | 1 | `0` | Total in-flight jobs across all worker pools. |
 | `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo`: open repository names | 100 | `0` | In-flight jobs by repo, capped by `max_workers`. |
 | `hephaestus_circuit_breaker_state` | Gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |

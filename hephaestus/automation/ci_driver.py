@@ -151,6 +151,9 @@ Examples:
         action="store_true",
         help="Skip the advise step before loop review",
     )
+    parser.add_argument("--learning-workers", type=int, default=1)
+    parser.add_argument("--learning-queue-capacity", type=int, default=1)
+    parser.add_argument("--no-learn", action="store_true")
     parser.add_argument(
         "--no-include-bot-prs",
         dest="include_bot_prs",
@@ -252,9 +255,12 @@ def main() -> int:
             loops=1,
             # --max-workers maps to the pipeline worker-pool size.
             max_workers=args.max_workers,
+            learning_workers=args.learning_workers,
+            learning_queue_capacity=args.learning_queue_capacity,
             dry_run=args.dry_run,
             agent=agent,
             no_advise=args.no_advise,
+            enable_learn=not args.no_learn,
             drive_green_all=drive_green_all,
             include_bot_prs=args.include_bot_prs,
             include_all_authors=args.include_all_authors,

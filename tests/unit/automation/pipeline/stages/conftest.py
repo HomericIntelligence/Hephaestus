@@ -657,6 +657,7 @@ def make_ctx() -> Callable[..., StageContext]:
         now_fn: Callable[[], float] | None = None,
         budget_fn: Callable[[str], int] | None = None,
         event_fn: Callable[[StageEvent], None] | None = None,
+        learning_journal: Any = None,
         branch_worktree_owner_status: (
             Callable[[WorkItem, str, str], BranchWorktreeOwnerStatus] | None
         ) = None,
@@ -676,6 +677,7 @@ def make_ctx() -> Callable[..., StageContext]:
             now_fn=now_fn if now_fn is not None else default_now_fn,
             budget_fn=budget_fn if budget_fn is not None else _budget_fn,
             event_fn=event_fn,
+            learning_journal=learning_journal,
             branch_worktree_owner_status=branch_worktree_owner_status,
         )
 
