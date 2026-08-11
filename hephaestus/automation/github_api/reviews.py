@@ -22,91 +22,48 @@ ReviewCommentIndexKey = tuple[str, Any] | tuple[str, Any, str]
 def _fetch_pr_inline_review_thread_nodes(pr_number: int) -> list[dict[str, Any]]:
     """Return PR review-thread nodes used by inline-comment dedupe helpers.
 
-    Fails open: returns ``[]`` on any API/parse error so callers preserve their
-    existing post-as-usual behaviour.
+    The centralized GraphQL validator distinguishes an empty valid connection
+    from a failed read; callers must not post duplicates after the latter.
     """
+    owner, repo = _api.get_repo_info()
+    if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
+        raise _api.GraphQLDeterministicError("invalid repository identity")
+    spec = _api.inline_review_threads_page_query(owner, repo, pr_number)
+
+    def fetch_thread_page(after: str | None) -> dict[str, Any]:
+        variables: dict[str, int | str] = {
+            "owner": owner,
+            "name": repo,
+            "number": int(pr_number),
+        }
+        if after is not None:
+            variables["after"] = after
+        return _api.run_graphql(spec, variables)
+
     try:
-        owner, repo = _api.get_repo_info()
-        if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
-            _api.logger.error("Invalid owner/repo format: %s/%s", owner, repo)
-            return []
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-            "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-            "reviewThreads(first:100,after:$after){"
-            "pageInfo{hasNextPage endCursor}"
-            "nodes{id isResolved path line side:diffSide "
-            "comments(first:1){nodes{id body viewerCanUpdate "
-            "pullRequestReview{id}}}}}}}}"
-        )
-
-        def fetch_thread_page(after: str | None) -> dict[str, Any]:
-            argv = [
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={repo}",
-                "-F",
-                f"number={int(pr_number)}",
-            ]
-            if after is not None:
-                argv.extend(["-F", f"after={after}"])
-            result = _api._gh_call(argv, check=False)
-            data = json.loads(result.stdout or "{}")
-            if not isinstance(data, dict):
-                raise RuntimeError("malformed inline review-thread GraphQL response")
-            _api._check_graphql_errors(data, f"inline review threads for PR #{pr_number}")
-            data_node = data.get("data")
-            repository = data_node.get("repository") if isinstance(data_node, dict) else None
-            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
-            review_threads = (
-                pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
-            )
-            if not isinstance(review_threads, dict):
-                raise RuntimeError("malformed inline review-thread GraphQL response")
-            return review_threads
-
         nodes = collect_graphql_connection_nodes(
             fetch_thread_page,
             connection_name=f"inline review threads for PR #{pr_number}",
         )
-        unique_nodes: dict[str, dict[str, Any]] = {}
-        for node in nodes:
-            thread_id = node.get("id")
-            comments = node.get("comments")
-            if (
-                not isinstance(thread_id, str)
-                or not thread_id
-                or not isinstance(node.get("isResolved"), bool)
-                or not isinstance(comments, dict)
-                or not isinstance(comments.get("nodes"), list)
-                or not all(isinstance(comment, dict) for comment in comments["nodes"])
-            ):
-                raise RuntimeError("malformed inline review-thread node")
-            previous = unique_nodes.get(thread_id)
-            if previous is not None and previous != node:
-                raise RuntimeError(f"conflicting duplicate inline review thread {thread_id}")
-            if previous is None:
-                unique_nodes[thread_id] = node
-        return list(unique_nodes.values())
-    except (
-        OSError,
-        subprocess.SubprocessError,
-        json.JSONDecodeError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-    ) as exc:
-        _api.logger.warning(
-            "PR #%s: could not fetch inline review-thread nodes (%s)", pr_number, exc
-        )
-        return []
+    except _api.GraphQLResponseError:
+        raise
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise _api.GraphQLDeterministicError(
+            f"malformed inline review threads for PR #{pr_number}"
+        ) from exc
+    unique_nodes: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        thread_id = node.get("id")
+        if not isinstance(thread_id, str) or not thread_id:
+            raise _api.GraphQLDeterministicError("malformed inline review-thread node")
+        previous = unique_nodes.get(thread_id)
+        if previous is not None and previous != node:
+            raise _api.GraphQLDeterministicError(
+                f"conflicting duplicate inline review thread {thread_id}"
+            )
+        if previous is None:
+            unique_nodes[thread_id] = node
+    return list(unique_nodes.values())
 
 
 def gh_pr_inline_comment_index(
@@ -125,8 +82,8 @@ def gh_pr_inline_comment_index(
     the first comment of a thread may belong to another app/account (Copilot,
     CodeQL); GitHub rejects an in-place edit of such a comment with
     ``Body is not editable``, so the caller must post its OWN editable shadow
-    comment instead (#1327). Fails open: returns ``{}`` on any API/parse error so
-    the caller posts everything as before.
+    comment instead (#1327). A malformed or unavailable response propagates;
+    only a validated empty connection produces an empty index.
     """
     index: dict[ReviewCommentIndexKey, tuple[str, str, bool]] = {}
     for node in _api._fetch_pr_inline_review_thread_nodes(pr_number):
@@ -170,26 +127,7 @@ def gh_pr_update_review_comment(comment_node_id: str, body: str) -> None:
     are not polluted with misleading error noise for a handled condition.
     Genuine, unexpected failures still propagate as exceptions to the caller.
     """
-    mutation = (
-        "mutation($id:ID!,$body:String!){"
-        "  updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:$body}){"
-        "    pullRequestReviewComment{ id }"
-        "  }"
-        "}"
-    )
-    _api._gh_call(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={mutation}",
-            "-f",
-            f"id={comment_node_id}",
-            "-f",
-            f"body={body}",
-        ],
-        log_on_error=False,
-    )
+    _api.run_graphql(_api.update_review_comment_mutation(comment_node_id, body))
 
 
 _BODY_NOT_EDITABLE_MARKER = "not editable"
@@ -379,8 +317,9 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
     silently suppressed, leaving the GO gate with zero unresolved threads and
     letting the PR converge with the issue still unfixed.
 
-    Fails open: an empty index returns *comments* unchanged, and an edit that
-    raises falls back to posting that comment fresh.
+    A validated empty index returns *comments* unchanged. Transport,
+    malformed-response, and unknown edit outcomes propagate so a failed read
+    or edit cannot become a duplicate publication.
     """
     editable_index = _api.gh_pr_inline_comment_index(pr_number)
     if not editable_index:
@@ -443,33 +382,21 @@ def _edit_or_keep_comments(pr_number: int, comments: list[dict[str, Any]]) -> li
                 line,
                 side,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
-            # A deterministic "Body is not editable" means viewerCanUpdate was
-            # stale/unavailable; recover by posting our own editable shadow
-            # comment (#1327). Any other edit error falls back to posting fresh.
-            if _BODY_NOT_EDITABLE_MARKER in str(exc).lower():
-                shadow = _api._post_shadow_review_comment(pr_number, c)
-                if shadow is not None:
-                    new_id, new_body = shadow
-                    editable_index[(path, line, side)] = (new_id, new_body, True)
-                    editable_index[(path, line)] = (new_id, new_body, True)
-                    _api.logger.info(
-                        "PR #%s: edit reported not-editable on %s:%s (%s); posted editable "
-                        "shadow comment instead",
-                        pr_number,
-                        path,
-                        line,
-                        side,
-                    )
-                    continue
-            _api.logger.warning(
-                "PR #%s: edit-in-place failed for %s:%s (%s): %s; posting fresh",
-                pr_number,
-                path,
-                line,
-                side,
-                exc,
-            )
+        except _api.ReviewCommentNotEditableError:
+            shadow = _api._post_shadow_review_comment(pr_number, c)
+            if shadow is not None:
+                new_id, new_body = shadow
+                editable_index[(path, line, side)] = (new_id, new_body, True)
+                editable_index[(path, line)] = (new_id, new_body, True)
+                _api.logger.info(
+                    "PR #%s: edit reported not-editable on %s:%s (%s); posted editable "
+                    "shadow comment instead",
+                    pr_number,
+                    path,
+                    line,
+                    side,
+                )
+                continue
             fresh.append(c)
     return fresh
 
@@ -497,8 +424,8 @@ def gh_pr_review_post(
             Only the genuinely new comments are posted as fresh threads. If
             dedupe/editing consumes every inline comment, no review is posted;
             a duplicate-only re-review should be a no-op, not another review
-            submission. Fails open: if the existing-comment index cannot
-            be fetched, every comment is posted as before.
+            submission. A failed existing-comment read propagates; only a
+            validated empty index leaves every comment available to post.
 
     Returns:
         List of created review thread IDs (empty on dry_run or if no comments)
@@ -558,8 +485,8 @@ def gh_pr_review_post(
 
     # #1083: edit-in-place instead of duplicating. If a comment targets a line
     # that already has an unresolved bot comment, append the new body to that
-    # comment and drop it from the to-post set. Fails open (posts everything) if
-    # the existing-comment index can't be fetched.
+    # comment and drop it from the to-post set. A failed existing-comment index
+    # propagates instead of posting duplicates.
     had_inline_comments = bool(comments)
     if comments and dedupe_existing:
         comments = _api._edit_or_keep_comments(pr_number, comments)
@@ -626,44 +553,31 @@ def _review_threads_for_review(pr_number: int, review_id: str) -> list[str]:
     *this* review are returned, not pre-existing human-reviewer threads — while
     using fields that actually exist in the GitHub GraphQL schema.
 
-    Returns an empty list on any failure (the caller treats it as no durable
-    thread snapshot, which is safe).
+    Response failures propagate so a missing receipt cannot masquerade as an
+    empty set of newly-created threads.
     """
     seen: dict[str, None] = {}
-    try:
-        for node in _api._fetch_pr_inline_review_thread_nodes(pr_number):
-            if node.get("isResolved"):
-                continue
-            comments = node.get("comments")
-            comment_nodes = comments.get("nodes") if isinstance(comments, dict) else None
-            if not isinstance(comment_nodes, list):
-                raise RuntimeError("malformed inline review-thread comments")
-            if not comment_nodes:
-                continue
-            first_comment = comment_nodes[0]
-            if not isinstance(first_comment, dict):
-                raise RuntimeError("malformed inline review-thread comment")
-            review = first_comment.get("pullRequestReview")
-            thread_id = node.get("id")
-            if (
-                isinstance(review, dict)
-                and review.get("id") == review_id
-                and isinstance(thread_id, str)
-                and thread_id
-            ):
-                seen[thread_id] = None
-    except (
-        OSError,
-        subprocess.SubprocessError,
-        json.JSONDecodeError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        AttributeError,
-        KeyError,
-    ) as exc:
-        _api.logger.warning("Could not fetch review threads for PR #%s: %s", pr_number, exc)
-        return []
+    for node in _api._fetch_pr_inline_review_thread_nodes(pr_number):
+        if node.get("isResolved"):
+            continue
+        comments = node.get("comments")
+        comment_nodes = comments.get("nodes") if isinstance(comments, dict) else None
+        if not isinstance(comment_nodes, list):
+            raise _api.GraphQLDeterministicError("malformed inline review-thread comments")
+        if not comment_nodes:
+            continue
+        first_comment = comment_nodes[0]
+        if not isinstance(first_comment, dict):
+            raise _api.GraphQLDeterministicError("malformed inline review-thread comment")
+        review = first_comment.get("pullRequestReview")
+        thread_id = node.get("id")
+        if (
+            isinstance(review, dict)
+            and review.get("id") == review_id
+            and isinstance(thread_id, str)
+            and thread_id
+        ):
+            seen[thread_id] = None
 
     # Preserve insertion order; a thread can hold multiple comments but its id
     # is unique, so a dict keyed on id dedupes naturally.

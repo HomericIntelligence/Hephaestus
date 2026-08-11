@@ -1383,7 +1383,10 @@ class PrReviewJobs(_PrReviewHost):
     def _on_reply_handoff_done(item: WorkItem, result: JobResult) -> None:
         """Store only an exact request-bearing recovery receipt."""
         if not result.ok:
-            item.payload[_REPLY_HANDOFF_RECEIPT_ERROR] = "retry"
+            # A worker failure does not prove that a mutation was never
+            # dispatched. Treat the handoff as blocked and force a fresh
+            # read-only review pass rather than replaying it.
+            item.payload[_REPLY_HANDOFF_RECEIPT_ERROR] = "blocked"
             return
         receipt = result.value
         if not isinstance(receipt, ReplyHandoffAttempted) or receipt.request != item.payload.get(

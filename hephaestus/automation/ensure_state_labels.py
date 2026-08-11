@@ -34,12 +34,12 @@ import subprocess
 import sys
 import threading
 
+from hephaestus.automation.github_api import gh_call
 from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
 )
-from hephaestus.github.client import gh_call
 from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser

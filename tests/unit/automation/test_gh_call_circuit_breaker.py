@@ -157,4 +157,5 @@ class TestGhCallCircuitBreaker:
             max_retries=3,
             log_on_error=True,
             timeout=None,
+            throttle=True,
         )

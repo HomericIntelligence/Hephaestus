@@ -140,18 +140,8 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         self, pr_number: int
     ) -> list[dict[str, Any]]:
         """List unresolved PR review threads for this accessor's explicit repo."""
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-            "  repository(owner:$owner,name:$name){"
-            "    pullRequest(number:$number){"
-            "      reviewThreads(first:100,after:$after){"
-            "        pageInfo{ hasNextPage endCursor }"
-            "        nodes{ id isResolved }"
-            "      }"
-            "    }"
-            "  }"
-            "}"
-        )
+        owner, name = self._owner_name()
+        spec = github_api.pipeline_unresolved_threads_page_query(owner, name, pr_number)
 
         def read_thread_ids() -> tuple[str, ...]:
             """Read one complete unresolved-thread traversal without hydrating it."""
@@ -163,18 +153,8 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 fields: dict[str, int | str] = {"number": int(pr_number)}
                 if after is not None:
                     fields["after"] = after
-                data = self._graphql(query, **fields)
-                data_node = data.get("data") if isinstance(data, dict) else None
-                repository = data_node.get("repository") if isinstance(data_node, dict) else None
-                pull_request = (
-                    repository.get("pullRequest") if isinstance(repository, dict) else None
-                )
-                review_threads = (
-                    pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
-                )
-                if not isinstance(review_threads, dict):
-                    raise RuntimeError("could not fetch all PR review threads")
-                nodes = review_threads.get("nodes")
+                review_threads = self._graphql(spec, **fields)
+                nodes = review_threads.get("nodes") if isinstance(review_threads, dict) else None
                 if not isinstance(nodes, list):
                     raise RuntimeError("could not fetch all PR review threads")
                 for node in nodes:

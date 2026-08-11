@@ -28,9 +28,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import default_mnemosyne_root as binding_mnemosyne_root
 from hephaestus.constants import agent_clone_timeout, agent_git_timeout
-from hephaestus.github.client import gh_call
 from hephaestus.github.mnemosyne_repo import resolve_mnemosyne_target
 
 # fcntl is POSIX-only; CPython does not bundle it on Windows. Import lazily so
