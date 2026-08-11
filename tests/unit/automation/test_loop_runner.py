@@ -14,13 +14,10 @@ import json
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest.mock import patch
 
 import pytest
-
-if TYPE_CHECKING:
-    from hephaestus.automation.pipeline.coordinator import PipelineConfig
 
 from hephaestus.automation import loop_runner
 from hephaestus.automation.loop_runner import (
@@ -32,6 +29,7 @@ from hephaestus.automation.loop_runner import (
     _validate_phases,
     main,
 )
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # ---------------------------------------------------------------------------
@@ -149,7 +147,7 @@ def test_main_wires_private_evidence_receipt_directory(
 ) -> None:
     """The normal loop can opt into bounded worker receipts for an evidence run."""
     config = cast(
-        "PipelineConfig",
+        PipelineConfig,
         _capture_config(["--agent", "codex", "--evidence-receipt-dir", str(tmp_path)], monkeypatch),
     )
 
