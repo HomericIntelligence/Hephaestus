@@ -14,7 +14,7 @@ Hephaestus self-tags its own newly-opened issues via
 [`.github/workflows/auto-label-needs-plan.yml`](../.github/workflows/auto-label-needs-plan.yml).
 That workflow is also a **reusable workflow** (`workflow_call`-callable), so
 every other HomericIntelligence repo gets the same behaviour by adding a
-**single 8-line stub file** at `.github/workflows/needs-plan.yml`:
+**small caller stub** at `.github/workflows/needs-plan.yml`:
 
 ```yaml
 name: needs-plan
@@ -30,6 +30,8 @@ permissions:
 jobs:
   call:
     uses: HomericIntelligence/Hephaestus/.github/workflows/auto-label-needs-plan.yml@main
+    with:
+      issue_number: ${{ github.event.issue.number }}
 ```
 
 ## Issue intake (forms → labels)
@@ -62,20 +64,29 @@ open/reopen (above). Keeping state automation-driven — not a free-text form
 field — is deliberate; a free-text state field drifts off-format and
 mis-routes issues.
 
-## Rollout
+## Rollout and rollback
 
 Run [`hephaestus-ensure-state-labels --org HomericIntelligence`](../hephaestus/automation/ensure_state_labels.py)
-first so every repo has the planning `state:*` labels defined. Then copy the
-stub above into each repo's `.github/workflows/needs-plan.yml` and merge — a
-short PR per repo is the simplest path. New issues from then on get
-`state:needs-plan` automatically; the next automation-loop iteration picks
-them up and the reviewer transitions them to `state:plan-go`,
-`state:plan-no-go`, or `state:plan-blocked`.
+first so every repo has the planning `state:*` labels defined. The reusable
+`issue_number` input is required, so an existing caller that does not pass it
+fails before any label API request. Inventory callers, update each stub with
+the `with` block above, and deploy the callers and reusable workflow as a
+coordinated rollout. Then confirm that newly opened and reopened issues get
+`state:needs-plan`; invalid inputs fail loudly before label mutation.
+
+If the rollout must be contained, revert the reusable workflow and its caller
+updates as one coordinated change. Reverting the workflow does not remove
+already-applied labels. If cleanup is required, remove labels only from a
+reviewed, explicit list of known issue numbers through the GitHub labels API;
+do not perform a bulk deletion.
 
 ## Security
 
-The reusable workflow only consumes **server-controlled integers**
-(`github.event.issue.number` and `github.repository`) — no user-controlled
-text (title/body/labels) is touched, so command-injection vectors via the
-issue payload are not present. Permissions are scoped to
-`contents: read` + `issues: write`.
+The reusable workflow receives the caller's server-controlled
+`github.event.issue.number` as the required numeric `issue_number` input. It
+resolves that input with the native event payload using
+`${{ github.event.issue.number || inputs.issue_number }}` and validates the
+resolved value as a positive decimal integer before making the API request.
+The repository remains server-controlled through `github.repository`; no
+user-controlled text (title/body/labels) is touched. Permissions are scoped
+to `contents: read` + `issues: write`.

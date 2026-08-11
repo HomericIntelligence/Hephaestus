@@ -3,13 +3,19 @@ name: Auto-label needs-plan
 # Reusable workflow that tags newly-opened (or re-opened) GitHub issues with
 # the ``state:needs-plan`` label so the automation pipeline picks them up on
 # its next loop iteration (#704). Other HomericIntelligence repos call this
-# via ``workflow_call`` from a tiny on:issues:opened stub.
+# via ``workflow_call`` from a tiny on:issues:opened stub that passes the
+# required issue number.
 #
 # Self-trigger when called as a local workflow (Hephaestus uses it for its
 # own issues), and respond to ``workflow_call`` from other repos.
 
 on:
   workflow_call:
+    inputs:
+      issue_number:
+        description: Issue number to label
+        required: true
+        type: number
   issues:
     types: [opened, reopened]
 
@@ -21,17 +27,16 @@ permissions:
 
 # Serialize per-issue so a rapid reopen/edit storm for the same issue does not
 # stack redundant idempotent label POSTs; distinct issues still run in parallel.
-# The run_id fallback gives the workflow_call path (no issue context) a unique
-# group. cancel-in-progress: the newest reconcile wins (label POST is idempotent).
+# Both trigger paths resolve to the same issue number. cancel-in-progress: the
+# newest reconcile wins (label POST is idempotent).
 concurrency:
-  group: auto-label-needs-plan-${{ github.event.issue.number || github.run_id }}
+  group: auto-label-needs-plan-${{ github.event.issue.number || inputs.issue_number }}
   cancel-in-progress: true
 
 jobs:
   needs-plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
-    if: github.event_name == 'issues'
     steps:
       - name: Add state:needs-plan label
         env:
@@ -40,15 +45,14 @@ jobs:
           # bind any user-controllable fields (issue title/body/labels);
           # passing only the issue number to ``gh api`` keeps the shell
           # command-injection-free even though "$VAR" quoting already would.
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Validate the issue number is purely numeric before passing it
-          # to ``gh api`` — defence in depth against any future change to
-          # the event payload shape.
+          # Validate the issue number before passing it to ``gh api`` —
+          # defence in depth against malformed reusable callers.
           case "$ISSUE_NUMBER" in
-            ''|*[!0-9]*)
+            ''|0|0*|*[!0-9]*)
               echo "::error::Unexpected ISSUE_NUMBER value (not a positive integer)"
               exit 1
               ;;
