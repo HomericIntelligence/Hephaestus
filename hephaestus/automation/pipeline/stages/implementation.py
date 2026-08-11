@@ -1392,6 +1392,7 @@ class ImplementationStage(Stage):
             snapshots if isinstance(snapshots, list) else [],
         )
         if isinstance(handoff, dict) and handoff.get("head_sha") == current_head:
+            handoff["reconciliation_only"] = True
             item.payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = handoff
             item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
             logger.info(
@@ -1429,7 +1430,7 @@ class ImplementationStage(Stage):
         """Apply a detached exact-reply receipt without retaining mutable state."""
         receipt = result.value
         if not result.ok:
-            status = "retry"
+            status = "blocked"
         elif not isinstance(receipt, ReplyHandoffAttempted) or not (
             ImplementationStage._matching_receipt_request(item, receipt)
         ):
@@ -2063,6 +2064,12 @@ class ImplementationStage(Stage):
         if handoff_result == "retry":
             item.state = REPLY_HANDOFF_WAIT
             return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_retry")
+        if handoff_result == "blocked":
+            item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            item.payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            item.payload.pop("implementation_remediation", None)
+            item.payload.pop("remediation_output", None)
+            return StageOutcome(Disposition.ADVANCE, "implementation_reply_handoff_blocked")
         if handoff_result in {"failed", "invalid"}:
             return StageOutcome(
                 Disposition.FINISH_FAIL,

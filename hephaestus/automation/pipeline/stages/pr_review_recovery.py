@@ -90,8 +90,10 @@ def consume_reply_handoff_receipt(item: WorkItem, pending_request_key: str) -> s
         item.payload.pop("retry_delay_s", None)
     else:
         item.payload["retry_delay_s"] = receipt.retry_delay_s
-    if receipt.status in {"completed", "stale"}:
+    if receipt.status in {"completed", "stale", "blocked"}:
         item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+    if receipt.status == "blocked":
+        item.payload.pop(_PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
     return receipt.status
 
 

@@ -11,6 +11,8 @@ import pytest
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
     GitHubUnavailableError,
+    GraphQLDeterministicError,
+    GraphQLRetryableError,
     _review_threads_for_review,
     gh_pr_list_unresolved_threads,
 )
@@ -31,6 +33,7 @@ def _inline_thread_node(
         "line": 1,
         "side": "RIGHT",
         "comments": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
             "nodes": [
                 {
                     "id": f"C-{thread_id}",
@@ -38,9 +41,39 @@ def _inline_thread_node(
                     "viewerCanUpdate": True,
                     "pullRequestReview": {"id": review_id},
                 }
-            ]
+            ],
         },
     }
+
+
+def _thread_page_payload(
+    nodes: list[dict[str, Any]],
+    *,
+    pr_number: int = 42,
+    owner: str = "owner",
+    name: str = "repo",
+    has_next: bool = False,
+    end_cursor: str | None = None,
+) -> str:
+    """Build a complete repository/PR/thread page for strict validators."""
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "owner": {"login": owner},
+                    "name": name,
+                    "pullRequest": {
+                        "id": f"PR_{pr_number}",
+                        "number": pr_number,
+                        "reviewThreads": {
+                            "nodes": nodes,
+                            "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+                        },
+                    },
+                }
+            }
+        }
+    )
 
 
 class TestReviewThreadsForReviewParameterisation:
@@ -54,47 +87,21 @@ class TestReviewThreadsForReviewParameterisation:
         """Receipt lookup paginates without accepting another review's threads."""
         mock_repo_info.return_value = ("owner", "repo")
         first_page_nodes = [
-            {
-                "id": f"T_other_{index}",
-                "isResolved": False,
-                "comments": {"nodes": [{"pullRequestReview": {"id": "OTHER_REVIEW"}}]},
-            }
+            _inline_thread_node(f"T_other_{index}", review_id="OTHER_REVIEW")
             for index in range(100)
         ]
         second_page_nodes = [
-            {
-                "id": "T_mine",
-                "isResolved": False,
-                "comments": {"nodes": [{"pullRequestReview": {"id": "REVIEW_1"}}]},
-            },
-            {
-                "id": "T_foreign",
-                "isResolved": False,
-                "comments": {"nodes": [{"pullRequestReview": {"id": "OTHER_REVIEW"}}]},
-            },
+            _inline_thread_node("T_mine"),
+            _inline_thread_node("T_foreign", review_id="OTHER_REVIEW"),
         ]
 
         def side_effect(argv: list[str], **_: Any) -> Mock:
             after_first_page = "after=cursor-1" in argv
-            result = Mock()
-            result.stdout = json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": (
-                                        second_page_nodes if after_first_page else first_page_nodes
-                                    ),
-                                    "pageInfo": {
-                                        "hasNextPage": not after_first_page,
-                                        "endCursor": (None if after_first_page else "cursor-1"),
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
+            result = Mock(returncode=0, stderr="")
+            result.stdout = _thread_page_payload(
+                second_page_nodes if after_first_page else first_page_nodes,
+                has_next=not after_first_page,
+                end_cursor=None if after_first_page else "cursor-1",
             )
             return result
 
@@ -108,21 +115,8 @@ class TestReviewThreadsForReviewParameterisation:
     @patch("hephaestus.automation.github_api.get_repo_info")
     def test_uses_parameterised_query(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
         mock_repo_info.return_value = ("owner", "repo")
-        mock_result = Mock()
-        mock_result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [],
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            }
-                        }
-                    }
-                }
-            }
-        )
+        mock_result = Mock(returncode=0, stderr="")
+        mock_result.stdout = _thread_page_payload([])
         mock_gh_call.return_value = mock_result
 
         _review_threads_for_review(42, "RV_kw1")
@@ -143,21 +137,8 @@ class TestReviewThreadsForReviewParameterisation:
         """Identical duplicate thread payloads preserve one stable receipt ID."""
         del mock_repo_info
         node = _inline_thread_node("T1")
-        result = Mock()
-        result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [node, node.copy()],
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            }
-                        }
-                    }
-                }
-            }
-        )
+        result = Mock(returncode=0, stderr="")
+        result.stdout = _thread_page_payload([node, node.copy()])
         mock_gh_call.return_value = result
 
         assert _review_threads_for_review(42, "REVIEW_1") == ["T1"]
@@ -169,27 +150,14 @@ class TestReviewThreadsForReviewParameterisation:
     ) -> None:
         """Conflicting duplicate IDs cannot produce an ambiguous receipt."""
         del mock_repo_info
-        result = Mock()
-        result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [
-                                    _inline_thread_node("T1"),
-                                    _inline_thread_node("T1", body="changed"),
-                                ],
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            }
-                        }
-                    }
-                }
-            }
+        result = Mock(returncode=0, stderr="")
+        result.stdout = _thread_page_payload(
+            [_inline_thread_node("T1"), _inline_thread_node("T1", body="changed")]
         )
         mock_gh_call.return_value = result
 
-        assert _review_threads_for_review(42, "REVIEW_1") == []
+        with pytest.raises(GraphQLDeterministicError, match="conflicting duplicate"):
+            _review_threads_for_review(42, "REVIEW_1")
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
@@ -202,32 +170,19 @@ class TestReviewThreadsForReviewParameterisation:
 
         def side_effect(argv: list[str], **_: Any) -> Mock:
             calls.append(argv)
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             if any(entry == "after=cursor-1" for entry in argv):
                 result.stdout = json.dumps({"errors": [{"message": "page failed"}]})
             else:
-                result.stdout = json.dumps(
-                    {
-                        "data": {
-                            "repository": {
-                                "pullRequest": {
-                                    "reviewThreads": {
-                                        "nodes": [_inline_thread_node("T1")],
-                                        "pageInfo": {
-                                            "hasNextPage": True,
-                                            "endCursor": "cursor-1",
-                                        },
-                                    }
-                                }
-                            }
-                        }
-                    }
+                result.stdout = _thread_page_payload(
+                    [_inline_thread_node("T1")], has_next=True, end_cursor="cursor-1"
                 )
             return result
 
         mock_gh_call.side_effect = side_effect
 
-        assert _review_threads_for_review(42, "REVIEW_1") == []
+        with pytest.raises(GraphQLDeterministicError, match="page failed"):
+            _review_threads_for_review(42, "REVIEW_1")
         assert len(calls) == 2
         assert "after=cursor-1" in calls[1]
 
@@ -239,21 +194,8 @@ class TestListUnresolvedThreadsParameterisation:
     @patch("hephaestus.automation.github_api.get_repo_info")
     def test_uses_parameterised_query(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
         mock_repo_info.return_value = ("owner", "repo")
-        mock_result = Mock()
-        mock_result.stdout = json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [],
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            }
-                        }
-                    }
-                }
-            }
-        )
+        mock_result = Mock(returncode=0, stderr="")
+        mock_result.stdout = _thread_page_payload([])
         mock_gh_call.return_value = mock_result
 
         gh_pr_list_unresolved_threads(42)
@@ -268,22 +210,34 @@ class TestListUnresolvedThreadsParameterisation:
         # The top-level page contains only immutable thread identities; each
         # open thread is then read through its independently paginated comment
         # connection so a long conversation cannot be truncated.
-        assert "nodes{ id isResolved }" in query
+        assert "nodes{id isResolved}" in query
         assert "comments(first:20)" not in query
-        assert "pageInfo{ hasNextPage" in query
+        assert "pageInfo{hasNextPage" in query
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
     def test_rejects_missing_page_info(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
         """A structurally incomplete page cannot hide unresolved conversations."""
         mock_repo_info.return_value = ("owner", "repo")
-        result = Mock()
+        result = Mock(returncode=0, stderr="")
         result.stdout = json.dumps(
-            {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}
+            {
+                "data": {
+                    "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
+                        "pullRequest": {
+                            "id": "PR_42",
+                            "number": 42,
+                            "reviewThreads": {"nodes": []},
+                        },
+                    }
+                }
+            }
         )
         mock_gh_call.return_value = result
 
-        with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
+        with pytest.raises(GraphQLDeterministicError, match="pageInfo"):
             gh_pr_list_unresolved_threads(42)
 
     @patch("hephaestus.automation.github_api._gh_call")
@@ -291,21 +245,27 @@ class TestListUnresolvedThreadsParameterisation:
     def test_rejects_missing_thread_nodes(self, mock_repo_info: Any, mock_gh_call: Any) -> None:
         """A partial thread page cannot be mistaken for a proven empty set."""
         mock_repo_info.return_value = ("owner", "repo")
-        result = Mock()
+        result = Mock(returncode=0, stderr="")
         result.stdout = json.dumps(
             {
                 "data": {
                     "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
                         "pullRequest": {
-                            "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None}}
-                        }
+                            "id": "PR_42",
+                            "number": 42,
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None}
+                            },
+                        },
                     }
                 }
             }
         )
         mock_gh_call.return_value = result
 
-        with pytest.raises(RuntimeError, match="could not fetch all PR review threads"):
+        with pytest.raises(GraphQLDeterministicError, match="nodes"):
             gh_pr_list_unresolved_threads(42)
 
     @patch("hephaestus.automation.github_api._gh_call")
@@ -317,12 +277,16 @@ class TestListUnresolvedThreadsParameterisation:
         mock_repo_info.return_value = ("owner", "repo")
 
         def side_effect(argv: list[str], **_: Any) -> Mock:
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             if any(entry.startswith("threadId=") for entry in argv):
                 result.stdout = json.dumps(
                     {
                         "data": {
-                            "repository": {"pullRequest": {"id": "PR1"}},
+                            "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
+                                "pullRequest": {"id": "PR1", "number": 42},
+                            },
                             "node": {
                                 "id": "T1",
                                 "isResolved": False,
@@ -350,12 +314,16 @@ class TestListUnresolvedThreadsParameterisation:
                     {
                         "data": {
                             "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
                                 "pullRequest": {
+                                    "id": "PR1",
+                                    "number": 42,
                                     "reviewThreads": {
                                         "nodes": [{"id": "T1", "isResolved": False}],
                                         "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    }
-                                }
+                                    },
+                                },
                             }
                         }
                     }
@@ -381,19 +349,23 @@ class TestListUnresolvedThreadsParameterisation:
         def side_effect(_argv: list[str], **_: Any) -> Mock:
             nonlocal reads
             reads += 1
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             result.stdout = json.dumps(
                 {
                     "data": {
                         "repository": {
+                            "owner": {"login": "owner"},
+                            "name": "repo",
                             "pullRequest": {
+                                "id": "PR1",
+                                "number": 42,
                                 "reviewThreads": {
                                     "nodes": [
                                         {"id": "T1" if reads == 1 else "T2", "isResolved": False}
                                     ],
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                }
-                            }
+                                },
+                            },
                         }
                     }
                 }
@@ -418,17 +390,21 @@ class TestListUnresolvedThreadsParameterisation:
                 "",
             )
             cursor = "cursor-a" if after == "cursor-b" else "cursor-b" if after else "cursor-a"
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             result.stdout = json.dumps(
                 {
                     "data": {
                         "repository": {
+                            "owner": {"login": "owner"},
+                            "name": "repo",
                             "pullRequest": {
+                                "id": "PR1",
+                                "number": 42,
                                 "reviewThreads": {
                                     "nodes": [{"id": f"T-{after or 'first'}", "isResolved": False}],
                                     "pageInfo": {"hasNextPage": True, "endCursor": cursor},
-                                }
-                            }
+                                },
+                            },
                         }
                     }
                 }
@@ -458,10 +434,10 @@ class TestListUnresolvedThreadsParameterisation:
         mock_repo_info.return_value = ("owner", "repo")
         mock_gh_call.side_effect = exception
 
-        with pytest.raises(type(exception)) as exc_info:
+        with pytest.raises(GraphQLRetryableError) as exc_info:
             gh_pr_list_unresolved_threads(42)
 
-        assert exc_info.value is exception
+        assert str(exception) in str(exc_info.value)
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_complete_thread_snapshot_rejects_unstable_comment_pages(
@@ -476,11 +452,15 @@ class TestListUnresolvedThreadsParameterisation:
             if not after:
                 comment_reads += 1
             second_pass = comment_reads == 2
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             result.stdout = json.dumps(
                 {
                     "data": {
-                        "repository": {"pullRequest": {"id": "PR1"}},
+                        "repository": {
+                            "owner": {"login": "owner"},
+                            "name": "repo",
+                            "pullRequest": {"id": "PR1", "number": 42},
+                        },
                         "node": {
                             "id": "T1",
                             "isResolved": False,
@@ -523,11 +503,15 @@ class TestListUnresolvedThreadsParameterisation:
         self, mock_gh_call: Any
     ) -> None:
         """A replayed or overlapping page is not a complete conversation fact."""
-        result = Mock()
+        result = Mock(returncode=0, stderr="")
         result.stdout = json.dumps(
             {
                 "data": {
-                    "repository": {"pullRequest": {"id": "PR1"}},
+                    "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
+                        "pullRequest": {"id": "PR1", "number": 42},
+                    },
                     "node": {
                         "id": "T1",
                         "isResolved": False,
@@ -569,10 +553,10 @@ class TestListUnresolvedThreadsParameterisation:
         """Provider-domain errors from comment pagination keep their original type."""
         mock_gh_call.side_effect = exception
 
-        with pytest.raises(type(exception)) as exc_info:
+        with pytest.raises(GraphQLRetryableError) as exc_info:
             _complete_thread_snapshot("owner", "repo", 42, "T1")
 
-        assert exc_info.value is exception
+        assert str(exception) in str(exc_info.value)
 
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.get_repo_info")
@@ -601,12 +585,16 @@ class TestListUnresolvedThreadsParameterisation:
                 None,
             )
             after_first_page = "after=cursor-1" in argv
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             if thread_id is not None:
                 result.stdout = json.dumps(
                     {
                         "data": {
-                            "repository": {"pullRequest": {"id": "PR1"}},
+                            "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
+                                "pullRequest": {"id": "PR1", "number": 42},
+                            },
                             "node": {
                                 "id": thread_id,
                                 "isResolved": False,
@@ -640,15 +628,19 @@ class TestListUnresolvedThreadsParameterisation:
                     {
                         "data": {
                             "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
                                 "pullRequest": {
+                                    "id": "PR1",
+                                    "number": 42,
                                     "reviewThreads": {
                                         "nodes": second_page if after_first_page else first_page,
                                         "pageInfo": {
                                             "hasNextPage": not after_first_page,
                                             "endCursor": None if after_first_page else "cursor-1",
                                         },
-                                    }
-                                }
+                                    },
+                                },
                             }
                         }
                     }
@@ -689,12 +681,16 @@ class TestListUnresolvedThreadsParameterisation:
 
         def side_effect(argv: list[str], **_: Any) -> Mock:
             after = "after=comment-cursor-100" in argv
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             if any(entry.startswith("threadId=") for entry in argv):
                 result.stdout = json.dumps(
                     {
                         "data": {
-                            "repository": {"pullRequest": {"id": "PR1"}},
+                            "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
+                                "pullRequest": {"id": "PR1", "number": 42},
+                            },
                             "node": {
                                 "id": "T1",
                                 "isResolved": False,
@@ -725,12 +721,16 @@ class TestListUnresolvedThreadsParameterisation:
                     {
                         "data": {
                             "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
                                 "pullRequest": {
+                                    "id": "PR1",
+                                    "number": 42,
                                     "reviewThreads": {
                                         "nodes": [{"id": "T1", "isResolved": False}],
                                         "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    }
-                                }
+                                    },
+                                },
                             }
                         }
                     }
@@ -775,18 +775,22 @@ class TestListUnresolvedThreadsParameterisation:
                 ),
                 None,
             )
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
             if thread_id is None:
                 result.stdout = json.dumps(
                     {
                         "data": {
                             "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
                                 "pullRequest": {
+                                    "id": "PR1",
+                                    "number": 42,
                                     "reviewThreads": {
                                         "nodes": nodes,
                                         "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    }
-                                }
+                                    },
+                                },
                             }
                         }
                     }
@@ -812,7 +816,11 @@ class TestListUnresolvedThreadsParameterisation:
             result.stdout = json.dumps(
                 {
                     "data": {
-                        "repository": {"pullRequest": {"id": "PR1"}},
+                        "repository": {
+                            "owner": {"login": "owner"},
+                            "name": "repo",
+                            "pullRequest": {"id": "PR1", "number": 42},
+                        },
                         "node": {
                             "id": thread_id,
                             "isResolved": False,

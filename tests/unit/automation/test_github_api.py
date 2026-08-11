@@ -13,7 +13,8 @@ import hephaestus.automation.github_api as _github_api_module
 import hephaestus.github.client as client_module
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
-    _check_graphql_errors,
+    GraphQLMutationIntent,
+    ReviewCommentNotEditableError,
     _gh_call,
     fetch_issue_info,
     gh_create_label,
@@ -295,10 +296,14 @@ class TestPrefetchIssueStates:
         mock_repo_info.return_value = ("owner", "repo")
 
         mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
         mock_result.stdout = json.dumps(
             {
                 "data": {
                     "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
                         "issue0": {"number": 123, "state": "OPEN"},
                         "issue1": {"number": 456, "state": "CLOSED"},
                     }
@@ -318,8 +323,18 @@ class TestPrefetchIssueStates:
         """#1587: a second call for cached numbers does not re-query gh."""
         mock_repo_info.return_value = ("owner", "repo")
         mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
         mock_result.stdout = json.dumps(
-            {"data": {"repository": {"issue0": {"number": 123, "state": "OPEN"}}}}
+            {
+                "data": {
+                    "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
+                        "issue0": {"number": 123, "state": "OPEN"},
+                    }
+                }
+            }
         )
         mock_gh_call.return_value = mock_result
 
@@ -336,8 +351,18 @@ class TestPrefetchIssueStates:
         """#1587: refresh=True bypasses the memo and re-queries."""
         mock_repo_info.return_value = ("owner", "repo")
         mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
         mock_result.stdout = json.dumps(
-            {"data": {"repository": {"issue0": {"number": 123, "state": "OPEN"}}}}
+            {
+                "data": {
+                    "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
+                        "issue0": {"number": 123, "state": "OPEN"},
+                    }
+                }
+            }
         )
         mock_gh_call.return_value = mock_result
 
@@ -353,14 +378,34 @@ class TestPrefetchIssueStates:
         mock_repo_info.return_value = ("owner", "repo")
         mock_gh_call.side_effect = [
             Mock(
+                returncode=0,
+                stderr="",
                 stdout=json.dumps(
-                    {"data": {"repository": {"issue0": {"number": 1, "state": "OPEN"}}}}
-                )
+                    {
+                        "data": {
+                            "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
+                                "issue0": {"number": 1, "state": "OPEN"},
+                            }
+                        }
+                    }
+                ),
             ),
             Mock(
+                returncode=0,
+                stderr="",
                 stdout=json.dumps(
-                    {"data": {"repository": {"issue0": {"number": 2, "state": "CLOSED"}}}}
-                )
+                    {
+                        "data": {
+                            "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
+                                "issue0": {"number": 2, "state": "CLOSED"},
+                            }
+                        }
+                    }
+                ),
             ),
         ]
 
@@ -385,8 +430,18 @@ class TestPrefetchIssueStates:
         """Issue numbers must flow through `-F nN=<int>` flags, not interpolation (#738)."""
         mock_repo_info.return_value = ("owner", "repo")
         mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
         mock_result.stdout = json.dumps(
-            {"data": {"repository": {"issue0": {"number": 123, "state": "OPEN"}}}}
+            {
+                "data": {
+                    "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
+                        "issue0": {"number": 123, "state": "OPEN"},
+                    }
+                }
+            }
         )
         mock_gh_call.return_value = mock_result
 
@@ -427,10 +482,14 @@ class TestPrefetchIssueStates:
         """Each batch element gets its own $nN scalar + -F nN flag (#738)."""
         mock_repo_info.return_value = ("owner", "repo")
         mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
         mock_result.stdout = json.dumps(
             {
                 "data": {
                     "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
                         "issue0": {"number": 11, "state": "OPEN"},
                         "issue1": {"number": 22, "state": "CLOSED"},
                         "issue2": {"number": 33, "state": "OPEN"},
@@ -446,7 +505,7 @@ class TestPrefetchIssueStates:
         query = next(a for a in argv if a.startswith("query="))
         for idx, num in enumerate([11, 22, 33]):
             assert f"$n{idx}:Int!" in query
-            assert f"issue{idx}: issue(number:$n{idx})" in query
+            assert f"issue{idx}:issue(number:$n{idx})" in query
             assert f"n{idx}={num}" in argv
 
     @patch("hephaestus.automation.github_api.gh_issue_json")
@@ -457,7 +516,8 @@ class TestPrefetchIssueStates:
     ) -> None:
         """When batch GraphQL fails, _fetch_batch_states falls back to gh_issue_json."""
         mock_repo_info.return_value = ("owner", "repo")
-        mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+        error = subprocess.CalledProcessError(1, "gh", stderr="HTTP 400: invalid query")
+        mock_gh_call.side_effect = error
         mock_issue_json.side_effect = [
             {"number": 11, "state": "OPEN"},
             {"number": 22, "state": "CLOSED"},
@@ -603,10 +663,10 @@ class TestGhCall:
             ),
         )
 
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(RuntimeError, match="must use run_graphql"):
             _gh_call(["api", "graphql", "-f", "query=mutation {...}"])
 
-        assert mock_run.call_count == 1
+        mock_run.assert_not_called()
 
     @patch("hephaestus.github.client.run_subprocess")
     @patch("hephaestus.github.client.time.sleep")
@@ -2319,40 +2379,6 @@ class TestGhCallThrottle:
         )
 
 
-class TestGraphQLRateLimitDetection:
-    """Tests for GitHubRateLimitError raised from GraphQL JSON payloads."""
-
-    def test_raises_on_rate_limited_type(self) -> None:
-        data = {"errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
-        with patch(
-            "hephaestus.automation.github_api.gh_rate_limit_reset_epoch",
-            return_value=1700000000,
-        ):
-            with pytest.raises(GitHubRateLimitError) as ei:
-                _check_graphql_errors(data, "test")
-        assert ei.value.reset_epoch == 1700000000
-
-    def test_raises_on_rate_limit_in_message(self) -> None:
-        data = {"errors": [{"message": "API rate limit exceeded for user 1"}]}
-        with patch(
-            "hephaestus.automation.github_api.gh_rate_limit_reset_epoch",
-            return_value=None,
-        ):
-            with pytest.raises(GitHubRateLimitError) as ei:
-                _check_graphql_errors(data, "ctx")
-        # Probe returned None → reset_epoch sentinel 0
-        assert ei.value.reset_epoch == 0
-
-    def test_raises_runtimeerror_for_other_errors(self) -> None:
-        data = {"errors": [{"type": "FORBIDDEN", "message": "no perms"}]}
-        with pytest.raises(RuntimeError) as ei:
-            _check_graphql_errors(data, "ctx")
-        assert not isinstance(ei.value, GitHubRateLimitError)
-
-    def test_no_raise_when_no_errors(self) -> None:
-        _check_graphql_errors({"data": {"viewer": {"login": "x"}}}, "ctx")
-
-
 class TestGhCallRateLimitFromStdout:
     """Tests for _gh_call detecting rate-limit messages on stdout.
 
@@ -2564,8 +2590,12 @@ class TestFetchIssueCommentIdsRepoScoping:
 
     @staticmethod
     def _graphql_vars(argv: list[str]) -> dict[str, str]:
-        """Extract the ``-F key=value`` GraphQL variables from a gh argv."""
-        return dict(argv[i + 1].split("=", 1) for i, tok in enumerate(argv) if tok == "-F")
+        """Extract the ``-f/-F key=value`` GraphQL variables from a gh argv."""
+        return dict(
+            argv[i + 1].split("=", 1)
+            for i, tok in enumerate(argv)
+            if tok in {"-f", "-F"} and i + 1 < len(argv) and not argv[i + 1].startswith("query=")
+        )
 
     @patch("hephaestus.automation.github_api.get_repo_info")
     @patch("hephaestus.automation.github_api._gh_call")
@@ -2575,7 +2605,25 @@ class TestFetchIssueCommentIdsRepoScoping:
         """An explicit ``repo=`` scopes the query and bypasses ambient resolution."""
         mock_repo_info.return_value = ("HomericIntelligence", "Hephaestus")
         mock_gh_call.return_value = Mock(
-            stdout=json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": []}}}}})
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "owner": {"login": "HomericIntelligence"},
+                            "name": "Myrmidons",
+                            "issue": {
+                                "number": 188,
+                                "comments": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": [],
+                                },
+                            },
+                        }
+                    }
+                }
+            ),
         )
 
         _github_api_module._fetch_issue_comment_ids(188, repo=("HomericIntelligence", "Myrmidons"))
@@ -2597,7 +2645,25 @@ class TestFetchIssueCommentIdsRepoScoping:
         """Back-compat: no ``repo=`` keeps the historical ambient behaviour."""
         mock_repo_info.return_value = ("HomericIntelligence", "Hephaestus")
         mock_gh_call.return_value = Mock(
-            stdout=json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": []}}}}})
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "owner": {"login": "HomericIntelligence"},
+                            "name": "Hephaestus",
+                            "issue": {
+                                "number": 42,
+                                "comments": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": [],
+                                },
+                            },
+                        }
+                    }
+                }
+            ),
         )
 
         _github_api_module._fetch_issue_comment_ids(42)
@@ -3010,21 +3076,58 @@ class TestGhPrReviewPost:
 
         def _side_effect(args: list[str], *_: Any, **__: Any) -> Any:
             joined = " ".join(args)
-            result = Mock()
+            result = Mock(returncode=0, stderr="")
+            pr_number = next(
+                (
+                    int(args[index + 1].split("=", 1)[1])
+                    for index, value in enumerate(args[:-1])
+                    if value in {"-f", "-F"} and args[index + 1].startswith("number=")
+                ),
+                7,
+            )
             if "/reviews" in joined:
                 # REST review POST returns numeric id + GraphQL node_id.
                 result.stdout = json.dumps({"id": 999, "node_id": review_id})
             elif "reviewThreads" in joined:
+                normalized_threads: list[dict[str, Any]] = []
+                for index, original in enumerate(threads):
+                    node = dict(original)
+                    node.setdefault("path", "a.py")
+                    node.setdefault("line", 1)
+                    node.setdefault("side", "RIGHT")
+                    comments = node.get("comments")
+                    comment_nodes = (
+                        list(comments.get("nodes", []))
+                        if isinstance(comments, dict) and isinstance(comments.get("nodes"), list)
+                        else []
+                    )
+                    normalized_comments: list[dict[str, Any]] = []
+                    for comment_index, original_comment in enumerate(comment_nodes):
+                        comment = dict(original_comment)
+                        comment.setdefault("id", f"COMMENT_{index}_{comment_index}")
+                        comment.setdefault("body", "")
+                        comment.setdefault("viewerCanUpdate", True)
+                        comment.setdefault("pullRequestReview", {"id": review_id})
+                        normalized_comments.append(comment)
+                    node["comments"] = {
+                        "nodes": normalized_comments,
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                    normalized_threads.append(node)
                 result.stdout = json.dumps(
                     {
                         "data": {
                             "repository": {
+                                "owner": {"login": "owner"},
+                                "name": "repo",
                                 "pullRequest": {
+                                    "id": f"PR_{pr_number}",
+                                    "number": pr_number,
                                     "reviewThreads": {
-                                        "nodes": threads,
+                                        "nodes": normalized_threads,
                                         "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    }
-                                }
+                                    },
+                                },
                             }
                         }
                     }
@@ -3656,7 +3759,7 @@ class TestGhPrReviewPost:
     @patch("hephaestus.automation.github_api.write_secure")
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_edit_in_place_falls_back_to_fresh_on_error(
+    def test_edit_in_place_does_not_replay_after_unknown_error(
         self,
         mock_gh_call: Any,
         _mock_repo: Any,
@@ -3664,23 +3767,23 @@ class TestGhPrReviewPost:
         mock_index: Any,
         mock_update: Any,
     ) -> None:
-        """#1085: if the in-place edit raises, the comment is posted fresh instead."""
+        """An edit with an unknown outcome must not create a duplicate comment."""
         mock_gh_call.side_effect = self._gh_call_side_effect(
             "REVIEW_1", [], diff_text=self._SAMPLE_DIFF
         )
         mock_index.return_value = {("a.py", 2): ("NODE", "old body", True)}
         mock_update.side_effect = OSError("network down")
 
-        gh_pr_review_post(
-            pr_number=7,
-            comments=[{"path": "a.py", "line": 2, "side": "RIGHT", "body": "retry me"}],
-            summary="Findings",
-            dedupe_existing=True,
-        )
+        with pytest.raises(OSError, match="network down"):
+            gh_pr_review_post(
+                pr_number=7,
+                comments=[{"path": "a.py", "line": 2, "side": "RIGHT", "body": "retry me"}],
+                summary="Findings",
+                dedupe_existing=True,
+            )
 
         mock_update.assert_called_once()
-        # Edit failed → the comment is posted as a fresh inline comment.
-        assert {c["body"] for c in self._posted_comments(mock_write)} == {"retry me"}
+        mock_write.assert_not_called()
 
 
 class TestEditOrKeepUneditableComment:
@@ -3778,7 +3881,15 @@ class TestEditOrKeepUneditableComment:
             {("a.py", 2, "RIGHT"): ("FOREIGN_NODE", "copilot finding", True)},
             {("a.py", 2, "RIGHT"): ("OUR_NODE", "our finding", True)},
         ]
-        mock_update.side_effect = subprocess.SubprocessError("gh: Body is not editable")
+        mock_update.side_effect = ReviewCommentNotEditableError(
+            "Body is not editable",
+            intent=GraphQLMutationIntent(
+                operation="updatePullRequestReviewComment",
+                client_mutation_id="test-correlation",
+                targets=(("comment_id", "NODE"),),
+                content_hashes=(),
+            ),
+        )
 
         kept = _edit_or_keep_comments(
             7, [{"path": "a.py", "line": 2, "side": "RIGHT", "body": "our finding"}]
@@ -3847,12 +3958,10 @@ class TestEditOrKeepUneditableComment:
         """
         from hephaestus.automation.github_api import gh_pr_update_review_comment
 
-        mock_run.side_effect = subprocess.CalledProcessError(
-            1, "gh", stderr="gh: Body is not editable"
-        )
+        mock_run.side_effect = subprocess.CalledProcessError(1, "gh", stderr="Body is not editable")
 
         with caplog.at_level("ERROR"):
-            with pytest.raises(subprocess.CalledProcessError):
+            with pytest.raises(ReviewCommentNotEditableError):
                 gh_pr_update_review_comment("NODE_ID", "some body")
 
         error_records = [r for r in caplog.records if r.levelno >= 40]
@@ -3868,12 +3977,16 @@ class TestGhPrInlineCommentIndex:
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
     def test_indexes_unresolved_threads_with_body(self, mock_gh_call: Any, _mock_repo: Any) -> None:
-        result = Mock()
+        result = Mock(returncode=0, stderr="")
         result.stdout = json.dumps(
             {
                 "data": {
                     "repository": {
+                        "owner": {"login": "owner"},
+                        "name": "repo",
                         "pullRequest": {
+                            "id": "PR_7",
+                            "number": 7,
                             "reviewThreads": {
                                 "nodes": [
                                     {
@@ -3883,13 +3996,17 @@ class TestGhPrInlineCommentIndex:
                                         "line": 2,
                                         "side": "RIGHT",
                                         "comments": {
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
                                             "nodes": [
                                                 {
                                                     "id": "N1",
                                                     "body": "keep me",
                                                     "viewerCanUpdate": True,
                                                 }
-                                            ]
+                                            ],
                                         },
                                     },
                                     {  # unresolved but foreign (Copilot) → not editable
@@ -3899,13 +4016,17 @@ class TestGhPrInlineCommentIndex:
                                         "line": 4,
                                         "side": "RIGHT",
                                         "comments": {
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
                                             "nodes": [
                                                 {
                                                     "id": "N3",
                                                     "body": "copilot note",
                                                     "viewerCanUpdate": False,
                                                 }
-                                            ]
+                                            ],
                                         },
                                     },
                                     {
@@ -3913,12 +4034,24 @@ class TestGhPrInlineCommentIndex:
                                         "isResolved": True,
                                         "path": "b.py",
                                         "line": 9,
-                                        "comments": {"nodes": [{"id": "N2", "body": "resolved"}]},
+                                        "comments": {
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                            "nodes": [
+                                                {
+                                                    "id": "N2",
+                                                    "body": "resolved",
+                                                    "viewerCanUpdate": False,
+                                                }
+                                            ],
+                                        },
                                     },
                                 ],
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            }
-                        }
+                            },
+                        },
                     }
                 }
             }
@@ -3939,11 +4072,16 @@ class TestGhPrInlineCommentIndex:
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("owner", "repo"))
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_fails_open_on_bad_json(self, mock_gh_call: Any, _mock_repo: Any) -> None:
+    def test_fails_closed_on_bad_json(self, mock_gh_call: Any, _mock_repo: Any) -> None:
         result = Mock()
+        result.returncode = 0
+        result.stderr = ""
         result.stdout = "not json{"
         mock_gh_call.return_value = result
-        assert gh_pr_inline_comment_index(7) == {}
+        from hephaestus.automation.github_api import GraphQLDeterministicError
+
+        with pytest.raises(GraphQLDeterministicError):
+            gh_pr_inline_comment_index(7)
 
 
 class TestValidReviewPositions:

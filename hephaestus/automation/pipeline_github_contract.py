@@ -1,6 +1,10 @@
 """Static host contract shared by the GitHub adapter collaborators."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
+
+from .github_api.graphql import GraphQLMutationSpec, GraphQLQuerySpec
+
+T = TypeVar("T")
 
 if TYPE_CHECKING:
     import subprocess
@@ -31,7 +35,11 @@ if TYPE_CHECKING:
         def _comment_owned_by_viewer(self, comment: dict[str, Any]) -> bool:
             pass
 
-        def _graphql(self, query: str, **fields: int | str) -> dict[str, Any]:
+        def _graphql(
+            self,
+            spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+            **fields: int | str,
+        ) -> T:
             pass
 
         def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:

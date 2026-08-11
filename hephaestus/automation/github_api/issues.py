@@ -49,33 +49,6 @@ def _body_file(body: str) -> Iterator[str]:
             os.unlink(path)
 
 
-def _check_graphql_errors(data: dict[str, Any], context: str) -> None:
-    """Raise RuntimeError if a GraphQL response carries an ``errors`` array.
-
-    The GitHub GraphQL API returns HTTP 200 with ``{"errors": [...]}`` for
-    permission, validation, and visibility failures. ``gh`` exits 0 in that
-    case, so a plain exit-code check sees success while the operation has
-    actually failed. This helper is the single place we surface those.
-
-    ``context`` appears verbatim in the error message so logs identify which
-    operation failed.
-    """
-    errors = data.get("errors")
-    if not errors:
-        return
-
-    for err in errors:
-        msg = err.get("message", "") if isinstance(err, dict) else ""
-        err_type = err.get("type", "") if isinstance(err, dict) else ""
-        if err_type == "RATE_LIMITED" or "rate limit" in msg.lower():
-            reset = _api.gh_rate_limit_reset_epoch() or 0
-            raise _api.GitHubRateLimitError(
-                f"GraphQL {context} rate-limited: {msg}", reset_epoch=reset
-            )
-
-    raise RuntimeError(f"GraphQL {context} failed: {errors!r}")
-
-
 def gh_issue_json(
     issue_number: int,
     repo: tuple[str, str] | None = None,
@@ -175,49 +148,15 @@ def _fetch_issue_comment_ids(
             404-ing (or, on number collision, silently reading an unrelated
             issue) and tripping the ``github-api`` circuit breaker (#1795).
 
-    Returns an empty list on any failure (callers then fall back to create).
+    Raises a typed GraphQL error when the comment index cannot be proven.
 
     """
     owner, name = repo if repo is not None else _api.get_repo_info()
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
-        "  repository(owner:$owner,name:$name){"
-        "    issue(number:$number){"
-        "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
-        "        nodes{ databaseId body createdAt url viewerDidAuthor "
-        "authorAssociation author{login} }"
-        "      }"
-        "    }"
-        "  }"
-        "}"
+    comments = _api.run_graphql(
+        _api.issue_comment_ids_query(owner, name, issue_number),
+        {"owner": owner, "name": name, "number": issue_number},
     )
-    try:
-        result = _api._gh_call(
-            [
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={name}",
-                "-F",
-                f"number={issue_number}",
-            ],
-        )
-        data = json.loads(result.stdout)
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("issue", {})
-            .get("comments", {})
-            .get("nodes", [])
-        )
-        return list(reversed(nodes))
-    except Exception as exc:
-        _api.logger.warning("Failed to fetch comment ids for issue #%s: %s", issue_number, exc)
-        return []
+    return list(reversed(comments))
 
 
 def fetch_issue_comments_metadata(

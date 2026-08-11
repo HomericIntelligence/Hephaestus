@@ -73,6 +73,62 @@ class TestBreakerPredicateWiring:
         assert _GH_BREAKER._ignore(_gh_error("gh: HTTP 401: Bad credentials")) is False
 
 
+class TestThrottleOptOut:
+    """GraphQL's one-attempt path can skip sleeps without bypassing the breaker."""
+
+    @patch("hephaestus.github.client._gh_throttle_wait")
+    @patch("hephaestus.github.client.gh_global_throttle_acquire")
+    @patch("hephaestus.github.client.run_subprocess")
+    def test_throttle_false_skips_both_throttles(
+        self,
+        mock_run: Mock,
+        mock_global: Mock,
+        mock_thread: Mock,
+    ) -> None:
+        """``throttle=False`` still dispatches through ``gh_call``."""
+        expected = subprocess.CompletedProcess(["gh", "issue", "list"], 0, "[]", "")
+        mock_run.return_value = expected
+
+        assert gh_call(["issue", "list"], throttle=False) == expected
+        mock_run.assert_called_once()
+        mock_global.assert_not_called()
+        mock_thread.assert_not_called()
+
+    @patch("hephaestus.github.client._gh_throttle_wait")
+    @patch("hephaestus.github.client.gh_global_throttle_acquire")
+    @patch("hephaestus.github.client.run_subprocess")
+    def test_throttle_defaults_to_enabled(
+        self,
+        mock_run: Mock,
+        mock_global: Mock,
+        mock_thread: Mock,
+    ) -> None:
+        """Existing callers retain both throttle controls by default."""
+        mock_run.return_value = subprocess.CompletedProcess(["gh", "issue", "list"], 0, "[]", "")
+
+        gh_call(["issue", "list"])
+        mock_global.assert_called_once()
+        mock_thread.assert_called_once()
+
+    @patch("hephaestus.github.client._gh_throttle_wait")
+    @patch("hephaestus.github.client.gh_global_throttle_acquire")
+    @patch("hephaestus.github.client.run_subprocess")
+    def test_throttle_opt_out_preserves_process_group_tracking(
+        self,
+        mock_run: Mock,
+        mock_global: Mock,
+        mock_thread: Mock,
+    ) -> None:
+        """The independent host-shutdown control still reaches the subprocess."""
+        mock_run.return_value = subprocess.CompletedProcess(["gh", "api"], 0, "{}", "")
+
+        gh_call(["api", "graphql"], throttle=False, track_process_group=True)
+
+        assert mock_run.call_args.kwargs["track_process_group"] is True
+        mock_global.assert_not_called()
+        mock_thread.assert_not_called()
+
+
 class TestPerTargetPatternInvariants:
     """``_PER_TARGET_PATTERNS`` must stay a strict subset of the non-transient set."""
 

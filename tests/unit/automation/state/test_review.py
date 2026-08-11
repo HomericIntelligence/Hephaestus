@@ -234,11 +234,36 @@ class TestIsPlanReviewGoWithComments:
 # ---------------------------------------------------------------------------
 
 
-def _graphql_payload(comment_bodies: list[str]) -> str:
+def _graphql_payload(
+    comment_bodies: list[str], *, number: int = 123, owner: str = "owner", name: str = "name"
+) -> str:
     # GraphQL returns newest-first; production code reverses to chronological.
     # So we hand it newest-first (i.e. reversed input).
-    nodes = [{"body": b, "updatedAt": "2025-01-01T00:00:00Z"} for b in reversed(comment_bodies)]
-    return json.dumps({"data": {"repository": {"issue": {"comments": {"nodes": nodes}}}}})
+    nodes = [
+        {
+            "body": b,
+            "updatedAt": "2025-01-01T00:00:00Z",
+            "url": f"https://github.com/owner/repo/issues/123#comment-{index}",
+        }
+        for index, b in enumerate(reversed(comment_bodies), start=1)
+    ]
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "owner": {"login": owner},
+                    "name": name,
+                    "issue": {
+                        "number": number,
+                        "comments": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": nodes,
+                        },
+                    },
+                }
+            }
+        }
+    )
 
 
 class TestIsPlanReviewGoWithFetch:
@@ -275,7 +300,7 @@ class TestIsPlanReviewGoWithFetch:
 
     def test_fetches_and_returns_false_for_nogo(self) -> None:
         nogo_body = _review_comment("NOGO")["body"]
-        mock_result = MagicMock()
+        mock_result = MagicMock(returncode=0, stderr="")
         mock_result.stdout = _graphql_payload(["# Implementation Plan\n", nogo_body])
         with patch("hephaestus.automation.state.review._gh_call", return_value=mock_result):
             assert is_plan_review_go(123) is False
@@ -297,8 +322,10 @@ class TestIsPlanReviewGoWithFetch:
         owner prefix). This mirrors the fix in PR #575 for the same bug
         pattern in ``plan_reviewer.py``; #588 caught the missed copy here.
         """
-        mock_result = MagicMock()
-        mock_result.stdout = _graphql_payload([])
+        mock_result = MagicMock(returncode=0, stderr="")
+        mock_result.stdout = _graphql_payload(
+            [], number=1928, owner="HomericIntelligence", name="Mnemosyne"
+        )
         with (
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
@@ -317,12 +344,8 @@ class TestIsPlanReviewGoWithFetch:
         assert "owner=HomericIntelligence" in joined
         assert "name=Mnemosyne" in joined
 
-    def test_fetch_issue_comments_returns_empty_on_gh_failure(self) -> None:
-        """#1426: a ``_gh_call`` failure is logged and yields an empty list.
-
-        Covers the formerly ``# pragma: no cover`` fallback handler in
-        ``_fetch_issue_comments_graphql`` — callers treat ``[]`` as "no review".
-        """
+    def test_fetch_issue_comments_propagates_gh_failure(self) -> None:
+        """A failed strict GraphQL read cannot masquerade as no review."""
         with (
             patch(
                 "hephaestus.automation.state.review.get_repo_info",
@@ -333,7 +356,8 @@ class TestIsPlanReviewGoWithFetch:
                 side_effect=RuntimeError("gh down"),
             ),
         ):
-            assert _fetch_issue_comments_graphql(1928) == []
+            with pytest.raises(RuntimeError, match="gh down"):
+                _fetch_issue_comments_graphql(1928)
 
 
 # ---------------------------------------------------------------------------
@@ -407,12 +431,8 @@ def test_fetch_all_issue_comments_graphql_is_importable() -> None:
     assert callable(fetch_all_issue_comments_graphql)
 
 
-def test_fetch_all_comments_returns_empty_map_on_gh_failure() -> None:
-    """#1426: a batch comment-fetch failure → every issue maps to ``[]``.
-
-    Covers the formerly ``# pragma: no cover`` fallback handler in
-    ``fetch_all_issue_comments_graphql``; callers get empty lists.
-    """
+def test_fetch_all_comments_propagates_gh_failure() -> None:
+    """A batch GraphQL failure cannot masquerade as empty comment lists."""
     with (
         patch("hephaestus.automation.state.review.get_repo_root", return_value="/tmp/repo"),
         patch(
@@ -424,7 +444,8 @@ def test_fetch_all_comments_returns_empty_map_on_gh_failure() -> None:
             side_effect=RuntimeError("gh down"),
         ),
     ):
-        assert fetch_all_issue_comments_graphql([1, 2]) == {1: [], 2: []}
+        with pytest.raises(RuntimeError, match="gh down"):
+            fetch_all_issue_comments_graphql([1, 2])
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +469,22 @@ class TestFetchAllIssueLabelsGraphql:
         payload = {
             "data": {
                 "repository": {
-                    "issue0": {"labels": {"nodes": [{"name": "state:plan-go"}, {"name": "bug"}]}},
-                    "issue1": {"labels": {"nodes": []}},
+                    "owner": {"login": "owner"},
+                    "name": "repo",
+                    "issue0": {
+                        "number": 10,
+                        "labels": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [{"name": "state:plan-go"}, {"name": "bug"}],
+                        },
+                    },
+                    "issue1": {
+                        "number": 11,
+                        "labels": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [],
+                        },
+                    },
                 }
             }
         }
@@ -461,12 +496,12 @@ class TestFetchAllIssueLabelsGraphql:
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
-            mock_gh.return_value = MagicMock(stdout=json.dumps(payload))
+            mock_gh.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps(payload))
             result = fetch_all_issue_labels_graphql([10, 11])
 
         assert result == {10: ["state:plan-go", "bug"], 11: []}
 
-    def test_fetch_failure_returns_empty_lists(self) -> None:
+    def test_fetch_failure_propagates(self) -> None:
         from unittest.mock import patch
 
         from hephaestus.automation.state.review import fetch_all_issue_labels_graphql
@@ -482,9 +517,8 @@ class TestFetchAllIssueLabelsGraphql:
                 side_effect=RuntimeError("gh down"),
             ),
         ):
-            result = fetch_all_issue_labels_graphql([10, 11])
-
-        assert result == {10: [], 11: []}
+            with pytest.raises(RuntimeError, match="gh down"):
+                fetch_all_issue_labels_graphql([10, 11])
 
     def test_owner_name_passed_as_graphql_variables_not_interpolated(self) -> None:
         """Regression: owner/name must be GraphQL variables, not interpolated.
@@ -508,8 +542,13 @@ class TestFetchAllIssueLabelsGraphql:
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
-            mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
-            fetch_all_issue_labels_graphql([10, 11])
+            mock_gh.return_value = MagicMock(
+                returncode=0, stderr="", stdout=json.dumps({"data": {"repository": {}}})
+            )
+            from hephaestus.automation.github_api import GraphQLDeterministicError
+
+            with pytest.raises(GraphQLDeterministicError):
+                fetch_all_issue_labels_graphql([10, 11])
 
         argv = mock_gh.call_args.args[0]
         query_arg = next(a for a in argv if a.startswith("query="))
@@ -517,7 +556,7 @@ class TestFetchAllIssueLabelsGraphql:
         assert "'HomericIntelligence'" not in query_arg
         assert "'Hephaestus'" not in query_arg
         # owner/name supplied as declared variables, passed via -F.
-        assert query_arg.startswith("query=query($owner:String!,$name:String!")
+        assert query_arg.startswith("query=query BatchIssueLabels($owner:String!,$name:String!")
         assert "$owner" in query_arg and "$name" in query_arg
         assert "owner=HomericIntelligence" in argv
         assert "name=Hephaestus" in argv
@@ -543,8 +582,10 @@ class TestFetchAllIssueTitlesGraphql:
         payload = {
             "data": {
                 "repository": {
-                    "issue0": {"title": "Epic: pipeline overhaul"},
-                    "issue1": {"title": "Fix crash"},
+                    "owner": {"login": "owner"},
+                    "name": "repo",
+                    "issue0": {"number": 10, "title": "Epic: pipeline overhaul"},
+                    "issue1": {"number": 11, "title": "Fix crash"},
                 }
             }
         }
@@ -556,12 +597,12 @@ class TestFetchAllIssueTitlesGraphql:
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
-            mock_gh.return_value = MagicMock(stdout=json.dumps(payload))
+            mock_gh.return_value = MagicMock(returncode=0, stderr="", stdout=json.dumps(payload))
             result = fetch_all_issue_titles_graphql([10, 11])
 
         assert result == {10: "Epic: pipeline overhaul", 11: "Fix crash"}
 
-    def test_fetch_failure_returns_empty_strings(self) -> None:
+    def test_fetch_failure_propagates(self) -> None:
         from unittest.mock import patch
 
         from hephaestus.automation.state.review import fetch_all_issue_titles_graphql
@@ -577,9 +618,8 @@ class TestFetchAllIssueTitlesGraphql:
                 side_effect=RuntimeError("gh down"),
             ),
         ):
-            result = fetch_all_issue_titles_graphql([10, 11])
-
-        assert result == {10: "", 11: ""}
+            with pytest.raises(RuntimeError, match="gh down"):
+                fetch_all_issue_titles_graphql([10, 11])
 
     def test_owner_name_passed_as_graphql_variables_not_interpolated(self) -> None:
         """Title fetch must parameterize owner/name/numbers (no injection)."""
@@ -595,13 +635,18 @@ class TestFetchAllIssueTitlesGraphql:
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
-            mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
-            fetch_all_issue_titles_graphql([10, 11])
+            mock_gh.return_value = MagicMock(
+                returncode=0, stderr="", stdout=json.dumps({"data": {"repository": {}}})
+            )
+            from hephaestus.automation.github_api import GraphQLDeterministicError
+
+            with pytest.raises(GraphQLDeterministicError):
+                fetch_all_issue_titles_graphql([10, 11])
 
         argv = mock_gh.call_args.args[0]
         query_arg = next(a for a in argv if a.startswith("query="))
         assert "'HomericIntelligence'" not in query_arg
-        assert query_arg.startswith("query=query($owner:String!,$name:String!")
+        assert query_arg.startswith("query=query BatchIssueTitles($owner:String!,$name:String!")
         assert "owner=HomericIntelligence" in argv
         assert "name=Hephaestus" in argv
         assert "n0=10" in argv and "n1=11" in argv
@@ -625,13 +670,18 @@ class TestFetchAllIssueCommentsGraphqlVars:
             ),
             patch("hephaestus.automation.state.review._gh_call") as mock_gh,
         ):
-            mock_gh.return_value = MagicMock(stdout=json.dumps({"data": {"repository": {}}}))
-            fetch_all_issue_comments_graphql([10])
+            mock_gh.return_value = MagicMock(
+                returncode=0, stderr="", stdout=json.dumps({"data": {"repository": {}}})
+            )
+            from hephaestus.automation.github_api import GraphQLDeterministicError
+
+            with pytest.raises(GraphQLDeterministicError):
+                fetch_all_issue_comments_graphql([10])
 
         argv = mock_gh.call_args.args[0]
         query_arg = next(a for a in argv if a.startswith("query="))
         assert "'HomericIntelligence'" not in query_arg
-        assert query_arg.startswith("query=query($owner:String!,$name:String!")
+        assert query_arg.startswith("query=query BatchIssueComments($owner:String!,$name:String!")
         assert "$owner" in query_arg and "$name" in query_arg
         assert "owner=HomericIntelligence" in argv
         assert "name=Hephaestus" in argv

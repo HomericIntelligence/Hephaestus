@@ -2566,7 +2566,9 @@ class TestCommitPushAndPrCreate:
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
                 batch_nonce: str,
+                progress: object = None,
             ) -> ImplementationThreadReplyResult:
+                del progress
                 if self._reply_results:
                     return self._reply_results.popleft()
                 return super().post_implementation_thread_replies(
@@ -2625,7 +2627,7 @@ class TestCommitPushAndPrCreate:
     def test_remediation_reply_handoff_reconstructs_after_restart_without_new_commit(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A restart replays its exact GitHub-journaled batch without another agent or commit."""
+        """A recovered armed handoff blocks when read-only proof is unavailable."""
 
         class TransientReadGitHub(FakeStageGitHub):
             def __init__(self) -> None:
@@ -2714,11 +2716,11 @@ class TestCommitPushAndPrCreate:
         )
 
         assert _drive_github_jobs(stage, resumed, ctx) == StageOutcome(
-            Disposition.ADVANCE, "PR #1001 ready for review"
+            Disposition.ADVANCE, "implementation_reply_handoff_blocked"
         )
         assert (
             github.mutation_log.count(("post_implementation_thread_replies", (1001, ("thread-1",))))
-            == 1
+            == 0
         )
 
         stale = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")

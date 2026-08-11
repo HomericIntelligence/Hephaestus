@@ -31,7 +31,10 @@ from hephaestus.automation.merge_authorization import (
     MergeAuthorization,
     canonical_body_digest,
 )
-from hephaestus.automation.pipeline.stages.base import StageGitHub
+from hephaestus.automation.pipeline.stages.base import (
+    ImplementationReplyProgress,
+    StageGitHub,
+)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
@@ -97,6 +100,7 @@ class PipelineGitHubForTest(pg.PipelineGitHub):
         threads: list[dict[str, Any]],
         replies: dict[str, str],
         batch_nonce: str | None = _BATCH_NONCE,
+        progress: ImplementationReplyProgress | None = None,
     ) -> Any:
         return super().post_implementation_thread_replies(
             pr_number,
@@ -104,6 +108,7 @@ class PipelineGitHubForTest(pg.PipelineGitHub):
             threads=threads,
             replies=replies,
             batch_nonce=batch_nonce,
+            progress=progress,
         )
 
 
@@ -264,12 +269,13 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 created_reviews.append(fields)
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
                 thread_id = str(fields["threadId"])
-                attached_review_ids.append(str(fields["reviewId"]))
+                attached_review_ids.append("review-1")
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
                     "comments": [
@@ -294,7 +300,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     }
                 }
             if "submitPullRequestReview" in query:
-                submitted_review_ids.append(str(fields["reviewId"]))
+                submitted_review_ids.append("review-1")
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -344,12 +350,13 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live)
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             nonlocal live
             if "addPullRequestReview(input:" in query:
                 created_reviews.append(fields)
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                attached_review_ids.append(str(fields["reviewId"]))
+                attached_review_ids.append("review-1")
                 body = str(fields["body"])
                 live = {
                     **live,
@@ -375,7 +382,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     }
                 }
             if "submitPullRequestReview" in query:
-                submitted_review_ids.append(str(fields["reviewId"]))
+                submitted_review_ids.append("review-1")
                 live = {
                     **live,
                     "comments": [
@@ -485,10 +492,11 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 thread_id = str(fields["threadId"])
                 reply_bodies.append(str(fields["body"]))
                 comment_id = f"implementation-{thread_id}"
@@ -512,7 +520,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
                 }
             if "submitPullRequestReview" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -562,14 +570,18 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 thread_id = str(fields["threadId"])
                 reply_calls.append(thread_id)
                 if thread_id == second["id"] and reply_calls.count(thread_id) == 1:
-                    raise OSError("transient GitHub reply failure")
+                    raise github_api_mod.GraphQLRetryableError(
+                        "circuit open",
+                        pre_dispatch=True,
+                    )
                 comment_id = f"implementation-{thread_id}"
                 live_by_id[thread_id] = {
                     **live_by_id[thread_id],
@@ -591,7 +603,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
                 }
             if "submitPullRequestReview" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -629,8 +641,13 @@ class TestAllThreadReplyAndReviewerResolution:
             replies=replies,
         )
 
-        assert failed.replied_thread_ids == ()
-        assert failed.retryable_thread_ids == (first["id"], second["id"])
+        assert failed.replied_thread_ids == (first["id"],)
+        assert failed.retryable_thread_ids == (second["id"],)
+        assert failed.retryable is True
+        assert failed.progress is not None
+        assert failed.progress.phase == "verify_reply"
+        assert failed.progress.pending_review_id == "review-1"
+        assert failed.progress.active_thread_id == second["id"]
         assert retried.replied_thread_ids == (first["id"], second["id"])
         assert reply_calls == [first["id"], second["id"], second["id"]]
 
@@ -649,10 +666,11 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 thread_id = str(fields["threadId"])
                 reply_calls.append(thread_id)
                 comment_id = f"implementation-{thread_id}"
@@ -674,7 +692,7 @@ class TestAllThreadReplyAndReviewerResolution:
                 }
                 return {"data": {"addPullRequestReviewThreadReply": None}}
             if "submitPullRequestReview" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -729,10 +747,11 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 thread_id = str(fields["threadId"])
                 reply_calls.append(thread_id)
                 sleep(0.05)
@@ -757,7 +776,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     "data": {"addPullRequestReviewThreadReply": {"comment": {"id": comment_id}}}
                 }
             if "submitPullRequestReview" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 for thread_id, live in live_by_id.items():
                     live_by_id[thread_id] = {
                         **live,
@@ -831,11 +850,12 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live)
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             nonlocal live
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 reply_calls.append(str(fields["body"]))
                 sleep(0.05)
                 live = {
@@ -862,7 +882,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     }
                 }
             if "submitPullRequestReview" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 live = {
                     **live,
                     "comments": [
@@ -982,12 +1002,13 @@ class TestAllThreadReplyAndReviewerResolution:
         calls: list[str] = []
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 calls.append("create-implementation-review")
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
                 calls.append("implementation-reply")
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
@@ -1013,7 +1034,7 @@ class TestAllThreadReplyAndReviewerResolution:
                 }
             if "submitPullRequestReview" in query:
                 calls.append("submit-implementation-review")
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -1114,13 +1135,14 @@ class TestAllThreadReplyAndReviewerResolution:
         calls: list[str] = []
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
                 calls.append(str(fields["body"]))
-                is_implementation_reply = "reviewId" in fields
+                is_implementation_reply = "AddImplementationReply" in query
                 if is_implementation_reply:
-                    assert fields["reviewId"] == "review-1"
+                    assert "review-1" == "review-1"
                 reply_body = str(fields["body"])
                 live[0] = {
                     **live[0],
@@ -1147,7 +1169,7 @@ class TestAllThreadReplyAndReviewerResolution:
                     }
                 }
             if "submitPullRequestReview" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 live[0] = {
                     **live[0],
                     "comments": [
@@ -1251,6 +1273,7 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id], resolved=thread_id in resolved_ids)
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             thread_id = str(fields["threadId"])
             if "resolveReviewThread" in query:
                 calls.append(("resolve", thread_id))
@@ -1429,6 +1452,7 @@ class TestAllThreadReplyAndReviewerResolution:
             return _open_thread_snapshot(live_by_id[thread_id])
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             nonlocal created, submitted
             if "addPullRequestReview(input:" in query:
                 created += 1
@@ -1482,7 +1506,11 @@ class TestAllThreadReplyAndReviewerResolution:
             7, expected_head_sha="a" * 40, threads=threads, replies=replies
         )
 
-        assert failed.retryable is True
+        # The submit was dispatched but its receipt was not proven.  A later
+        # call may reconcile the already-commented review, but the original
+        # intent is never safe retry work.
+        assert failed.retryable is False
+        assert failed.blocked_thread_ids == tuple(sorted(thread_ids))
         assert recovered.replied_thread_ids == tuple(sorted(thread_ids))
         assert created == 1
         assert submitted == 1
@@ -1621,11 +1649,12 @@ class TestAllThreadReplyAndReviewerResolution:
         monkeypatch.setattr(adapter, "_review_thread_snapshot", snapshot)
 
         def graphql(query: str, **fields: str | int) -> dict[str, Any]:
+            fields = {**getattr(query, "variables", {}), **fields}
             nonlocal live
             if "addPullRequestReview(input:" in query:
                 return {"data": {"addPullRequestReview": {"pullRequestReview": {"id": "review-1"}}}}
             if "addPullRequestReviewThreadReply" in query:
-                assert fields["reviewId"] == "review-1"
+                assert "review-1" == "review-1"
                 live = {
                     **live,
                     "comments": [
@@ -3525,7 +3554,7 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
@@ -3909,7 +3938,11 @@ class TestRepoScoping:
             payload = {
                 "data": {
                     "repository": {
+                        "name": "repo-a",
+                        "owner": {"login": "org"},
                         "pullRequest": {
+                            "id": "PR_7",
+                            "number": 7,
                             "reviewThreads": {
                                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                                 "nodes": [
@@ -3943,12 +3976,12 @@ class TestRepoScoping:
                                         "comments": {"nodes": []},
                                     },
                                 ],
-                            }
-                        }
+                            },
+                        },
                     }
                 }
             }
-            return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
@@ -4016,16 +4049,37 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
+            client_mutation_id = next(
+                value.split("=", 1)[1] for value in argv if value.startswith("clientMutationId=")
+            )
             return SimpleNamespace(
                 stdout=json.dumps(
-                    {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
-                )
+                    {
+                        "data": {
+                            "addPullRequestReviewThreadReply": {
+                                "clientMutationId": client_mutation_id,
+                                "comment": {
+                                    "id": "C1",
+                                    "body": body,
+                                    "viewerDidAuthor": True,
+                                    "pullRequestReview": {
+                                        "id": "review-1",
+                                        "state": "COMMENTED",
+                                        "commit": {"oid": "a" * 40},
+                                    },
+                                },
+                            }
+                        }
+                    }
+                ),
+                returncode=0,
             )
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
-        assert adapter._add_thread_reply("T1", body) == "C1"
+        receipt = adapter._add_reviewer_feedback_reply("T1", body, expected_head_sha="a" * 40)
+        assert receipt["id"] == "C1"
 
         argv = calls[0]
         body_index = argv.index(f"body={body}")
@@ -4040,12 +4094,38 @@ class TestRepoScoping:
 
         def fake_gh_call(argv: list[str], **_kwargs: object) -> SimpleNamespace:
             calls.append(argv)
-            return SimpleNamespace(stdout=json.dumps({"data": {}}))
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "owner": {"login": "org"},
+                                "name": "repo-a",
+                                "pullRequest": {
+                                    "id": "PR_7",
+                                    "number": 7,
+                                    "reviewThreads": {
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                        "nodes": [],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                ),
+                returncode=0,
+            )
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
 
-        adapter._graphql("query($number:Int!){node{id}}", number=7)
+        adapter._graphql(
+            github_api_mod.unresolved_review_threads_page_query("org", "repo-a", 7),
+            number=7,
+        )
 
         argv = calls[0]
         assert argv[argv.index("owner=org") - 1] == "-f"
@@ -4089,40 +4169,36 @@ class TestRepoScoping:
             adapter,
             "_graphql",
             lambda _query, **_fields: {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "PR1",
-                            "state": "OPEN",
-                            "headRefOid": "a" * 40,
-                            "autoMergeRequest": None,
+                "pr_node_id": "PR1",
+                "pr_state": {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": None,
+                },
+                "thread": {
+                    "id": "T1",
+                    "isResolved": False,
+                    "path": "a.py",
+                    "line": None,
+                    "side": None,
+                    "pullRequest": {
+                        "id": "PR1",
+                        "number": 7,
+                        "repository": {"name": "repo-a", "owner": {"login": "org"}},
+                    },
+                },
+                "comments": {
+                    "nodes": [
+                        {
+                            "id": "C1",
+                            "body": "Please fix this.",
+                            "viewerDidAuthor": False,
+                            "author": None,
+                            "pullRequestReview": None,
                         }
-                    },
-                    "node": {
-                        "id": "T1",
-                        "isResolved": False,
-                        "path": "a.py",
-                        "line": None,
-                        "side": None,
-                        "pullRequest": {
-                            "id": "PR1",
-                            "number": 7,
-                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
-                        },
-                        "comments": {
-                            "nodes": [
-                                {
-                                    "id": "C1",
-                                    "body": "Please fix this.",
-                                    "viewerDidAuthor": False,
-                                    "author": None,
-                                    "pullRequestReview": None,
-                                }
-                            ],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        },
-                    },
-                }
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
             },
         )
 
@@ -4154,35 +4230,31 @@ class TestRepoScoping:
             calls.append(after if isinstance(after, str) else None)
             last_page = after == "cursor-100"
             return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "PR1",
-                            "state": "OPEN",
-                            "headRefOid": "a" * 40,
-                            "autoMergeRequest": None,
-                        }
+                "pr_node_id": "PR1",
+                "pr_state": {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": None,
+                },
+                "thread": {
+                    "id": "T1",
+                    "isResolved": False,
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "pullRequest": {
+                        "id": "PR1",
+                        "number": 7,
+                        "repository": {"name": "repo-a", "owner": {"login": "org"}},
                     },
-                    "node": {
-                        "id": "T1",
-                        "isResolved": False,
-                        "path": "a.py",
-                        "line": 1,
-                        "side": "RIGHT",
-                        "pullRequest": {
-                            "id": "PR1",
-                            "number": 7,
-                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
-                        },
-                        "comments": {
-                            "nodes": comments[100:] if last_page else comments[:100],
-                            "pageInfo": {
-                                "hasNextPage": not last_page,
-                                "endCursor": None if last_page else "cursor-100",
-                            },
-                        },
+                },
+                "comments": {
+                    "nodes": comments[100:] if last_page else comments[:100],
+                    "pageInfo": {
+                        "hasNextPage": not last_page,
+                        "endCursor": None if last_page else "cursor-100",
                     },
-                }
+                },
             }
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -4201,43 +4273,39 @@ class TestRepoScoping:
         def graphql(_query: str, **fields: str | int) -> dict[str, Any]:
             after = fields.get("after") == "cursor-1"
             return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "id": "PR1",
-                            "state": "OPEN",
-                            "headRefOid": "a" * 40,
-                            "autoMergeRequest": {"enabledAt": "now"} if after else None,
+                "pr_node_id": "PR1",
+                "pr_state": {
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "autoMergeRequest": {"enabledAt": "now"} if after else None,
+                },
+                "thread": {
+                    "id": "T1",
+                    "isResolved": False,
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                    "pullRequest": {
+                        "id": "PR1",
+                        "number": 7,
+                        "repository": {"name": "repo-a", "owner": {"login": "org"}},
+                    },
+                },
+                "comments": {
+                    "nodes": [
+                        {
+                            "id": "C2" if after else "C1",
+                            "body": "later" if after else "first",
+                            "viewerDidAuthor": False,
+                            "author": {"login": "reviewer", "__typename": "User"},
+                            "pullRequestReview": None,
                         }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": not after,
+                        "endCursor": None if after else "cursor-1",
                     },
-                    "node": {
-                        "id": "T1",
-                        "isResolved": False,
-                        "path": "a.py",
-                        "line": 1,
-                        "side": "RIGHT",
-                        "pullRequest": {
-                            "id": "PR1",
-                            "number": 7,
-                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
-                        },
-                        "comments": {
-                            "nodes": [
-                                {
-                                    "id": "C2" if after else "C1",
-                                    "body": "later" if after else "first",
-                                    "viewerDidAuthor": False,
-                                    "author": {"login": "reviewer", "__typename": "User"},
-                                    "pullRequestReview": None,
-                                }
-                            ],
-                            "pageInfo": {
-                                "hasNextPage": not after,
-                                "endCursor": None if after else "cursor-1",
-                            },
-                        },
-                    },
-                }
+                },
             }
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -4270,7 +4338,11 @@ class TestRepoScoping:
             payload = {
                 "data": {
                     "repository": {
+                        "owner": {"login": "org"},
+                        "name": "repo-a",
                         "pullRequest": {
+                            "id": "PR_7",
+                            "number": 7,
                             "reviewThreads": {
                                 "nodes": (
                                     second_page_nodes if after_first_page else first_page_nodes
@@ -4279,12 +4351,12 @@ class TestRepoScoping:
                                     "hasNextPage": not after_first_page,
                                     "endCursor": None if after_first_page else "cursor-1",
                                 },
-                            }
-                        }
+                            },
+                        },
                     }
                 }
             }
-            return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
@@ -4330,16 +4402,8 @@ class TestRepoScoping:
             reads += 1
             thread_id = "T1" if reads == 1 else "T2"
             return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [{"id": thread_id, "isResolved": False}],
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            }
-                        }
-                    }
-                }
+                "nodes": [{"id": thread_id, "isResolved": False}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
             }
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -4356,16 +4420,8 @@ class TestRepoScoping:
             after = fields.get("after")
             cursor = "cursor-a" if after == "cursor-b" else "cursor-b" if after else "cursor-a"
             return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "nodes": [{"id": f"T-{after or 'first'}", "isResolved": False}],
-                                "pageInfo": {"hasNextPage": True, "endCursor": cursor},
-                            }
-                        }
-                    }
-                }
+                "nodes": [{"id": f"T-{after or 'first'}", "isResolved": False}],
+                "pageInfo": {"hasNextPage": True, "endCursor": cursor},
             }
 
         monkeypatch.setattr(adapter, "_graphql", graphql)
@@ -4405,47 +4461,35 @@ class TestRepoScoping:
         def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
             if "node(id:$threadId)" in query:
                 return {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "PR1",
-                                "state": "OPEN",
-                                "headRefOid": "a" * 40,
-                                "autoMergeRequest": None,
-                            }
-                        },
-                        "node": {
-                            "id": "T1",
-                            "isResolved": False,
-                            "path": "a.py",
-                            "line": 1,
-                            "side": "RIGHT",
-                            "pullRequest": {
-                                "id": "PR1",
-                                "number": 7,
-                                "repository": {
-                                    "name": "repo-a",
-                                    "owner": {"login": "org"},
-                                },
-                            },
-                            "comments": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": comments,
+                    "pr_node_id": "PR1",
+                    "pr_state": {
+                        "state": "OPEN",
+                        "headRefOid": "a" * 40,
+                        "autoMergeRequest": None,
+                    },
+                    "thread": {
+                        "id": "T1",
+                        "isResolved": False,
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "pullRequest": {
+                            "id": "PR1",
+                            "number": 7,
+                            "repository": {
+                                "name": "repo-a",
+                                "owner": {"login": "org"},
                             },
                         },
-                    }
+                    },
+                    "comments": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": comments,
+                    },
                 }
             return {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "reviewThreads": {
-                                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [{"id": "T1", "isResolved": False}],
-                            }
-                        }
-                    }
-                }
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"id": "T1", "isResolved": False}],
             }
 
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
@@ -4466,36 +4510,43 @@ class TestRepoScoping:
             {"body": f"bot reply {index}", "author": {"login": "ci-bot"}} for index in range(20)
         ]
         all_comments.append({"body": "human reply", "author": {"login": "reviewer"}})
-        payload = {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "reviewThreads": {
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                            "nodes": [
-                                {
-                                    "id": "T1",
-                                    "isResolved": False,
-                                    "comments": {
-                                        "pageInfo": {
-                                            "hasNextPage": len(all_comments) > 20,
-                                            "endCursor": "comment-cursor-20",
-                                        },
-                                        "nodes": all_comments[:20],
-                                    },
-                                }
-                            ],
-                        }
-                    }
-                }
-            }
-        }
-        monkeypatch.setattr(
-            pg,
-            "gh_call",
-            lambda _argv, **_kwargs: SimpleNamespace(stdout=json.dumps(payload)),
-        )
         adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        def graphql(query: str, **_fields: str | int) -> dict[str, Any]:
+            if "node(id:$threadId)" in query:
+                return {
+                    "pr_node_id": "PR1",
+                    "pr_state": {
+                        "state": "OPEN",
+                        "headRefOid": "a" * 40,
+                        "autoMergeRequest": None,
+                    },
+                    "thread": {
+                        "id": "T1",
+                        "isResolved": False,
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "pullRequest": {
+                            "id": "PR1",
+                            "number": 7,
+                            "repository": {"name": "repo-a", "owner": {"login": "org"}},
+                        },
+                    },
+                    "comments": {
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "comment-cursor-20",
+                        },
+                        "nodes": all_comments[:20],
+                    },
+                }
+            return {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"id": "T1", "isResolved": False}],
+            }
+
+        monkeypatch.setattr(adapter, "_graphql", graphql)
         with pytest.raises(RuntimeError, match=r"could not fetch all comments.*T1"):
             adapter.list_unresolved_review_threads(7)
 
@@ -4555,8 +4606,16 @@ class TestRepoScoping:
                 payload = {
                     "data": {
                         "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo-a",
                             "pullRequest": {
+                                "id": "PR_7",
+                                "number": 7,
                                 "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
                                     "nodes": [
                                         {
                                             "id": "thread-1",
@@ -4567,9 +4626,9 @@ class TestRepoScoping:
                                                 ]
                                             },
                                         }
-                                    ]
-                                }
-                            }
+                                    ],
+                                },
+                            },
                         }
                     }
                 }
@@ -4765,29 +4824,49 @@ class TestRepoScoping:
                 payload = {
                     "data": {
                         "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo-a",
                             "pullRequest": {
+                                "id": "PR_7",
+                                "number": 7,
                                 "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
                                     "nodes": [
                                         {
                                             "id": "thread-1",
                                             "isResolved": False,
+                                            "path": "a.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
                                             "comments": {
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
                                                 "nodes": [
                                                     {
+                                                        "id": "comment-1",
+                                                        "body": "other",
+                                                        "author": {"login": "reviewer"},
                                                         "pullRequestReview": {
-                                                            "id": "other-review-node"
-                                                        }
+                                                            "id": "other-review-node",
+                                                            "state": "COMMENTED",
+                                                            "commit": {"oid": "a" * 40},
+                                                        },
                                                     }
-                                                ]
+                                                ],
                                             },
                                         }
-                                    ]
-                                }
-                            }
+                                    ],
+                                },
+                            },
                         }
                     }
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
+                return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
             if "repos/org/repo-a/pulls/7/reviews" in argv:
                 return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
             return SimpleNamespace(stdout="")
@@ -4826,7 +4905,11 @@ class TestRepoScoping:
                 payload = {
                     "data": {
                         "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo-a",
                             "pullRequest": {
+                                "id": "PR_7",
+                                "number": 7,
                                 "reviewThreads": {
                                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                                     "nodes": [
@@ -4843,28 +4926,38 @@ class TestRepoScoping:
                                                 },
                                                 "nodes": [
                                                     {
+                                                        "id": "comment-1",
                                                         "body": (
                                                             "<!-- hephaestus-severity: "
                                                             "major -->\nfinding"
                                                         ),
                                                         "author": {"login": "mvillmow"},
-                                                        "pullRequestReview": {"id": "review-node"},
+                                                        "pullRequestReview": {
+                                                            "id": "review-node",
+                                                            "state": "COMMENTED",
+                                                            "commit": {"oid": "a" * 40},
+                                                        },
                                                     },
                                                     {
+                                                        "id": "comment-2",
                                                         "body": "human follow-up",
                                                         "author": {"login": "mvillmow"},
-                                                        "pullRequestReview": None,
+                                                        "pullRequestReview": {
+                                                            "id": "review-node",
+                                                            "state": "COMMENTED",
+                                                            "commit": {"oid": "a" * 40},
+                                                        },
                                                     },
                                                 ],
                                             },
                                         }
                                     ],
-                                }
-                            }
+                                },
+                            },
                         }
                     }
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
+                return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
             if "repos/org/repo-a/pulls/7/reviews" in argv:
                 return SimpleNamespace(stdout=json.dumps({"id": 999, "node_id": "review-node"}))
             return SimpleNamespace(stdout="")
@@ -4894,38 +4987,54 @@ class TestRepoReviewThreadReceipts:
     ) -> None:
         """Receipt lookup paginates without accepting another review's threads."""
         calls: list[list[str]] = []
-        first_page_nodes = [
-            {
-                "id": f"PRRT_other_{index}",
+
+        def receipt_node(
+            thread_id: str,
+            review_id: str,
+            *,
+            body: str = "other",
+            comment_id: str | None = None,
+            path: str = "other.py",
+            line: int | None = 1,
+            author: str = "reviewer",
+        ) -> dict[str, Any]:
+            return {
+                "id": thread_id,
                 "isResolved": False,
-                "comments": {"nodes": [{"pullRequestReview": {"id": "other-review-node"}}]},
-            }
-            for index in range(100)
-        ]
-        second_page_nodes = [
-            {
-                "id": "PRRT_matching",
-                "isResolved": False,
-                "path": "a.py",
-                "line": 1,
+                "path": path,
+                "line": line,
                 "side": "RIGHT",
                 "comments": {
-                    "pageInfo": {"hasNextPage": False},
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
                     "nodes": [
                         {
-                            "id": "PRRC_matching",
-                            "body": "finding",
-                            "author": {"login": "hephaestus[bot]"},
-                            "pullRequestReview": {"id": "review-node"},
+                            "id": comment_id or f"comment-{thread_id}",
+                            "body": body,
+                            "author": {"login": author},
+                            "pullRequestReview": {
+                                "id": review_id,
+                                "state": "COMMENTED",
+                                "commit": {"oid": "a" * 40},
+                            },
                         }
                     ],
                 },
-            },
-            {
-                "id": "PRRT_other_review",
-                "isResolved": False,
-                "comments": {"nodes": [{"pullRequestReview": {"id": "other-review-node"}}]},
-            },
+            }
+
+        first_page_nodes = [
+            receipt_node(f"PRRT_other_{index}", "other-review-node") for index in range(100)
+        ]
+        second_page_nodes = [
+            receipt_node(
+                "PRRT_matching",
+                "review-node",
+                body="finding",
+                comment_id="PRRC_matching",
+                path="a.py",
+                line=1,
+                author="hephaestus[bot]",
+            ),
+            receipt_node("PRRT_other_review", "other-review-node"),
         ]
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
@@ -4934,7 +5043,11 @@ class TestRepoReviewThreadReceipts:
             payload = {
                 "data": {
                     "repository": {
+                        "owner": {"login": "org"},
+                        "name": "repo-a",
                         "pullRequest": {
+                            "id": "PR_7",
+                            "number": 7,
                             "reviewThreads": {
                                 "nodes": (
                                     second_page_nodes if after_first_page else first_page_nodes
@@ -4943,12 +5056,12 @@ class TestRepoReviewThreadReceipts:
                                     "hasNextPage": not after_first_page,
                                     "endCursor": None if after_first_page else "cursor-1",
                                 },
-                            }
-                        }
+                            },
+                        },
                     }
                 }
             }
-            return SimpleNamespace(stdout=json.dumps(payload))
+            return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
 
@@ -4986,8 +5099,16 @@ class TestRepoReviewThreadReceipts:
                 payload = {
                     "data": {
                         "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo-a",
                             "pullRequest": {
+                                "id": "PR_7",
+                                "number": 7,
                                 "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
                                     "nodes": [
                                         {
                                             "id": "PRRT_matching",
@@ -4996,14 +5117,19 @@ class TestRepoReviewThreadReceipts:
                                             "line": 1,
                                             "side": "RIGHT",
                                             "comments": {
-                                                "pageInfo": {"hasNextPage": False},
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
                                                 "nodes": [
                                                     {
                                                         "id": "PRRC_matching",
                                                         "body": "finding",
                                                         "author": {"login": "hephaestus[bot]"},
                                                         "pullRequestReview": {
-                                                            "id": rest_review_response["node_id"]
+                                                            "id": rest_review_response["node_id"],
+                                                            "state": "COMMENTED",
+                                                            "commit": {"oid": "a" * 40},
                                                         },
                                                     }
                                                 ],
@@ -5012,19 +5138,35 @@ class TestRepoReviewThreadReceipts:
                                         {
                                             "id": "PRRT_other_review",
                                             "isResolved": False,
+                                            "path": "other.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
                                             "comments": {
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
                                                 "nodes": [
-                                                    {"pullRequestReview": {"id": "PRR_unrelated"}}
-                                                ]
+                                                    {
+                                                        "id": "PRRC_other",
+                                                        "body": "other",
+                                                        "author": {"login": "reviewer"},
+                                                        "pullRequestReview": {
+                                                            "id": "PRR_unrelated",
+                                                            "state": "COMMENTED",
+                                                            "commit": {"oid": "a" * 40},
+                                                        },
+                                                    }
+                                                ],
                                             },
                                         },
-                                    ]
-                                }
-                            }
+                                    ],
+                                },
+                            },
                         }
                     }
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
+                return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
             return SimpleNamespace(stdout="")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
@@ -5046,25 +5188,49 @@ class TestRepoReviewThreadReceipts:
                 payload = {
                     "data": {
                         "repository": {
+                            "owner": {"login": "org"},
+                            "name": "repo-a",
                             "pullRequest": {
+                                "id": "PR_7",
+                                "number": 7,
                                 "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
                                     "nodes": [
                                         {
                                             "id": "PRRT_resolved",
                                             "isResolved": True,
+                                            "path": "a.py",
+                                            "line": 1,
+                                            "side": "RIGHT",
                                             "comments": {
+                                                "pageInfo": {
+                                                    "hasNextPage": False,
+                                                    "endCursor": None,
+                                                },
                                                 "nodes": [
-                                                    {"pullRequestReview": {"id": "review-node"}}
-                                                ]
+                                                    {
+                                                        "id": "PRRC_resolved",
+                                                        "body": "finding",
+                                                        "author": {"login": "reviewer"},
+                                                        "pullRequestReview": {
+                                                            "id": "review-node",
+                                                            "state": "COMMENTED",
+                                                            "commit": {"oid": "a" * 40},
+                                                        },
+                                                    }
+                                                ],
                                             },
                                         }
-                                    ]
-                                }
-                            }
+                                    ],
+                                },
+                            },
                         }
                     }
                 }
-                return SimpleNamespace(stdout=json.dumps(payload))
+                return SimpleNamespace(stdout=json.dumps(payload), returncode=0)
             return SimpleNamespace(stdout="")
 
         monkeypatch.setattr(pg, "gh_call", fake_gh_call)
