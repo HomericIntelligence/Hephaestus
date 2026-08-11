@@ -111,34 +111,44 @@ class ValidationReport:
 class ReadmeValidator:
     """Validates commands in README markdown files."""
 
-    # Default allowed command prefixes (can be overridden)
-    DEFAULT_ALLOWED_PREFIXES: ClassVar[list[str]] = [
-        "uv run",
-        "uv sync",
-        "uv tree",
-        "just precommit",
-        "python3 -m py_compile",
-        "python3 --version",
-        "gh auth status",
-        "gh issue list",
-        "gh issue view",
-        "gh pr list",
-        "gh pr view",
-        "echo",
-        "cat",
-        "ls",
-        "pwd",
-        "which",
-    ]
+    # Only exact argv tuples are admitted. A prefix-based policy would allow
+    # README-authored arguments to select arbitrary Python, scripts, or uv
+    # options while still beginning with an apparently safe command.
+    DEFAULT_ALLOWED_ARGV: ClassVar[frozenset[tuple[str, ...]]] = frozenset(
+        {
+            ("uv", "run", "pytest"),
+            ("uv", "run", "pytest", "tests/unit"),
+            ("uv", "run", "pytest", "tests/integration"),
+            ("uv", "run", "pytest", "-m", "not integration"),
+            ("uv", "run", "ruff", "format", "hephaestus", "scripts", "tests"),
+            ("uv", "run", "ruff", "check", "hephaestus", "scripts", "tests"),
+            ("uv", "sync"),
+        }
+    )
 
     def __init__(self, allowed_prefixes: list[str] | None = None) -> None:
         """Initialize the readme validator.
 
         Args:
-            allowed_prefixes: Custom list of allowed command prefixes. If None, uses defaults.
+            allowed_prefixes: Custom list of exact command strings. The parameter name is
+                retained for compatibility; entries are parsed into exact argv tuples. If
+                None, the documented default command grammar is used. Malformed or empty
+                entries are ignored so a custom policy fails closed.
 
         """
-        self.allowed_prefixes = allowed_prefixes or self.DEFAULT_ALLOWED_PREFIXES
+        if allowed_prefixes is None:
+            self.allowed_argv = self.DEFAULT_ALLOWED_ARGV
+            return
+
+        parsed_commands: set[tuple[str, ...]] = set()
+        for allowed_command in allowed_prefixes:
+            try:
+                argv = tuple(shlex.split(allowed_command, posix=True))
+            except ValueError:
+                continue
+            if argv:
+                parsed_commands.add(argv)
+        self.allowed_argv = frozenset(parsed_commands)
 
     def extract_code_blocks(self, markdown_path: Path) -> list[CodeBlock]:
         """Extract fenced code blocks from markdown file.
@@ -185,7 +195,7 @@ class ReadmeValidator:
         return any(re.search(pattern, command) for pattern in BLOCKED_PATTERNS)
 
     def is_allowed_command(self, command: str) -> bool:
-        """Check if command starts with an allowed prefix.
+        """Check if a command parses to one exact allowed argv tuple.
 
         Args:
             command: Command string to check
@@ -194,7 +204,11 @@ class ReadmeValidator:
             True if command is allowed
 
         """
-        return any(command.startswith(prefix) for prefix in self.allowed_prefixes)
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return False
+        return bool(argv) and argv in self.allowed_argv
 
     def is_safe_command(self, command: str) -> tuple[bool, str]:
         """Check if command is safe to execute.
@@ -210,7 +224,7 @@ class ReadmeValidator:
             return False, "matches blocked pattern"
 
         if not self.is_allowed_command(command):
-            return False, "not in allowed prefixes"
+            return False, "not in allowed command grammar"
 
         return True, "allowed"
 
@@ -307,8 +321,8 @@ class ReadmeValidator:
 
         The command is tokenized with shlex and run with shell=False, so
         pipes, redirection, command substitution, and env-var interpolation
-        in the README string have no effect. Callers must already have
-        passed is_safe_command(); SHELL_METACHARS is rejected there.
+        in the README string have no effect. The exact command grammar is
+        rechecked here so direct callers cannot bypass the admission gate.
 
         A failed tokenization or empty command returns exit_code=-1 (sentinel)
         so consumers reading ValidationResult.exit_code never see exit_code=0
@@ -340,6 +354,17 @@ class ReadmeValidator:
                 error_message="Empty command",
                 exit_code=-1,
             )
+
+        is_safe, reason = self.is_safe_command(command)
+        if not is_safe:
+            return ValidationResult(
+                command=command,
+                passed=False,
+                check_type="execution",
+                error_message=f"Command rejected: {reason}",
+                exit_code=-1,
+            )
+
         try:
             result = subprocess.run(
                 argv,

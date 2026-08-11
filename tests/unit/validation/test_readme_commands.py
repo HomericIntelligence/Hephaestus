@@ -213,24 +213,64 @@ class TestCommandClassification:
         """Safe commands are not blocked."""
         assert ReadmeValidator().is_blocked_command(cmd) is False
 
-    def test_is_allowed_command_defaults(self) -> None:
-        """Default allowed prefixes are recognized."""
-        v = ReadmeValidator()
-        assert v.is_allowed_command("uv run pytest") is True
-        assert v.is_allowed_command("echo hello") is True
-        assert v.is_allowed_command("ls -la") is True
-        assert v.is_allowed_command("python3 --version") is True
-        assert v.is_allowed_command("random_cmd") is False
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "uv run pytest",
+            "uv run pytest tests/unit",
+            "uv run pytest tests/integration",
+            'uv run pytest -m "not integration"',
+            "uv run ruff format hephaestus scripts tests",
+            "uv run ruff check hephaestus scripts tests",
+            "uv sync",
+        ],
+    )
+    def test_is_allowed_command_defaults_exactly(self, cmd: str) -> None:
+        """Each explicitly documented command is admitted as one exact argv."""
+        assert ReadmeValidator().is_allowed_command(cmd) is True
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            'uv run python -c "print(1)"',
+            'uv run --with requests python -c "print(1)"',
+            "uv run scripts/untrusted.py",
+            "uv run /tmp/untrusted.py",
+            "uv run pytest tests/unit/untrusted.py",
+            "uv run mypy hephaestus",
+            "uv run pytest-malicious",
+            "uv sync-malicious",
+            "echo unlisted",
+        ],
+    )
+    def test_is_allowed_command_rejects_unlisted_argv(self, cmd: str) -> None:
+        """Prefix lookalikes and arbitrary commands are not admitted."""
+        validator = ReadmeValidator()
+        assert validator.is_allowed_command(cmd) is False
+        is_safe, reason = validator.is_safe_command(cmd)
+        assert is_safe is False
+        assert reason == "not in allowed command grammar"
 
     def test_custom_allowed_prefixes(self) -> None:
-        """Custom prefixes replace defaults."""
+        """The legacy parameter name configures exact custom argv entries."""
         v = ReadmeValidator(allowed_prefixes=["myapp run", "myapp test"])
-        assert v.is_allowed_command("myapp run tests") is True
+        assert v.is_allowed_command("myapp run") is True
+        assert v.is_allowed_command("myapp run tests") is False
         assert v.is_allowed_command("echo 'test'") is False
+
+    def test_empty_custom_allowlist_does_not_use_defaults(self) -> None:
+        """An explicit empty policy remains empty instead of falling back."""
+        validator = ReadmeValidator(allowed_prefixes=[])
+        assert validator.is_allowed_command("uv run pytest") is False
+
+    def test_malformed_custom_allowlist_entry_is_rejected(self) -> None:
+        """Malformed custom entries fail closed without breaking construction."""
+        validator = ReadmeValidator(allowed_prefixes=['myapp "unterminated'])
+        assert validator.is_allowed_command("myapp run") is False
 
     def test_is_safe_command_allowed(self) -> None:
         """Safe allowed command returns (True, 'allowed')."""
-        is_safe, reason = ReadmeValidator().is_safe_command("echo 'test'")
+        is_safe, reason = ReadmeValidator().is_safe_command("uv run pytest")
         assert is_safe is True
         assert reason == "allowed"
 
@@ -241,10 +281,10 @@ class TestCommandClassification:
         assert "blocked" in reason
 
     def test_is_safe_command_not_allowed(self) -> None:
-        """Unrecognized command returns (False, 'not in allowed prefixes')."""
+        """Unrecognized command reports the exact-grammar rejection reason."""
         is_safe, reason = ReadmeValidator().is_safe_command("random_command")
         assert is_safe is False
-        assert "allowed prefixes" in reason
+        assert reason == "not in allowed command grammar"
 
     def test_blocks_shell_substitution_bypass(self) -> None:
         """is_safe_command rejects $(...), backticks, and ${VAR} indirection (#750)."""
@@ -353,7 +393,7 @@ class TestValidateExecution:
         """Successful command returns passed=True."""
         mock_root.return_value = Path("/repo")
         mock_run.return_value = MagicMock(returncode=0, stdout="output", stderr="")
-        result = ReadmeValidator().validate_execution("echo hello")
+        result = ReadmeValidator().validate_execution("uv run pytest")
 
         assert result.passed is True
         assert result.check_type == "execution"
@@ -366,7 +406,7 @@ class TestValidateExecution:
         """Non-zero exit returns passed=False with stderr."""
         mock_root.return_value = Path("/repo")
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error msg")
-        result = ReadmeValidator().validate_execution("false")
+        result = ReadmeValidator().validate_execution("uv run pytest")
 
         assert result.passed is False
         assert result.check_type == "execution"
@@ -380,7 +420,7 @@ class TestValidateExecution:
         mock_root.return_value = Path("/repo")
         exc = subprocess.TimeoutExpired(cmd="bash", timeout=60)
         mock_run.side_effect = exc
-        result = ReadmeValidator().validate_execution("sleep 999")
+        result = ReadmeValidator().validate_execution("uv run pytest")
 
         assert result.passed is False
         assert "timed out" in (result.error_message or "").lower()
@@ -391,7 +431,7 @@ class TestValidateExecution:
         """OSError returns passed=False."""
         mock_root.return_value = Path("/repo")
         mock_run.side_effect = OSError("no such binary")
-        result = ReadmeValidator().validate_execution("nonexistent")
+        result = ReadmeValidator().validate_execution("uv run pytest")
 
         assert result.passed is False
         assert "no such binary" in (result.error_message or "")
@@ -402,7 +442,7 @@ class TestValidateExecution:
         """Custom timeout is forwarded to subprocess.run."""
         mock_root.return_value = Path("/repo")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        ReadmeValidator().validate_execution("echo hi", timeout=30)
+        ReadmeValidator().validate_execution("uv run pytest", timeout=30)
         call_kwargs = mock_run.call_args[1]
         assert call_kwargs["timeout"] == 30
 
@@ -412,9 +452,9 @@ class TestValidateExecution:
         """validate_execution must run argv with shell=False, not bash -c (issue #750)."""
         mock_root.return_value = Path("/repo")
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        ReadmeValidator().validate_execution("echo hi", timeout=30)
+        ReadmeValidator().validate_execution("uv run pytest", timeout=30)
         args, kwargs = mock_run.call_args
-        assert args[0] == ["echo", "hi"]
+        assert args[0] == ["uv", "run", "pytest"]
         assert kwargs.get("shell", False) is False
         assert kwargs["timeout"] == 30
         assert kwargs["cwd"] == Path("/repo")
@@ -432,6 +472,16 @@ class TestValidateExecution:
         assert result.passed is False
         assert result.exit_code == -1
 
+    @patch("hephaestus.validation.readme_commands.subprocess.run")
+    def test_rejected_command_never_reaches_subprocess(self, mock_run: MagicMock) -> None:
+        """The execution sink independently enforces the command grammar."""
+        result = ReadmeValidator().validate_execution('uv run python -c "print(1)"')
+
+        assert result.passed is False
+        assert result.exit_code == -1
+        assert result.error_message == "Command rejected: not in allowed command grammar"
+        mock_run.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # validate_quick tests (mocked end-to-end)
@@ -443,13 +493,13 @@ class TestValidateQuick:
         """Build a representative list of code blocks."""
         return [
             # Executable bash block with 2 safe commands
-            CodeBlock(language="bash", content="echo hello\nls\n", line_number=1),
+            CodeBlock(language="bash", content="uv run pytest\nuv sync\n", line_number=1),
             # Non-executable python block (should be skipped)
             CodeBlock(language="python", content="print('hi')\n", line_number=10),
             # Bash block with skip marker
             CodeBlock(
                 language="bash",
-                content="echo skip  # SKIP-VALIDATION\n",
+                content="uv run pytest  # SKIP-VALIDATION\n",
                 line_number=20,
             ),
             # Bash block with unsafe command
@@ -484,16 +534,17 @@ class TestValidateQuick:
 
     @patch("hephaestus.validation.readme_commands.shutil.which")
     @patch("hephaestus.validation.readme_commands.subprocess.run")
-    def test_syntax_failure_short_circuits(
+    def test_unlisted_syntax_failure_is_skipped_before_availability(
         self, mock_run: MagicMock, mock_which: MagicMock
     ) -> None:
-        """When syntax fails (via shlex), availability is not checked."""
+        """An unlisted malformed command is skipped before availability."""
         blocks = [CodeBlock(language="bash", content="echo 'bad\n", line_number=1)]
         report = ReadmeValidator().validate_quick(blocks)
 
-        assert report.failed == 1
+        assert report.failed == 0
+        assert report.skipped_commands == 1
         mock_which.assert_not_called()
-        mock_run.assert_not_called()  # shlex.split caught it; subprocess never invoked
+        mock_run.assert_not_called()  # The admission gate caught it; subprocess never invoked.
 
     def test_non_executable_blocks_skipped(self) -> None:
         """Blocks with non-executable languages produce no results."""
@@ -519,7 +570,7 @@ class TestValidateComprehensive:
         mock_root.return_value = Path("/repo")
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         blocks = [
-            CodeBlock(language="bash", content="echo test\n", line_number=1),
+            CodeBlock(language="bash", content="uv run pytest\n", line_number=1),
         ]
         report = ReadmeValidator().validate_comprehensive(blocks)
 
@@ -536,7 +587,7 @@ class TestValidateComprehensive:
         mock_root.return_value = Path("/repo")
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="oops")
         blocks = [
-            CodeBlock(language="bash", content="echo fail\n", line_number=5),
+            CodeBlock(language="bash", content="uv run pytest\n", line_number=5),
         ]
         report = ReadmeValidator().validate_comprehensive(blocks)
 
@@ -550,6 +601,23 @@ class TestValidateComprehensive:
         mock_root.return_value = Path("/repo")
         blocks = [
             CodeBlock(language="bash", content="rm -rf /\n", line_number=1),
+        ]
+        report = ReadmeValidator().validate_comprehensive(blocks)
+
+        assert report.skipped_commands == 1
+        assert report.passed == 0
+        assert report.failed == 0
+        mock_run.assert_not_called()
+
+    @patch("hephaestus.validation.readme_commands.subprocess.run")
+    def test_comprehensive_skips_unlisted_argv(self, mock_run: MagicMock) -> None:
+        """Arbitrary uv commands are skipped without invoking subprocess."""
+        blocks = [
+            CodeBlock(
+                language="bash",
+                content='uv run python -c "print(1)"\n',
+                line_number=1,
+            ),
         ]
         report = ReadmeValidator().validate_comprehensive(blocks)
 
@@ -574,7 +642,7 @@ class TestValidateComprehensive:
         blocks = [
             CodeBlock(
                 language="bash",
-                content="echo hi  # SKIP-VALIDATION\n",
+                content="uv run pytest  # SKIP-VALIDATION\n",
                 line_number=1,
             ),
         ]
