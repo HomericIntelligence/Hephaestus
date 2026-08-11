@@ -13,6 +13,10 @@ must run under a bare ``python3`` in a broken environment (no ``uv sync``, no
 editable install), because that is precisely when a restore is needed.
 Credentials and secrets are never archived.
 
+Verification and restore fail closed: they reject malformed manifests,
+unauthorized or non-regular archive members, unsafe paths, and size or digest
+mismatches before any state payload is written.
+
 Usage:
     # Archive tier-3 state to ~/.hephaestus-backups/
     python3 scripts/backup_state.py backup
@@ -25,7 +29,7 @@ Usage:
 
 Exit codes:
     0  success (or verify: all members intact)
-    1  verify failure (a member's digest did not match the manifest)
+    1  verify failure (invalid structure, metadata, size, or digest)
     2  usage error, or a restore refused because the target was non-empty
 """
 
@@ -33,12 +37,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import os
+import stat
 import sys
 import tarfile
-import tempfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import cast
 
 # Tier-3, local-only state. Tiers 1-2 are re-derived, not archived (ADR-0012).
 INVENTORY: tuple[str, ...] = ("build/.issue_implementer",)
@@ -53,20 +60,69 @@ class RestoreError(Exception):
     """Raised when a restore cannot be performed safely (fail closed)."""
 
 
+class BackupError(Exception):
+    """Raised when inventory cannot be archived as safe regular files."""
+
+
 def _sha256_bytes(data: bytes) -> str:
     """Return the hex SHA-256 digest of ``data``."""
     return hashlib.sha256(data).hexdigest()
 
 
-def _iter_inventory_files(repo_root: Path) -> list[Path]:
-    """Return every regular file under any INVENTORY prefix, sorted by path."""
-    files: list[Path] = []
+def _read_regular_inventory_file(path: Path) -> bytes:
+    """Read one unchanged regular file without following a symbolic link."""
+    try:
+        expected = path.lstat()
+    except OSError as exc:
+        raise BackupError(f"cannot inspect inventory path {path}: {exc}") from exc
+    if not stat.S_ISREG(expected.st_mode):
+        raise BackupError(f"inventory path is not a regular file: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise BackupError(f"cannot safely open inventory file {path}: {exc}") from exc
+
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (expected.st_dev, expected.st_ino):
+            raise BackupError(f"inventory file changed while being opened: {path}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            return stream.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _inventory_members(repo_root: Path) -> list[tuple[str, bytes]]:
+    """Return safe regular inventory members and their bytes, sorted by name."""
+    members: list[tuple[str, bytes]] = []
     for prefix in INVENTORY:
         base = repo_root / prefix
+        current = repo_root
+        for part in PurePosixPath(prefix).parts:
+            current /= part
+            if current.is_symlink():
+                raise BackupError(f"inventory path is a symbolic link: {current}")
+
         if not base.exists():
             continue
-        files.extend(p for p in base.rglob("*") if p.is_file())
-    return sorted(files)
+        if not base.is_dir():
+            raise BackupError(f"inventory root is not a directory: {base}")
+
+        for path in base.rglob("*"):
+            if path.is_symlink():
+                raise BackupError(f"inventory path is a symbolic link: {path}")
+            if path.is_dir():
+                continue
+            rel = path.relative_to(repo_root).as_posix()
+            members.append((rel, _read_regular_inventory_file(path)))
+    return sorted(members)
 
 
 def cmd_backup(repo_root: Path, output_dir: Path, timestamp: str) -> Path:
@@ -74,6 +130,8 @@ def cmd_backup(repo_root: Path, output_dir: Path, timestamp: str) -> Path:
 
     The archive stores each file under its repo-relative POSIX path plus a
     ``manifest.json`` mapping every member to its SHA-256 digest and byte size.
+    Symbolic links are rejected before the archive is created; hard-linked
+    files are materialized as independent regular members.
     A repo with no tier-3 state produces a valid archive with an empty member
     map (an empty backup is a legitimate state, not an error).
 
@@ -86,44 +144,174 @@ def cmd_backup(repo_root: Path, output_dir: Path, timestamp: str) -> Path:
     Returns:
         The path to the written archive.
 
+    Raises:
+        BackupError: If an inventory path is a symlink, is not a regular file,
+            or changes while being opened.
+
     """
+    inventory_members = _inventory_members(repo_root)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"{_ARCHIVE_PREFIX}{timestamp}.tar.gz"
 
     members: dict[str, dict[str, object]] = {}
     with tarfile.open(archive_path, "w:gz") as tar:
-        for file_path in _iter_inventory_files(repo_root):
-            rel = file_path.relative_to(repo_root).as_posix()
-            data = file_path.read_bytes()
+        for rel, data in inventory_members:
             members[rel] = {"sha256": _sha256_bytes(data), "size": len(data)}
-            tar.add(file_path, arcname=rel)
+            info = tarfile.TarInfo(rel)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
 
         manifest = json.dumps({"members": members}, indent=2, sort_keys=True).encode("utf-8")
         info = tarfile.TarInfo(MANIFEST_NAME)
         info.size = len(manifest)
-        import io
-
         tar.addfile(info, io.BytesIO(manifest))
 
     return archive_path
 
 
-def _read_manifest(tar: tarfile.TarFile) -> dict[str, dict[str, object]]:
-    """Return the ``members`` mapping from an archive's manifest.
+def _canonical_member_name(name: str) -> str:
+    """Return one safe, canonical POSIX archive-member name.
 
     Raises:
-        RestoreError: The archive has no readable ``manifest.json``.
+        RestoreError: If ``name`` is empty, unsafe, or normalizes to the
+            current directory.
+
+    """
+    if not name or "\x00" in name or "\\" in name:
+        raise RestoreError(f"unsafe archive member path: {name!r}")
+
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise RestoreError(f"unsafe archive member path: {name!r}")
+
+    normalized = path.as_posix()
+    if normalized == ".":
+        raise RestoreError(f"unsafe archive member path: {name!r}")
+    return normalized
+
+
+def _inventory_prefix_for(normalized: str) -> str:
+    """Return the inventory prefix that strictly owns ``normalized``."""
+    path = PurePosixPath(normalized)
+    for prefix in INVENTORY:
+        inventory = PurePosixPath(prefix)
+        if path != inventory and path.is_relative_to(inventory):
+            return prefix
+    raise RestoreError(f"archive member is outside inventory: {normalized!r}")
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build a JSON object while rejecting duplicate keys."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RestoreError(f"duplicate manifest key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _read_manifest(
+    tar: tarfile.TarFile,
+    member: tarfile.TarInfo,
+) -> dict[str, dict[str, object]]:
+    """Read and validate a manifest from its validated regular member.
+
+    Raises:
+        RestoreError: If the manifest cannot be read, decoded, parsed, or
+            does not contain valid member metadata.
 
     """
     try:
-        member = tar.extractfile(MANIFEST_NAME)
-    except KeyError:
-        member = None
-    if member is None:
+        extracted = tar.extractfile(member)
+        if extracted is None:
+            raise RestoreError(f"archive has no readable {MANIFEST_NAME}")
+        document = json.loads(
+            extracted.read().decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RestoreError(f"invalid {MANIFEST_NAME}: {exc}") from exc
+
+    if not isinstance(document, dict) or set(document) != {"members"}:
+        raise RestoreError(f"{MANIFEST_NAME} must contain exactly a members object")
+    raw_members = document["members"]
+    if not isinstance(raw_members, dict):
+        raise RestoreError(f"{MANIFEST_NAME} members must be an object")
+
+    members: dict[str, dict[str, object]] = {}
+    for name, metadata in raw_members.items():
+        if not isinstance(metadata, dict) or set(metadata) != {"sha256", "size"}:
+            raise RestoreError(f"invalid manifest metadata for {name!r}")
+
+        digest = metadata["sha256"]
+        size = metadata["size"]
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise RestoreError(f"invalid SHA-256 for {name!r}")
+        try:
+            int(digest, 16)
+        except ValueError as exc:
+            raise RestoreError(f"invalid SHA-256 for {name!r}") from exc
+        if type(size) is not int or size < 0:
+            raise RestoreError(f"invalid size for {name!r}")
+
+        members[name] = metadata
+    return members
+
+
+def _validated_restore_members(
+    tar: tarfile.TarFile,
+) -> tuple[
+    dict[str, dict[str, object]],
+    dict[str, tuple[tarfile.TarInfo, str]],
+]:
+    """Validate and bind the manifest and authorized regular data members.
+
+    The complete tar index is checked before any state payload is read. Only
+    one regular ``manifest.json`` and regular files strictly beneath an
+    ``INVENTORY`` prefix are accepted, and the manifest must name exactly the
+    same canonical data members.
+
+    Raises:
+        RestoreError: If the archive contains unsafe, duplicate, unknown, or
+            non-regular members, or an invalid/non-matching manifest.
+
+    """
+    manifest_member: tarfile.TarInfo | None = None
+    archive_members: dict[str, tuple[tarfile.TarInfo, str]] = {}
+    seen: set[str] = set()
+
+    for member in tar.getmembers():
+        normalized = _canonical_member_name(member.name)
+        if normalized in seen:
+            raise RestoreError(f"duplicate archive member: {normalized!r}")
+        seen.add(normalized)
+
+        if not member.isreg():
+            raise RestoreError(f"archive member is not a regular file: {member.name!r}")
+
+        if normalized == MANIFEST_NAME:
+            manifest_member = member
+            continue
+
+        prefix = _inventory_prefix_for(normalized)
+        archive_members[normalized] = (member, prefix)
+
+    if manifest_member is None:
         raise RestoreError(f"archive is missing {MANIFEST_NAME}")
-    manifest = json.loads(member.read().decode("utf-8"))
-    result: dict[str, dict[str, object]] = manifest.get("members", {})
-    return result
+
+    raw_manifest = _read_manifest(tar, manifest_member)
+    manifest: dict[str, dict[str, object]] = {}
+    for raw_name, metadata in raw_manifest.items():
+        normalized = _canonical_member_name(raw_name)
+        _inventory_prefix_for(normalized)
+        if normalized in manifest:
+            raise RestoreError(f"duplicate normalized manifest member: {normalized!r}")
+        manifest[normalized] = metadata
+
+    if set(manifest) != set(archive_members):
+        raise RestoreError("archive members do not exactly match the manifest")
+    return manifest, archive_members
 
 
 def _is_within(root: Path, target: Path) -> bool:
@@ -136,82 +324,114 @@ def _is_within(root: Path, target: Path) -> bool:
 
 
 def cmd_verify(archive: Path) -> int:
-    """Read-only integrity drill: recompute every member digest against the manifest.
+    """Verify archive structure, authorization, sizes, and digests read-only.
 
-    Extracts the archive to a throwaway temp dir, compares each member's SHA-256
-    to the manifest, and prints per-member ``PASS``/``FAIL``. Never mutates the
+    Invalid archive members, malformed manifests, and size or digest
+    mismatches produce a ``FAIL`` result and return ``1``. Never mutates the
     repo or the archive.
 
     Returns:
         0 if every member matches its recorded digest, 1 otherwise.
 
     """
-    ok = True
-    with tarfile.open(archive, "r:gz") as tar:
-        manifest = _read_manifest(tar)
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_root = Path(tmp)
-            for name, meta in sorted(manifest.items()):
-                extracted = tar.extractfile(name)
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            manifest, archive_members = _validated_restore_members(tar)
+            ok = True
+            for name, metadata in sorted(manifest.items()):
+                member, _ = archive_members[name]
+                extracted = tar.extractfile(member)
                 data = extracted.read() if extracted is not None else None
-                if data is None:
-                    print(f"FAIL {name} (missing from archive)")
+                size = cast(int, metadata["size"])
+                digest = cast(str, metadata["sha256"])
+                if (
+                    data is None
+                    or member.size != size
+                    or len(data) != size
+                    or _sha256_bytes(data) != digest
+                ):
+                    print(f"FAIL {name} (content mismatch)")
                     ok = False
-                    continue
-                actual = _sha256_bytes(data)
-                if actual == meta.get("sha256"):
-                    print(f"PASS {name}")
                 else:
-                    print(f"FAIL {name} (digest mismatch)")
-                    ok = False
-            _ = tmp_root  # temp dir reserved for future streamed extraction
-    return 0 if ok else 1
+                    print(f"PASS {name}")
+            return 0 if ok else 1
+    except (RestoreError, OSError, tarfile.TarError) as exc:
+        print(f"FAIL archive ({exc})")
+        return 1
 
 
 def cmd_restore(repo_root: Path, archive: Path, *, force: bool = False) -> None:
-    """Restore ``archive`` into ``repo_root`` after verifying every manifest digest.
+    """Restore a fully validated archive into ``repo_root``.
 
     Fail-closed guarantees:
-    - Every member is verified against the manifest digest *before* anything is
-      written; a single mismatch aborts with nothing written.
-    - A member whose resolved path escapes ``repo_root`` (tar path traversal) is
-      rejected before any write.
+    - Invalid structure, unauthorized members, malformed manifests, and
+      destination escapes are rejected before state payloads are read.
+    - Every member is verified against its declared size and digest before
+      anything is written; a single mismatch aborts with nothing written.
     - If any INVENTORY target directory is already non-empty, the restore is
       refused unless ``force`` is set, so a restore never silently clobbers state.
 
     Raises:
-        RestoreError: On digest mismatch, path traversal, or a non-empty target
-            without ``force``. The repository is left untouched in every case.
+        RestoreError: On invalid structure, unauthorized members, malformed
+            metadata, size or digest mismatch, destination escape, or a
+            non-empty target without ``force``. The repository is left
+            untouched in every validation failure.
 
     """
-    with tarfile.open(archive, "r:gz") as tar:
-        manifest = _read_manifest(tar)
+    staged: dict[Path, bytes] = {}
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            manifest, archive_members = _validated_restore_members(tar)
 
-        # Refuse to overwrite populated tier-3 targets unless forced.
-        if not force:
-            for prefix in INVENTORY:
-                base = repo_root / prefix
-                if base.exists() and any(base.rglob("*")):
-                    raise RestoreError(f"target {base} is not empty; pass force=True to overwrite")
+            # Refuse to overwrite populated tier-3 targets unless forced.
+            if not force:
+                for prefix in INVENTORY:
+                    base = repo_root / prefix
+                    if base.exists() and any(base.rglob("*")):
+                        raise RestoreError(
+                            f"target {base} is not empty; pass force=True to overwrite"
+                        )
 
-        repo_resolved = repo_root.resolve()
-        staged: dict[Path, bytes] = {}
-        for name, meta in manifest.items():
-            dest = (repo_root / name).resolve()
-            if not _is_within(repo_resolved, dest):
-                raise RestoreError(f"refusing member outside repo root: {name!r}")
-            extracted = tar.extractfile(name)
-            data = extracted.read() if extracted is not None else None
-            if data is None:
-                raise RestoreError(f"member missing from archive: {name!r}")
-            if _sha256_bytes(data) != meta.get("sha256"):
-                raise RestoreError(f"digest mismatch for {name!r}; refusing restore")
-            staged[dest] = data
+            repo_resolved = repo_root.resolve()
+            destinations: dict[str, tuple[Path, tarfile.TarInfo]] = {}
+            seen_destinations: set[Path] = set()
+            for name in manifest:
+                member, prefix = archive_members[name]
+                inventory_root = repo_resolved / prefix
+                dest = (repo_resolved / name).resolve()
+                if not _is_within(repo_resolved, dest) or not _is_within(inventory_root, dest):
+                    raise RestoreError(f"refusing member outside inventory: {name!r}")
+                if dest in seen_destinations:
+                    raise RestoreError(f"multiple members resolve to destination: {name!r}")
+                seen_destinations.add(dest)
+                metadata = manifest[name]
+                if member.size != cast(int, metadata["size"]):
+                    raise RestoreError(f"size mismatch for {name!r}; refusing restore")
+                destinations[name] = (dest, member)
 
-        # All members verified — commit writes only now (fail closed above).
-        for dest, data in staged.items():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(data)
+            for name, metadata in manifest.items():
+                dest, member = destinations[name]
+                extracted = tar.extractfile(member)
+                data = extracted.read() if extracted is not None else None
+                if data is None:
+                    raise RestoreError(f"member is unreadable: {name!r}")
+                size = cast(int, metadata["size"])
+                digest = cast(str, metadata["sha256"])
+                if len(data) != size:
+                    raise RestoreError(f"size mismatch for {name!r}; refusing restore")
+                if _sha256_bytes(data) != digest:
+                    raise RestoreError(f"digest mismatch for {name!r}; refusing restore")
+                staged[dest] = data
+
+    except RestoreError:
+        raise
+    except (OSError, tarfile.TarError) as exc:
+        raise RestoreError(f"archive processing failed: {exc}") from exc
+
+    # All members verified — commit writes only now (fail closed above).
+    for dest, data in staged.items():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
 
 
 def _default_output_dir() -> Path:
@@ -275,7 +495,11 @@ def main(argv: list[str] | None = None) -> int:
         repo_root = args.repo_root or _default_repo_root()
         output_dir = args.output or _default_output_dir()
         timestamp = args.timestamp or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive = cmd_backup(repo_root, output_dir, timestamp)
+        try:
+            archive = cmd_backup(repo_root, output_dir, timestamp)
+        except BackupError as exc:
+            print(f"Backup refused: {exc}", file=sys.stderr)
+            return 2
         print(f"Wrote backup: {archive}")
         return 0
 

@@ -46,13 +46,18 @@ python3 scripts/backup_state.py restore ~/.hephaestus-backups/hephaestus-state-<
 
 Restore is fail-closed:
 
-- Every member's SHA-256 digest is verified against the archive manifest
-  **before** anything is written; a single mismatch aborts the restore with
-  nothing written (fail-closed on digest mismatch).
+- An archive may contain exactly one regular `manifest.json` plus regular files
+  whose normalized paths are strictly beneath `build/.issue_implementer/`.
+- Unknown, undeclared, missing, duplicate, absolute, path-traversal, directory,
+  link, and device members are rejected before any state payload is read or
+  written.
+- Malformed manifests and invalid size or SHA-256 metadata are rejected.
+- Every authorized member's declared size and SHA-256 digest are verified before
+  anything is written; any failure leaves the repository untouched.
+- Resolved restore destinations must remain beneath both the repository root and
+  the lexical inventory root, so pre-existing symlinks cannot redirect writes.
 - A non-empty target is refused unless you pass `--force`, so a restore never
   silently clobbers existing state.
-- Archive members whose path escapes the repo root are rejected (path-traversal
-  guard).
 
 Exit codes: `0` success, `1` verify failure, `2` usage error or a refused
 overwrite.
@@ -81,10 +86,12 @@ Run a read-only integrity drill against the latest archive at any time:
 python3 scripts/backup_state.py verify ~/.hephaestus-backups/hephaestus-state-<ts>.tar.gz
 ```
 
-`verify` extracts to a temp directory, recomputes every member digest, prints
-per-member `PASS`/`FAIL`, and returns `0`/`1` — it never mutates the repo. The
-same backup → destroy → restore round-trip and tamper checks run in CI via
-`tests/unit/scripts/test_backup_state.py`, so the restore procedure is
+`verify` applies the same archive-structure and inventory checks as restore,
+then recomputes every authorized member's declared size and digest, prints
+per-member `PASS`/`FAIL`, and returns `0` only for an intact archive. Structural,
+metadata, size, and digest failures return `1`; verification never mutates the
+repo. The same backup → destroy → restore round-trip and tamper checks run in CI
+via `tests/unit/scripts/test_backup_state.py`, so the restore procedure is
 continuously tested, not merely documented.
 
 ## What is never backed up
