@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from contextlib import AbstractContextManager, nullcontext
 from typing import cast
 
 import pytest
@@ -206,6 +207,38 @@ def test_register_host_adapter_rejects_incompatible_invoke_signature(
     ):
         agent_runtime.register_pi_isolation_adapter(
             cast(agent_runtime.PiIsolationAdapter, Adapter())
+        )
+
+    assert agent_runtime._PI_ISOLATION_ADAPTER is None
+
+
+def test_register_host_adapter_requires_process_tracker_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adapter must let the host track every provider process it starts."""
+
+    class LegacyAdapter:
+        def invoke(
+            self,
+            *,
+            policy: ExecutionPolicy,
+            command: list[str],
+            prompt: str,
+            cwd: object,
+            timeout: int,
+            model: str,
+            session_id: str | None,
+        ) -> agent_runtime.AgentRunResult:
+            raise AssertionError("registration must not invoke the adapter")
+
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+
+    with pytest.raises(
+        agent_runtime.PiIsolationUnavailableError,
+        match=r"does not implement invoke\(\) with the required keyword contract",
+    ):
+        agent_runtime.register_pi_isolation_adapter(
+            cast(agent_runtime.PiIsolationAdapter, LegacyAdapter())
         )
 
     assert agent_runtime._PI_ISOLATION_ADAPTER is None
@@ -525,6 +558,7 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     assert policy.filesystem is FilesystemMode.CHECKOUT_RO
     assert policy.network is NetworkMode.CONSTRAINED_WEB_RELAY
     assert received["session_id"] is None
+    assert received["process_tracker"] is None
 
 
 def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
@@ -577,6 +611,10 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
     resume_request = ExecutionRequest(
         AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
     )
+
+    def process_tracker(_pid: int) -> AbstractContextManager[None]:
+        return nullcontext()
+
     result = agent_runtime.resume_agent_session(
         "pi",
         binding.session_id,
@@ -584,11 +622,13 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
         cwd=tmp_path,
         timeout=30,
         model="model",
+        process_tracker=process_tracker,
         execution_request=resume_request,
         resume_binding=binding,
     )
 
     assert received["session_id"] == binding.session_id
+    assert received["process_tracker"] is process_tracker
     assert result.session_id == binding.session_id
 
 
@@ -609,11 +649,21 @@ def test_pi_session_start_dispatches_without_resume_binding(
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
 
+    def process_tracker(_pid: int) -> AbstractContextManager[None]:
+        return nullcontext()
+
     result = agent_runtime.run_agent_session(
-        "pi", "plan", cwd=tmp_path, timeout=30, model="model", execution_request=request
+        "pi",
+        "plan",
+        cwd=tmp_path,
+        timeout=30,
+        model="model",
+        process_tracker=process_tracker,
+        execution_request=request,
     )
 
     assert received["session_id"] is None
+    assert received["process_tracker"] is process_tracker
     assert result.session_id == "pi-session-new"
     assert result.session_binding is not None
     assert result.session_binding.session_id == "pi-session-new"

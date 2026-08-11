@@ -3488,7 +3488,7 @@ class TestRepoScoping:
                 "view",
                 "5",
                 "--json",
-                "number,title,state,labels,body",
+                "id,number,title,state,labels,body,url",
                 "--repo",
                 "org/repo-a",
             ]

@@ -305,7 +305,13 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         """Fetch issue JSON (``github_api.issues.gh_issue_json``)."""
         if self._repo_slug is not None:
             result = self._gh(
-                ["issue", "view", str(issue_number), "--json", "number,title,state,labels,body"]
+                [
+                    "issue",
+                    "view",
+                    str(issue_number),
+                    "--json",
+                    "id,number,title,state,labels,body,url",
+                ]
             )
             data = json.loads(result.stdout or "{}")
             if not isinstance(data, dict):
