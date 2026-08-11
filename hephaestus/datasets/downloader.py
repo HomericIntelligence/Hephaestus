@@ -172,7 +172,12 @@ def _extract_tar_safely(tf: tarfile.TarFile, destination: Path) -> None:
 
 
 class DatasetDownloader:
-    """Generic dataset downloader with retry logic and progress tracking."""
+    """Generic dataset downloader with retry logic and progress tracking.
+
+    Direct generic instances must declare their checksum policy explicitly via
+    ``checksum_manifest``. Dataset-specific subclasses inject their pinned
+    manifests so known files cannot silently bypass integrity verification.
+    """
 
     _checksums: Mapping[str, str] = {}
 
@@ -182,6 +187,8 @@ class DatasetDownloader:
         user_agent: str = "Mozilla/5.0 (compatible; Hephaestus/1.0)",
         max_retries: int = 3,
         retry_delays: list[float] | None = None,
+        *,
+        checksum_manifest: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize the dataset downloader.
 
@@ -190,12 +197,23 @@ class DatasetDownloader:
             user_agent: User-Agent header for HTTPS requests
             max_retries: Maximum number of retry attempts
             retry_delays: Delay times between retries (exponential backoff)
+            checksum_manifest: Mapping of filenames to expected MD5 digests.
+                Generic direct instances must pass this explicitly; use an
+                empty mapping only when no authoritative digest is available.
 
         """
+        if type(self) is DatasetDownloader and checksum_manifest is None:
+            raise ValueError(
+                "Generic DatasetDownloader requires an explicit checksum_manifest; "
+                "pass an authoritative filename-to-MD5 mapping, or {} only when "
+                "no checksum exists for the dataset."
+            )
+
         self.base_url = _validate_url_scheme(base_url.rstrip("/"))
         self.user_agent = user_agent
         self.max_retries = max_retries
         self.retry_delays = retry_delays or [1.0, 2.0, 4.0]
+        self._checksums = dict(self._checksums if checksum_manifest is None else checksum_manifest)
 
     def download_with_retry(
         self, filename: str, output_path: Path, max_retries: int | None = None
@@ -304,7 +322,10 @@ class MNISTDownloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with the MNIST dataset URL."""
-        super().__init__("https://yann.lecun.com/exdb/mnist")
+        super().__init__(
+            "https://yann.lecun.com/exdb/mnist",
+            checksum_manifest=_MNIST_MD5,
+        )
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
             ("train-labels-idx1-ubyte.gz", "train_labels.idx"),
@@ -364,7 +385,10 @@ class FashionMNISTDownloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with the Fashion-MNIST dataset URL."""
-        super().__init__("https://fashion-mnist.s3-website.eu-central-1.amazonaws.com")
+        super().__init__(
+            "https://fashion-mnist.s3-website.eu-central-1.amazonaws.com",
+            checksum_manifest=_FASHION_MNIST_MD5,
+        )
         self.files = [
             ("train-images-idx3-ubyte.gz", "train_images.idx"),
             ("train-labels-idx1-ubyte.gz", "train_labels.idx"),
@@ -418,7 +442,10 @@ class CIFAR10Downloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with CIFAR-10 dataset URL."""
-        super().__init__("https://www.cs.toronto.edu/~kriz")
+        super().__init__(
+            "https://www.cs.toronto.edu/~kriz",
+            checksum_manifest=_CIFAR10_MD5,
+        )
 
     def download_cifar10(self, output_dir: str = "datasets/cifar10") -> bool:
         """Download, extract, and convert CIFAR-10 to IDX format.
@@ -573,7 +600,10 @@ class CIFAR100Downloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with CIFAR-100 dataset URL."""
-        super().__init__("https://www.cs.toronto.edu/~kriz")
+        super().__init__(
+            "https://www.cs.toronto.edu/~kriz",
+            checksum_manifest=_CIFAR100_MD5,
+        )
 
     def download_cifar100(self, output_dir: str = "datasets/cifar100") -> bool:
         """Download and extract CIFAR-100 dataset.
@@ -623,7 +653,7 @@ class EMNISTDownloader(DatasetDownloader):
 
     def __init__(self) -> None:
         """Initialize with primary EMNIST URL."""
-        super().__init__(_EMNIST_URLS[0])
+        super().__init__(_EMNIST_URLS[0], checksum_manifest={})
         self._fallback_urls = _EMNIST_URLS[1:]
 
     def download_emnist(self, split: str = "balanced", output_dir: str = "datasets/emnist") -> bool:
