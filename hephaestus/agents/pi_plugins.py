@@ -1070,17 +1070,35 @@ class PiPreflightResult:
     remediation: str
     detail: str = ""
     inventory: InventoryResult | None = None
+    executable: Path | None = None
+    executable_fingerprint: tuple[int, int, int, int] | None = None
     athena_command_receipts: tuple[PiAthenaCommandReceipt, ...] = ()
 
     @classmethod
-    def ready_result(cls, inventory: InventoryResult | None = None) -> PiPreflightResult:
+    def ready_result(
+        cls,
+        inventory: InventoryResult | None = None,
+        *,
+        executable: Path | None = None,
+    ) -> PiPreflightResult:
         """Construct the successful package-preflight result."""
         catalog = load_pi_package_catalog()
+        fingerprint = None
+        if executable is not None:
+            metadata = executable.stat()
+            fingerprint = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+            )
         return cls(
             True,
             "ready",
             "",
             inventory=inventory,
+            executable=executable,
+            executable_fingerprint=fingerprint,
             athena_command_receipts=athena_command_receipts(catalog, inventory),
         )
 
@@ -1338,7 +1356,7 @@ def preflight_pi_environment(
             detail=capabilities.detail,
             inventory=inventory,
         )
-    return PiPreflightResult.ready_result(inventory)
+    return PiPreflightResult.ready_result(inventory, executable=identity.executable)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -373,7 +373,7 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
         seen.append(argv)
         receipt_dir = Path(argv[argv.index("--evidence-receipt-dir") + 1])
         receipt_dir.mkdir(parents=True, exist_ok=True)
-        (receipt_dir / "agent.json").write_text(
+        (receipt_dir / "02-agent.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -397,7 +397,7 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
             ),
             encoding="utf-8",
         )
-        (receipt_dir / "advise.json").write_text(
+        (receipt_dir / "01-advise.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -414,7 +414,7 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
             ),
             encoding="utf-8",
         )
-        (receipt_dir / "plan-review.json").write_text(
+        (receipt_dir / "03-plan-review.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -438,6 +438,28 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
             ),
             encoding="utf-8",
         )
+        (receipt_dir / "04-learn.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job_type": "athena",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "plan_review",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "learn",
+                    "ok": True,
+                    "interrupted": False,
+                    "result": {"kind": "learn"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        capture_nonce = receipt_dir.name.removeprefix("pipeline-receipts-")
+        for receipt_path in receipt_dir.glob("*.json"):
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["capture_nonce"] = capture_nonce
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
         return subprocess.CompletedProcess(
             argv,
             0,
@@ -472,6 +494,14 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
     assert entry["command"] == seen[0]
     assert entry["session_ids"] == ["pipeline-session"]
     assert entry["tool_scopes"] == ["find", "grep", "ls", "read"]
+    wrong_nonce_entry = dict(entry)
+    wrong_nonce_entry["capture_nonce"] = "0" * 32
+    with pytest.raises(ValueError, match="not bound"):
+        module._verify_capture_artifacts(run_dir, wrong_nonce_entry)
+    receipt_path = run_dir / entry["pipeline_receipts"][0]["artifact"]
+    receipt_path.write_text(receipt_path.read_text() + " ", encoding="utf-8")
+    with pytest.raises(ValueError, match="receipt digest mismatch"):
+        module._verify_capture_artifacts(run_dir, entry)
 
 
 def test_queue_capture_imports_host_owned_athena_result(
@@ -496,7 +526,7 @@ def test_queue_capture_imports_host_owned_athena_result(
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         receipt_dir = Path(argv[argv.index("--evidence-receipt-dir") + 1])
         receipt_dir.mkdir(parents=True, exist_ok=True)
-        (receipt_dir / "advise.json").write_text(
+        (receipt_dir / "01-advise.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -519,7 +549,7 @@ def test_queue_capture_imports_host_owned_athena_result(
             ),
             encoding="utf-8",
         )
-        (receipt_dir / "agent.json").write_text(
+        (receipt_dir / "02-agent.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -544,7 +574,7 @@ def test_queue_capture_imports_host_owned_athena_result(
             ),
             encoding="utf-8",
         )
-        (receipt_dir / "plan-review.json").write_text(
+        (receipt_dir / "03-plan-review.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
@@ -569,6 +599,28 @@ def test_queue_capture_imports_host_owned_athena_result(
             ),
             encoding="utf-8",
         )
+        (receipt_dir / "04-learn.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job_type": "athena",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "plan_review",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "learn",
+                    "ok": True,
+                    "interrupted": False,
+                    "result": {"kind": "learn"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        capture_nonce = receipt_dir.name.removeprefix("pipeline-receipts-")
+        for receipt_path in receipt_dir.glob("*.json"):
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["capture_nonce"] = capture_nonce
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -586,7 +638,7 @@ def test_queue_capture_imports_host_owned_athena_result(
         == 0
     )
     receipt = module._load_manifest(run_dir)["athena_host_receipts"]
-    assert [entry["kind"] for entry in receipt] == ["advise"]
+    assert [entry["kind"] for entry in receipt] == ["advise", "learn"]
 
 
 def test_pi_capture_rejects_commands_outside_normal_pipeline(tmp_path: Path) -> None:
@@ -812,6 +864,102 @@ def test_pipeline_receipts_reject_cross_repo_provenance() -> None:
 
     with pytest.raises(ValueError, match="not bound"):
         module._validate_pipeline_receipts([receipt], stage="discovery-plan", provider="pi")
+
+
+def test_pipeline_receipts_reject_wrong_implementation_operations() -> None:
+    """Broad job categories cannot substitute for the required lifecycle actions."""
+    module = _load_module()
+    head = "a" * 40
+
+    def receipt(index: int, job_type: str, stage: str, **extra: object) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "receipt_sha256": f"{index:064x}",
+            "job_type": job_type,
+            "claim_key": "Hephaestus#2519",
+            "claim_stage": stage,
+            "repo": "Hephaestus",
+            "issue": 2519,
+            "descr": job_type,
+            "ok": True,
+            "interrupted": False,
+            **extra,
+        }
+
+    receipts = [
+        receipt(
+            1,
+            "agent",
+            "implementation",
+            provider="pi",
+            session_id="impl",
+            tool_scopes=["read"],
+            execution_request={
+                "role": "implementer",
+                "operation": "implement",
+                "lifecycle": "start_new",
+            },
+        ),
+        receipt(
+            2,
+            "build_test",
+            "implementation",
+            argv_sha256=module.PRE_PR_TEST_ARGV_SHA256,
+            expected_head_sha=head,
+            succeeded=True,
+        ),
+        receipt(3, "git", "implementation", operation="rebase", head_sha=head, pushed=True),
+        receipt(
+            4,
+            "agent",
+            "pr_review",
+            provider="pi",
+            session_id="review",
+            tool_scopes=["read"],
+            execution_request={
+                "role": "pr_reviewer",
+                "operation": "pr_review",
+                "lifecycle": "one_shot",
+            },
+            observed_skill_invocations=["athena:pr-review"],
+        ),
+        receipt(
+            5,
+            "github",
+            "pr_review",
+            operation="ReconcilePrReviewRequest",
+            request_head_sha=head,
+        ),
+        receipt(
+            6,
+            "github",
+            "merge_wait",
+            operation="RunMergeWaitCycleRequest",
+            request_head_sha=head,
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="implementation lifecycle operations"):
+        module._validate_pipeline_receipts(
+            receipts, stage="implementation-review-handoff", provider="pi"
+        )
+
+    receipts[2]["operation"] = "commit_push"
+    receipts[4].update(
+        pr_number=2737,
+        request_issue=2519,
+        result_type="PrReviewReconciled",
+        result_action="apply",
+    )
+    receipts[5].update(
+        pr_number=2737,
+        request_issue=2519,
+        result_type="MergeWaitCycleCompleted",
+        result_outcome="waiting",
+    )
+    module._validate_pipeline_receipts(
+        receipts, stage="implementation-review-handoff", provider="pi"
+    )
 
 
 def test_evidence_status_requires_full_host_receipt_verification(

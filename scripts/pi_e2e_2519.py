@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from hephaestus.agents.runtime import pi_private_redaction_tokens, redact_pi_pri
 from hephaestus.automation.athena_contract import load_athena_contract_receipt
 from hephaestus.automation.mnemosyne_binding import default_mnemosyne_root
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
+from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline_github import PipelineGitHub
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import slugify
@@ -64,6 +66,10 @@ FOLLOW_UP_PARENT_RE = re.compile(rf"^Parent: #{ISSUE_NUMBER}[ \t]*$", re.MULTILI
 DEFAULT_CAPTURE_TIMEOUT_SECONDS = 600
 DEFAULT_INVENTORY_TIMEOUT_SECONDS = 30
 PI_PROVIDER_NAME = "pi"
+EXPECTED_REPO_NAME = "Hephaestus"
+PRE_PR_TEST_ARGV_SHA256 = hashlib.sha256(
+    json.dumps(PRE_PR_TEST_ARGV, separators=(",", ":")).encode()
+).hexdigest()
 
 
 def _repo_root() -> Path:
@@ -423,6 +429,9 @@ def _proxy_invocations(events: Iterable[dict[str, Any]]) -> tuple[dict[str, Any]
             "tool": tool,
             "argv": list(argv),
             "real_binary": real_binary if isinstance(real_binary, str) else "",
+            "capture_nonce": (
+                event.get("capture_nonce") if isinstance(event.get("capture_nonce"), str) else ""
+            ),
             "cwd": event.get("cwd") if isinstance(event.get("cwd"), str) else "",
             "timestamp": event.get("timestamp") if isinstance(event.get("timestamp"), str) else "",
         }
@@ -540,7 +549,9 @@ def _with_evidence_receipt_dir(command_argv: Sequence[str], receipt_dir: Path) -
     return [*command_argv, "--evidence-receipt-dir", str(receipt_dir)]
 
 
-def _load_pipeline_receipts(receipt_dir: Path) -> list[dict[str, Any]]:
+def _load_pipeline_receipts(
+    receipt_dir: Path, *, run_dir: Path | None = None
+) -> list[dict[str, Any]]:
     """Load bounded regular JSON receipts produced by the queue workers."""
     receipts: list[dict[str, Any]] = []
     for path in sorted(receipt_dir.glob("*.json")):
@@ -555,12 +566,18 @@ def _load_pipeline_receipts(receipt_dir: Path) -> list[dict[str, Any]]:
             raise ValueError("pipeline evidence receipt has an unsupported schema")
         typed_payload = cast(dict[str, Any], payload)
         typed_payload["receipt_sha256"] = _sha256_bytes(content)
+        if run_dir is not None:
+            typed_payload["artifact"] = str(path.relative_to(run_dir))
         receipts.append(typed_payload)
     return receipts
 
 
 def _validate_pipeline_receipts(
-    receipts: Sequence[dict[str, Any]], *, stage: str, provider: str
+    receipts: Sequence[dict[str, Any]],
+    *,
+    stage: str,
+    provider: str,
+    capture_nonce: str = "",
 ) -> None:
     """Bind queue receipts to the requested #2519 stage and provider."""
     allowed_stages = {
@@ -583,11 +600,13 @@ def _validate_pipeline_receipts(
             not isinstance(job_type, str)
             or not isinstance(claim_key, str)
             or not claim_key.endswith(f"#{ISSUE_NUMBER}")
-            or receipt.get("repo") != claim_key.rsplit("#", maxsplit=1)[0]
+            or claim_key != f"{EXPECTED_REPO_NAME}#{ISSUE_NUMBER}"
+            or receipt.get("repo") != EXPECTED_REPO_NAME
             or claim_stage not in allowed_stages
             or receipt.get("issue") != ISSUE_NUMBER
             or receipt.get("ok") is not True
             or receipt.get("interrupted") is not False
+            or (capture_nonce and receipt.get("capture_nonce") != capture_nonce)
         ):
             raise ValueError("pipeline evidence receipt is not bound to the requested run")
         receipt_digest = receipt.get("receipt_sha256")
@@ -616,6 +635,159 @@ def _validate_pipeline_receipts(
         raise ValueError(
             "pipeline stage receipts are missing: " + ", ".join(sorted(missing_stages))
         )
+    if stage == "discovery-plan":
+        athena_kinds = {
+            result.get("kind")
+            for receipt in receipts
+            if receipt.get("job_type") == "athena"
+            and isinstance((result := receipt.get("result")), dict)
+        }
+        agent_operations = {
+            (receipt.get("claim_stage"), request.get("operation"))
+            for receipt in receipts
+            if receipt.get("job_type") == "agent"
+            and isinstance((request := receipt.get("execution_request")), dict)
+        }
+        if not {"advise", "learn"}.issubset(athena_kinds) or not {
+            ("planning", "plan"),
+            ("plan_review", "plan_review"),
+        }.issubset(agent_operations):
+            raise ValueError("pipeline discovery lifecycle operations are incomplete")
+        ordered = [
+            (
+                receipt.get("claim_stage"),
+                receipt.get("job_type"),
+                (
+                    receipt.get("execution_request", {}).get("operation")
+                    if isinstance(receipt.get("execution_request"), dict)
+                    else receipt.get("result", {}).get("kind")
+                    if isinstance(receipt.get("result"), dict)
+                    else None
+                ),
+            )
+            for receipt in receipts
+        ]
+        required_order = [
+            ("planning", "athena", "advise"),
+            ("planning", "agent", "plan"),
+            ("plan_review", "agent", "plan_review"),
+            ("plan_review", "athena", "learn"),
+        ]
+        positions = [
+            next((index for index, value in enumerate(ordered) if value == target), -1)
+            for target in required_order
+        ]
+        if positions != sorted(positions) or -1 in positions:
+            raise ValueError("pipeline discovery lifecycle receipts are out of order")
+        return
+    build_receipts = [receipt for receipt in receipts if receipt.get("job_type") == "build_test"]
+    commit_receipts = [
+        receipt
+        for receipt in receipts
+        if receipt.get("job_type") == "git" and receipt.get("operation") == "commit_push"
+    ]
+    review_receipts = [
+        receipt
+        for receipt in receipts
+        if receipt.get("job_type") == "github"
+        and receipt.get("operation") == "ReconcilePrReviewRequest"
+    ]
+    merge_receipts = [
+        receipt
+        for receipt in receipts
+        if receipt.get("job_type") == "github"
+        and receipt.get("operation") == "RunMergeWaitCycleRequest"
+    ]
+    implementation_agents = [
+        receipt
+        for receipt in receipts
+        if receipt.get("job_type") == "agent"
+        and receipt.get("claim_stage") == "implementation"
+        and isinstance(receipt.get("execution_request"), dict)
+        and receipt["execution_request"].get("operation") in {"implement", "address_review"}
+    ]
+    review_agents = [
+        receipt
+        for receipt in receipts
+        if receipt.get("job_type") == "agent"
+        and receipt.get("claim_stage") == "pr_review"
+        and isinstance(receipt.get("execution_request"), dict)
+        and receipt["execution_request"].get("operation") == "pr_review"
+        and "athena:pr-review" in receipt.get("observed_skill_invocations", [])
+    ]
+    heads = {
+        receipt.get("head_sha")
+        for receipt in commit_receipts
+        if receipt.get("pushed") is True
+        and isinstance(receipt.get("head_sha"), str)
+        and FULL_COMMIT_SHA_RE.fullmatch(receipt["head_sha"])
+    }
+    request_heads = {
+        receipt.get("request_head_sha") for receipt in (*review_receipts, *merge_receipts)
+    }
+    pr_numbers = {receipt.get("pr_number") for receipt in (*review_receipts, *merge_receipts)}
+    if (
+        not any(
+            receipt.get("argv_sha256") == PRE_PR_TEST_ARGV_SHA256
+            and receipt.get("succeeded") is True
+            and receipt.get("expected_head_sha") in heads
+            for receipt in build_receipts
+        )
+        or len(heads) != 1
+        or request_heads != heads
+        or len(pr_numbers) != 1
+        or not isinstance(next(iter(pr_numbers), None), int)
+        or any(receipt.get("request_issue") != ISSUE_NUMBER for receipt in review_receipts)
+        or any(receipt.get("request_issue") != ISSUE_NUMBER for receipt in merge_receipts)
+        or not implementation_agents
+        or not review_agents
+        or not review_receipts
+        or not merge_receipts
+        or any(
+            receipt.get("result_type") != "PrReviewReconciled"
+            or receipt.get("result_action") == "audit_failure"
+            for receipt in review_receipts
+        )
+        or any(
+            receipt.get("result_type") != "MergeWaitCycleCompleted"
+            or not isinstance(receipt.get("result_outcome"), str)
+            or not receipt.get("result_outcome")
+            for receipt in merge_receipts
+        )
+    ):
+        raise ValueError("pipeline implementation lifecycle operations are incomplete")
+    ordered_operations: list[tuple[object, object, object]] = [
+        (
+            receipt.get("claim_stage"),
+            receipt.get("job_type"),
+            receipt.get("operation")
+            or (
+                receipt.get("execution_request", {}).get("operation")
+                if isinstance(receipt.get("execution_request"), dict)
+                else None
+            ),
+        )
+        for receipt in receipts
+    ]
+    implementation_operation = next(
+        value
+        for value in ordered_operations
+        if value[:2] == ("implementation", "agent") and value[2] in {"implement", "address_review"}
+    )
+    implementation_order: list[tuple[object, object, object]] = [
+        implementation_operation,
+        ("implementation", "build_test", None),
+        ("implementation", "git", "commit_push"),
+        ("pr_review", "agent", "pr_review"),
+        ("pr_review", "github", "ReconcilePrReviewRequest"),
+        ("merge_wait", "github", "RunMergeWaitCycleRequest"),
+    ]
+    positions = [
+        next((index for index, value in enumerate(ordered_operations) if value == target), -1)
+        for target in implementation_order
+    ]
+    if positions != sorted(positions) or -1 in positions:
+        raise ValueError("pipeline implementation lifecycle receipts are out of order")
 
 
 def _store_generated_athena_receipts(
@@ -677,6 +849,7 @@ def _write_proxy_wrapper(path: Path, real_env_var: str) -> None:
             if log_path:
                 event = {{
                     "event": "proxy-invocation",
+                    "capture_nonce": os.environ.get("HEPH_PI_E2E_CAPTURE_NONCE", ""),
                     "tool": tool,
                     "real_binary": real,
                     "argv": sys.argv[1:],
@@ -702,10 +875,11 @@ def _prepare_provider_proxy_dir(run_dir: Path) -> Path:
     return proxy_dir
 
 
-def _provider_proxy_env(proxy_dir: Path, log_path: Path) -> dict[str, str]:
+def _provider_proxy_env(proxy_dir: Path, log_path: Path, capture_nonce: str) -> dict[str, str]:
     env = os.environ.copy()
     env["PATH"] = f"{proxy_dir}{os.pathsep}{env.get('PATH', os.defpath)}"
     env["HEPH_PI_E2E_PROXY_LOG"] = str(log_path)
+    env["HEPH_PI_E2E_CAPTURE_NONCE"] = capture_nonce
     env["HEPH_PI_E2E_REAL_PI"] = shutil.which("pi") or ""
     env["HEPH_PI_E2E_REAL_CODEX"] = shutil.which("codex") or ""
     return env
@@ -814,6 +988,56 @@ def _record_snapshot(run_dir: Path, label: str) -> int:
     return 0
 
 
+def _fixture_commit_evidence(repo_root: Path, head_sha: str) -> dict[str, Any]:
+    """Verify and summarize the deterministic fixture's signed implementation commit."""
+    if FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:
+        raise ValueError("fixture commit head is invalid")
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=DEFAULT_INVENTORY_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            raise ValueError("fixture commit cannot be read from the repository")
+        return result.stdout
+
+    changed_paths = tuple(
+        line
+        for line in git("diff-tree", "--no-commit-id", "--name-only", "-r", head_sha).splitlines()
+        if line
+    )
+    required_paths = {
+        "hephaestus/utils/helpers.py",
+        "tests/unit/utils/test_general_utils.py",
+    }
+    if not required_paths.issubset(changed_paths):
+        raise ValueError("fixture commit does not change the required utility and unit test")
+    diff = git("show", "--format=", "--binary", head_sha, "--", *sorted(required_paths))
+    if (
+        "human_readable_size" not in diff
+        or "size_bytes < 0" not in diff
+        or "pytest.raises(ValueError" not in diff
+    ):
+        raise ValueError("fixture commit does not implement the negative-size rejection")
+    metadata = git("log", "-1", "--format=%G?%n%B", head_sha)
+    signature_state, _, message = metadata.partition("\n")
+    if signature_state not in {"G", "U"} or "Signed-off-by:" not in message:
+        raise ValueError("fixture commit is not signed and DCO-compliant")
+    return {
+        "head_sha": head_sha,
+        "changed_paths": list(changed_paths),
+        "diff_sha256": _sha256_text(diff),
+        "pre_pr_test_argv_sha256": PRE_PR_TEST_ARGV_SHA256,
+        "signed": True,
+        "dco": True,
+    }
+
+
 def _record_command(
     run_dir: Path,
     *,
@@ -832,11 +1056,13 @@ def _record_command(
         run_dir / COMMANDS_DIR_NAME / f"{command_index:02d}-{slugify(stage) or 'stage'}"
     )
     proxy_log = record_dir / PROXY_LOG_NAME
-    env = _provider_proxy_env(proxy_dir, proxy_log)
+    write_secure(proxy_log, "")
+    capture_nonce = secrets.token_hex(16)
+    env = _provider_proxy_env(proxy_dir, proxy_log, capture_nonce)
     stdout_path = record_dir / "stdout.txt"
     stderr_path = record_dir / "stderr.txt"
     analysis_path = record_dir / "analysis.json"
-    pipeline_receipt_dir = _ensure_owner_only_dir(record_dir / "pipeline-receipts")
+    pipeline_receipt_dir = _ensure_owner_only_dir(record_dir / f"pipeline-receipts-{capture_nonce}")
     executed_argv = list(command_argv)
     executed_argv = _with_evidence_receipt_dir(executed_argv, pipeline_receipt_dir)
     if prompt_file is not None:
@@ -871,10 +1097,29 @@ def _record_command(
         timed_out = True
     write_secure(stdout_path, stdout)
     write_secure(stderr_path, stderr)
-    pipeline_receipts = _load_pipeline_receipts(pipeline_receipt_dir)
+    pipeline_receipts = _load_pipeline_receipts(pipeline_receipt_dir, run_dir=run_dir)
     if returncode == 0:
-        _validate_pipeline_receipts(pipeline_receipts, stage=stage, provider=provider)
+        _validate_pipeline_receipts(
+            pipeline_receipts,
+            stage=stage,
+            provider=provider,
+            capture_nonce=capture_nonce,
+        )
     analysis = _capture_analysis(stdout, stderr, proxy_log, pipeline_receipts)
+    fixture_commit = None
+    if returncode == 0 and stage == "implementation-review-handoff":
+        commit_heads = {
+            receipt.get("head_sha")
+            for receipt in pipeline_receipts
+            if receipt.get("job_type") == "git"
+            and receipt.get("operation") == "commit_push"
+            and receipt.get("pushed") is True
+        }
+        if len(commit_heads) != 1:
+            raise ValueError("implementation capture lacks one immutable published head")
+        fixture_commit = _fixture_commit_evidence(
+            Path(manifest["repo_root"]), cast(str, commit_heads.pop())
+        )
     analysis.update(
         {
             "provider": provider,
@@ -926,6 +1171,19 @@ def _record_command(
         "agent_receipts": analysis["agent_receipts"],
         "pipeline_job_types": analysis["pipeline_job_types"],
         "pipeline_claim_stages": analysis["pipeline_claim_stages"],
+        "capture_nonce": capture_nonce,
+        "fixture_commit": fixture_commit,
+        "pipeline_receipts": [
+            {
+                "artifact": receipt["artifact"],
+                "sha256": receipt["receipt_sha256"],
+            }
+            for receipt in pipeline_receipts
+        ],
+        "proxy_log": {
+            "artifact": str(proxy_log.relative_to(run_dir)),
+            "sha256": _sha256_bytes(proxy_log.read_bytes()),
+        },
         "started_at": start,
         "finished_at": _utc_now(),
     }
@@ -1438,7 +1696,7 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "- `fixture` validates the deterministic fixture contract.",
             "- `workflow` requires inventory, command, and repository snapshot evidence.",
             "- `capture` requires private session identifiers and observed tool scopes.",
-            "- `comparison` requires Pi and a distinct control provider.",
+            "- `comparison` verifies Pi and a distinct control provider when recorded.",
             "- `mnemosyne` revalidates typed host-owned advise and learn receipts.",
             "- `publication` requires deterministic manifest-to-document rendering.",
             (
@@ -1491,6 +1749,27 @@ def _verify_fixture(manifest: dict[str, Any]) -> None:
         raise ValueError("run manifest fixture summary is invalid")
 
 
+def _verify_fixture_commit(manifest: dict[str, Any]) -> None:
+    """Rebind the implementation capture to the signed fixture commit object."""
+    entries = [
+        entry
+        for entry in manifest.get("commands", [])
+        if isinstance(entry, dict)
+        and entry.get("kind") == "capture"
+        and entry.get("provider") == PI_PROVIDER_NAME
+        and entry.get("stage") == "implementation-review-handoff"
+        and entry.get("status") == "success"
+    ]
+    if len(entries) != 1 or not isinstance(entries[0].get("fixture_commit"), dict):
+        raise ValueError("fixture commit evidence is missing")
+    recorded = cast(dict[str, Any], entries[0]["fixture_commit"])
+    observed = _fixture_commit_evidence(
+        Path(manifest["repo_root"]), cast(str, recorded.get("head_sha"))
+    )
+    if observed != recorded:
+        raise ValueError("fixture commit evidence no longer matches its immutable object")
+
+
 def _verify_workflow(manifest: dict[str, Any]) -> None:
     if not manifest.get("commands"):
         raise ValueError("no commands were captured")
@@ -1500,28 +1779,96 @@ def _verify_workflow(manifest: dict[str, Any]) -> None:
         raise ValueError("no Pi inventory was recorded")
 
 
+def _contained_capture_artifact(run_dir: Path, relative: object, name: str) -> Path:
+    """Resolve one bounded regular capture artifact beneath its private run."""
+    if not isinstance(relative, str):
+        raise ValueError(f"capture {name} artifact is missing")
+    path = run_dir / relative
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"capture {name} artifact is unavailable") from exc
+    if (
+        path.is_symlink()
+        or not resolved.is_relative_to(run_dir.resolve())
+        or not resolved.is_file()
+    ):
+        raise ValueError(f"capture {name} artifact escapes the private run")
+    if resolved.stat().st_size > 64 * 1024 * 1024:
+        raise ValueError(f"capture {name} artifact is unbounded")
+    return resolved
+
+
 def _verify_capture_artifacts(run_dir: Path, entry: dict[str, Any]) -> None:
-    """Re-hash the private stdout and stderr bound to one capture entry."""
+    """Re-hash every canonical source bound to one capture entry."""
+    capture_nonce = entry.get("capture_nonce")
+    if not isinstance(capture_nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", capture_nonce):
+        raise ValueError("capture nonce is missing or malformed")
     artifacts = entry.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ValueError("capture artifacts are missing")
     for name, digest_key in (("stdout", "stdout_digest"), ("stderr", "stderr_digest")):
-        relative = artifacts.get(name)
-        if not isinstance(relative, str):
-            raise ValueError(f"capture {name} artifact is missing")
-        path = run_dir / relative
-        try:
-            resolved = path.resolve(strict=True)
-        except OSError as exc:
-            raise ValueError(f"capture {name} artifact is unavailable") from exc
-        if (
-            path.is_symlink()
-            or not resolved.is_relative_to(run_dir.resolve())
-            or not resolved.is_file()
-        ):
-            raise ValueError(f"capture {name} artifact escapes the private run")
+        resolved = _contained_capture_artifact(run_dir, artifacts.get(name), name)
         if _sha256_bytes(resolved.read_bytes()) != entry.get(digest_key):
             raise ValueError(f"capture {name} artifact digest mismatch")
+
+    receipt_descriptors = entry.get("pipeline_receipts")
+    if not isinstance(receipt_descriptors, list) or not receipt_descriptors:
+        raise ValueError("capture pipeline receipt artifacts are missing")
+    receipts: list[dict[str, Any]] = []
+    for descriptor in receipt_descriptors:
+        if not isinstance(descriptor, dict):
+            raise ValueError("capture pipeline receipt descriptor is malformed")
+        receipt_path = _contained_capture_artifact(
+            run_dir, descriptor.get("artifact"), "pipeline receipt"
+        )
+        content = receipt_path.read_bytes()
+        if _sha256_bytes(content) != descriptor.get("sha256"):
+            raise ValueError("capture pipeline receipt digest mismatch")
+        try:
+            receipt = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("capture pipeline receipt is malformed") from exc
+        if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+            raise ValueError("capture pipeline receipt has an unsupported schema")
+        receipt["receipt_sha256"] = descriptor["sha256"]
+        receipt["artifact"] = descriptor["artifact"]
+        receipts.append(cast(dict[str, Any], receipt))
+
+    proxy_descriptor = entry.get("proxy_log")
+    if not isinstance(proxy_descriptor, dict):
+        raise ValueError("capture provider proxy descriptor is missing")
+    proxy_path = _contained_capture_artifact(
+        run_dir, proxy_descriptor.get("artifact"), "provider proxy"
+    )
+    if _sha256_bytes(proxy_path.read_bytes()) != proxy_descriptor.get("sha256"):
+        raise ValueError("capture provider proxy digest mismatch")
+    stdout_path = _contained_capture_artifact(run_dir, artifacts.get("stdout"), "stdout")
+    stderr_path = _contained_capture_artifact(run_dir, artifacts.get("stderr"), "stderr")
+    recomputed = _capture_analysis(
+        stdout_path.read_text(encoding="utf-8"),
+        stderr_path.read_text(encoding="utf-8"),
+        proxy_path,
+        receipts,
+    )
+    for field in (
+        "session_ids",
+        "tool_scopes",
+        "provider_invocations",
+        "agent_receipts",
+        "pi_agent_receipts",
+        "pipeline_job_types",
+        "pipeline_claim_stages",
+    ):
+        source_field = "proxy_invocations" if field == "provider_invocations" else field
+        if entry.get(field) != recomputed.get(source_field):
+            raise ValueError(f"capture {field} summary does not match its source artifacts")
+    _validate_pipeline_receipts(
+        receipts,
+        stage=cast(str, entry.get("stage")),
+        provider=cast(str, entry.get("provider")),
+        capture_nonce=capture_nonce,
+    )
 
 
 def _verify_capture(manifest: dict[str, Any], run_dir: Path | None = None) -> None:
@@ -1644,9 +1991,11 @@ def _verify_mnemosyne(manifest: dict[str, Any]) -> None:
 def _verify_completion(manifest: dict[str, Any], run_dir: Path | None = None) -> None:
     """Require the complete successful Pi workflow and its control evidence."""
     _verify_fixture(manifest)
+    _verify_fixture_commit(manifest)
     _verify_workflow(manifest)
     _verify_capture(manifest, run_dir)
-    _verify_comparison(manifest, run_dir)
+    if manifest.get("comparisons"):
+        _verify_comparison(manifest, run_dir)
     _verify_failure_probes(manifest)
     _verify_mnemosyne(manifest)
     pi = cast(dict[str, Any], manifest.get("pi", {}))
