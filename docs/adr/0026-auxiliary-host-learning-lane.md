@@ -51,3 +51,9 @@ capacity, completion, shutdown, and failure accounting. A crash-left claimed
 intent fails as `outcome_unknown` instead of risking a duplicate delivery.
 Operators must observe the rollback gate until all new journal records are
 terminal.
+
+This decision provides scheduling, recovery, and cleanup infrastructure. It
+does not prepare Mnemosyne content or the host-owned delivery request. Issue
+#2754 owns that production capability. Until it is complete, a request without
+a prepared delivery fails as ancillary post-processing. The primary pipeline
+result does not change, and cleanup still waits for that terminal failure.

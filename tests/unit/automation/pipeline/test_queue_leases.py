@@ -174,6 +174,49 @@ class TestStageQueueLeases:
         assert popped_item is item
         assert destination.occupancy == 0
 
+    def test_complementary_leases_exchange_full_source_queues_atomically(self) -> None:
+        """Two active leases can swap full source queues without a spill slot."""
+        left = StageQueue(capacity=1)
+        right = StageQueue(capacity=1)
+        left_item = _item("left")
+        right_item = _item("right")
+        left.push(left_item)
+        right.push(right_item)
+        left_lease = left.claim()
+        right_lease = right.claim()
+        assert left_lease is not None
+        assert right_lease is not None
+
+        assert left_lease.exchange(right, right_lease, left)
+
+        assert left.snapshot() == [right_item]
+        assert right.snapshot() == [left_item]
+        assert left.occupancy == right.occupancy == 1
+        assert not left_lease.handoff(right)
+        assert not right_lease.handoff(left)
+
+    def test_exchange_rejects_noncomplementary_destinations_without_mutation(self) -> None:
+        """Exchange fails closed unless each destination is the peer source."""
+        left = StageQueue(capacity=1)
+        right = StageQueue(capacity=1)
+        other = StageQueue(capacity=1)
+        left_item = _item("left")
+        right_item = _item("right")
+        left.push(left_item)
+        right.push(right_item)
+        left_lease = left.claim()
+        right_lease = right.claim()
+        assert left_lease is not None
+        assert right_lease is not None
+
+        assert not left_lease.exchange(other, right_lease, left)
+
+        assert left.occupancy == right.occupancy == 1
+        left_lease.restore()
+        right_lease.restore()
+        assert left.snapshot() == [left_item]
+        assert right.snapshot() == [right_item]
+
     def test_empty_claim_is_explicit(self) -> None:
         """An empty source queue reports no lease instead of raising or inventing work."""
         source = StageQueue(capacity=1)

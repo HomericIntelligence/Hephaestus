@@ -183,6 +183,7 @@ class TestCleanup:
             )
         )
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        assert item.result is not None
         item.post_processing = PostProcessingRecord(
             result=item.result,
             resume_stage=StageName.FINISHED,
@@ -191,10 +192,11 @@ class TestCleanup:
         )
         result = stage.step(item, ctx)
 
-        assert result == Continue(next_state="DONE")
+        assert result == StageOutcome(Disposition.EJECT, "learning_cleanup_pending")
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
-        assert item.payload["_learning_cleanup_succeeded"] is False
-        assert item.payload["_learning_cleanup_error"] == "learning is not terminal"
+        assert "_learning_cleanup_succeeded" not in item.payload
+        assert "_learning_cleanup_error" not in item.payload
+        assert item.state == "CLEANUP"
 
     def test_fresh_review_completion_retains_only_receipt_backed_recovery_checkouts(
         self,

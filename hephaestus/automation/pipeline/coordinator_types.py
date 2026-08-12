@@ -2,14 +2,13 @@
 
 ## Semantics
 
-The coordinator runs on the process main thread and owns all seven stage
-queues, the timer heap, the in-flight registry, all routing, and (through the
+The coordinator main thread owns all eight queues, the timer heap, in-flight
+jobs, routing, and (through the
 :class:`~hephaestus.automation.pipeline_github.PipelineGitHub` accessor) every
-GitHub API mutation. A single worker pool executes agent, build/test, and
-git/network jobs; bounded main and auxiliary completion queues are the only
-cross-thread data channels. A separate event latch wakes the idle loop for accepted completions and
-signals, so neither a worker callback nor a signal handler can block on a
-full queue.
+GitHub API mutation. The main pool runs agent, test, Git, and network jobs. The
+auxiliary pool runs learning and terminal cleanup. Their bounded completion
+queues are the only cross-thread channels. An event latch wakes the loop for
+accepted completions and signals; callbacks and signal handlers never block on full queues.
 
 Per tick (epic #1809 "Coordinator event loop"):
 
@@ -18,8 +17,9 @@ Per tick (epic #1809 "Coordinator event loop"):
 2. wake expired timers (heapq) back into their stage queues;
 3. drain ALL ready completions — interrupted results park the item
    RESUMABLE and never advance (``on_job_done`` is never called for them);
-4. drain queues DOWNSTREAM-FIRST (finished → merge_wait → ... → repo; finish
-   work before admitting new) with admission control;
+4. drain queues DOWNSTREAM-FIRST (finished → learning → merge_wait → pr_review
+   → implementation → plan_review → planning → repo; finish work before
+   admitting new) with admission control;
 5. fully drained: re-seed discovery up to ``--loops``; explicit
    ``--issues``/``--prs`` selections drain once; otherwise block or converge.
 
@@ -224,8 +224,8 @@ _DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
 _SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 
 #: Downstream-first drain order: finish work before admitting new (epic
-#: #1809 "drain queues downstream-first (merge_wait -> ... -> repo)"; the
-#: finished sink drains first of all so results are recorded promptly).
+#: #1809 "drain queues downstream-first"; finished and auxiliary learning
+#: drain before the main pipeline so terminal work is recorded promptly).
 _DRAIN_ORDER: tuple[StageName, ...] = (
     StageName.FINISHED,
     StageName.LEARNING,

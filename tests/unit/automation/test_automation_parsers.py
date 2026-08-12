@@ -908,6 +908,24 @@ def test_learning_capacity_flags_require_positive_values(
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [planner._build_parser, implementer._build_parser, ci_driver._build_parser],
+)
+@pytest.mark.parametrize(
+    "flag",
+    ["--learning-workers", "--learning-queue-capacity", "--no-learn"],
+)
+def test_learning_options_have_visible_help(
+    factory: Callable[[], argparse.ArgumentParser], flag: str
+) -> None:
+    """Each wrapper explains its auxiliary learning controls to operators."""
+    action = factory()._option_string_actions[flag]
+
+    assert action.help not in (None, argparse.SUPPRESS)
+    assert str(action.help).strip()
+
+
 def test_ci_driver_help_describes_loop_owned_review() -> None:
     """The historical driver advertises loop-owned review and arming."""
     description = ci_driver._build_parser().description or ""

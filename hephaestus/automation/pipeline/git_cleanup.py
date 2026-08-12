@@ -35,15 +35,19 @@ def _is_expected_worktree_path(path: Path, *, repo_root: Path, issue_number: int
         root = repo_root.resolve()
     except OSError:
         return False
-    expected_names = (
-        f"issue-{issue_number}",
-        f"issue-{issue_number}-direct-",
-        f"review-pr-{issue_number}",
+    issue_name = f"issue-{issue_number}"
+    direct_prefix = f"{issue_name}-direct-"
+    review_name = f"review-pr-{issue_number}"
+    review_generation = resolved.name.removeprefix(f"{review_name}-")
+    is_review_path = resolved.name == review_name or (
+        resolved.name.startswith(f"{review_name}-")
+        and review_generation.isdecimal()
+        and int(review_generation) > 0
     )
     if (
-        resolved.name != expected_names[0]
-        and not resolved.name.startswith(expected_names[1])
-        and resolved.name != expected_names[2]
+        resolved.name != issue_name
+        and not resolved.name.startswith(direct_prefix)
+        and not is_review_path
     ):
         return False
     return resolved.parent in {root, root / "build" / ".worktrees"}
@@ -67,6 +71,29 @@ def _worktree_record(
         ),
         None,
     )
+
+
+def _ownership_changed(
+    record: dict[str, str] | None,
+    *,
+    expected_branch: object,
+    expected_head: object,
+    expected_detached: bool,
+) -> bool:
+    """Return whether the registered worktree differs from its cleanup proof."""
+    branch_changed = expected_branch is not None and (
+        not isinstance(expected_branch, str)
+        or not expected_branch
+        or record is None
+        or record.get("branch") != f"refs/heads/{expected_branch}"
+    )
+    head_changed = expected_head is not None and (
+        not _is_full_commit_sha(expected_head)
+        or record is None
+        or record.get("commit") != expected_head
+    )
+    detached_changed = expected_detached and (record is None or bool(record.get("branch")))
+    return branch_changed or head_changed or detached_changed
 
 
 def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager) -> JobResult:
@@ -100,6 +127,9 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
         worktree_path = Path(str(job.kwargs["worktree_path"]))
         repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
         issue_number = job.kwargs.get("issue_number")
+        expected_branch = job.kwargs.get("expected_branch")
+        expected_head = job.kwargs.get("expected_head")
+        expected_detached = job.kwargs.get("expected_detached", False)
         if (
             isinstance(issue_number, bool)
             or not isinstance(issue_number, int)
@@ -108,31 +138,24 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
                 repo_root=repo_root,
                 issue_number=issue_number,
             )
+            or (expected_branch is None and expected_head is None)
+            or not isinstance(expected_detached, bool)
         ):
             return JobResult(ok=False, error="worktree cleanup identity is invalid")
-        expected_branch = job.kwargs.get("expected_branch")
-        expected_head = job.kwargs.get("expected_head")
         with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
-            if expected_branch is not None or expected_head is not None:
-                record = _worktree_record(
-                    worktree_path,
-                    repo_root=repo_root,
-                    timeout=job.timeout_s,
-                    worktree_manager_type=worktree_manager_type,
-                )
-                branch_changed = expected_branch is not None and (
-                    not isinstance(expected_branch, str)
-                    or not expected_branch
-                    or record is None
-                    or record.get("branch") != f"refs/heads/{expected_branch}"
-                )
-                head_changed = expected_head is not None and (
-                    not _is_full_commit_sha(expected_head)
-                    or record is None
-                    or record.get("commit") != expected_head
-                )
-                if branch_changed or head_changed:
-                    return JobResult(ok=False, error="worktree cleanup ownership changed")
+            record = _worktree_record(
+                worktree_path,
+                repo_root=repo_root,
+                timeout=job.timeout_s,
+                worktree_manager_type=worktree_manager_type,
+            )
+            if _ownership_changed(
+                record,
+                expected_branch=expected_branch,
+                expected_head=expected_head,
+                expected_detached=expected_detached,
+            ):
+                return JobResult(ok=False, error="worktree cleanup ownership changed")
             status = run(
                 ["git", "status", "--porcelain", "--untracked-files=all"],
                 cwd=worktree_path,

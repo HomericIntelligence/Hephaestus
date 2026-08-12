@@ -521,6 +521,7 @@ class TestPrReviewStageOnEnter:
             {
                 "review_checkout_ready": True,
                 "review_checkout_expected_head": "a" * 40,
+                "review_worktree_expected_head": "a" * 40,
                 "pr_diff": "",
             }
         )
@@ -543,6 +544,7 @@ class TestPrReviewStageOnEnter:
             {
                 "review_worktree": item.worktree,
                 "review_checkout_expected_head": "a" * 40,
+                "review_worktree_expected_head": "a" * 40,
                 "review_checkout_ready": True,
                 "reviewed_pr_head_sha": "a" * 40,
                 "reviewed_pr_proof_generation": 7,
@@ -868,6 +870,7 @@ class TestPrReviewStageStep:
         item.payload.update(
             {
                 "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
                 "review_worktree_cleanup_done": "pending",
                 "review_worktree_cleanup_outcome": Disposition.FAIL_BACK.value,
                 "review_worktree_cleanup_note": "implementation_remediation",
@@ -878,6 +881,8 @@ class TestPrReviewStageStep:
         assert isinstance(removal, JobRequest)
         assert isinstance(removal.job, GitJob)
         assert removal.job.op == "remove_worktree"
+        assert removal.job.kwargs["expected_head"] == "a" * 40
+        assert removal.job.kwargs["expected_detached"] is True
         stage.on_job_done(item, JobResult(ok=True), ctx)
 
         assert stage.step(item, ctx) == StageOutcome(
@@ -904,6 +909,7 @@ class TestPrReviewStageStep:
                 "existing_pr": True,
                 "writer_worktree": "/tmp/implementation-writer",
                 "review_worktree": item.worktree,
+                "review_worktree_expected_head": "a" * 40,
                 "review_worktree_cleanup_done": "pending",
                 "review_worktree_cleanup_outcome": Disposition.RETRY.value,
                 "review_worktree_cleanup_note": "review audit format failure",

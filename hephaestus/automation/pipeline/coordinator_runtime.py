@@ -4,10 +4,10 @@ from typing import Any, cast
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
 
-# This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
 
 
@@ -37,7 +37,7 @@ _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
 
 
-class CoordinatorRuntime(_CoordinatorHost):
+class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     """Own the event loop, timers, completions, routing, and shutdown."""
 
     _event_log_disabled: bool
@@ -466,7 +466,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         lease = self.queues[stage_name].claim_at(index)
         if lease is None:
             return None
-        item = lease.item
+        item = cast(WorkItem, lease.item)
         item_id = id(item)
         if item_id in self._leases:  # pragma: no cover - internal invariant
             lease.restore()
@@ -579,13 +579,6 @@ class CoordinatorRuntime(_CoordinatorHost):
         existing = self._pending_handoffs.setdefault(id(item), pending)
         if existing != pending:  # pragma: no cover - no item can route twice while leased
             raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
-        if self._is_auxiliary_stage(item.stage) and not self._is_auxiliary_stage(target):
-            # The bounded handoff record now owns the item. Release the source
-            # queue slot and auxiliary permit so a main-lane item can enter
-            # learning and release the main permit that this return needs.
-            # Keeping either source capacity creates a capacity-one cycle.
-            self._leases.pop(id(item)).release()
-            self._learning_work_permit_ids.discard(id(item))
         self._record_event(
             "handoff_pending",
             item.stage.value,
@@ -596,6 +589,7 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _drain_pending_handoffs(self) -> None:
         """Retry every retained route whose destination may have opened."""
+        self._drain_complementary_handoff_pairs()
         for item_id, pending in list(self._pending_handoffs.items()):
             lease = self._leases.get(item_id)
             item = pending.item

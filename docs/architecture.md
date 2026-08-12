@@ -322,6 +322,11 @@ within that lane. A cross-lane handoff transfers permit ownership only after
 the destination accepts the item. The auxiliary permit is released after
 `finished` records the outcome.
 
+The auxiliary lane does not create Mnemosyne content or delivery authority.
+Issue #2754 owns that host preparation seam. Until it is complete, a missing
+prepared delivery becomes a terminal ancillary learning failure. It does not
+change the primary result, and cleanup still waits for that terminal state.
+
 Queue draining claims an item through a
 [`StageQueueLease`](../hephaestus/automation/pipeline/queues.py). The lease keeps
 the source queue slot occupied while a stage runs. A transition is

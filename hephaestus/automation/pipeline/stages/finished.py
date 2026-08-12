@@ -321,19 +321,17 @@ class FinishedStage(Stage):
         )
         return JobRequest(job=job, on_done_state="DONE")
 
-    def _preserve_pending_learning_worktree(self, item: WorkItem) -> Continue:
-        """Preserve a writer checkout until all learning work is terminal."""
+    def _preserve_pending_learning_worktree(self, item: WorkItem) -> StageOutcome:
+        """Eject a writer checkout until all learning work is terminal."""
         entry = (item.repo, item.issue or item.pr or 0, item.worktree)
         if entry not in self._preserved:
             self._preserved.append(entry)
-        item.payload["_learning_cleanup_succeeded"] = False
-        item.payload["_learning_cleanup_error"] = "learning is not terminal"
         logger.warning(
             "finished:%s: preserving worktree until learning is terminal: %s",
             item.issue or item.repo,
             item.worktree,
         )
-        return Continue(next_state="DONE")
+        return StageOutcome(Disposition.EJECT, "learning_cleanup_pending")
 
     @staticmethod
     def _learning_is_terminal(item: WorkItem, ctx: StageContext) -> bool:

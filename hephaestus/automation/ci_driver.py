@@ -152,9 +152,23 @@ Examples:
         action="store_true",
         help="Skip the advise step before loop review",
     )
-    parser.add_argument("--learning-workers", type=positive_int, default=1)
-    parser.add_argument("--learning-queue-capacity", type=positive_int, default=1)
-    parser.add_argument("--no-learn", action="store_true")
+    parser.add_argument(
+        "--learning-workers",
+        type=positive_int,
+        default=1,
+        help="Independent auxiliary learning workers (default: 1)",
+    )
+    parser.add_argument(
+        "--learning-queue-capacity",
+        type=positive_int,
+        default=1,
+        help="Bounded auxiliary learning queue capacity (default: 1)",
+    )
+    parser.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Do not create or execute auxiliary learning intents",
+    )
     parser.add_argument(
         "--no-include-bot-prs",
         dest="include_bot_prs",

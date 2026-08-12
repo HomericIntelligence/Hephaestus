@@ -2772,10 +2772,19 @@ class TestGitOps:
                 "worktree_path": str(tmp_path / "issue-7"),
                 "repo_root": str(tmp_path),
                 "issue_number": 7,
+                "expected_head": "a" * 40,
+                "expected_detached": True,
                 "force": False,
             },
         )
-        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+        records = [{"path": str(tmp_path / "issue-7"), "commit": "a" * 40}]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run,
+        ):
             mock_run.return_value.stdout = ""
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
@@ -2809,10 +2818,19 @@ class TestGitOps:
                 "worktree_path": str(worktree),
                 "repo_root": str(tmp_path),
                 "issue_number": 7,
+                "expected_head": "a" * 40,
+                "expected_detached": True,
                 "force": False,
             },
         )
-        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+        records = [{"path": str(worktree), "commit": "a" * 40}]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run,
+        ):
             mock_run.return_value.stdout = "?? learning-notes.md\n"
             pool.submit(job, StageName.FINISHED)
             _, result = completion_q.get(timeout=10)
@@ -2823,6 +2841,140 @@ class TestGitOps:
             call.args and call.args[0][:3] == ["git", "worktree", "remove"]
             for call in mock_run.call_args_list
         )
+
+    def test_remove_worktree_requires_ownership_proof(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Path cleanup cannot remove a checkout without a bound branch or head."""
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / "review-pr-7"),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+            },
+        )
+        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup identity is invalid"
+        mock_run.assert_not_called()
+
+    def test_remove_generated_detached_review_worktree(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A positive numeric review generation is a valid managed path."""
+        worktree = tmp_path / "review-pr-7-2"
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(worktree),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "expected_head": "a" * 40,
+                "expected_detached": True,
+            },
+        )
+        records = [{"path": str(worktree), "commit": "a" * 40}]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run,
+        ):
+            mock_run.return_value.stdout = ""
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        mock_run.assert_any_call(
+            ["git", "worktree", "remove", str(worktree)],
+            cwd=tmp_path,
+            timeout=60,
+        )
+
+    def test_remove_detached_review_rejects_branch_attachment(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Detached cleanup preserves a replacement attached to a branch."""
+        worktree = tmp_path / "review-pr-7-1"
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(worktree),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "expected_head": "a" * 40,
+                "expected_detached": True,
+            },
+        )
+        records = [
+            {
+                "path": str(worktree),
+                "commit": "a" * 40,
+                "branch": "refs/heads/human-work",
+            }
+        ]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup ownership changed"
+        mock_run.assert_not_called()
+
+    @pytest.mark.parametrize("name", ["review-pr-7-0", "review-pr-7-next", "review-pr-7--1"])
+    def test_remove_review_worktree_rejects_invalid_generation(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+        name: str,
+    ) -> None:
+        """Only a positive numeric review generation is admitted."""
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / name),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "expected_head": "a" * 40,
+                "expected_detached": True,
+            },
+        )
+        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup identity is invalid"
+        mock_run.assert_not_called()
 
     def test_remove_worktree_rejects_path_outside_issue_identity(
         self,

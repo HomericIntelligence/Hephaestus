@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -145,15 +145,91 @@ def test_opposite_lane_handoffs_do_not_deadlock_at_capacity_one(tmp_path: Path) 
     assert coordinator._claim_item(StageName.PLAN_REVIEW) is entering
 
     assert not coordinator._handoff_item(returning, StageName.IMPLEMENTATION, enter=True)
-    assert coordinator.learning_work_count == 0
-    assert coordinator._handoff_item(entering, StageName.LEARNING, enter=True)
-    assert coordinator.live_work_count == 0
+    assert coordinator.learning_work_count == 1
+    assert not coordinator._handoff_item(entering, StageName.LEARNING, enter=True)
+    assert coordinator.live_work_count == 1
 
     coordinator._drain_pending_handoffs()
 
     assert returning.stage is StageName.IMPLEMENTATION
+    assert entering.stage is StageName.LEARNING
     assert id(returning) not in coordinator._pending_handoffs
+    assert id(entering) not in coordinator._pending_handoffs
     assert coordinator.live_work_count == 1
+    assert coordinator.learning_work_count == 1
+
+
+def test_exact_stage_opposite_lane_handoffs_exchange_at_capacity_one(tmp_path: Path) -> None:
+    """Full source queues exchange complementary leased items without a spill."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    returning = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING)
+    entering = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.PLAN_REVIEW)
+    assert coordinator._push_item(returning, StageName.LEARNING, enter=True)
+    assert coordinator._push_item(entering, StageName.PLAN_REVIEW, enter=True)
+    assert coordinator._claim_item(StageName.LEARNING) is returning
+    assert coordinator._claim_item(StageName.PLAN_REVIEW) is entering
+
+    assert not coordinator._handoff_item(returning, StageName.PLAN_REVIEW, enter=True)
+    assert not coordinator._handoff_item(entering, StageName.LEARNING, enter=True)
+
+    coordinator._drain_pending_handoffs()
+
+    assert coordinator.queues[StageName.PLAN_REVIEW].snapshot() == [returning]
+    assert coordinator.queues[StageName.LEARNING].snapshot() == [entering]
+    assert not coordinator._leases
+    assert not coordinator._pending_handoffs
+    assert coordinator.live_work_count == coordinator.learning_work_count == 1
+
+
+def test_repeated_opposite_lane_recovery_stays_bounded_by_active_leases(tmp_path: Path) -> None:
+    """Repeated capacity-one exchanges never create permitless pending work."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            max_workers=1,
+            learning_workers=1,
+            learning_queue_capacity=1,
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    main = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLANNING)
+    auxiliary = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.LEARNING)
+    assert coordinator._push_item(main, StageName.PLANNING, enter=True)
+    assert coordinator._push_item(auxiliary, StageName.LEARNING, enter=True)
+
+    for cycle in range(3):
+        assert coordinator._claim_item(main.stage) is main
+        assert coordinator._claim_item(auxiliary.stage) is auxiliary
+        auxiliary_target = StageName.IMPLEMENTATION if cycle % 2 == 0 else StageName.PLANNING
+        assert not coordinator._handoff_item(auxiliary, auxiliary_target, enter=True)
+        assert not coordinator._handoff_item(main, StageName.LEARNING, enter=True)
+        assert len(coordinator._pending_handoffs) == len(coordinator._leases) == 2
+        assert coordinator.live_work_count == coordinator.learning_work_count == 1
+
+        coordinator._drain_pending_handoffs()
+
+        assert not coordinator._pending_handoffs
+        assert not coordinator._leases
+        assert coordinator.live_work_count == coordinator.learning_work_count == 1
+        main, auxiliary = auxiliary, main
 
 
 def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
@@ -541,6 +617,46 @@ def test_no_learn_restores_terminal_cleanup_before_disabling(tmp_path: Path) -> 
     assert terminal["cleanup_status"] == "succeeded"
 
 
+def test_pending_learning_ejection_keeps_cleanup_recoverable(tmp_path: Path) -> None:
+    """Finished leaves the cleanup receipt pending until learning is terminal."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    item = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2705,
+        pr=12,
+        stage=StageName.FINISHED,
+        state="CLEANUP",
+        worktree="build/.worktrees/issue-2705",
+        branch="2705-fix",
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    item.learning_intents.append(intent)
+    item.compact_for_post_processing(
+        ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+    )
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(
+        intent.key, kind=intent.kind.value, identity=item.learning_journal_identity(intent)
+    )
+
+    finished = coordinator.stages[StageName.FINISHED]
+    outcome = finished.step(item, coordinator._ctx_for_repo("repo"))
+
+    assert outcome == StageOutcome(Disposition.EJECT, "learning_cleanup_pending")
+    coordinator._route(item, outcome)
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["status"] == "pending"
+    assert record["cleanup_status"] == "pending"
+    assert item.worktree == "build/.worktrees/issue-2705"
+
+
 def test_malformed_post_processing_quarantines_only_one_issue(tmp_path: Path) -> None:
     """One damaged cleanup receipt does not stop later repository discovery."""
     coordinator = Coordinator(
@@ -604,7 +720,7 @@ def test_post_merge_persistence_failure_keeps_confirmed_result(tmp_path: Path) -
     def fail_persistence(*_args: object, **_kwargs: object) -> None:
         raise OSError("journal unavailable")
 
-    journal.ensure_pending = fail_persistence
+    cast(Any, journal).ensure_pending = fail_persistence
 
     coordinator._route(item, StageOutcome(Disposition.FINISH_PASS, "merged"))
 
@@ -712,7 +828,7 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
         def on_job_done(self, _item: WorkItem, _result: JobResult, _ctx: object) -> None:
             raise AssertionError("progress stage submits no job")
 
-    coordinator.stages[StageName.PLANNING] = ProgressStage()  # type: ignore[assignment]
+    coordinator.stages[StageName.PLANNING] = ProgressStage()
     coordinator._run_item(unrelated)
     assert progressed.is_set()
     assert unrelated.result is not None
@@ -865,8 +981,88 @@ def test_learning_completion_exception_parks_before_cleanup(tmp_path: Path) -> N
     assert coordinator._terminal_summary.dispositions["resumable"] == 1
 
 
-def test_learning_completion_capacity_covers_all_learning_workers(tmp_path: Path) -> None:
-    """A small backlog setting cannot make valid completions disappear."""
+class _CompletionRecordingStage:
+    """Record completion delivery without starting more work."""
+
+    def __init__(self) -> None:
+        self.completed: list[int] = []
+
+    def on_job_done(self, item: WorkItem, result: JobResult, ctx: object) -> None:
+        del result, ctx
+        self.completed.append(item.issue or 0)
+
+
+def _queue_dual_lane_completions(
+    coordinator: Coordinator, tmp_path: Path
+) -> tuple[_CompletionRecordingStage, _CompletionRecordingStage]:
+    """Publish one owned result to each coordinator completion channel."""
+    main_stage = _CompletionRecordingStage()
+    auxiliary_stage = _CompletionRecordingStage()
+    coordinator.stages[StageName.PLANNING] = main_stage  # type: ignore[assignment]
+    coordinator.stages[StageName.LEARNING] = auxiliary_stage  # type: ignore[assignment]
+
+    main_item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLANNING)
+    main_handle = JobHandle(
+        job=GitJob(repo="repo", op="push", timeout_s=1),
+        on_done_state="DONE",
+    )
+    coordinator.in_flight[main_handle] = main_item
+    coordinator.inflight_per_repo[main_item.repo] = 1
+
+    auxiliary_item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2, stage=StageName.LEARNING)
+    auxiliary_handle = JobHandle(
+        job=AthenaSkillJob(
+            request=AthenaSkillRequest(
+                kind="learn",
+                repo="repo",
+                issue=2,
+                agent="codex",
+                model="default",
+                cwd=tmp_path,
+                timeout_s=60,
+            )
+        ),
+        on_done_state="DONE",
+    )
+    coordinator.auxiliary_in_flight[auxiliary_handle] = auxiliary_item
+
+    coordinator.completion_q.put((main_handle, JobResult(ok=True, duration_s=0.5)))
+    coordinator.auxiliary_completion_q.put(
+        (auxiliary_handle, JobResult(ok=False, error="delivery failed", duration_s=0.75))
+    )
+    return main_stage, auxiliary_stage
+
+
+def test_dual_completion_channels_drain_all_published_results(tmp_path: Path) -> None:
+    """One drain handles ready main and auxiliary results without loss."""
+    coordinator = Coordinator(
+        PipelineConfig(
+            org="org",
+            repos=["repo"],
+            projects_dir=tmp_path,
+        ),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        auxiliary_pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    main_stage, auxiliary_stage = _queue_dual_lane_completions(coordinator, tmp_path)
+    coordinator.shutdown.set()
+
+    coordinator._drain_completions()
+
+    assert main_stage.completed == [1]
+    assert auxiliary_stage.completed == [2]
+    assert not coordinator.in_flight
+    assert not coordinator.auxiliary_in_flight
+    assert coordinator.completion_q.empty()
+    assert coordinator.auxiliary_completion_q.empty()
+    assert coordinator._auxiliary_job_count == 1
+    assert coordinator._auxiliary_job_failure_count == 1
+
+
+def test_dual_completion_saturation_drains_results_before_fault(tmp_path: Path) -> None:
+    """A saturation fault cannot discard results already in either channel."""
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -880,5 +1076,18 @@ def test_learning_completion_capacity_covers_all_learning_workers(tmp_path: Path
         auxiliary_pool=FakeWorkerPool(),
         install_signals=False,
     )
+    main_stage, auxiliary_stage = _queue_dual_lane_completions(coordinator, tmp_path)
+    coordinator.shutdown.set()
+    coordinator._completion_saturation.set()
 
+    with pytest.raises(RuntimeError, match="completion queue saturated"):
+        coordinator._drain_completions()
+
+    assert main_stage.completed == [1]
+    assert auxiliary_stage.completed == [2]
+    assert not coordinator.in_flight
+    assert not coordinator.auxiliary_in_flight
+    assert coordinator.completion_q.empty()
+    assert coordinator.auxiliary_completion_q.empty()
+    assert any(event[0] == "completion_saturation" for event in coordinator.event_log)
     assert coordinator.auxiliary_completion_q.maxsize == 3
