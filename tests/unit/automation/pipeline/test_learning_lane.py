@@ -196,6 +196,7 @@ def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
 def test_restart_reconstructs_pending_intent_before_primary_stage(tmp_path: Path) -> None:
     """A new coordinator routes a durable pending claim back to learning."""
     repo_root = tmp_path / "repo"
+    github = FakeStageGitHub(pr_state={"state": "MERGED"})
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -203,12 +204,12 @@ def test_restart_reconstructs_pending_intent_before_primary_stage(tmp_path: Path
             projects_dir=tmp_path,
             repo_roots={"repo": repo_root},
         ),
-        github=FakeStageGitHub(pr_state={"state": "MERGED"}),
+        github=github,
         pool=FakeWorkerPool(),
         install_signals=False,
     )
     approved_plan = "Use the approved plan."
-    coordinator.github.comments[1] = [render_current_plan(approved_plan, revision=1)]
+    github.comments[1] = [render_current_plan(approved_plan, revision=1)]
     intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
     journal = coordinator._ctx_for_repo("repo").learning_journal
     journal.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
@@ -606,6 +607,7 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
         completion_q=completions,
         athena_skill_executor=host,
     )
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -615,13 +617,13 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
             learning_queue_capacity=1,
             projects_dir=tmp_path,
         ),
-        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        github=github,
         pool=FakeWorkerPool(),
         auxiliary_pool=auxiliary,
         install_signals=False,
     )
     approved_plan = "Use the approved plan."
-    coordinator.github.comments[1] = [render_current_plan(approved_plan, revision=1)]
+    github.comments[1] = [render_current_plan(approved_plan, revision=1)]
     learning = WorkItem(
         repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING, state="ENTER"
     )
