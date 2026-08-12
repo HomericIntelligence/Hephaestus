@@ -110,8 +110,12 @@ The factory must return an object implementing
 activate it, and Hephaestus never auto-selects among installed adapters. A
 missing, duplicate, unloadable, or invalid selected entry point fails before a
 Pi provider process starts. The external package remains responsible for
-reviewed enforcement of every filesystem and network grant it receives. See
-[ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md).
+reviewed enforcement of every filesystem and network grant it receives. It
+must launch the supplied command with the supplied minimized environment;
+that Pi-only environment carries `PI_CODING_AGENT_DIR` while excluding ambient
+GitHub, cloud, and operator-specific variables.
+See [ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md) for the
+bootstrap decision and rejected automatic-loading alternatives.
 
 ## Athena package acceptance
 

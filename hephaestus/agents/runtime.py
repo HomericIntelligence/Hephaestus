@@ -158,6 +158,9 @@ class PiIsolationAdapter(Protocol):
     ``policy`` before it starts the provider process.  It must also enter the
     supplied ``process_tracker`` around each live provider child when the host
     supplies one, so queue shutdown can terminate the child's process group.
+    The provider must be launched with ``command`` and ``environment`` exactly
+    as supplied; inheriting the adapter process environment would reintroduce
+    ambient credentials outside the reviewed Pi profile.
     """
 
     def invoke(
@@ -165,6 +168,7 @@ class PiIsolationAdapter(Protocol):
         *,
         policy: ExecutionPolicy,
         command: list[str],
+        environment: dict[str, str],
         prompt: str,
         cwd: Path,
         timeout: int,
@@ -256,6 +260,7 @@ def _supports_pi_isolation_adapter_invoke_contract(adapter: object) -> bool:
         inspect.signature(invoke).bind(
             policy=object(),
             command=[],
+            environment={},
             prompt="",
             cwd=Path("."),
             timeout=0,
@@ -1618,10 +1623,28 @@ def _run_codex_command(
 
 
 def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
-    """Build a Pi JSON-mode command without alias values in argv."""
+    """Build the common Pi JSON-mode command."""
     cmd = ["pi", "--mode", "json"]
     if session_id:
         cmd.extend(["--session", session_id])
+    return cmd
+
+
+def _pi_automation_cmd(*, model: str, session_id: str | None = None) -> list[str]:
+    """Build a non-interactive Pi command with explicit private selection."""
+    provider = os.environ.get(PI_PROVIDER_ENV, "").strip()
+    selected_model = model.strip() or os.environ.get(PI_MODEL_ENV, "").strip()
+    missing: list[str] = []
+    if not provider:
+        missing.append(PI_PROVIDER_ENV)
+    if not selected_model:
+        missing.append(PI_MODEL_ENV)
+    if missing:
+        raise AgentExecutionError(
+            "Pi automation requires operator-local provider selection: " + ", ".join(missing)
+        )
+    cmd = _pi_base_cmd(session_id=session_id)
+    cmd.extend(["--print", "--provider", provider, "--model", selected_model])
     return cmd
 
 
@@ -1670,6 +1693,41 @@ def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
     if temp_dir is not None:
         for name in ("TMPDIR", "TMP", "TEMP"):
             env[name] = str(temp_dir)
+    env["PI_TELEMETRY"] = "0"
+    env["PI_SKIP_VERSION_CHECK"] = "1"
+    return env
+
+
+def _pi_automation_env() -> dict[str, str]:
+    """Return the explicit child environment for an admitted Pi process."""
+    safe_names = (
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "COMSPEC",
+        "PATHEXT",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "PI_CODING_AGENT_DIR",
+        "PI_CODING_AGENT_SESSION_DIR",
+        "PI_PACKAGE_DIR",
+    )
+    env = {name: value for name in safe_names if (value := os.environ.get(name))}
+    env.setdefault("PATH", os.defpath)
+    env["PI_OFFLINE"] = "1"
     env["PI_TELEMETRY"] = "0"
     env["PI_SKIP_VERSION_CHECK"] = "1"
     return env
@@ -1975,10 +2033,6 @@ def _run_pi_with_policy(
     No fallback invokes Pi directly: its native ``--tools`` flags cannot
     enforce the policy's filesystem mount or network-relay boundary.
     """
-    command = _pi_base_cmd(session_id=session_id)
-    command.extend(_pi_policy_args(policy))
-    if _PI_ISOLATION_ADAPTER is None:
-        _load_configured_pi_isolation_adapter()
     adapter = _PI_ISOLATION_ADAPTER
     if adapter is None:
         raise PiIsolationUnavailableError(
@@ -1986,9 +2040,12 @@ def _run_pi_with_policy(
             f"filesystem={policy.filesystem.value} network={policy.network.value}; "
             "no Pi provider process was started"
         )
+    command = _pi_automation_cmd(model=model, session_id=session_id)
+    command.extend(_pi_policy_args(policy))
     return adapter.invoke(
         policy=policy,
         command=command,
+        environment=_pi_automation_env(),
         prompt=prompt,
         cwd=cwd,
         timeout=timeout,

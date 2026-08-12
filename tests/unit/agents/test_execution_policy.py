@@ -223,12 +223,14 @@ def test_register_host_adapter_requires_process_tracker_channel(
             *,
             policy: ExecutionPolicy,
             command: list[str],
+            environment: dict[str, str],
             prompt: str,
             cwd: object,
             timeout: int,
             model: str,
             session_id: str | None,
         ) -> agent_runtime.AgentRunResult:
+            del environment
             raise AssertionError("registration must not invoke the adapter")
 
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
@@ -545,6 +547,8 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
 
     monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
+    monkeypatch.setenv("HEPH_PI_MODEL", "operator-model")
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
     )
@@ -559,6 +563,66 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     assert policy.network is NetworkMode.CONSTRAINED_WEB_RELAY
     assert received["session_id"] is None
     assert received["process_tracker"] is None
+
+
+def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The adapter receives native selection and only the Pi profile environment."""
+    received: dict[str, object] = {}
+
+    class Adapter:
+        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
+            received.update(kwargs)
+            return agent_runtime.AgentRunResult(
+                stdout="implemented", stderr="", session_id="pi-session-private-profile"
+            )
+
+    pi_dir = tmp_path / "pi-agent"
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-local-provider")
+    monkeypatch.setenv("HEPH_PI_MODEL", "operator-local-model")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+    monkeypatch.setenv("GH_TOKEN", "must-not-reach-pi")
+    monkeypatch.setenv("INTERNAL_PROFILE_FLAG", "must-not-reach-pi")
+    request = ExecutionRequest(
+        AgentRole.IMPLEMENTER,
+        AgentOperation.IMPLEMENT,
+        SessionLifecycle.START_NEW,
+    )
+
+    result = agent_runtime.run_agent_session(
+        "pi",
+        "implement",
+        cwd=tmp_path,
+        timeout=30,
+        model="operator-local-model",
+        execution_request=request,
+    )
+
+    assert result.stdout == "implemented"
+    assert received["command"] == [
+        "pi",
+        "--mode",
+        "json",
+        "--print",
+        "--provider",
+        "operator-local-provider",
+        "--model",
+        "operator-local-model",
+        "--tools",
+        "bash,edit,find,grep,ls,read,write",
+    ]
+    environment = cast(dict[str, str], received["environment"])
+    assert environment["PI_CODING_AGENT_DIR"] == str(pi_dir)
+    assert environment["PI_OFFLINE"] == "1"
+    assert environment["PI_SKIP_VERSION_CHECK"] == "1"
+    assert environment["PI_TELEMETRY"] == "0"
+    assert "HEPH_PI_PROVIDER" not in environment
+    assert "HEPH_PI_MODEL" not in environment
+    assert "GH_TOKEN" not in environment
+    assert "INTERNAL_PROFILE_FLAG" not in environment
 
 
 def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
@@ -608,6 +672,7 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
             return agent_runtime.AgentRunResult(stdout="amended", stderr="")
 
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
     resume_request = ExecutionRequest(
         AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
     )
@@ -647,6 +712,7 @@ def test_pi_session_start_dispatches_without_resume_binding(
 
     monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
     request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
 
     def process_tracker(_pid: int) -> AbstractContextManager[None]:

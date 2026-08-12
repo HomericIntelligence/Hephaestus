@@ -6509,6 +6509,7 @@ class TestShutdownReapsSubprocess:
                 *,
                 policy: ExecutionPolicy,
                 command: list[str],
+                environment: dict[str, str],
                 prompt: str,
                 cwd: Path,
                 timeout: int,
@@ -6516,7 +6517,7 @@ class TestShutdownReapsSubprocess:
                 session_id: str | None,
                 process_tracker: agent_runtime.ProcessTracker | None,
             ) -> AgentRunResult:
-                del policy, prompt, model, session_id
+                del policy, environment, prompt, model, session_id
                 assert process_tracker is not None
                 process = subprocess.Popen(
                     sleeper,
@@ -6543,6 +6544,7 @@ class TestShutdownReapsSubprocess:
 
         monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
         monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+        monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
         agent_runtime.register_pi_isolation_adapter(Adapter())
         request = ExecutionRequest(
             AgentRole.IMPLEMENTER,
