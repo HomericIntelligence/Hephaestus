@@ -4,7 +4,8 @@ Pure data and pure functions with ZERO I/O — no gh, no claude, no
 subprocess, no imports of github_api/claude_invoke. Part of epic #1809.
 
 Thread-safety: a WorkItem and its StageQueue are only ever touched by the
-coordinator thread. The single cross-thread channel is CompletionQueue.
+coordinator thread. The bounded main and auxiliary completion queues are the
+only cross-thread payload channels.
 """
 
 from __future__ import annotations

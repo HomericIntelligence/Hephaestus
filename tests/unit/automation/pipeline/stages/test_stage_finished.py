@@ -251,6 +251,7 @@ class TestCleanup:
     ) -> None:
         ctx = make_ctx()
         item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
 
         stage.step(item, ctx)
         item.state = "CLEANUP"
@@ -267,6 +268,7 @@ class TestCleanup:
         """A terminal failure cannot strand a deterministic branch at its base SHA."""
         ctx = make_ctx()
         item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
         item.payload["_direct_scope_reservation"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
@@ -296,6 +298,7 @@ class TestCleanup:
         """The release runs for every unpublished direct item, including a passing no-op."""
         ctx = make_ctx()
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
         item.payload["_direct_scope_reservation"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
@@ -313,12 +316,31 @@ class TestCleanup:
         assert isinstance(second.job, GitJob)
         assert second.job.op == "remove_worktree"
 
+    def test_reservation_cleanup_rejects_a_different_item_branch(
+        self, stage: FinishedStage, make_ctx: Any
+    ) -> None:
+        """A damaged receipt cannot release an unrelated same-SHA branch."""
+        item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-owned"
+        item.payload["_direct_scope_reservation"] = {
+            "branch": "unrelated",
+            "base_sha": "a" * 40,
+        }
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "DONE"
+        assert item.payload["_learning_cleanup_succeeded"] is False
+        assert item.payload["_learning_cleanup_error"] == "cleanup ownership changed"
+
     def test_failed_reservation_release_retries_before_terminal_cleanup(
         self, stage: FinishedStage, make_ctx: Any
     ) -> None:
         """An operational lease failure is retried instead of being misclassified as stale."""
         ctx = make_ctx()
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
         item.payload["_direct_scope_reservation"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
@@ -345,6 +367,7 @@ class TestCleanup:
         """A direct no-op removes its local deterministic branch after detaching it."""
         ctx = make_ctx()
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
         item.payload["_direct_scope_local_branch_cleanup"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
@@ -366,6 +389,7 @@ class TestCleanup:
         """A skipped no-op must not strand the deterministic local branch."""
         ctx = make_ctx()
         item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
         item.payload["_direct_scope_local_branch_cleanup"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,
@@ -381,6 +405,7 @@ class TestCleanup:
             "repo_root": str(ctx.paths.repo_root),
             "issue_number": 42,
             "force": False,
+            "expected_branch": "42-auto-impl",
             "local_branch_cleanup": {
                 "branch": "42-auto-impl",
                 "base_sha": "a" * 40,
@@ -395,6 +420,7 @@ class TestCleanup:
     ) -> None:
         """A late human edit blocks no-op cleanup without being discarded."""
         item = _item(passed=False, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-auto-impl"
         item.payload["_direct_scope_local_branch_cleanup"] = {
             "branch": "42-auto-impl",
             "base_sha": "a" * 40,

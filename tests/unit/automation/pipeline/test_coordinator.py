@@ -410,6 +410,33 @@ class TestQuiescence:
         assert item.branch == ""
         assert item.payload["existing_pr"] is True
 
+    def test_duplicate_explicit_issue_is_ejected_from_source_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeated explicit issue cannot run after its first copy finishes."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[617, 617],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+
+        assert coordinator._drain_direct_issue_source() == 1
+        assert coordinator._direct_issue_source is None
+        assert [item.issue for item in coordinator.items] == [617]
+
     def test_direct_issue_source_rotates_overlap_and_admits_independent_work(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

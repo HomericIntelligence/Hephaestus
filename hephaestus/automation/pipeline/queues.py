@@ -1,7 +1,8 @@
-"""Stage queues and cross-thread completion channel. Pure data, zero I/O (epic #1809).
+"""Stage queues and cross-thread completion channels. Pure data, zero I/O (epic #1809).
 
 The StageQueue is FIFO and deliberately not thread-safe — owned exclusively by
-the coordinator thread. The CompletionQueue is the only cross-thread channel.
+the coordinator thread. The main and auxiliary completion queues are the only
+cross-thread payload channels.
 """
 
 from __future__ import annotations

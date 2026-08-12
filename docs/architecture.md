@@ -209,9 +209,9 @@ thread lock, outer) **and**
 [`_interruptible_file_lock`](../hephaestus/automation/pipeline/worker_pool.py)
 (cross-process flock, inner). Worktrees share `.git`, so two concurrent
 operations on the same checkout would race.
-The only cross-thread **payload** channel is the bounded
-[`CompletionQueue`](../hephaestus/automation/pipeline/queues.py)
-(`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). A separate
+The only cross-thread **payload** channels are the bounded main and auxiliary
+[`CompletionQueue`](../hephaestus/automation/pipeline/queues.py) instances
+(`queue.Queue[(JobHandle, JobResult)]`). A separate
 `threading.Event` latch is control-plane-only: workers set it after a
 non-blocking completion publish, and signal handlers set it to wake an idle
 coordinator. Neither writes a sentinel into the completion queue or blocks on
@@ -518,8 +518,8 @@ cross-stage cycles terminate even if a stage has a budget bookkeeping bug
 
 The single per-item record moving through the queue. Thread-safety is by
 construction: a `WorkItem` and its `StageQueue` are only ever touched by
-the coordinator thread; the only cross-thread payload channel is the bounded
-[`CompletionQueue`](../hephaestus/automation/pipeline/queues.py). Event latches
+the coordinator thread; the only cross-thread payload channels are the bounded
+main and auxiliary completion queues. Event latches
 carry wake/fault signals only, never `WorkItem` or `JobResult` payloads.
 Key fields:
 
@@ -682,9 +682,9 @@ flowchart LR
     M -. "approval invalidated" .-> Q
 ```
 
-GitHub is the durable journal. After a restart, labels, issue comments, pull
-request reviews, review threads, and merge state reconstruct where work should
-resume.
+GitHub facts reconstruct the main workflow after a restart. The learning
+journal, arming store, and issue-wave checkpoints reconstruct their owned
+auxiliary, merge, and issue-wave obligations.
 
 ### 5.1 Repo intake
 
@@ -1600,7 +1600,9 @@ When `event_log_path` is configured, the coordinator also appends diagnostic
 records to JSONL. That file is best-effort: an I/O failure logs a
 warning and disables further JSONL writes without changing pipeline routing.
 It is not a queue snapshot or recovery journal. GitHub labels, comments, and
-PR state remain the only restart authority.
+PR state are normal restart authorities. `LearningJournalStore`,
+`ArmingStateStore`, and issue-wave checkpoints supply the other durable state
+listed in the journal contract above.
 
 ### Gauges
 
@@ -1756,7 +1758,7 @@ Exit-code priority is:
 - **StageQueue** — FIFO queue for one
  [`StageName`](../hephaestus/automation/pipeline/routing.py), owned only
  by the coordinator. [`queues.py`](../hephaestus/automation/pipeline/queues.py).
-- **CompletionQueue** — the bounded cross-thread payload channel
+- **CompletionQueue** — the bounded main and auxiliary cross-thread payload channels
  (`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). Event latches carry
  wake and saturation signals without queue payloads.
  [`queues.py`](../hephaestus/automation/pipeline/queues.py).

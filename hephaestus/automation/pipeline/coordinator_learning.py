@@ -47,17 +47,20 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
                 )
         if not restored:
             return
+        item.learning_intents = restored
         if not self.config.enable_learn:
-            disabled = self._disable_valid_records(records, journal)
+            self._disable_valid_records(records, journal)
             if primary_stage is StageName.FINISHED:
                 terminal_record = next(
                     (record for record in records if "post_processing" in record),
                     records[0],
                 )
-                item.restore_post_processing(terminal_record)
-            if disabled:
-                return
-        item.learning_intents = restored
+                if "post_processing" in terminal_record and not self._restore_post_processing(
+                    item, terminal_record
+                ):
+                    return
+            item.learning_intents.clear()
+            return
         item.learning_resume_stage = primary_stage
         if primary_stage is StageName.FINISHED:
             item.payload["_learning_primary_reason"] = primary_reason
@@ -65,10 +68,35 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
                 (record for record in records if "post_processing" in record),
                 records[0],
             )
-            restored_terminal = item.restore_post_processing(terminal_record)
+            restored_terminal = self._restore_post_processing(item, terminal_record)
+            if item.result is not None and not item.result.passed:
+                return
             if item.result is not None and not restored_terminal:
                 item.compact_for_post_processing(item.result)
         item.stage = StageName.LEARNING
+
+    @staticmethod
+    def _restore_post_processing(item: WorkItem, record: dict[str, Any]) -> bool:
+        """Restore one cleanup receipt or quarantine only its source item."""
+        try:
+            return item.restore_post_processing(record)
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "learning:%s#%s: invalid post-processing state quarantined: %s",
+                item.repo,
+                item.issue,
+                exc,
+            )
+            item.learning_intents = []
+            item.learning_resume_stage = None
+            item.post_processing = None
+            item.result = ItemResult(
+                passed=False,
+                reason="invalid durable learning recovery state",
+                final_stage=StageName.LEARNING,
+            )
+            item.stage = StageName.FINISHED
+            return False
 
     @staticmethod
     def _disable_valid_records(

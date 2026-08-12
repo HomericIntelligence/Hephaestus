@@ -1,7 +1,8 @@
 """Work item and history tracking. Pure data, zero I/O (epic #1809).
 
 Thread-safety: a WorkItem and its associated StageQueue are only ever touched
-by the coordinator thread. The single cross-thread channel is CompletionQueue.
+by the coordinator thread. The bounded main and auxiliary completion queues
+are the only cross-thread payload channels.
 """
 
 from __future__ import annotations

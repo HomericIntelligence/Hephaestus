@@ -49,6 +49,26 @@ def _is_expected_worktree_path(path: Path, *, repo_root: Path, issue_number: int
     return resolved.parent in {root, root / "build" / ".worktrees"}
 
 
+def _worktree_record(
+    worktree_path: Path,
+    *,
+    repo_root: Path,
+    timeout: int,
+    worktree_manager_type: Any,
+) -> dict[str, str] | None:
+    """Return the registered record for an exact worktree path."""
+    target = worktree_path.resolve()
+    manager = worktree_manager_type(repo_root=repo_root)
+    return next(
+        (
+            record
+            for record in manager.list_worktrees(raise_on_error=True, timeout=timeout)
+            if record.get("path") and Path(record["path"]).resolve() == target
+        ),
+        None,
+    )
+
+
 def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager) -> JobResult:
     """Run one validated worktree or reservation cleanup operation."""
     if job.op == "release_branch_reservation":
@@ -90,7 +110,22 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
             )
         ):
             return JobResult(ok=False, error="worktree cleanup identity is invalid")
+        expected_branch = job.kwargs.get("expected_branch")
         with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
+            if expected_branch is not None:
+                record = _worktree_record(
+                    worktree_path,
+                    repo_root=repo_root,
+                    timeout=job.timeout_s,
+                    worktree_manager_type=worktree_manager_type,
+                )
+                if (
+                    not isinstance(expected_branch, str)
+                    or not expected_branch
+                    or record is None
+                    or record.get("branch") != f"refs/heads/{expected_branch}"
+                ):
+                    return JobResult(ok=False, error="worktree cleanup ownership changed")
             command = ["git", "worktree", "remove", str(worktree_path)]
             if job.kwargs.get("force"):
                 command.append("--force")
@@ -107,7 +142,11 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
                     return JobResult(ok=False, error="local branch cleanup receipt is invalid")
                 cleanup_branch = local_cleanup.get("branch")
                 expected_sha = str(local_cleanup.get("base_sha") or "")
-                if not isinstance(cleanup_branch, str) or not _is_full_commit_sha(expected_sha):
+                if (
+                    not isinstance(cleanup_branch, str)
+                    or cleanup_branch != expected_branch
+                    or not _is_full_commit_sha(expected_sha)
+                ):
                     return JobResult(ok=False, error="local branch cleanup receipt is invalid")
                 deleted = delete_local_branch_if_unchanged(
                     cleanup_branch,

@@ -33,7 +33,7 @@ from hephaestus.automation.pipeline.stages.base import (
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -306,6 +306,64 @@ class TestInterruptSemantics:
             "Ctrl+C received: timed graceful shutdown started (17s); "
             "press Ctrl+C again to force teardown"
         )
+
+    @pytest.mark.parametrize("signal_count", [1, 2])
+    def test_signal_parks_auxiliary_learning_and_restart_recovers_it(
+        self,
+        signal_count: int,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Graceful and forced shutdown keep durable learning resumable."""
+        _capture_signal_handlers(monkeypatch)
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        intent = LearningIntent.post_merge(repo="repo-a", issue=81, pr=181)
+        journal = coordinator._ctx_for_repo("repo-a").learning_journal
+        journal.ensure_pending(
+            intent.key,
+            kind=intent.kind.value,
+            identity=intent.journal_identity(),
+        )
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=81,
+            pr=181,
+            stage=StageName.LEARNING,
+        )
+        item.learning_intents.append(intent)
+        item.learning_resume_stage = StageName.FINISHED
+        assert coordinator._push_item(item, StageName.LEARNING, enter=True)
+        coordinator._install_signal_handlers()
+        handler = signal_mod.getsignal(signal_mod.SIGINT)
+        assert callable(handler)
+        for _ in range(signal_count):
+            handler(signal_mod.SIGINT, None)
+
+        assert coordinator.run() == 130
+        assert item.result is not None
+        assert item.result.reason == "resumable at learning"
+        record = journal.load(intent.key)
+        assert record is not None and record["status"] == "pending"
+
+        restarted = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        recovered = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=81, pr=181)
+        restarted._restore_learning_intents(recovered, StageName.FINISHED, "merged")
+
+        assert recovered.stage is StageName.LEARNING
+        assert recovered.learning_intents == [intent]
 
 
 class TestNormalTeardownExitSemantics:

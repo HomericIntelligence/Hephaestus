@@ -892,6 +892,22 @@ def test_parser_action_specs_are_preserved(
     assert _sorted_specs(_specs(factory())) == _sorted_specs(expected)
 
 
+@pytest.mark.parametrize(
+    "factory",
+    [planner._build_parser, implementer._build_parser, ci_driver._build_parser],
+)
+@pytest.mark.parametrize("flag", ["--learning-workers", "--learning-queue-capacity"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_learning_capacity_flags_require_positive_values(
+    factory: Callable[[], argparse.ArgumentParser], flag: str, value: str
+) -> None:
+    """All queue wrappers reject invalid learning capacity at parse time."""
+    with pytest.raises(SystemExit) as error:
+        factory().parse_args([flag, value])
+
+    assert error.value.code == 2
+
+
 def test_ci_driver_help_describes_loop_owned_review() -> None:
     """The historical driver advertises loop-owned review and arming."""
     description = ci_driver._build_parser().description or ""

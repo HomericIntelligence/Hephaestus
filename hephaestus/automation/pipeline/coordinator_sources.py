@@ -429,9 +429,10 @@ class SourceCoordinator(_CoordinatorHost):
         if not self.config.issues:
             return
         open_issues = _admission._filter_open_issues(repo, self.config.issues)
+        unique_open_issues = list(dict.fromkeys(open_issues))
         self._direct_issue_source = _DirectIssueSource(
             repo=repo,
-            issues=deque(open_issues),
+            issues=deque(unique_open_issues),
             base_sha=base_sha,
             run_nonce=uuid.uuid4().hex,
             wave_lease=self._direct_wave_lease,

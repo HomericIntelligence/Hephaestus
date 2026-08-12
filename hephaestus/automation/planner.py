@@ -32,6 +32,7 @@ from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
+    positive_int,
 )
 from hephaestus.config.paths import resolve_projects_dir
 
@@ -130,8 +131,8 @@ Examples:
         action="store_true",
         help="Skip the advise step (don't search team knowledge base before planning)",
     )
-    parser.add_argument("--learning-workers", type=int, default=1)
-    parser.add_argument("--learning-queue-capacity", type=int, default=1)
+    parser.add_argument("--learning-workers", type=positive_int, default=1)
+    parser.add_argument("--learning-queue-capacity", type=positive_int, default=1)
     parser.add_argument("--no-learn", action="store_true")
     add_agent_timeout_arg(parser)
     add_advise_timeout_arg(parser)

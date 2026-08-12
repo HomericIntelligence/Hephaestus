@@ -205,7 +205,8 @@ class FinishedStage(Stage):
             if isinstance(reservation, dict):
                 branch_name = reservation.get("branch")
                 base_sha = reservation.get("base_sha")
-                if isinstance(branch_name, str) and is_full_commit_sha(base_sha):
+                owns_branch = isinstance(branch_name, str) and branch_name == item.branch
+                if owns_branch and is_full_commit_sha(base_sha):
                     # The branch contains no coordinator-published commit.
                     # Release only if its remote ref is still the exact base
                     # we reserved, so a later human/concurrent writer is
@@ -238,10 +239,12 @@ class FinishedStage(Stage):
                     )
                 else:
                     logger.warning(
-                        "finished:%s: invalid direct-scope reservation receipt; "
+                        "finished:%s: invalid or stale direct-scope reservation receipt; "
                         "not releasing branch",
                         item.issue or item.repo,
                     )
+                    item.payload["_learning_cleanup_succeeded"] = False
+                    item.payload["_learning_cleanup_error"] = "cleanup ownership changed"
             item.payload["_direct_scope_reservation_release_attempted"] = True
 
         if not item.worktree:
@@ -293,6 +296,7 @@ class FinishedStage(Stage):
             # human may edit it before this terminal cleanup runs. Refuse to
             # discard that late edit; on failure the worktree is preserved.
             "force": not is_direct_noop,
+            **({"expected_branch": item.branch} if item.branch else {}),
         }
         if is_direct_noop:
             kwargs["local_branch_cleanup"] = local_cleanup

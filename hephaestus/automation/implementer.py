@@ -49,6 +49,7 @@ from hephaestus.cli.utils import (
     add_follow_up_timeout_arg,
     add_git_message_timeout_arg,
     add_learn_timeout_arg,
+    positive_int,
 )
 from hephaestus.config.paths import resolve_projects_dir
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
@@ -201,8 +202,8 @@ Examples:
         action="store_true",
         help="Disable /learn after implementation (enabled by default)",
     )
-    parser.add_argument("--learning-workers", type=int, default=1)
-    parser.add_argument("--learning-queue-capacity", type=int, default=1)
+    parser.add_argument("--learning-workers", type=positive_int, default=1)
+    parser.add_argument("--learning-queue-capacity", type=positive_int, default=1)
     parser.add_argument(
         "--no-follow-up",
         action="store_true",

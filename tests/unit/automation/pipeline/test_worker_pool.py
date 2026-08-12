@@ -2818,6 +2818,46 @@ class TestGitOps:
         assert result.error == "worktree cleanup identity is invalid"
         mock_run.assert_not_called()
 
+    def test_remove_worktree_rejects_replacement_branch(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Recovered cleanup cannot remove a replacement worktree at the expected path."""
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / "issue-7"),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "expected_branch": "7-auto",
+                "force": True,
+            },
+        )
+        records = [
+            {
+                "path": str(tmp_path / "issue-7"),
+                "branch": "refs/heads/human-work",
+                "commit": "a" * 40,
+            }
+        ]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run,
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup ownership changed"
+        mock_run.assert_not_called()
+
     def test_remove_worktree_conditionally_releases_noop_local_branch(
         self,
         pool: WorkerPool,
@@ -2835,11 +2875,23 @@ class TestGitOps:
                 "repo_root": str(tmp_path),
                 "issue_number": 7,
                 "force": True,
+                "expected_branch": "7-auto",
                 "local_branch_cleanup": {"branch": "7-auto", "base_sha": pin},
             },
         )
+        records = [
+            {
+                "path": str(tmp_path / "issue-7"),
+                "branch": "refs/heads/7-auto",
+                "commit": pin,
+            }
+        ]
         with (
             patch("hephaestus.automation.pipeline.git_cleanup.run"),
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
             patch(
                 "hephaestus.automation.pipeline.git_cleanup.delete_local_branch_if_unchanged",
                 return_value=True,

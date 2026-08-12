@@ -526,8 +526,60 @@ def test_no_learn_restores_terminal_cleanup_before_disabling(tmp_path: Path) -> 
     coordinator._restore_learning_intents(recovered, StageName.FINISHED, "already merged")
 
     assert recovered.post_processing is not None
+    assert recovered.post_processing.intent_keys == (intent.key,)
     assert recovered.worktree == original.worktree
     assert recovered.branch == original.branch
+
+    recovered.state = "DONE"
+    finished = coordinator.stages[StageName.FINISHED]
+    assert finished.step(recovered, coordinator._ctx_for_repo("repo")) == StageOutcome(
+        Disposition.FINISH_PASS,
+        "done",
+    )
+    terminal = journal.load(intent.key)
+    assert terminal is not None
+    assert terminal["cleanup_status"] == "succeeded"
+
+
+def test_malformed_post_processing_quarantines_only_one_issue(tmp_path: Path) -> None:
+    """One damaged cleanup receipt does not stop later repository discovery."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(
+        intent.key,
+        kind=intent.kind.value,
+        identity={
+            **intent.journal_identity(),
+            "post_processing": {
+                "worktree": "",
+                "branch": "",
+                "resume_stage": StageName.FINISHED.value,
+                "cleanup_payload": {},
+                "result": {
+                    "passed": "false",
+                    "reason": "bad",
+                    "final_stage": StageName.MERGE_WAIT.value,
+                },
+            },
+        },
+    )
+    damaged = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2705)
+    healthy = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=2706)
+
+    coordinator._restore_learning_intents(damaged, StageName.FINISHED, "merged")
+    coordinator._restore_learning_intents(healthy, StageName.PLANNING, "open")
+
+    assert damaged.stage is StageName.FINISHED
+    assert damaged.result is not None
+    assert not damaged.result.passed
+    assert damaged.result.reason == "invalid durable learning recovery state"
+    assert healthy.stage is StageName.REPO
 
 
 def test_post_merge_persistence_failure_keeps_confirmed_result(tmp_path: Path) -> None:
@@ -646,6 +698,27 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
     assert coordinator._push_item(unrelated, StageName.PLANNING, enter=True)
     assert coordinator.live_work_count == 1
     assert coordinator.learning_work_count == 1
+    assert coordinator._claim_item(StageName.PLANNING) is unrelated
+    progressed = threading.Event()
+
+    class ProgressStage:
+        def on_enter(self, _item: WorkItem, _ctx: object) -> StageOutcome:
+            progressed.set()
+            return StageOutcome(Disposition.EJECT, "unrelated completed")
+
+        def step(self, _item: WorkItem, _ctx: object) -> StageOutcome:
+            raise AssertionError("on_enter completes the unrelated item")
+
+        def on_job_done(self, _item: WorkItem, _result: JobResult, _ctx: object) -> None:
+            raise AssertionError("progress stage submits no job")
+
+    coordinator.stages[StageName.PLANNING] = ProgressStage()  # type: ignore[assignment]
+    coordinator._run_item(unrelated)
+    assert progressed.is_set()
+    assert unrelated.result is not None
+    assert unrelated.result.passed
+    assert unrelated.result.reason == "ejected: unrelated completed"
+    assert not host.release.is_set()
 
     host.release.set()
     done, result = coordinator.auxiliary_completion_q.get(timeout=2)
