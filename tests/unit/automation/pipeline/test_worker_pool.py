@@ -2772,15 +2772,16 @@ class TestGitOps:
                 "worktree_path": str(tmp_path / "issue-7"),
                 "repo_root": str(tmp_path),
                 "issue_number": 7,
-                "force": True,
+                "force": False,
             },
         )
         with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+            mock_run.return_value.stdout = ""
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
         mock_run.assert_any_call(
-            ["git", "worktree", "remove", str(tmp_path / "issue-7"), "--force"],
+            ["git", "worktree", "remove", str(tmp_path / "issue-7")],
             cwd=tmp_path,
             timeout=60,
         )
@@ -2791,6 +2792,37 @@ class TestGitOps:
             timeout=60,
         )
         assert result.ok is True
+
+    def test_remove_worktree_rejects_dirty_checkout(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Cleanup preserves tracked and untracked work after learning."""
+        worktree = tmp_path / "issue-7"
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(worktree),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "force": False,
+            },
+        )
+        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+            mock_run.return_value.stdout = "?? learning-notes.md\n"
+            pool.submit(job, StageName.FINISHED)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup refused a dirty checkout"
+        assert not any(
+            call.args and call.args[0][:3] == ["git", "worktree", "remove"]
+            for call in mock_run.call_args_list
+        )
 
     def test_remove_worktree_rejects_path_outside_issue_identity(
         self,
@@ -2858,6 +2890,47 @@ class TestGitOps:
         assert result.error == "worktree cleanup ownership changed"
         mock_run.assert_not_called()
 
+    def test_remove_worktree_rejects_replacement_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Delayed cleanup cannot remove a checkout that moved to a new commit."""
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / "issue-7"),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "expected_branch": "7-auto",
+                "expected_head": "a" * 40,
+                "force": False,
+            },
+        )
+        records = [
+            {
+                "path": str(tmp_path / "issue-7"),
+                "branch": "refs/heads/7-auto",
+                "commit": "b" * 40,
+            }
+        ]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
+                return_value=records,
+            ),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run,
+        ):
+            pool.submit(job, StageName.FINISHED)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup ownership changed"
+        mock_run.assert_not_called()
+
     def test_remove_worktree_conditionally_releases_noop_local_branch(
         self,
         pool: WorkerPool,
@@ -2887,7 +2960,7 @@ class TestGitOps:
             }
         ]
         with (
-            patch("hephaestus.automation.pipeline.git_cleanup.run"),
+            patch("hephaestus.automation.pipeline.git_cleanup.run") as run,
             patch(
                 "hephaestus.automation.pipeline.git_cleanup.WorktreeManager.list_worktrees",
                 return_value=records,
@@ -2897,6 +2970,7 @@ class TestGitOps:
                 return_value=True,
             ) as release,
         ):
+            run.return_value.stdout = ""
             pool.submit(job, StageName.FINISHED)
             _, result = completion_q.get(timeout=10)
 

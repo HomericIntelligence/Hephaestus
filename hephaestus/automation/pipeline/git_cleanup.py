@@ -111,24 +111,39 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
         ):
             return JobResult(ok=False, error="worktree cleanup identity is invalid")
         expected_branch = job.kwargs.get("expected_branch")
+        expected_head = job.kwargs.get("expected_head")
         with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
-            if expected_branch is not None:
+            if expected_branch is not None or expected_head is not None:
                 record = _worktree_record(
                     worktree_path,
                     repo_root=repo_root,
                     timeout=job.timeout_s,
                     worktree_manager_type=worktree_manager_type,
                 )
-                if (
+                branch_changed = expected_branch is not None and (
                     not isinstance(expected_branch, str)
                     or not expected_branch
                     or record is None
                     or record.get("branch") != f"refs/heads/{expected_branch}"
-                ):
+                )
+                head_changed = expected_head is not None and (
+                    not _is_full_commit_sha(expected_head)
+                    or record is None
+                    or record.get("commit") != expected_head
+                )
+                if branch_changed or head_changed:
                     return JobResult(ok=False, error="worktree cleanup ownership changed")
+            status = run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=worktree_path,
+                timeout=job.timeout_s,
+            )
+            if status.stdout.strip():
+                return JobResult(
+                    ok=False,
+                    error="worktree cleanup refused a dirty checkout",
+                )
             command = ["git", "worktree", "remove", str(worktree_path)]
-            if job.kwargs.get("force"):
-                command.append("--force")
             run(command, cwd=repo_root, timeout=job.timeout_s)
             run(
                 ["git", "worktree", "prune"],

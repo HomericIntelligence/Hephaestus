@@ -1204,7 +1204,11 @@ after all intents are terminal.
 ### 5.8 `finished`
 
 Finished records the final outcome exactly once and applies workspace retention
-policy. It does not change issue, review, or merge verdicts.
+policy. A post-merge writer worktree remains available while learning runs.
+Finished removes it only after all durable learning intents are terminal. The
+cleanup job verifies the registered branch or detached head and refuses a
+dirty checkout. It never forces removal. Finished does not change issue,
+review, or merge verdicts.
 
 States: `ENTER → RECORD → CLEANUP → DONE`.
 

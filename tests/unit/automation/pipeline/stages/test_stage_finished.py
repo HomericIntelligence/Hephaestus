@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -20,7 +21,12 @@ from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import finished as finished_module
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.finished import FinishedStage
-from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.automation.pipeline.work_item import (
+    ItemKind,
+    ItemResult,
+    PostProcessingRecord,
+    WorkItem,
+)
 
 # tests/unit/automation/pipeline/stages/ -> parents[5] = repo root
 ROOT = Path(__file__).resolve().parents[5]
@@ -147,6 +153,8 @@ class TestCleanup:
     ) -> None:
         ctx = make_ctx()
         item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.branch = "42-fix"
+        item.payload["_worktree_cleanup_head_sha"] = "a" * 40
 
         result = stage.step(item, ctx)
 
@@ -156,9 +164,37 @@ class TestCleanup:
             "worktree_path": "/wt/issue-42",
             "repo_root": str(ctx.paths.repo_root),
             "issue_number": 42,
-            "force": True,
+            "force": False,
+            "expected_branch": "42-fix",
+            "expected_head": "a" * 40,
         }
         assert result.on_done_state == "DONE"
+
+    def test_pending_learning_preserves_worktree_before_cleanup(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """Finished cannot remove a writer worktree before learning is terminal."""
+        ctx = make_ctx(
+            learning_journal=SimpleNamespace(
+                load=lambda key: {"status": "pending"} if key == "post_merge:pending" else None
+            )
+        )
+        item = _item(passed=True, worktree="/wt/issue-42", state="CLEANUP")
+        item.post_processing = PostProcessingRecord(
+            result=item.result,
+            resume_stage=StageName.FINISHED,
+            intent_keys=("post_merge:pending",),
+            cleanup_payload={},
+        )
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="DONE")
+        assert preserved == [("repo-a", 42, "/wt/issue-42")]
+        assert item.payload["_learning_cleanup_succeeded"] is False
+        assert item.payload["_learning_cleanup_error"] == "learning is not terminal"
 
     def test_fresh_review_completion_retains_only_receipt_backed_recovery_checkouts(
         self,

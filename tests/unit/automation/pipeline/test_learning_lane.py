@@ -784,6 +784,8 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
         install_signals=False,
     )
     item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, pr=7, stage=StageName.MERGE_WAIT)
+    item.worktree = str(tmp_path / "repo" / "build" / ".worktrees" / "issue-1")
+    item.branch = "1-fix"
     item.payload.update({"pr_diff": "large raw diff", "review_audit": {"large": "value"}})
     item.learning_intents.append(LearningIntent.post_merge(repo="repo", issue=1, pr=7))
 
@@ -796,6 +798,8 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
     assert item.post_processing is not None
     assert item.post_processing.result.passed
     assert item.post_processing.result.final_stage is StageName.MERGE_WAIT
+    assert item.worktree.endswith("issue-1")
+    assert item.branch == "1-fix"
 
     item.payload["learning_failures"] = [{"key": "intent", "error": "host failed"}]
     coordinator._route(item, StageOutcome(Disposition.ADVANCE, "learning terminal"))
@@ -805,6 +809,7 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
     assert item.result.passed
     assert item.result.reason == "merged"
     assert item.result.final_stage is StageName.MERGE_WAIT
+    assert item.worktree.endswith("issue-1")
 
 
 def test_learning_completion_exception_parks_before_cleanup(tmp_path: Path) -> None:
