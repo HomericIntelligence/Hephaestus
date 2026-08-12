@@ -966,6 +966,16 @@ class CoordinatorRuntime(_CoordinatorHost):
         if disposition is Disposition.SKIP:
             self._finish(item, passed=False, reason=f"skip: {outcome.note}")
             return
+        if disposition is Disposition.EJECT:
+            item.result = ItemResult(
+                passed=True,
+                reason=f"ejected: {outcome.note}",
+                final_stage=item.stage,
+            )
+            self._record_terminal_result(item)
+            self._release_source_lease(item)
+            self._release_work_permit(item)
+            return
         if disposition is Disposition.BLOCKED:
             self._finish(item, passed=False, reason=f"blocked: {outcome.note}")
             return
@@ -979,8 +989,26 @@ class CoordinatorRuntime(_CoordinatorHost):
                     reason=primary_reason,
                     final_stage=StageName.MERGE_WAIT,
                 )
-                item.compact_for_post_processing(terminal_result)
-                self._persist_learning_intents(item)
+                try:
+                    item.compact_for_post_processing(terminal_result)
+                    self._persist_learning_intents(item)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "merge_wait:%s: could not persist ancillary learning: %s",
+                        item.issue or item.repo,
+                        exc,
+                    )
+                    item.payload.setdefault("learning_failures", []).append(
+                        {"key": "post_merge", "error": str(exc)[:1000]}
+                    )
+                    item.learning_intents.clear()
+                    self._handoff_item(
+                        item,
+                        StageName.FINISHED,
+                        enter=True,
+                        result=terminal_result,
+                    )
+                    return
                 self._handoff_item(
                     item,
                     StageName.LEARNING,

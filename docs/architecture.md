@@ -251,7 +251,7 @@ tick does, in order:
 4. **Emit observability tick** — push queue-depth / in-flight / circuit
  breaker gauges and record alert transitions
  ([`_emit_observability_tick`](../hephaestus/automation/pipeline/coordinator.py)).
-5. **Drain queues down-stream first** — `finished → merge_wait →
+5. **Drain queues down-stream first** — `finished → learning → merge_wait →
  pr_review → implementation → plan_review → planning → repo`
  ([`_DRAIN_ORDER`](../hephaestus/automation/pipeline/coordinator.py)).
  Implementation drains separately to enforce dependency topo-order
@@ -554,14 +554,13 @@ Key fields:
 `str`-flavored `Enum`:
 
 ```
-REPO → PLANNING → PLAN_REVIEW → IMPLEMENTATION → PR_REVIEW →
- MERGE_WAIT → FINISHED
+REPO → PLANNING → PLAN_REVIEW → IMPLEMENTATION → PR_REVIEW → MERGE_WAIT
+LEARNING → FINISHED
 ```
 
-Declaration order matches
-[`PIPELINE_ORDER`](../hephaestus/automation/pipeline/routing.py) and the
-[`_DRAIN_ORDER`](../hephaestus/automation/pipeline/coordinator.py) reversed.
-DO NOT REORDER — the `PipelineScope` contiguity check indexes by position.
+`MAIN_PIPELINE_ORDER` controls scope contiguity. `LEARNING` and `FINISHED` are
+the auxiliary lane. Declaration order matches `PIPELINE_ORDER`; `_DRAIN_ORDER`
+uses its reverse order. Do not reorder these values.
 
 ### [§`Disposition`](../hephaestus/automation/pipeline/routing.py)
 
@@ -575,6 +574,8 @@ DO NOT REORDER — the `PipelineScope` contiguity check indexes by position.
  `ROUTES[stage].fail_routes.get(note, …)`; failing-back from the
  coordinator's safety cap finishes failed.
 - `SKIP` — finish failed with reason `skip:<note>`.
+- `EJECT` — remove work that a different live process owns. Record a passed
+ terminal summary without cleanup or another delivery attempt.
 - `BLOCKED` — finish failed with reason `blocked:<note>`.
 - `FINISH_PASS` / `FINISH_FAIL` — terminal; pass with reason `<note>` /
  fail with reason `<note>`.
@@ -1191,6 +1192,10 @@ An ambiguous crash-left claim becomes terminal `failed` with
 `outcome_unknown`; it is not submitted twice. Learning failure is ancillary
 and cannot change a confirmed main result.
 
+A live claim held by another process ejects the duplicate item. The owner keeps
+the claim, the main result, and the cleanup obligation. A terminal learning
+record stays recoverable until `finished` records a bounded cleanup result.
+
 Main and learning permits are separate. Handoffs reserve the bounded
 destination before they release the source. Approved-plan work returns to the
 scope-trimmed main destination. Post-merge work continues to `finished` only
@@ -1611,6 +1616,8 @@ are reported through `hephaestus_metrics_series_overflow_total`.
 |-------------------------------------------|--------|-----------|-----:|---------|-----------|
 | `hephaestus_pipeline_queue_depth` | Gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `learning`, `finished` | 8 | `0` | Item count per pipeline stage. Useful for detecting back-pressure. |
 | `hephaestus_pipeline_inflight_jobs` | Gauge | (none) | 1 | `0` | Total in-flight jobs across all worker pools. |
+| `hephaestus_pipeline_lane_queue_depth` | Gauge | `lane`: `main`, `auxiliary` | 2 | `0` | Queued items partitioned by worker lane. |
+| `hephaestus_pipeline_lane_inflight_jobs` | Gauge | `lane`: `main`, `auxiliary` | 2 | `0` | In-flight jobs partitioned by worker lane. |
 | `hephaestus_pipeline_inflight_per_repo` | Gauge | `repo`: open repository names | 100 | `0` | Main-lane in-flight jobs by repo, capped by `max_workers`. Auxiliary work is reported by the lane gauges. |
 | `hephaestus_circuit_breaker_state` | Gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | `0` | `1` for the active state, `0` for prior states (only emitted from the optional `circuit_breaker_snapshot_provider`). |
 | `hephaestus_pipeline_alert_active` | Gauge | `name`: `circuit_breaker_open`, `queue_depth_exceeds`, `pipeline_stalled` | 3 | `0` | `1` while a fired alert is unresolved, `0` when resolved. |
@@ -1753,9 +1760,9 @@ Exit-code priority is:
  (`queue.Queue[(JobHandle, JobResult)]`, capacity `C`). Event latches carry
  wake and saturation signals without queue payloads.
  [`queues.py`](../hephaestus/automation/pipeline/queues.py).
-- **Durable journal** — GitHub labels, comments, PR state, and
- `ArmingStateStore` records. Restart reconstruction reads this;
- nothing else.
+- **Durable journal** — GitHub labels, comments, PR state,
+ `LearningJournalStore` records, `ArmingStateStore` records, and issue-wave
+ checkpoints. Restart reconstruction reads these stores.
 - **Timer-park** — non-blocking retry/backoff by pushing an item onto
  the coordinator timer heap
  ([`_timer_park`](../hephaestus/automation/pipeline/coordinator.py)).

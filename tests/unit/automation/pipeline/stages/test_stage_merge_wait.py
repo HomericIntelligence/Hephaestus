@@ -625,6 +625,27 @@ def test_merged_emits_post_merge_intent_without_job(
     assert github.merge_attempts == []
 
 
+def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: Any) -> None:
+    """A journal failure after merge confirmation cannot change merge success."""
+    from hephaestus.automation.arming_state import LearningJournalStore
+
+    class BrokenJournal(LearningJournalStore):
+        def ensure_pending(self, *_args: object, **_kwargs: object) -> None:
+            raise OSError("journal unavailable")
+
+    github = _ConditionalGitHub(states=[{"state": "MERGED"}])
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(),
+        item,
+        make_ctx(github=github, learning_journal=BrokenJournal(lambda: Path("."))),
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert item.payload["learning_failures"][0]["error"] == "learning_intent_persist_failed"
+
+
 def test_legacy_inflight_learning_is_not_dispatched_again(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:

@@ -2771,6 +2771,7 @@ class TestGitOps:
             kwargs={
                 "worktree_path": str(tmp_path / "issue-7"),
                 "repo_root": str(tmp_path),
+                "issue_number": 7,
                 "force": True,
             },
         )
@@ -2791,6 +2792,32 @@ class TestGitOps:
         )
         assert result.ok is True
 
+    def test_remove_worktree_rejects_path_outside_issue_identity(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Recovered cleanup cannot remove a path for another identity."""
+        job = GitJob(
+            repo="test/repo",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path / "issue-8"),
+                "repo_root": str(tmp_path),
+                "issue_number": 7,
+                "force": True,
+            },
+        )
+        with patch("hephaestus.automation.pipeline.git_cleanup.run") as mock_run:
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "worktree cleanup identity is invalid"
+        mock_run.assert_not_called()
+
     def test_remove_worktree_conditionally_releases_noop_local_branch(
         self,
         pool: WorkerPool,
@@ -2806,6 +2833,7 @@ class TestGitOps:
             kwargs={
                 "worktree_path": str(tmp_path / "issue-7"),
                 "repo_root": str(tmp_path),
+                "issue_number": 7,
                 "force": True,
                 "local_branch_cleanup": {"branch": "7-auto", "base_sha": pin},
             },
@@ -3548,6 +3576,30 @@ class TestGitOps:
 
         assert result.ok is True
         assert result.value is False
+        release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
+
+    def test_release_branch_reservation_accepts_sha256_object_id(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """Cleanup supports repositories that use SHA-256 object IDs."""
+        pin = "a" * 64
+        job = GitJob(
+            repo="test/repo",
+            op="release_branch_reservation",
+            timeout_s=60,
+            kwargs={"branch": "7-auto", "base_sha": pin, "repo_root": str(tmp_path)},
+        )
+        with patch(
+            "hephaestus.automation.pipeline.git_cleanup.delete_reserved_branch_if_unchanged",
+            return_value=True,
+        ) as release:
+            pool.submit(job, StageName.FINISHED)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok
         release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
 
     def test_commit_push_extracts_explicit_keys(

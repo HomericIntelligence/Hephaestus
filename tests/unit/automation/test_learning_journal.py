@@ -74,6 +74,31 @@ def test_learning_journal_does_not_overwrite_corrupt_record(tmp_path: Path) -> N
     assert path.read_text(encoding="utf-8") == "{not-json"
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("cleanup_status", "unknown", "invalid cleanup status"),
+        ("post_processing", "not-an-object", "invalid post-processing data"),
+    ],
+)
+def test_learning_journal_rejects_invalid_cleanup_state(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    """Recovery rejects malformed cleanup state before it can delete files."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    store.ensure_pending("key", kind="post_merge")
+    path = store.path("key")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record[field] = value
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(arming_state.LearningJournalError, match=message):
+        store.load("key")
+
+
 def test_learning_journal_identity_cannot_replace_reserved_fields(tmp_path: Path) -> None:
     """Caller identity cannot change journal protocol fields."""
     store = arming_state.LearningJournalStore(lambda: tmp_path)
@@ -99,6 +124,39 @@ def test_learning_journal_exposes_live_claim_until_finish(tmp_path: Path) -> Non
 
     owner.finish("key", succeeded=True)
     assert observer.claim_is_active("key") is False
+
+
+def test_learning_journal_requires_local_claim_ownership_to_finish(tmp_path: Path) -> None:
+    """One process cannot finish another process's claimed delivery."""
+    owner = arming_state.LearningJournalStore(lambda: tmp_path)
+    observer = arming_state.LearningJournalStore(lambda: tmp_path)
+    owner.ensure_pending("key", kind="approved_plan")
+    assert owner.claim("key")
+
+    with pytest.raises(ValueError, match="owned by this process"):
+        observer.finish("key", succeeded=True)
+
+    owner.finish("key", succeeded=True)
+
+
+def test_terminal_learning_keeps_cleanup_recoverable(tmp_path: Path) -> None:
+    """A terminal learn result remains discoverable until cleanup completes."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    identity = {
+        "repo": "Hephaestus",
+        "issue": 2705,
+        "post_processing": {"result": {"passed": True}},
+    }
+    store.ensure_pending("key", kind="post_merge", identity=identity)
+    assert store.claim("key")
+    store.finish("key", succeeded=True)
+
+    assert [
+        record["key"] for record in store.incomplete_for_issue(repo="Hephaestus", issue=2705)
+    ] == ["key"]
+
+    store.finish_cleanup("key", succeeded=True)
+    assert store.incomplete_for_issue(repo="Hephaestus", issue=2705) == []
 
 
 def test_learning_journal_validates_required_identity(tmp_path: Path) -> None:

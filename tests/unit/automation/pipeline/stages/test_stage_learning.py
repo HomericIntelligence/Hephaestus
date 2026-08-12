@@ -178,16 +178,62 @@ def test_live_claim_is_ejected_without_terminalizing_owner(
     assert owner.claim(intent.key)
 
     stage = LearningStage()
-    assert stage.step(item, ctx) == Continue(next_state="CLAIM")
     assert stage.step(item, ctx) == StageOutcome(
-        Disposition.FAIL_BACK,
-        "resume_implementation",
+        Disposition.EJECT,
+        "learning_claim_owned_elsewhere",
     )
 
     record = observer.load(intent.key)
     assert record is not None and record["status"] == "claimed"
-    assert item.payload["learning_external_claims"] == [intent.key]
     owner.finish(intent.key, succeeded=True)
+
+
+def test_completion_is_bound_to_the_locally_submitted_intent(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A local completion cannot terminalize another process's live claim."""
+    owner = LearningJournalStore(lambda: tmp_path)
+    observer = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(learning_journal=observer, budget_fn=lambda _name: 1)
+    item = make_work_item(issue=2705, state="CLAIM")
+    external = LearningIntent.post_merge(repo=item.repo, issue=2705, pr=1)
+    local = LearningIntent.post_merge(repo=item.repo, issue=2705, pr=2)
+    item.learning_intents.extend([external, local])
+    item.learning_resume_stage = StageName.FINISHED
+    for intent in item.learning_intents:
+        observer.ensure_pending(
+            intent.key,
+            kind=intent.kind.value,
+            identity=intent.journal_identity(),
+        )
+    assert owner.claim(external.key)
+    item.payload["learning_external_claims"] = [external.key]
+
+    stage = LearningStage()
+    request = stage.step(item, ctx)
+    assert isinstance(request, JobRequest)
+    assert request.job.request.payload["intent_key"] == local.key
+    sha = "a" * 40
+    stage.on_job_done(
+        item,
+        JobResult(
+            ok=True,
+            value=AthenaSkillResult(
+                kind="learn",
+                delivery_receipt={
+                    "pr_url": "https://github.com/HomericIntelligence/Mnemosyne/pull/1",
+                    "pr_number": 1,
+                    "commit_sha": sha,
+                    "readback_head_sha": sha,
+                },
+            ),
+        ),
+        ctx,
+    )
+
+    assert observer.load(external.key)["status"] == "claimed"
+    assert observer.load(local.key)["status"] == "succeeded"
+    owner.finish(external.key, succeeded=True)
 
 
 def test_cancellation_before_host_start_returns_claim_to_pending(

@@ -155,6 +155,7 @@ class TestCleanup:
         assert result.job.kwargs == {
             "worktree_path": "/wt/issue-42",
             "repo_root": str(ctx.paths.repo_root),
+            "issue_number": 42,
             "force": True,
         }
         assert result.on_done_state == "DONE"
@@ -373,6 +374,7 @@ class TestCleanup:
         assert result.job.kwargs == {
             "worktree_path": "/wt/issue-42",
             "repo_root": str(ctx.paths.repo_root),
+            "issue_number": 42,
             "force": False,
             "local_branch_cleanup": {
                 "branch": "42-auto-impl",

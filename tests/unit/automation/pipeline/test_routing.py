@@ -54,6 +54,7 @@ class TestDisposition:
             "retry",
             "fail_back",
             "skip",
+            "eject",
             "blocked",
             "finish_pass",
             "finish_fail",

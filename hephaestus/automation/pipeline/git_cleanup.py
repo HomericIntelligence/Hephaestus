@@ -21,9 +21,32 @@ from .job_results import JobResult
 def _is_full_commit_sha(value: object) -> bool:
     return (
         isinstance(value, str)
-        and len(value) == 40
+        and len(value) in (40, 64)
         and all(character in "0123456789abcdefABCDEF" for character in value)
     )
+
+
+def _is_expected_worktree_path(path: Path, *, repo_root: Path, issue_number: int) -> bool:
+    """Bind destructive cleanup to one managed issue worktree identity."""
+    if issue_number <= 0:
+        return False
+    try:
+        resolved = path.resolve()
+        root = repo_root.resolve()
+    except OSError:
+        return False
+    expected_names = (
+        f"issue-{issue_number}",
+        f"issue-{issue_number}-direct-",
+        f"review-pr-{issue_number}",
+    )
+    if (
+        resolved.name != expected_names[0]
+        and not resolved.name.startswith(expected_names[1])
+        and resolved.name != expected_names[2]
+    ):
+        return False
+    return resolved.parent in {root, root / "build" / ".worktrees"}
 
 
 def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager) -> JobResult:
@@ -56,6 +79,17 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
     if job.kwargs.get("worktree_path"):
         worktree_path = Path(str(job.kwargs["worktree_path"]))
         repo_root = Path(str(job.kwargs.get("repo_root") or get_repo_root()))
+        issue_number = job.kwargs.get("issue_number")
+        if (
+            isinstance(issue_number, bool)
+            or not isinstance(issue_number, int)
+            or not _is_expected_worktree_path(
+                worktree_path,
+                repo_root=repo_root,
+                issue_number=issue_number,
+            )
+        ):
+            return JobResult(ok=False, error="worktree cleanup identity is invalid")
         with file_lock(worktree_manager_type.git_metadata_lock_path(repo_root)):
             command = ["git", "worktree", "remove", str(worktree_path)]
             if job.kwargs.get("force"):

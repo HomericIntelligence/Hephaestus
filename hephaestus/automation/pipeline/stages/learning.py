@@ -67,6 +67,7 @@ class LearningStage:
             return skip
         if not journal.claim(intent.key):
             return Continue(next_state=CLAIM)
+        item.payload["_learning_claimed_intent_key"] = intent.key
 
         payload: dict[str, object] = {
             "issue_number": intent.issue,
@@ -98,7 +99,7 @@ class LearningStage:
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: Any) -> None:
         """Record success or apply the bounded retry policy."""
-        intent = self._claimed_intent(item, ctx)
+        intent = self._locally_claimed_intent(item)
         if intent is None:
             return
         succeeded = bool(
@@ -132,7 +133,7 @@ class LearningStage:
 
     def on_cancelled_before_start(self, item: WorkItem, ctx: Any) -> None:
         """Return a claim to pending when the host provably did not run."""
-        intent = self._claimed_intent(item, ctx)
+        intent = self._locally_claimed_intent(item)
         if intent is not None:
             self._journal(ctx).retry(intent.key, error="interrupted_before_start")
 
@@ -154,13 +155,12 @@ class LearningStage:
                 return intent
         return None
 
-    def _claimed_intent(self, item: WorkItem, ctx: Any) -> LearningIntent | None:
-        journal = self._journal(ctx)
-        for intent in item.learning_intents:
-            record = journal.load(intent.key)
-            if record is not None and record["status"] == "claimed":
-                return intent
-        return None
+    @staticmethod
+    def _locally_claimed_intent(item: WorkItem) -> LearningIntent | None:
+        key = item.payload.pop("_learning_claimed_intent_key", None)
+        if not isinstance(key, str):
+            return None
+        return next((intent for intent in item.learning_intents if intent.key == key), None)
 
     def _claim_or_skip(
         self,
@@ -169,13 +169,19 @@ class LearningStage:
         record: dict[str, Any],
         journal: LearningJournalStore,
         ctx: Any,
-    ) -> Continue | None:
+    ) -> Continue | StageOutcome | None:
         """Handle terminal, ambiguous, and stale-plan records before claim."""
         if record["status"] == "claimed":
             if journal.claim_is_active(intent.key):
-                item.payload.setdefault("learning_external_claims", []).append(intent.key)
-                return Continue(next_state=CLAIM)
-            journal.finish(intent.key, succeeded=False, error="outcome_unknown")
+                return StageOutcome(
+                    Disposition.EJECT,
+                    "learning_claim_owned_elsewhere",
+                )
+            if journal.fail_abandoned_claim(intent.key, error="outcome_unknown") is None:
+                return StageOutcome(
+                    Disposition.EJECT,
+                    "learning_claim_owned_elsewhere",
+                )
             item.payload.setdefault("learning_failures", []).append(
                 {"key": intent.key, "error": "outcome_unknown"}
             )

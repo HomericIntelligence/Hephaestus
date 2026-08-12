@@ -27,7 +27,7 @@ class AuxiliaryWorkerPool:
         size: int,
         shutdown: threading.Event,
         completion_q: queue.Queue[tuple[JobHandle, JobResult]],
-        athena_skill_executor: AthenaSkillExecutor,
+        athena_skill_executor: AthenaSkillExecutor | None,
         cleanup_runner: CleanupRunner | None = None,
     ) -> None:
         """Create a bounded host-only executor."""
@@ -57,6 +57,8 @@ class AuxiliaryWorkerPool:
         if isinstance(job, AthenaSkillJob):
             if job.request.kind != "learn":
                 raise TypeError("auxiliary worker pool accepts only Athena learn jobs")
+            if self._athena_skill_executor is None:
+                raise RuntimeError("auxiliary learning is disabled")
         elif isinstance(job, GitJob):
             if job.op not in _CLEANUP_OPS:
                 raise TypeError("auxiliary worker pool accepts only cleanup Git jobs")
@@ -73,6 +75,8 @@ class AuxiliaryWorkerPool:
             return JobResult(ok=False, interrupted=True, error="interrupted_before_start")
         try:
             if isinstance(job, AthenaSkillJob):
+                if self._athena_skill_executor is None:
+                    raise RuntimeError("auxiliary learning is disabled")
                 value = self._athena_skill_executor.execute(job.request)
                 result = JobResult(ok=value.ok, value=value, error=value.error)
             else:

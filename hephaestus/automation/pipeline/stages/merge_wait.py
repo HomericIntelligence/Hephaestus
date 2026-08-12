@@ -611,23 +611,30 @@ class MergeWaitStage(Stage):
         if intent not in item.learning_intents:
             item.learning_intents.append(intent)
         if isinstance(ctx.learning_journal, LearningJournalStore):
-            record = ctx.learning_journal.ensure_pending(
-                intent.key,
-                kind=intent.kind.value,
-                identity=intent.journal_identity(),
-            )
-            if (
-                ctx.github.drive_green_learn_inflight(item.issue)
-                and record["status"] == "pending"
-                and ctx.learning_journal.claim(intent.key)
-            ):
-                ctx.learning_journal.finish(
+            try:
+                record = ctx.learning_journal.ensure_pending(
                     intent.key,
-                    succeeded=False,
-                    error="legacy_outcome_unknown",
+                    kind=intent.kind.value,
+                    identity=intent.journal_identity(),
                 )
+                if (
+                    ctx.github.drive_green_learn_inflight(item.issue)
+                    and record["status"] == "pending"
+                    and ctx.learning_journal.claim(intent.key)
+                ):
+                    ctx.learning_journal.finish(
+                        intent.key,
+                        succeeded=False,
+                        error="legacy_outcome_unknown",
+                    )
+                    item.payload.setdefault("learning_failures", []).append(
+                        {"key": intent.key, "error": "legacy_outcome_unknown"}
+                    )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                logger.exception("merge_wait:%s: could not persist learning intent", item.issue)
+                item.learning_intents.remove(intent)
                 item.payload.setdefault("learning_failures", []).append(
-                    {"key": intent.key, "error": "legacy_outcome_unknown"}
+                    {"key": intent.key, "error": "learning_intent_persist_failed"}
                 )
         elif ctx.github.drive_green_learn_inflight(item.issue):
             item.learning_intents.remove(intent)

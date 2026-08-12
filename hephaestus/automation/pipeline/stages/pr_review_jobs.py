@@ -806,6 +806,7 @@ class PrReviewJobs(_PrReviewHost):
                 kwargs={
                     "worktree_path": review_worktree,
                     "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue or item.pr or 0,
                     "force": False,
                 },
                 descr="remove_read_only_review_worktree",

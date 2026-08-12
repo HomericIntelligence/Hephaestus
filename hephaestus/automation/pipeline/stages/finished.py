@@ -1,6 +1,6 @@
 """Finished stage: record outcomes and clean up worktrees (epic #1809).
 
-Binding contract: docs/architecture.md §5.7 "finished".
+Binding contract: docs/architecture.md §5.8 "finished".
 
 The universal sink. States: ENTER -> RECORD -> CLEANUP -> DONE.
 
@@ -170,9 +170,32 @@ class FinishedStage(Stage):
             return self._cleanup(item, ctx)
 
         if item.state == "DONE":
+            self._record_cleanup_terminal(item, ctx)
             return StageOutcome(Disposition.FINISH_PASS, note="done")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
+
+    @staticmethod
+    def _record_cleanup_terminal(item: WorkItem, ctx: StageContext) -> None:
+        """Close durable cleanup obligations after the sink reaches DONE."""
+        if item.post_processing is None:
+            return
+        succeeded = bool(item.payload.pop("_learning_cleanup_succeeded", True))
+        error = str(item.payload.pop("_learning_cleanup_error", ""))
+        for key in item.post_processing.intent_keys:
+            try:
+                ctx.learning_journal.finish_cleanup(
+                    key,
+                    succeeded=succeeded,
+                    error=error,
+                )
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "finished:%s: could not record cleanup completion for %s: %s",
+                    item.issue or item.repo,
+                    key,
+                    exc,
+                )
 
     def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Clean or preserve the writer worktree."""
@@ -265,6 +288,7 @@ class FinishedStage(Stage):
         kwargs: dict[str, object] = {
             "worktree_path": item.worktree,
             "repo_root": str(ctx.paths.repo_root),
+            "issue_number": item.issue or item.pr or 0,
             # A no-op direct scope is known-clean at commit/push time, but a
             # human may edit it before this terminal cleanup runs. Refuse to
             # discard that late edit; on failure the worktree is preserved.
@@ -338,6 +362,8 @@ class FinishedStage(Stage):
                 )
             return
         if not result.ok:
+            item.payload["_learning_cleanup_succeeded"] = False
+            item.payload["_learning_cleanup_error"] = result.error
             if item.payload.pop("_direct_scope_noop_cleanup_inflight", False):
                 entry = (item.repo, item.issue or item.pr or 0, item.worktree)
                 if entry not in self._preserved:

@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,13 @@ def test_learning_workers_are_distinct_and_reject_generic_agents(tmp_path: Path)
 
     assert done is handle
     assert result.ok
-    assert result.value.receipt["worker"].startswith("hephaestus-learning-worker-")
+    learning_worker = result.value.receipt["worker"]
+    assert learning_worker.startswith("hephaestus-learning-worker-")
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="hephaestus-pipeline-worker-"
+    ) as main:
+        main_worker = main.submit(lambda: threading.current_thread().name).result()
+    assert learning_worker != main_worker
     with pytest.raises(TypeError, match="does not accept"):
         pool.submit(AgentJob("r", 1, "codex", "", lambda: "", tmp_path, 1), "DONE")
     pool.shutdown(mark_interrupted=False)

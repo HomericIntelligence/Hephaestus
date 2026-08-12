@@ -65,6 +65,7 @@ class Disposition(StrEnum):
     RETRY = "retry"
     FAIL_BACK = "fail_back"
     SKIP = "skip"
+    EJECT = "eject"
     BLOCKED = "blocked"
     # "PASS" trips ruff's hardcoded-password heuristic (S105); this is a
     # pipeline disposition, not a credential.

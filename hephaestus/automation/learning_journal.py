@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 _STATUSES = frozenset({"pending", "claimed", "succeeded", "failed"})
 _REQUIRED_FIELDS = frozenset({"key", "kind", "status", "attempts", "created_at", "updated_at"})
-_RESERVED_FIELDS = _REQUIRED_FIELDS | frozenset({"error", "receipt_summary", "claim_owner"})
+_RESERVED_FIELDS = _REQUIRED_FIELDS | frozenset(
+    {"error", "receipt_summary", "claim_owner", "cleanup_status", "cleanup_error"}
+)
 
 
 class LearningJournalError(RuntimeError):
@@ -76,6 +78,15 @@ class LearningJournalStore:
             raise LearningJournalError(f"learning intent {key} has an invalid kind")
         if not isinstance(raw.get("attempts"), int) or int(raw["attempts"]) < 0:
             raise LearningJournalError(f"learning intent {key} has invalid attempts")
+        cleanup_status = raw.get("cleanup_status")
+        if cleanup_status is not None and cleanup_status not in {
+            "pending",
+            "succeeded",
+            "failed",
+        }:
+            raise LearningJournalError(f"learning intent {key} has invalid cleanup status")
+        if "post_processing" in raw and not isinstance(raw["post_processing"], dict):
+            raise LearningJournalError(f"learning intent {key} has invalid post-processing data")
         return dict(raw)
 
     def ensure_pending(
@@ -101,6 +112,12 @@ class LearningJournalStore:
                     if field not in current:
                         current[field] = value
                         changed = True
+                if (
+                    isinstance(current.get("post_processing"), dict)
+                    and current.get("cleanup_status") is None
+                ):
+                    current["cleanup_status"] = "pending"
+                    changed = True
                 if changed:
                     current["updated_at"] = datetime.now(UTC).isoformat()
                     self._write(key, current)
@@ -115,6 +132,8 @@ class LearningJournalStore:
                 "updated_at": now,
                 **identity_fields,
             }
+            if "post_processing" in identity_fields:
+                record["cleanup_status"] = "pending"
             self._write(key, record)
             return record
 
@@ -140,7 +159,14 @@ class LearningJournalStore:
             if (
                 isinstance(raw, dict)
                 and raw.get("repo") == repo
-                and raw.get("status") in {"pending", "claimed"}
+                and (
+                    raw.get("status") in {"pending", "claimed"}
+                    or (
+                        isinstance(raw.get("post_processing"), dict)
+                        and raw.get("cleanup_status") != "succeeded"
+                        and raw.get("cleanup_status") != "failed"
+                    )
+                )
             ):
                 yield dict(raw)
 
@@ -197,6 +223,26 @@ class LearningJournalStore:
         probe.__exit__(None, None, None)
         return False
 
+    def fail_abandoned_claim(self, key: str, *, error: str) -> dict[str, Any] | None:
+        """Fail an abandoned claim, or return ``None`` if a live owner won."""
+        claim_lock = file_lock(self.claim_lock_path(key), blocking=False, require_exclusive=True)
+        try:
+            claim_lock.__enter__()
+        except LockUnavailableError:
+            return None
+        try:
+            with file_lock(self.lock_path(key), require_exclusive=True):
+                record = self._require_claimed(key)
+                record.update(
+                    status="failed",
+                    updated_at=datetime.now(UTC).isoformat(),
+                    error=error[:1000],
+                )
+                self._write(key, record)
+                return record
+        finally:
+            claim_lock.__exit__(None, None, None)
+
     def finish(
         self,
         key: str,
@@ -206,6 +252,8 @@ class LearningJournalStore:
         receipt_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Commit a claimed intent to a terminal result."""
+        self._require_claimed(key)
+        self._require_local_claim(key)
         with file_lock(self.lock_path(key), require_exclusive=True):
             record = self._require_claimed(key)
             record["status"] = "succeeded" if succeeded else "failed"
@@ -220,6 +268,8 @@ class LearningJournalStore:
 
     def retry(self, key: str, *, error: str) -> dict[str, Any]:
         """Return a known failed claim to pending for a bounded retry."""
+        self._require_claimed(key)
+        self._require_local_claim(key)
         with file_lock(self.lock_path(key), require_exclusive=True):
             record = self._require_claimed(key)
             record.update(
@@ -230,6 +280,28 @@ class LearningJournalStore:
             self._write(key, record)
         self._release_claim_lock(key)
         return record
+
+    def finish_cleanup(self, key: str, *, succeeded: bool, error: str = "") -> dict[str, Any]:
+        """Record that terminal cleanup reached a bounded outcome."""
+        with file_lock(self.lock_path(key), require_exclusive=True):
+            record = self.load(key)
+            if record is None:
+                raise KeyError(key)
+            if not isinstance(record.get("post_processing"), dict):
+                return record
+            if record["status"] not in {"succeeded", "failed"}:
+                raise ValueError("learning must be terminal before cleanup")
+            record["cleanup_status"] = "succeeded" if succeeded else "failed"
+            record["updated_at"] = datetime.now(UTC).isoformat()
+            if error:
+                record["cleanup_error"] = error[:1000]
+            self._write(key, record)
+            return record
+
+    def _require_local_claim(self, key: str) -> None:
+        with self._claim_locks_guard:
+            if key not in self._claim_locks:
+                raise ValueError("learning intent claim is not owned by this process")
 
     def _require_claimed(self, key: str) -> dict[str, Any]:
         record = self.load(key)

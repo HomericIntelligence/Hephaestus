@@ -91,6 +91,7 @@ class Coordinator(
             maxsize=max(config.learning_queue_capacity, config.learning_workers)
         )
         athena_executor: Any | None = None
+        production_pool = pool is None
         if pool is None:
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
@@ -139,7 +140,7 @@ class Coordinator(
                 saturation=self._completion_saturation,
             )
 
-        if auxiliary_pool is None and athena_executor is not None:
+        if auxiliary_pool is None and production_pool:
             from hephaestus.automation.pipeline.auxiliary_worker_pool import AuxiliaryWorkerPool
 
             auxiliary_pool = AuxiliaryWorkerPool(
