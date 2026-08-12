@@ -6,9 +6,8 @@ The coordinator runs on the process main thread and owns all seven stage
 queues, the timer heap, the in-flight registry, all routing, and (through the
 :class:`~hephaestus.automation.pipeline_github.PipelineGitHub` accessor) every
 GitHub API mutation. A single worker pool executes agent, build/test, and
-git/network jobs; the only cross-thread data channels are the bounded main and
-auxiliary completion queues.
-A separate event latch wakes the idle loop for both accepted completions and
+git/network jobs; bounded main and auxiliary completion queues are the only
+cross-thread data channels. A separate event latch wakes the idle loop for accepted completions and
 signals, so neither a worker callback nor a signal handler can block on a
 full queue.
 
@@ -218,9 +217,8 @@ _FAIL_BACK_CAP = sum(sum(route.budgets.values()) for route in ROUTES.values())
 _PROMPT_PREFLIGHT_TEMPLATE = "shared/untrusted_notice.j2"
 _PROMPT_PREFLIGHT_ERROR = "ERROR: Prompt templates missing or unreadable — reinstall: `uv sync`."
 
-# In-memory diagnostics are finite; the durable JSONL stream is a best-effort
-# diagnostic artifact only. GitHub facts, learning journals, arming state, and
-# issue-wave checkpoints are the restart authorities for their owned state.
+# JSONL is diagnostic only. GitHub facts, learning journals, arming state, and issue-wave
+# checkpoints are the restart authorities for their owned state.
 _DEFAULT_EVENT_LOG_CAPACITY = 1_024
 _DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
 _SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
