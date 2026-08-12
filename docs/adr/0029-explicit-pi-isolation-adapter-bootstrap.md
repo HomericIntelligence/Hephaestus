@@ -42,8 +42,13 @@ available to embedding applications. Both bootstrap paths end at the same
 `PiIsolationAdapter.invoke()` boundary; the external implementation remains
 responsible for enforcing every filesystem and network grant in the resolved
 `ExecutionPolicy`. Hephaestus supplies the complete minimized child environment
-at that boundary. This is the only supported channel for an operator-selected
-`PI_CODING_AGENT_DIR`; adapters must not inherit the ambient host environment.
+at that boundary. It points `PI_CODING_AGENT_DIR` at a disposable profile that
+contains only the preflight-proven package roots plus copied `models.json` and
+`auth.json` files. Actual automation uses explicit offline, no-context, and
+no-approval flags, so ambient extensions, checkout instructions, and saved
+trust cannot change the proven capability set. Adapters must not inherit the
+ambient host environment. An adapter may inject credentials only from its own
+reviewed secret store; it must not recover them from ambient variables.
 
 ## Alternatives considered
 
@@ -68,6 +73,8 @@ at that boundary. This is the only supported channel for an operator-selected
 - The adapter must launch the supplied non-interactive command with the
   supplied child environment so the exact operator-local Pi profile and model
   selection survive external isolation without forwarding host credentials.
+- The adapter must return trusted observed skill-call identifiers separately
+  from model output and requested command grants.
 - Broker implementation, OS-level enforcement, adversarial validation, and
   deployment remain a separate deliverable tracked by #2738; this decision
   adds no claim that Stage 6 evidence is complete.

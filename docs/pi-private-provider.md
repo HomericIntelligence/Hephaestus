@@ -111,9 +111,13 @@ activate it, and Hephaestus never auto-selects among installed adapters. A
 missing, duplicate, unloadable, or invalid selected entry point fails before a
 Pi provider process starts. The external package remains responsible for
 reviewed enforcement of every filesystem and network grant it receives. It
-must launch the supplied command with the supplied minimized environment;
-that Pi-only environment carries `PI_CODING_AGENT_DIR` while excluding ambient
-GitHub, cloud, and operator-specific variables.
+must launch the supplied command with the supplied minimized environment. That
+Pi-only environment carries a disposable `PI_CODING_AGENT_DIR` containing only
+the preflight-proven packages and the operator's private model/auth files while
+excluding ambient GitHub, cloud, and operator-specific variables. The broker
+may inject an API credential from its own reviewed secret store; it must not
+inherit arbitrary host variables. It must also return trusted observed
+skill-call identifiers separately from provider text and requested grants.
 See [ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md) for the
 bootstrap decision and rejected automatic-loading alternatives.
 

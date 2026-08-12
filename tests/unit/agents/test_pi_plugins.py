@@ -246,6 +246,26 @@ def test_project_inventory_uses_pi_npm_node_modules_layout(tmp_path: Path) -> No
     assert set(result.scopes.values()) == {"project"}
 
 
+def test_inventory_rejects_packages_outside_the_pinned_catalog(tmp_path: Path) -> None:
+    """Preflight and execution cannot observe different package sets."""
+    from hephaestus.agents import pi_plugins
+
+    pi_dir = tmp_path / "pi-home"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    catalog = pi_plugins.load_pi_package_catalog()
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        json.dumps({"packages": [*catalog.install_specs, "npm:extra-private-package@1.0.0"]}),
+        encoding="utf-8",
+    )
+
+    result = pi_plugins.inspect_pi_package_inventory(cwd, catalog, pi_dir=pi_dir)
+
+    assert result.ready is False
+    assert result.status == "package_inventory_mismatch"
+
+
 def test_probe_requires_verified_source_info_provenance(tmp_path: Path) -> None:
     """A colliding command or tool name from another root cannot satisfy preflight."""
     from hephaestus.agents.pi_plugins import (
@@ -379,7 +399,7 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     cwd.mkdir()
     (pi_dir / "settings.json").parent.mkdir(parents=True)
     (pi_dir / "settings.json").write_text(
-        json.dumps({"packages": [*catalog.install_specs, "npm:unverified-package@1.0.0"]}),
+        json.dumps({"packages": list(catalog.install_specs)}),
         encoding="utf-8",
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
