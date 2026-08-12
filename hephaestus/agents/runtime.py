@@ -34,6 +34,7 @@ from hephaestus.agents.execution_policy import (
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     preflight_pi_environment,
+    prove_athena_skill_command,
 )
 from hephaestus.agents.pi_session import (
     AgentSessionBinding,
@@ -1627,15 +1628,28 @@ def _run_codex_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
 
 
-def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
+def _pi_base_cmd(
+    executable: Path,
+    *,
+    lifecycle: SessionLifecycle,
+    session_id: str | None = None,
+) -> list[str]:
     """Build the common Pi JSON-mode command."""
-    cmd = ["pi", "--mode", "json"]
-    if session_id:
+    cmd = [str(executable), "--mode", "json"]
+    if lifecycle is SessionLifecycle.ONE_SHOT:
+        cmd.append("--no-session")
+    elif session_id:
         cmd.extend(["--session", session_id])
     return cmd
 
 
-def _pi_automation_cmd(*, model: str, session_id: str | None = None) -> list[str]:
+def _pi_automation_cmd(
+    executable: Path,
+    *,
+    model: str,
+    lifecycle: SessionLifecycle,
+    session_id: str | None = None,
+) -> list[str]:
     """Build a non-interactive Pi command with explicit private selection."""
     provider = os.environ.get(PI_PROVIDER_ENV, "").strip()
     selected_model = model.strip() or os.environ.get(PI_MODEL_ENV, "").strip()
@@ -1648,7 +1662,7 @@ def _pi_automation_cmd(*, model: str, session_id: str | None = None) -> list[str
         raise AgentExecutionError(
             "Pi automation requires operator-local provider selection: " + ", ".join(missing)
         )
-    cmd = _pi_base_cmd(session_id=session_id)
+    cmd = _pi_base_cmd(executable, lifecycle=lifecycle, session_id=session_id)
     cmd.extend(
         [
             "--print",
@@ -2047,16 +2061,26 @@ def _require_admitted_pi_policy(
     return _require_pi_request(execution_request), preflight
 
 
-def _pi_policy_args(policy: ExecutionPolicy) -> list[str]:
+def _pi_policy_args(policy: ExecutionPolicy, preflight: PiPreflightResult) -> list[str]:
     """Translate a reviewed policy to Pi's model-visible capability flags.
 
     These flags are intentionally only a second layer.  The runtime's external
     isolation adapter remains the authority for filesystem and network access.
     """
-    args = ["--tools", ",".join(sorted(policy.builtins))]
+    args = ["--tools", ",".join(sorted(policy.builtins)), "--no-skills"]
     if policy.skills:
-        commands = ",".join(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills)
-        args.extend(["--commands", commands])
+        for skill in sorted(policy.skills):
+            command = f"skill:{skill.split(':', 1)[1]}"
+            receipt = prove_athena_skill_command(command, preflight)
+            skill_path = Path(receipt.package_root) / "skills" / command.removeprefix("skill:")
+            try:
+                resolved = skill_path.resolve(strict=True)
+                package_root = Path(receipt.package_root).resolve(strict=True)
+            except OSError as exc:
+                raise AgentExecutionError(f"Pi skill {command!r} is unavailable") from exc
+            if not resolved.is_relative_to(package_root) or not (resolved / "SKILL.md").is_file():
+                raise AgentExecutionError(f"Pi skill {command!r} escaped its proven package")
+            args.extend(["--skill", str(resolved)])
     return args
 
 
@@ -2068,6 +2092,7 @@ def _run_pi_with_policy(
     model: str,
     policy: ExecutionPolicy,
     preflight: PiPreflightResult,
+    lifecycle: SessionLifecycle,
     session_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
@@ -2083,8 +2108,25 @@ def _run_pi_with_policy(
             f"filesystem={policy.filesystem.value} network={policy.network.value}; "
             "no Pi provider process was started"
         )
-    command = _pi_automation_cmd(model=model, session_id=session_id)
-    command.extend(_pi_policy_args(policy))
+    if preflight.executable is None:
+        raise AgentExecutionError("Pi automation lacks a preflight-proven executable")
+    try:
+        executable = preflight.executable.resolve(strict=True)
+        metadata = executable.stat()
+    except OSError as exc:
+        raise AgentExecutionError("Pi preflight-proven executable is unavailable") from exc
+    if executable != preflight.executable:
+        raise AgentExecutionError("Pi preflight-proven executable identity drifted")
+    fingerprint = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+    if fingerprint != preflight.executable_fingerprint:
+        raise AgentExecutionError("Pi preflight-proven executable identity drifted")
+    command = _pi_automation_cmd(
+        executable,
+        model=model,
+        lifecycle=lifecycle,
+        session_id=session_id,
+    )
+    command.extend(_pi_policy_args(policy, preflight))
     tokens = pi_private_redaction_tokens(cwd, model)
     try:
         with _pi_automation_profile(preflight) as profile_dir:
@@ -2120,7 +2162,13 @@ def _run_pi_with_policy(
     observed = tuple(dict.fromkeys(result.observed_skill_invocations))
     if any(skill not in allowed_skills for skill in observed):
         raise AgentExecutionError("Pi isolation adapter reported an ungranted skill invocation")
-    return result
+    return AgentRunResult(
+        stdout=redact_pi_private_values(result.stdout, tokens),
+        stderr=redact_pi_private_values(result.stderr, tokens),
+        session_id=result.session_id,
+        session_binding=result.session_binding,
+        observed_skill_invocations=observed,
+    )
 
 
 def _redact_pi_exception_output(
@@ -2174,6 +2222,7 @@ def run_agent_text(
             model=model,
             policy=policy,
             preflight=preflight,
+            lifecycle=execution_request.lifecycle,
         )
         return subprocess.CompletedProcess(
             args=["pi", "--mode", "json"], returncode=0, stdout=result.stdout, stderr=result.stderr
@@ -2228,6 +2277,7 @@ def run_agent_session(
             model=model,
             policy=policy,
             preflight=preflight,
+            lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id if resume_binding is not None else None,
             process_tracker=process_tracker,
         )
@@ -2302,6 +2352,7 @@ def resume_agent_session(
             model=model,
             policy=policy,
             preflight=preflight,
+            lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id,
             process_tracker=process_tracker,
         )

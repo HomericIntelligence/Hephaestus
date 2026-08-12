@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -28,8 +29,16 @@ from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import PiSessionBindingError, create_pi_binding
 
 
-def _ready_pi_preflight() -> PiPreflightResult:
-    return PiPreflightResult.ready_result(InventoryResult(True, "ready", {}, {}))
+def _ready_pi_preflight(tmp_path: Path) -> PiPreflightResult:
+    athena_root = tmp_path / "athena"
+    for skill in ("advise", "learn", "pr-review"):
+        skill_root = athena_root / "skills" / skill
+        skill_root.mkdir(parents=True, exist_ok=True)
+        (skill_root / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+    return PiPreflightResult.ready_result(
+        InventoryResult(True, "ready", {"athena": athena_root}, {"athena": "user"}),
+        executable=Path(sys.executable).resolve(),
+    )
 
 
 def test_pr_review_one_shot_uses_the_read_only_review_policy() -> None:
@@ -142,7 +151,7 @@ def test_child_policy_intersection_rejects_filesystem_widening() -> None:
         intersect_child_policy(parent, requested)
 
 
-def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool() -> None:
+def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool(tmp_path: Path) -> None:
     """Provider-visible flags cannot create a child execution path."""
     policy = resolve_policy(
         ExecutionRequest(
@@ -152,7 +161,10 @@ def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool() -> None:
         )
     )
 
-    assert "subagent" not in agent_runtime._pi_policy_args(policy)[1].split(",")
+    args = agent_runtime._pi_policy_args(policy, _ready_pi_preflight(tmp_path))
+    assert "subagent" not in args[1].split(",")
+    assert "--no-skills" in args
+    assert "--commands" not in args
 
 
 def test_ready_pi_is_explicitly_na_without_a_registered_isolation_adapter(
@@ -539,7 +551,9 @@ def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(
 ) -> None:
     """Pi cannot treat model-visible tool flags as filesystem or network isolation."""
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
@@ -551,6 +565,28 @@ def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(
     ):
         agent_runtime.run_agent_text(
             "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
+        )
+
+
+def test_pi_policy_dispatch_rejects_executable_drift(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The admitted process must be the exact executable object proven by preflight."""
+    executable = tmp_path / "pi"
+    executable.write_text("first", encoding="utf-8")
+    preflight = PiPreflightResult.ready_result(
+        InventoryResult(True, "ready", {}, {}), executable=executable.resolve()
+    )
+    executable.write_text("replacement", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: preflight)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", object())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
+    monkeypatch.setenv("HEPH_PI_MODEL", "operator-model")
+    request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="identity drifted"):
+        agent_runtime.run_agent_session(
+            "pi", "plan", cwd=tmp_path, timeout=30, execution_request=request
         )
 
 
@@ -566,11 +602,12 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
             return agent_runtime.AgentRunResult(stdout="review", stderr="")
 
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
-    monkeypatch.setenv("HEPH_PI_MODEL", "operator-model")
     monkeypatch.setenv("HEPH_PI_MODEL", "operator-model")
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
@@ -586,6 +623,14 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     assert policy.network is NetworkMode.CONSTRAINED_WEB_RELAY
     assert received["session_id"] is None
     assert received["process_tracker"] is None
+    command = cast(list[str], received["command"])
+    assert command[0] == str(Path(sys.executable).resolve())
+    assert "--no-session" in command
+    assert "--no-skills" in command
+    assert "--commands" not in command
+    assert command[command.index("--skill") + 1] == str(
+        (tmp_path / "athena" / "skills" / "pr-review").resolve()
+    )
 
 
 def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
@@ -609,7 +654,9 @@ def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
     pi_dir.mkdir()
     (pi_dir / "models.json").write_text('{"models": ["private"]}\n')
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-local-provider")
@@ -634,7 +681,7 @@ def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
 
     assert result.stdout == "implemented"
     assert received["command"] == [
-        "pi",
+        str(Path(sys.executable).resolve()),
         "--mode",
         "json",
         "--print",
@@ -649,11 +696,15 @@ def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
         "operator-local-model",
         "--tools",
         "bash,edit,find,grep,ls,read,write",
+        "--no-skills",
     ]
     environment = cast(dict[str, str], received["environment"])
     assert environment["PI_CODING_AGENT_DIR"] != str(pi_dir)
     assert received["profile_models"] == '{"models": ["private"]}\n'
-    assert received["profile_settings"] == '{"packages": []}\n'
+    assert (
+        received["profile_settings"]
+        == json.dumps({"packages": [str(tmp_path / "athena")]}, sort_keys=True) + "\n"
+    )
     assert environment["PI_OFFLINE"] == "1"
     assert environment["PI_SKIP_VERSION_CHECK"] == "1"
     assert environment["PI_TELEMETRY"] == "0"
@@ -679,7 +730,9 @@ def test_pi_adapter_errors_redact_private_profile_values(
             )
 
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-local-provider")
@@ -715,7 +768,9 @@ def test_pi_adapter_reports_only_granted_skill_invocations(
             )
 
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
@@ -731,6 +786,39 @@ def test_pi_adapter_reports_only_granted_skill_invocations(
     assert result.observed_skill_invocations == ("athena:pr-review",)
 
 
+def test_pi_adapter_success_output_redacts_private_values(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful model output is sanitized before worker parsing or publication."""
+
+    class Adapter:
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            return agent_runtime.AgentRunResult(
+                stdout="operator-provider operator-model",
+                stderr="operator-provider",
+            )
+
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
+    )
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
+    monkeypatch.setenv("HEPH_PI_MODEL", "operator-model")
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
+    )
+
+    result = agent_runtime.run_agent_session(
+        "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
+    )
+
+    assert "operator-provider" not in result.stdout
+    assert "operator-model" not in result.stdout
+    assert result.stderr == agent_runtime.PI_PRIVATE_REDACTION
+
+
 def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -739,7 +827,9 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
         session_id="pi-session-123", cwd=tmp_path, role=AgentRole.PLANNER, model="model"
     )
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     start_request = ExecutionRequest(
         AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW
@@ -819,7 +909,9 @@ def test_pi_session_start_dispatches_without_resume_binding(
             )
 
     monkeypatch.setattr(
-        agent_runtime, "_require_pi_automation_admission", lambda _cwd: _ready_pi_preflight()
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd: _ready_pi_preflight(tmp_path),
     )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
@@ -840,6 +932,10 @@ def test_pi_session_start_dispatches_without_resume_binding(
 
     assert received["session_id"] is None
     assert received["process_tracker"] is process_tracker
+    command = cast(list[str], received["command"])
+    assert "--no-session" not in command
+    assert "--session" not in command
+    assert "--no-skills" in command
     assert result.session_id == "pi-session-new"
     assert result.session_binding is not None
     assert result.session_binding.session_id == "pi-session-new"

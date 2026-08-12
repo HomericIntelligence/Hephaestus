@@ -6579,7 +6579,10 @@ class TestShutdownReapsSubprocess:
         monkeypatch.setattr(
             agent_runtime,
             "_require_pi_automation_admission",
-            lambda _cwd: PiPreflightResult.ready_result(InventoryResult(True, "ready", {}, {})),
+            lambda _cwd: PiPreflightResult.ready_result(
+                InventoryResult(True, "ready", {}, {}),
+                executable=Path(sys.executable).resolve(),
+            ),
         )
         monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
         agent_runtime.register_pi_isolation_adapter(Adapter())

@@ -118,6 +118,11 @@ excluding ambient GitHub, cloud, and operator-specific variables. The broker
 may inject an API credential from its own reviewed secret store; it must not
 inherit arbitrary host variables. It must also return trusted observed
 skill-call identifiers separately from provider text and requested grants.
+Hephaestus passes the exact absolute Pi executable proven by preflight,
+disables ambient skills with `--no-skills`, and supplies only allowed,
+preflight-proven Athena directories through repeatable `--skill` arguments.
+One-shot operations use `--no-session`. Successful output and failure
+diagnostics are redacted before queue parsing, logging, or publication.
 See [ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md) for the
 bootstrap decision and rejected automatic-loading alternatives.
 

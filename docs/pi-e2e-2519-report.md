@@ -19,7 +19,7 @@ Missing evidence:
 - Successful `implementation-review-handoff` capture through `hephaestus-automation-loop --agent pi`.
 - Provider session identifiers and requested tool scopes from those real queue runs.
 - Queue-emitted typed Athena advise and learn host receipts.
-- A same-fixture Pi/Codex comparison where practical.
+- A same-fixture Pi/Codex comparison if identical starting GitHub state is practical.
 - Fresh exact-head GitHub PR, label, thread, closing-issue, and native auto-merge readback.
 - Publication attestation for the rendered report and runbook.
 

@@ -1861,6 +1861,11 @@ class WorkerPool:
                 issue = int(candidate)
         payload: dict[str, object] = {
             "schema_version": 1,
+            "capture_nonce": (
+                match.group(1)
+                if (match := re.fullmatch(r"pipeline-receipts-([0-9a-f]{32})", receipt_dir.name))
+                else ""
+            ),
             "claim_key": claim_key,
             "claim_stage": claim_stage,
             "repo": job.repo,
@@ -1908,12 +1913,29 @@ class WorkerPool:
                         json.dumps(job.argv, separators=(",", ":")).encode()
                     ).hexdigest(),
                     "expected_head_sha": job.expected_head_sha,
+                    "succeeded": result.ok,
                 }
             )
         elif isinstance(job, GitJob):
             payload.update({"job_type": "git", "operation": job.op})
+            if isinstance(result.value, dict):
+                payload["head_sha"] = result.value.get("head_sha")
+                payload["pushed"] = result.value.get("pushed")
         elif isinstance(job, GitHubJob):
-            payload.update({"job_type": "github", "operation": type(job.request).__name__})
+            payload.update(
+                {
+                    "job_type": "github",
+                    "operation": type(job.request).__name__,
+                    "pr_number": getattr(job.request, "pr_number", None),
+                    "request_issue": getattr(job.request, "issue_number", None),
+                    "request_head_sha": getattr(job.request, "reviewed_head_sha", None),
+                    "result_type": type(result.value).__name__
+                    if result.value is not None
+                    else None,
+                    "result_action": getattr(result.value, "action", None),
+                    "result_outcome": getattr(result.value, "outcome", None),
+                }
+            )
         filename = f"{time.time_ns()}-{threading.get_ident()}.json"
         write_secure(
             receipt_dir / filename,

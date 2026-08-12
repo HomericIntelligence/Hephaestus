@@ -49,6 +49,12 @@ no-approval flags, so ambient extensions, checkout instructions, and saved
 trust cannot change the proven capability set. Adapters must not inherit the
 ambient host environment. An adapter may inject credentials only from its own
 reviewed secret store; it must not recover them from ambient variables.
+Admitted execution uses the exact absolute Pi executable proven by preflight,
+disables ambient skill discovery with `--no-skills`, and adds only
+preflight-proven Athena skill directories through repeatable `--skill`
+arguments. One-shot operations use `--no-session`; resumable operations alone
+may create or reopen durable sessions. Provider output and failures are
+redacted before they cross the shared runtime boundary.
 
 ## Alternatives considered
 

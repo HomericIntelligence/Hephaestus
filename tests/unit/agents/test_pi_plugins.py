@@ -502,6 +502,8 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
 
     assert result.ready is True
     assert result.status == "ready"
+    assert result.executable == executable.resolve()
+    assert result.executable_fingerprint is not None
     assert len(rpc_calls) == 1
     assert "--mode" in rpc_calls[0]
     assert "rpc" in rpc_calls[0]
