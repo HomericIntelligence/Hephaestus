@@ -506,7 +506,7 @@ def test_post_merge_persistence_failure_keeps_confirmed_result(tmp_path: Path) -
     def fail_persistence(*_args: object, **_kwargs: object) -> None:
         raise OSError("journal unavailable")
 
-    journal.ensure_pending = fail_persistence  # type: ignore[method-assign]
+    journal.ensure_pending = fail_persistence
 
     coordinator._route(item, StageOutcome(Disposition.FINISH_PASS, "merged"))
 

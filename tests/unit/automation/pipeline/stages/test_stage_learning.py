@@ -231,8 +231,10 @@ def test_completion_is_bound_to_the_locally_submitted_intent(
         ctx,
     )
 
-    assert observer.load(external.key)["status"] == "claimed"
-    assert observer.load(local.key)["status"] == "succeeded"
+    external_record = observer.load(external.key)
+    local_record = observer.load(local.key)
+    assert external_record is not None and external_record["status"] == "claimed"
+    assert local_record is not None and local_record["status"] == "succeeded"
     owner.finish(external.key, succeeded=True)
 
 

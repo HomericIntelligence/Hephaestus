@@ -630,7 +630,13 @@ def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: 
     from hephaestus.automation.arming_state import LearningJournalStore
 
     class BrokenJournal(LearningJournalStore):
-        def ensure_pending(self, *_args: object, **_kwargs: object) -> None:
+        def ensure_pending(
+            self,
+            key: str,
+            *,
+            kind: str,
+            identity: dict[str, object] | None = None,
+        ) -> dict[str, Any]:
             raise OSError("journal unavailable")
 
     github = _ConditionalGitHub(states=[{"state": "MERGED"}])
