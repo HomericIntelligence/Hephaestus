@@ -2037,7 +2037,10 @@ def test_agent_json_stdout_wraps_direct_agent_text() -> None:
 
 def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
     """The shared text boundary requires a scoped execution request."""
-    with patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text:
+    with (
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
+        patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text,
+    ):
         with pytest.raises(
             agent_runtime.ExecutionPolicyError,
             match="Pi automation requires an ExecutionRequest",
@@ -2049,7 +2052,10 @@ def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) ->
 
 def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
     """The shared session boundary requires a scoped execution request."""
-    with patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session:
+    with (
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
+        patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session,
+    ):
         with pytest.raises(
             agent_runtime.ExecutionPolicyError,
             match="Pi automation requires an ExecutionRequest",
@@ -2061,7 +2067,10 @@ def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path)
 
 def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
     """The shared resume boundary requires a scoped execution request."""
-    with patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session:
+    with (
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
+        patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session,
+    ):
         with pytest.raises(
             agent_runtime.ExecutionPolicyError,
             match="Pi automation requires an ExecutionRequest",
