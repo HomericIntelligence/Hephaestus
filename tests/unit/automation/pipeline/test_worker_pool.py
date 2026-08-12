@@ -30,6 +30,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
 from hephaestus.automation import git_utils, subprocess_registry
@@ -136,6 +137,38 @@ def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) 
     }
     assert payload["tool_scopes"] == ["find", "grep", "ls", "read"]
     assert "private prompt" not in receipts[0].read_text()
+
+
+def test_evidence_receipts_cover_host_lifecycle_jobs(tmp_path: Path) -> None:
+    """The private sink records build, Git, and GitHub lifecycle boundaries."""
+    receipt_dir = tmp_path / "receipts"
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+        evidence_receipt_dir=receipt_dir,
+    )
+    jobs: list[BuildTestJob | GitJob] = [
+        BuildTestJob("Hephaestus", tmp_path, ("uv", "run", "pytest"), 60, descr="tests"),
+        GitJob("Hephaestus", "push", 60, descr="push"),
+    ]
+    try:
+        for job in jobs:
+            pool._persist_evidence_receipt(
+                job,
+                JobResult(ok=True),
+                "Hephaestus#2519",
+                "implementation",
+            )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    payloads = [json.loads(path.read_text()) for path in receipt_dir.glob("*.json")]
+    assert {payload["job_type"] for payload in payloads} == {"build_test", "git"}
+    assert all(payload["claim_key"] == "Hephaestus#2519" for payload in payloads)
+    assert all(payload["claim_stage"] == "implementation" for payload in payloads)
+    assert all(payload["interrupted"] is False for payload in payloads)
 
 
 def _executable_path(name: str, *, path: str | None = None) -> str:
@@ -6543,7 +6576,11 @@ class TestShutdownReapsSubprocess:
                 )
 
         monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
-        monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+        monkeypatch.setattr(
+            agent_runtime,
+            "_require_pi_automation_admission",
+            lambda _cwd: PiPreflightResult.ready_result(InventoryResult(True, "ready", {}, {})),
+        )
         monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
         agent_runtime.register_pi_isolation_adapter(Adapter())
         request = ExecutionRequest(

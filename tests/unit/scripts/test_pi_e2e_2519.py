@@ -256,6 +256,7 @@ def test_mnemosyne_uses_independent_typed_host_receipts(
     """Advise/learn evidence is host-owned and never inferred from Pi output."""
     module = _load_module()
     repo_root, run_dir = _bootstrap_run(module, tmp_path)
+    monkeypatch.setattr(module, "_validate_athena_host_receipt", lambda *_args: None)
     contract = {
         "athena_repository": "HomericIntelligence/Mnemosyne",
         "athena_commit": "a" * 40,
@@ -353,6 +354,7 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
     """Pi evidence observes the queue CLI instead of reimplementing its stages."""
     module = _load_module()
     repo_root, run_dir = _bootstrap_run(module, tmp_path)
+    monkeypatch.setattr(module, "_validate_athena_host_receipt", lambda *_args: None)
     command = [
         "uv",
         "run",
@@ -376,14 +378,61 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
                 {
                     "schema_version": 1,
                     "job_type": "agent",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "planning",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "plan",
                     "provider": "pi",
                     "ok": True,
+                    "interrupted": False,
                     "session_id": "pipeline-session",
                     "tool_scopes": ["find", "grep", "ls", "read"],
                     "execution_request": {
                         "role": "planner",
                         "operation": "plan",
                         "lifecycle": "start_new",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (receipt_dir / "advise.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job_type": "athena",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "planning",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "advise",
+                    "ok": True,
+                    "interrupted": False,
+                    "result": {"kind": "advise"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (receipt_dir / "plan-review.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job_type": "agent",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "plan_review",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "review plan",
+                    "provider": "pi",
+                    "ok": True,
+                    "interrupted": False,
+                    "session_id": "pipeline-session",
+                    "tool_scopes": ["find", "grep", "ls", "read"],
+                    "execution_request": {
+                        "role": "plan_reviewer",
+                        "operation": "plan_review",
+                        "lifecycle": "one_shot",
                     },
                 }
             ),
@@ -435,7 +484,7 @@ def test_queue_capture_imports_host_owned_athena_result(
     command = [
         "uv",
         "run",
-        "hephaestus-automation-loop",
+        "hephaestus-plan-issues",
         "--issues",
         "2519",
         "--agent",
@@ -452,7 +501,13 @@ def test_queue_capture_imports_host_owned_athena_result(
                 {
                     "schema_version": 1,
                     "job_type": "athena",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "planning",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "advise",
                     "ok": True,
+                    "interrupted": False,
                     "result": {
                         "kind": "advise",
                         "context": "selected",
@@ -460,6 +515,56 @@ def test_queue_capture_imports_host_owned_athena_result(
                         "delivery_receipt": None,
                         "error": None,
                     },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (receipt_dir / "agent.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job_type": "agent",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "planning",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "plan",
+                    "provider": "pi",
+                    "ok": True,
+                    "interrupted": False,
+                    "session_id": "pi-session",
+                    "tool_scopes": ["read"],
+                    "execution_request": {
+                        "role": "planner",
+                        "operation": "plan",
+                        "lifecycle": "start_new",
+                    },
+                    "observed_skill_invocations": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (receipt_dir / "plan-review.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "job_type": "agent",
+                    "claim_key": "Hephaestus#2519",
+                    "claim_stage": "plan_review",
+                    "repo": "Hephaestus",
+                    "issue": 2519,
+                    "descr": "review plan",
+                    "provider": "pi",
+                    "ok": True,
+                    "interrupted": False,
+                    "session_id": "pi-session",
+                    "tool_scopes": ["read"],
+                    "execution_request": {
+                        "role": "plan_reviewer",
+                        "operation": "plan_review",
+                        "lifecycle": "one_shot",
+                    },
+                    "observed_skill_invocations": [],
                 }
             ),
             encoding="utf-8",
@@ -472,7 +577,7 @@ def test_queue_capture_imports_host_owned_athena_result(
         module._record_command(
             run_dir,
             provider="pi",
-            stage="implementation-review-handoff",
+            stage="discovery-plan",
             command_argv=command,
             prompt="",
             prompt_file=None,
@@ -528,6 +633,11 @@ def test_comparison_requires_distinct_provider_capture(tmp_path: Path) -> None:
             "stage": "discovery-plan",
             "prompt_sha256": "a" * 64,
             "revision": "b" * 40,
+            "status": "success",
+            "returncode": 0,
+            "timed_out": False,
+            "stdout_digest": "c" * 64,
+            "stderr_digest": "d" * 64,
         },
         {
             "id": "control",
@@ -536,6 +646,13 @@ def test_comparison_requires_distinct_provider_capture(tmp_path: Path) -> None:
             "stage": "discovery-plan",
             "prompt_sha256": "a" * 64,
             "revision": "b" * 40,
+            "status": "success",
+            "returncode": 0,
+            "timed_out": False,
+            "stdout_digest": "c" * 64,
+            "stderr_digest": "d" * 64,
+            "provider_invocations": [{"tool": "codex"}],
+            "agent_receipts": [{"provider": "codex", "ok": True, "interrupted": False}],
         },
     ]
     module._save_manifest(run_dir, manifest)
@@ -543,6 +660,16 @@ def test_comparison_requires_distinct_provider_capture(tmp_path: Path) -> None:
     manifest = module._load_manifest(run_dir)
 
     module._verify_comparison(manifest)
+
+    manifest["commands"][1]["returncode"] = 9
+    manifest["commands"][1]["status"] = "failure"
+    manifest["comparisons"] = [
+        module._comparison_payload(manifest["commands"][0], manifest["commands"][1])
+    ]
+    with pytest.raises(ValueError, match="outcomes differ"):
+        module._verify_comparison(manifest)
+    manifest["commands"][1]["returncode"] = 0
+    manifest["commands"][1]["status"] = "success"
 
     manifest["commands"].pop()
     manifest["comparisons"] = []
@@ -615,6 +742,8 @@ def test_capture_verification_requires_each_pi_pipeline_observation() -> None:
                         "execution_request": {"role": "planner"},
                     }
                 ],
+                "pipeline_job_types": ["agent", "athena"],
+                "pipeline_claim_stages": ["planning", "plan_review"],
             },
             {
                 "kind": "capture",
@@ -629,6 +758,76 @@ def test_capture_verification_requires_each_pi_pipeline_observation() -> None:
 
     with pytest.raises(ValueError, match="implementation-review-handoff"):
         module._verify_capture(manifest)
+
+
+def test_pipeline_receipts_reject_cross_issue_provenance() -> None:
+    """A stale receipt from another issue cannot satisfy the #2519 capture."""
+    module = _load_module()
+    receipt = {
+        "schema_version": 1,
+        "receipt_sha256": "a" * 64,
+        "job_type": "agent",
+        "claim_key": "Hephaestus#999",
+        "claim_stage": "planning",
+        "repo": "Hephaestus",
+        "issue": 999,
+        "descr": "plan",
+        "provider": "pi",
+        "ok": True,
+        "interrupted": False,
+        "execution_request": {
+            "role": "planner",
+            "operation": "plan",
+            "lifecycle": "start_new",
+        },
+        "tool_scopes": ["read"],
+    }
+
+    with pytest.raises(ValueError, match="not bound"):
+        module._validate_pipeline_receipts([receipt], stage="discovery-plan", provider="pi")
+
+
+def test_pipeline_receipts_reject_cross_repo_provenance() -> None:
+    """A claim key cannot be rebound to a different repository field."""
+    module = _load_module()
+    receipt = {
+        "schema_version": 1,
+        "receipt_sha256": "a" * 64,
+        "job_type": "agent",
+        "claim_key": "Hephaestus#2519",
+        "claim_stage": "planning",
+        "repo": "AnotherRepo",
+        "issue": 2519,
+        "descr": "plan",
+        "provider": "pi",
+        "ok": True,
+        "interrupted": False,
+        "execution_request": {
+            "role": "planner",
+            "operation": "plan",
+            "lifecycle": "start_new",
+        },
+        "tool_scopes": ["read"],
+    }
+
+    with pytest.raises(ValueError, match="not bound"):
+        module._validate_pipeline_receipts([receipt], stage="discovery-plan", provider="pi")
+
+
+def test_evidence_status_requires_full_host_receipt_verification(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Descriptor-only Athena claims never render as complete evidence."""
+    module = _load_module()
+    _, run_dir = _bootstrap_run(module, tmp_path)
+    monkeypatch.setattr(module, "_verify_completion", lambda *_args: None)
+    monkeypatch.setattr(
+        module,
+        "_verify_athena_host_receipts",
+        lambda *_args: (_ for _ in ()).throw(ValueError("missing artifact")),
+    )
+
+    assert module._evidence_status(module._load_manifest(run_dir), run_dir) == "incomplete"
 
 
 def test_mnemosyne_verification_ignores_inventory_catalog_skill_calls(
@@ -918,7 +1117,7 @@ def test_attestation_rebinds_exact_head_and_review_state_to_live_github(
             return []
 
     monkeypatch.setattr(module, "PipelineGitHub", FakeGitHub)
-    monkeypatch.setattr(module, "_verify_completion", lambda _manifest: None)
+    monkeypatch.setattr(module, "_verify_completion", lambda *_args: None)
     monkeypatch.setattr(module, "_verify_publication", lambda *_args: None)
     monkeypatch.setattr(module, "_verify_athena_host_receipts", lambda *_args: None)
     manifest = module._load_manifest(run_dir)
@@ -955,6 +1154,8 @@ def test_render_verify_and_publication_attestation(
     prompt = "capture prompt"
     head = "a" * 40
     monkeypatch.setattr(module, "_verify_athena_host_receipts", lambda *_args: None)
+    monkeypatch.setattr(module, "_verify_completion", lambda *_args: None)
+    monkeypatch.setattr(module, "_evidence_status", lambda *_args: "complete")
     monkeypatch.setattr(
         module,
         "_stable_live_pull_request",

@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from hephaestus.agents.execution_policy import AgentOperation, AgentRole, SessionLifecycle
 from hephaestus.agents.pi_plugins import inspect_pi_package_inventory, load_pi_package_catalog
 from hephaestus.agents.runtime import pi_private_redaction_tokens, redact_pi_private_values
 from hephaestus.automation.athena_contract import load_athena_contract_receipt
@@ -285,8 +286,8 @@ def _normalize_command_argv(command_argv: Sequence[str]) -> list[str]:
     return argv
 
 
-def _validate_pi_pipeline_command(stage: str, command_argv: Sequence[str]) -> None:
-    """Require a Pi capture to observe one exact normal pipeline entry point."""
+def _validate_pipeline_command(stage: str, command_argv: Sequence[str], provider: str) -> None:
+    """Require a capture to observe one exact normal pipeline entry point."""
     expected_command = PIPELINE_CAPTURE_COMMANDS.get(stage)
     if expected_command is None:
         raise ValueError(f"unsupported Pi pipeline capture stage: {stage!r}")
@@ -294,17 +295,17 @@ def _validate_pi_pipeline_command(stage: str, command_argv: Sequence[str]) -> No
     command_index = 2 if argv[:2] == ["uv", "run"] else 0
     if len(argv) <= command_index or argv[command_index] != expected_command:
         raise ValueError(
-            f"Pi {stage} evidence must run {expected_command!r} through the normal pipeline"
+            f"{provider} {stage} evidence must run {expected_command!r} through the normal pipeline"
         )
     try:
         agent_index = argv.index("--agent", command_index + 1)
         selected_agent = argv[agent_index + 1]
     except (ValueError, IndexError) as exc:
         raise ValueError(
-            "Pi pipeline evidence requires the literal arguments '--agent pi'"
+            f"pipeline evidence requires the literal arguments '--agent {provider}'"
         ) from exc
-    if selected_agent != PI_PROVIDER_NAME:
-        raise ValueError("Pi pipeline evidence requires the literal arguments '--agent pi'")
+    if selected_agent != provider:
+        raise ValueError(f"pipeline evidence requires the literal arguments '--agent {provider}'")
     try:
         issue_index = argv.index("--issues", command_index + 1)
         selected_issue = argv[issue_index + 1]
@@ -312,6 +313,8 @@ def _validate_pi_pipeline_command(stage: str, command_argv: Sequence[str]) -> No
         raise ValueError(f"Pi pipeline evidence must target issue #{ISSUE_NUMBER}") from exc
     if selected_issue != str(ISSUE_NUMBER):
         raise ValueError(f"Pi pipeline evidence must target issue #{ISSUE_NUMBER}")
+    if stage == "implementation-review-handoff" and "--run-pre-pr-tests" not in argv:
+        raise ValueError("implementation evidence requires --run-pre-pr-tests")
 
 
 def _positive_timeout(value: str) -> int:
@@ -438,16 +441,23 @@ def _capture_analysis(
     all_events = stdout_events + stderr_events
     proxy_events = _proxy_events(proxy_log)
     proxy_invocations = _proxy_invocations(proxy_events)
-    pi_agent_receipts = [
+    agent_receipts = [
         {
+            "receipt_sha256": receipt.get("receipt_sha256", ""),
+            "claim_key": receipt.get("claim_key", ""),
             "claim_stage": receipt.get("claim_stage", ""),
+            "repo": receipt.get("repo", ""),
+            "issue": receipt.get("issue"),
             "ok": receipt.get("ok") is True,
+            "interrupted": receipt.get("interrupted") is True,
+            "provider": receipt.get("provider", ""),
             "session_id": receipt.get("session_id", ""),
             "tool_scopes": receipt.get("tool_scopes", []),
             "execution_request": receipt.get("execution_request"),
+            "observed_skill_invocations": receipt.get("observed_skill_invocations", []),
         }
         for receipt in pipeline_receipts
-        if receipt.get("job_type") == "agent" and receipt.get("provider") == PI_PROVIDER_NAME
+        if receipt.get("job_type") == "agent"
     ]
     session_ids = tuple(
         dict.fromkeys(
@@ -502,7 +512,20 @@ def _capture_analysis(
         "tool_scopes": list(tool_scopes),
         "proxy_invocations": list(proxy_invocations),
         "pipeline_receipt_count": len(pipeline_receipts),
-        "pi_agent_receipts": pi_agent_receipts,
+        "agent_receipts": agent_receipts,
+        "pi_agent_receipts": [
+            receipt for receipt in agent_receipts if receipt.get("provider") == PI_PROVIDER_NAME
+        ],
+        "pipeline_job_types": sorted(
+            {receipt.get("job_type") for receipt in pipeline_receipts if receipt.get("job_type")}
+        ),
+        "pipeline_claim_stages": sorted(
+            {
+                receipt.get("claim_stage")
+                for receipt in pipeline_receipts
+                if receipt.get("claim_stage")
+            }
+        ),
         "stdout_digest": _sha256_text(stdout),
         "stderr_digest": _sha256_text(stderr),
         "stdout_event_count": len(stdout_events),
@@ -524,13 +547,75 @@ def _load_pipeline_receipts(receipt_dir: Path) -> list[dict[str, Any]]:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
             raise ValueError("pipeline evidence receipt is not a bounded regular file")
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            content = path.read_bytes()
+            payload = json.loads(content)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("pipeline evidence receipt is not valid JSON") from exc
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
             raise ValueError("pipeline evidence receipt has an unsupported schema")
-        receipts.append(cast(dict[str, Any], payload))
+        typed_payload = cast(dict[str, Any], payload)
+        typed_payload["receipt_sha256"] = _sha256_bytes(content)
+        receipts.append(typed_payload)
     return receipts
+
+
+def _validate_pipeline_receipts(
+    receipts: Sequence[dict[str, Any]], *, stage: str, provider: str
+) -> None:
+    """Bind queue receipts to the requested #2519 stage and provider."""
+    allowed_stages = {
+        "discovery-plan": {"planning", "plan_review"},
+        "implementation-review-handoff": {"implementation", "pr_review", "merge_wait"},
+    }[stage]
+    required_types = (
+        {"agent", "athena"}
+        if stage == "discovery-plan"
+        else {"agent", "build_test", "git", "github"}
+    )
+    seen_types: set[str] = set()
+    seen_stages: set[str] = set()
+    seen_receipts: set[str] = set()
+    for receipt in receipts:
+        job_type = receipt.get("job_type")
+        claim_key = receipt.get("claim_key")
+        claim_stage = receipt.get("claim_stage")
+        if (
+            not isinstance(job_type, str)
+            or not isinstance(claim_key, str)
+            or not claim_key.endswith(f"#{ISSUE_NUMBER}")
+            or receipt.get("repo") != claim_key.rsplit("#", maxsplit=1)[0]
+            or claim_stage not in allowed_stages
+            or receipt.get("issue") != ISSUE_NUMBER
+            or receipt.get("ok") is not True
+            or receipt.get("interrupted") is not False
+        ):
+            raise ValueError("pipeline evidence receipt is not bound to the requested run")
+        receipt_digest = receipt.get("receipt_sha256")
+        if not isinstance(receipt_digest, str) or receipt_digest in seen_receipts:
+            raise ValueError("pipeline evidence receipt claim is duplicated")
+        seen_receipts.add(receipt_digest)
+        seen_types.add(job_type)
+        seen_stages.add(cast(str, claim_stage))
+        if job_type == "agent":
+            request = receipt.get("execution_request")
+            if (
+                receipt.get("provider") != provider
+                or not isinstance(request, dict)
+                or request.get("role") not in {role.value for role in AgentRole}
+                or request.get("operation") not in {operation.value for operation in AgentOperation}
+                or request.get("lifecycle")
+                not in {lifecycle.value for lifecycle in SessionLifecycle}
+                or not isinstance(receipt.get("tool_scopes"), list)
+            ):
+                raise ValueError("pipeline agent receipt is malformed or from another provider")
+    missing = required_types - seen_types
+    if missing:
+        raise ValueError(f"pipeline lifecycle receipts are missing: {', '.join(sorted(missing))}")
+    missing_stages = allowed_stages - seen_stages
+    if missing_stages:
+        raise ValueError(
+            "pipeline stage receipts are missing: " + ", ".join(sorted(missing_stages))
+        )
 
 
 def _store_generated_athena_receipts(
@@ -739,8 +824,7 @@ def _record_command(
     prompt_file: Path | None,
     timeout_seconds: int,
 ) -> int:
-    if provider == PI_PROVIDER_NAME:
-        _validate_pi_pipeline_command(stage, command_argv)
+    _validate_pipeline_command(stage, command_argv, provider)
     proxy_dir = _prepare_provider_proxy_dir(run_dir)
     manifest = _load_manifest(run_dir)
     command_index = len(manifest["commands"]) + 1
@@ -754,8 +838,7 @@ def _record_command(
     analysis_path = record_dir / "analysis.json"
     pipeline_receipt_dir = _ensure_owner_only_dir(record_dir / "pipeline-receipts")
     executed_argv = list(command_argv)
-    if provider == PI_PROVIDER_NAME:
-        executed_argv = _with_evidence_receipt_dir(executed_argv, pipeline_receipt_dir)
+    executed_argv = _with_evidence_receipt_dir(executed_argv, pipeline_receipt_dir)
     if prompt_file is not None:
         prompt_copy = record_dir / "prompt.txt"
         write_secure(prompt_copy, prompt)
@@ -789,6 +872,8 @@ def _record_command(
     write_secure(stdout_path, stdout)
     write_secure(stderr_path, stderr)
     pipeline_receipts = _load_pipeline_receipts(pipeline_receipt_dir)
+    if returncode == 0:
+        _validate_pipeline_receipts(pipeline_receipts, stage=stage, provider=provider)
     analysis = _capture_analysis(stdout, stderr, proxy_log, pipeline_receipts)
     analysis.update(
         {
@@ -838,6 +923,9 @@ def _record_command(
         },
         "provider_invocations": analysis["proxy_invocations"],
         "pi_agent_receipts": analysis["pi_agent_receipts"],
+        "agent_receipts": analysis["agent_receipts"],
+        "pipeline_job_types": analysis["pipeline_job_types"],
+        "pipeline_claim_stages": analysis["pipeline_claim_stages"],
         "started_at": start,
         "finished_at": _utc_now(),
     }
@@ -1138,7 +1226,9 @@ def _verify_athena_host_receipts(manifest: dict[str, Any], run_dir: Path) -> Non
         _validate_athena_host_receipt(cast(dict[str, Any], payload), descriptor["kind"])
 
 
-def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Path) -> str:
+def _render_report(
+    manifest: dict[str, Any], run_dir: Path, report_path: Path, runbook_path: Path
+) -> str:
     pi = cast(dict[str, Any], manifest.get("pi", {}))
     inventory = cast(dict[str, Any], pi.get("package_inventory", {}))
     commands = [entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"]
@@ -1149,7 +1239,7 @@ def _render_report(manifest: dict[str, Any], report_path: Path, runbook_path: Pa
     lines = [
         "# Pi Issue 2519 Report",
         "",
-        f"- Evidence status: `{_evidence_status(manifest)}`",
+        f"- Evidence status: `{_evidence_status(manifest, run_dir)}`",
         f"- Fixture: `{manifest['fixture']['title']}`",
         f"- Run ID: `{manifest['run_id']}`",
         f"- Created: `{manifest['created_at']}`",
@@ -1259,7 +1349,7 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             "",
             "This runbook reproduces the live evidence collected for issue #2519.",
             "",
-            f"- Evidence status: `{_evidence_status(manifest)}`",
+            f"- Evidence status: `{_evidence_status(manifest, run_dir)}`",
             "- Exact local paths remain in the owner-only manifest.",
             "- Session identifiers are published in the report as required evidence.",
             "",
@@ -1315,7 +1405,8 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
             (
                 f"uv run python scripts/{script_name} capture --run-id <run-id> "
                 "--stage implementation-review-handoff --provider pi -- uv run "
-                f"hephaestus-automation-loop --issues {ISSUE_NUMBER} --agent pi --json"
+                f"hephaestus-automation-loop --issues {ISSUE_NUMBER} --agent pi "
+                "--run-pre-pr-tests --json"
             ),
             (
                 f"uv run python scripts/{script_name} failure-probe --run-id <run-id> "
@@ -1367,7 +1458,7 @@ def _render_runbook(manifest: dict[str, Any], run_dir: Path, report_path: Path) 
 
 def _render_artifacts(run_dir: Path, report_path: Path, runbook_path: Path) -> int:
     manifest = _load_manifest(run_dir)
-    report_text = _render_report(manifest, report_path, runbook_path)
+    report_text = _render_report(manifest, run_dir, report_path, runbook_path)
     runbook_text = _render_runbook(manifest, run_dir, report_path)
     write_secure(report_path, report_text)
     write_secure(runbook_path, runbook_text)
@@ -1409,7 +1500,31 @@ def _verify_workflow(manifest: dict[str, Any]) -> None:
         raise ValueError("no Pi inventory was recorded")
 
 
-def _verify_capture(manifest: dict[str, Any]) -> None:
+def _verify_capture_artifacts(run_dir: Path, entry: dict[str, Any]) -> None:
+    """Re-hash the private stdout and stderr bound to one capture entry."""
+    artifacts = entry.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError("capture artifacts are missing")
+    for name, digest_key in (("stdout", "stdout_digest"), ("stderr", "stderr_digest")):
+        relative = artifacts.get(name)
+        if not isinstance(relative, str):
+            raise ValueError(f"capture {name} artifact is missing")
+        path = run_dir / relative
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"capture {name} artifact is unavailable") from exc
+        if (
+            path.is_symlink()
+            or not resolved.is_relative_to(run_dir.resolve())
+            or not resolved.is_file()
+        ):
+            raise ValueError(f"capture {name} artifact escapes the private run")
+        if _sha256_bytes(resolved.read_bytes()) != entry.get(digest_key):
+            raise ValueError(f"capture {name} artifact digest mismatch")
+
+
+def _verify_capture(manifest: dict[str, Any], run_dir: Path | None = None) -> None:
     capture_entries = [
         entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"
     ]
@@ -1436,9 +1551,31 @@ def _verify_capture(manifest: dict[str, Any]) -> None:
             if isinstance(receipt, dict)
         ) or any(not isinstance(receipt, dict) for receipt in receipts):
             raise ValueError(f"Pi capture {stage} has incomplete queue-worker agent receipts")
+        if run_dir is not None:
+            _verify_capture_artifacts(run_dir, entry)
+        expected_types = (
+            {"agent", "athena"}
+            if stage == "discovery-plan"
+            else {"agent", "build_test", "git", "github"}
+        )
+        if not expected_types.issubset(set(entry.get("pipeline_job_types", []))):
+            raise ValueError(f"Pi capture {stage} lacks complete lifecycle receipts")
+        expected_stages = (
+            {"planning", "plan_review"}
+            if stage == "discovery-plan"
+            else {"implementation", "pr_review", "merge_wait"}
+        )
+        if not expected_stages.issubset(set(entry.get("pipeline_claim_stages", []))):
+            raise ValueError(f"Pi capture {stage} lacks complete stage receipts")
+        if stage == "implementation-review-handoff" and not any(
+            "athena:pr-review" in receipt.get("observed_skill_invocations", [])
+            for receipt in receipts
+            if isinstance(receipt, dict)
+        ):
+            raise ValueError("Pi review capture lacks an observed athena:pr-review invocation")
 
 
-def _verify_comparison(manifest: dict[str, Any]) -> None:
+def _verify_comparison(manifest: dict[str, Any], run_dir: Path | None = None) -> None:
     capture_entries = [
         entry for entry in manifest.get("commands", []) if entry.get("kind") == "capture"
     ]
@@ -1458,6 +1595,26 @@ def _verify_comparison(manifest: dict[str, Any]) -> None:
             raise ValueError("comparison references a missing capture")
         if comparison != _comparison_payload(pi_entry, control_entry):
             raise ValueError("comparison no longer matches its paired captures")
+        if comparison.get("outcomes_match") is not True:
+            raise ValueError("Pi/control outcomes differ without equivalent behavior")
+        invocations = control_entry.get("provider_invocations")
+        if not isinstance(invocations, list) or not any(
+            isinstance(invocation, dict) and invocation.get("tool") == control_entry.get("provider")
+            for invocation in invocations
+        ):
+            raise ValueError("control capture lacks a host-observed provider invocation")
+        agent_receipts = control_entry.get("agent_receipts")
+        if not isinstance(agent_receipts, list) or not any(
+            isinstance(receipt, dict)
+            and receipt.get("provider") == control_entry.get("provider")
+            and receipt.get("ok") is True
+            and receipt.get("interrupted") is False
+            for receipt in agent_receipts
+        ):
+            raise ValueError("control capture lacks a bound queue-worker receipt")
+        if run_dir is not None:
+            _verify_capture_artifacts(run_dir, pi_entry)
+            _verify_capture_artifacts(run_dir, control_entry)
 
 
 def _verify_failure_probes(manifest: dict[str, Any]) -> None:
@@ -1484,12 +1641,12 @@ def _verify_mnemosyne(manifest: dict[str, Any]) -> None:
         raise ValueError("Athena host receipts must come from the queue pipeline")
 
 
-def _verify_completion(manifest: dict[str, Any]) -> None:
+def _verify_completion(manifest: dict[str, Any], run_dir: Path | None = None) -> None:
     """Require the complete successful Pi workflow and its control evidence."""
     _verify_fixture(manifest)
     _verify_workflow(manifest)
-    _verify_capture(manifest)
-    _verify_comparison(manifest)
+    _verify_capture(manifest, run_dir)
+    _verify_comparison(manifest, run_dir)
     _verify_failure_probes(manifest)
     _verify_mnemosyne(manifest)
     pi = cast(dict[str, Any], manifest.get("pi", {}))
@@ -1514,11 +1671,12 @@ def _verify_completion(manifest: dict[str, Any]) -> None:
         raise ValueError(f"required Pi stages are missing: {', '.join(missing_stages)}")
 
 
-def _evidence_status(manifest: dict[str, Any]) -> str:
+def _evidence_status(manifest: dict[str, Any], run_dir: Path) -> str:
     """Return the truthful publishable completion state for a private manifest."""
     try:
-        _verify_completion(manifest)
-    except (KeyError, TypeError, ValueError):
+        _verify_completion(manifest, run_dir)
+        _verify_athena_host_receipts(manifest, run_dir)
+    except (KeyError, OSError, TypeError, ValueError):
         return "incomplete"
     return "complete"
 
@@ -1530,7 +1688,7 @@ def _verify_publication(
     runbook_path: Path,
 ) -> None:
     _require_manifest_paths(report_path, runbook_path)
-    expected_report = _render_report(manifest, report_path, runbook_path)
+    expected_report = _render_report(manifest, run_dir, report_path, runbook_path)
     expected_runbook = _render_runbook(manifest, run_dir, report_path)
     if report_path.read_text(encoding="utf-8") != expected_report:
         raise ValueError("rendered report does not match the manifest")
@@ -1558,10 +1716,10 @@ def _verify_run(
         _verify_workflow(manifest)
         return 0
     if criterion == "capture":
-        _verify_capture(manifest)
+        _verify_capture(manifest, run_dir)
         return 0
     if criterion == "comparison":
-        _verify_comparison(manifest)
+        _verify_comparison(manifest, run_dir)
         return 0
     if criterion == "mnemosyne":
         _verify_mnemosyne(manifest)
@@ -1575,7 +1733,7 @@ def _verify_run(
     if criterion == "completion":
         if report_path is None or runbook_path is None:
             raise ValueError("completion verification requires report and runbook paths")
-        _verify_completion(manifest)
+        _verify_completion(manifest, run_dir)
         _verify_athena_host_receipts(manifest, run_dir)
         _verify_publication(manifest, run_dir, report_path, runbook_path)
         return 0
@@ -1593,7 +1751,7 @@ def _attest_publication(
     verify_defects: bool,
 ) -> int:
     manifest = _load_manifest(run_dir)
-    _verify_completion(manifest)
+    _verify_completion(manifest, run_dir)
     _verify_publication(manifest, run_dir, report_path, runbook_path)
     _verify_athena_host_receipts(manifest, run_dir)
     if repo != PROJECT_REPOSITORY:

@@ -2381,7 +2381,7 @@ def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> Non
         with pytest.raises(RuntimeError, match="hephaestus-install-pi-plugins"):
             agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
-    preflight.assert_called_once_with(tmp_path)
+    preflight.assert_called_once_with(tmp_path, trust_override="--no-approve")
 
 
 def test_resolve_pi_is_na_without_a_host_isolation_adapter(tmp_path: Path) -> None:
@@ -2424,7 +2424,7 @@ def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: P
     ) as preflight:
         with pytest.raises(RuntimeError, match="package_inventory_mismatch"):
             agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
-    preflight.assert_called_once_with(tmp_path)
+    preflight.assert_called_once_with(tmp_path, trust_override="--no-approve")
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:

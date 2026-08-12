@@ -926,6 +926,15 @@ def inspect_pi_package_inventory(
         )
     except ValueError as exc:
         return InventoryResult(False, "package_settings_invalid", {}, {}, str(exc))
+    configured_sources = (*user_sources, *project_sources)
+    if sorted(configured_sources) != sorted(catalog.install_specs):
+        return InventoryResult(
+            False,
+            "package_inventory_mismatch",
+            {},
+            {},
+            "effective settings must contain exactly the catalog-pinned packages",
+        )
     roots: dict[str, Path] = {}
     scopes: dict[str, str] = {}
     for package in catalog.packages:

@@ -1850,16 +1850,21 @@ class WorkerPool:
     ) -> None:
         """Persist one output-free typed receipt when explicitly configured."""
         receipt_dir = self._evidence_receipt_dir
-        if receipt_dir is None or not isinstance(job, (AgentJob, AthenaSkillJob)):
+        if receipt_dir is None or isinstance(job, CompactJob):
             return
         receipt_dir.mkdir(parents=True, exist_ok=True)
         receipt_dir.chmod(0o700)
+        issue = getattr(job, "issue", None)
+        if issue is None and "#" in claim_key:
+            _, _, candidate = claim_key.rpartition("#")
+            if candidate.isdigit():
+                issue = int(candidate)
         payload: dict[str, object] = {
             "schema_version": 1,
             "claim_key": claim_key,
             "claim_stage": claim_stage,
             "repo": job.repo,
-            "issue": job.issue,
+            "issue": issue,
             "descr": job.descr,
             "ok": result.ok,
             "interrupted": result.interrupted,
@@ -1868,7 +1873,7 @@ class WorkerPool:
             payload["job_type"] = "athena"
             if isinstance(result.value, AthenaSkillResult):
                 payload["result"] = asdict(result.value)
-        else:
+        elif isinstance(job, AgentJob):
             payload.update(
                 {
                     "job_type": "agent",
@@ -1878,6 +1883,7 @@ class WorkerPool:
                         if result.session_binding is not None
                         else result.session_id
                     ),
+                    "observed_skill_invocations": list(result.observed_skill_invocations),
                 }
             )
             if job.execution_request is not None:
@@ -1894,6 +1900,20 @@ class WorkerPool:
                 payload["tool_scopes"] = sorted(
                     scope.strip() for scope in (job.allowed_tools or "").split(",") if scope.strip()
                 )
+        elif isinstance(job, BuildTestJob):
+            payload.update(
+                {
+                    "job_type": "build_test",
+                    "argv_sha256": hashlib.sha256(
+                        json.dumps(job.argv, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "expected_head_sha": job.expected_head_sha,
+                }
+            )
+        elif isinstance(job, GitJob):
+            payload.update({"job_type": "git", "operation": job.op})
+        elif isinstance(job, GitHubJob):
+            payload.update({"job_type": "github", "operation": type(job.request).__name__})
         filename = f"{time.time_ns()}-{threading.get_ident()}.json"
         write_secure(
             receipt_dir / filename,
@@ -1948,7 +1968,7 @@ class WorkerPool:
             session_key = job.session_key or session_agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
-            def _invoke() -> tuple[str, str | None, AgentSessionBinding | None]:
+            def _invoke() -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
                 if is_claude:
                     # Scope priority: an explicit per-job grant (a stage that
                     # knows its exact needs, e.g. pr_review) wins; a read-only
@@ -1978,7 +1998,7 @@ class WorkerPool:
                             else None
                         ),
                     )
-                    return stdout, claude_session_id, None
+                    return stdout, claude_session_id, None, ()
                 if job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
@@ -2026,13 +2046,19 @@ class WorkerPool:
                     agent_result.stdout or "",
                     agent_result.session_id or job.resume_session_id,
                     agent_result.session_binding,
+                    agent_result.observed_skill_invocations,
                 )
 
-            def _invoke_leased() -> tuple[str, str | None, AgentSessionBinding | None]:
+            def _invoke_leased() -> tuple[
+                str,
+                str | None,
+                AgentSessionBinding | None,
+                tuple[str, ...],
+            ]:
                 with _agent_workspace_lease(job):
                     return _invoke()
 
-            stdout, session_id, session_binding = resilient_call(
+            stdout, session_id, session_binding, observed_skill_invocations = resilient_call(
                 _invoke_leased,
                 circuit_breaker_name=f"agent:{agent}",
                 retry_predicate=lambda exc: (
@@ -2066,6 +2092,7 @@ class WorkerPool:
                 stdout_tail=stdout[-_TAIL:],
                 session_id=session_id,
                 session_binding=session_binding,
+                observed_skill_invocations=observed_skill_invocations,
             )
 
         except CircuitBreakerOpenError:
