@@ -24,7 +24,6 @@ from hephaestus.cli.utils import (
     emit_json_status,
     format_output,
     format_table,
-    positive_int,
     register_command,
     resolve_repo_root,
 )
@@ -53,7 +52,6 @@ __all__ = [
     "emit_json_status",
     "format_output",
     "format_table",
-    "positive_int",
     "register_command",
     "resolve_repo_root",
 ]

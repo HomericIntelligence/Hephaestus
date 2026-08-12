@@ -49,7 +49,6 @@ __all__ = [
     "emit_json_status",
     "format_output",
     "format_table",
-    "positive_int",
     "register_command",
     "resolve_repo_root",
 ]
