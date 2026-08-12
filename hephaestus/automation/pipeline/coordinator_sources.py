@@ -162,12 +162,12 @@ class SourceCoordinator(_CoordinatorHost):
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-                source.pending = None
-                if self._push_item(new_item, new_item.stage, enter=True):
+                if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
+                    source.pending = None
                     source.seeded_count += 1
                     self._progress = True
                     return True
-                self._progress = True
+                source.pending = metadata
                 return True
             except Exception as exc:
                 logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
@@ -534,13 +534,16 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             if item is None:
                 continue
-            if self._push_item(item, item.stage, enter=True):
+            if self._push_item(item, item.stage, enter=True, defer_if_full=True):
                 pushed += 1
                 # Let the implementation drain establish ownership before a
                 # later source item is considered, otherwise two overlapping
                 # plans can be queued in the same bootstrap tick.
                 if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
                     break
+            else:
+                source.issues.appendleft(issue)
+                break
         if not source.issues:
             self._direct_issue_source = None
         elif pushed == 0 and blocked_by_overlap and scanned == scan_limit:
@@ -585,8 +588,11 @@ class SourceCoordinator(_CoordinatorHost):
             self._restore_learning_intents(item, entry.stage, entry.reason)
             if source.wave_lease is not None:
                 item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-            if self._push_item(item, item.stage, enter=True):
+            if self._push_item(item, item.stage, enter=True, defer_if_full=True):
                 pushed += 1
+            else:
+                source.pending_pr = pr
+                break
         return pushed
 
     def _clamp_seed_stage_to_scope(

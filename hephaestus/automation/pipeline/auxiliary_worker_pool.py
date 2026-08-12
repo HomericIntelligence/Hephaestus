@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import replace
 
 from .athena_skill_jobs import AthenaSkillExecutor, AthenaSkillJob
@@ -44,6 +44,8 @@ class AuxiliaryWorkerPool:
         )
         self._completion_wakeup: threading.Event | None = None
         self._completion_saturation: threading.Event | None = None
+        self._futures: set[Future[JobResult]] = set()
+        self._futures_guard = threading.Lock()
 
     def set_completion_notifiers(
         self, *, wakeup: threading.Event, saturation: threading.Event
@@ -66,6 +68,8 @@ class AuxiliaryWorkerPool:
             raise TypeError(f"auxiliary worker pool does not accept {type(job).__name__}")
         handle = JobHandle(job=job, on_done_state=on_done_state)
         future = self._executor.submit(self._run, job)
+        with self._futures_guard:
+            self._futures.add(future)
         future.add_done_callback(lambda completed: self._publish(handle, completed))
         return handle
 
@@ -96,8 +100,16 @@ class AuxiliaryWorkerPool:
     def _publish(self, handle: JobHandle, future: Future[JobResult]) -> None:
         try:
             result = future.result()
+        except CancelledError:
+            result = JobResult(
+                ok=False,
+                interrupted=True,
+                error="interrupted_before_start",
+            )
         except Exception as exc:
             result = JobResult(ok=False, error=f"worker_crash: {type(exc).__name__}: {exc}")
+        with self._futures_guard:
+            self._futures.discard(future)
         try:
             self._completion_q.put_nowait((handle, result))
         except queue.Full:
@@ -114,4 +126,8 @@ class AuxiliaryWorkerPool:
         cancel = getattr(self._athena_skill_executor, "cancel", None)
         if callable(cancel):
             cancel()
+        with self._futures_guard:
+            futures = tuple(self._futures)
+        for future in futures:
+            future.cancel()
         self._executor.shutdown(wait=False, cancel_futures=True)

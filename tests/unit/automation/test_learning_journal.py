@@ -139,6 +139,45 @@ def test_learning_journal_requires_local_claim_ownership_to_finish(tmp_path: Pat
     owner.finish("key", succeeded=True)
 
 
+def test_shared_claim_registry_survives_store_reconstruction(tmp_path: Path) -> None:
+    """An evicted repository context does not lose its live claim owner."""
+    registry = arming_state.LearningClaimRegistry()
+    owner = arming_state.LearningJournalStore(lambda: tmp_path, claim_registry=registry)
+    replacement = arming_state.LearningJournalStore(lambda: tmp_path, claim_registry=registry)
+    owner.ensure_pending("key", kind="approved_plan")
+    assert owner.claim("key")
+
+    replacement.finish("key", succeeded=True)
+
+    record = replacement.load("key")
+    assert record is not None and record["status"] == "succeeded"
+
+
+def test_disable_does_not_overwrite_a_live_claim(tmp_path: Path) -> None:
+    """The no-learn path cannot replace an active delivery result."""
+    owner = arming_state.LearningJournalStore(lambda: tmp_path)
+    observer = arming_state.LearningJournalStore(lambda: tmp_path)
+    owner.ensure_pending("key", kind="approved_plan")
+    assert owner.claim("key")
+
+    assert observer.disable("key") is None
+    record = observer.load("key")
+    assert record is not None and record["status"] == "claimed"
+    owner.finish("key", succeeded=True)
+
+
+def test_abandoned_claim_terminal_race_is_idempotent(tmp_path: Path) -> None:
+    """A stale recovery read accepts a claim that became terminal."""
+    store = arming_state.LearningJournalStore(lambda: tmp_path)
+    store.ensure_pending("key", kind="approved_plan")
+    assert store.claim("key")
+    store.finish("key", succeeded=True)
+
+    record = store.fail_abandoned_claim("key", error="outcome_unknown")
+
+    assert record is not None and record["status"] == "succeeded"
+
+
 def test_terminal_learning_keeps_cleanup_recoverable(tmp_path: Path) -> None:
     """A terminal learn result remains discoverable until cleanup completes."""
     store = arming_state.LearningJournalStore(lambda: tmp_path)

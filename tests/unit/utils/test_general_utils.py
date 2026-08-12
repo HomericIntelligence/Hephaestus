@@ -537,6 +537,18 @@ class TestRunSubprocessTimeoutLogging:
 
         mock_error.assert_not_called()
 
+    def test_tracked_process_falls_back_when_process_groups_are_unavailable(self) -> None:
+        """A non-POSIX host uses the normal bounded subprocess path."""
+        completed = subprocess.CompletedProcess(["tool"], 0, stdout="ok", stderr="")
+        with (
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=False),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            result = run_subprocess(["tool"], track_process_group=True)
+
+        assert result is completed
+        run.assert_called_once()
+
     @pytest.mark.skipif(
         not hasattr(os, "killpg"),
         reason="requires POSIX process groups",

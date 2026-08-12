@@ -93,7 +93,10 @@ class CoordinatorRuntime(_CoordinatorHost):
                 now_fn=time.monotonic,
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
-                learning_journal=LearningJournalStore(learning_state_dir),
+                learning_journal=LearningJournalStore(
+                    learning_state_dir,
+                    claim_registry=self._learning_claim_registry,
+                ),
                 branch_worktree_owner_status=self._branch_worktree_owner_status,
             )
             if len(self._ctx_cache) >= self._ctx_cache_capacity:
@@ -1288,6 +1291,7 @@ class CoordinatorRuntime(_CoordinatorHost):
     def _teardown_immediate(self) -> None:
         """Cancel the pool and synthesize interrupted results for in-flight items."""
         self.shutdown.set()
+        self._force_shutdown.set()
         self._shutdown_pool()
 
     def _shutdown_pool(self) -> None:
@@ -1316,6 +1320,11 @@ class CoordinatorRuntime(_CoordinatorHost):
                 self.auxiliary_pool.shutdown(mark_interrupted=self.shutdown.is_set())
             except Exception:  # pragma: no cover - defensive
                 logger.exception("auxiliary pool shutdown raised")
+        try:
+            self._drain_completions()
+        except RuntimeError as exc:
+            if str(exc) != "completion queue saturated":
+                raise
         for item in list(self.in_flight.values()):
             self._park_resumable(item)
         for item in list(self.auxiliary_in_flight.values()):

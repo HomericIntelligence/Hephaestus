@@ -191,6 +191,18 @@ def _run_tracked_process_group(
     """Run one command and terminate its full process group on timeout."""
     from hephaestus.utils import subprocess_registry
 
+    if not subprocess_registry.supported():
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout,
+            env=env,
+        )
+
     process = subprocess.Popen(
         cmd,
         cwd=cwd,

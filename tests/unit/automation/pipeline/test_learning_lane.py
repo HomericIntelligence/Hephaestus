@@ -25,6 +25,7 @@ from hephaestus.automation.pipeline.job_results import JobResult
 from hephaestus.automation.pipeline.jobs import GitJob, JobHandle
 from hephaestus.automation.pipeline.routing import Disposition, StageName, StageOutcome
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, LearningIntent, WorkItem
+from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from hephaestus.utils import subprocess_registry
 from hephaestus.utils.helpers import run_subprocess
@@ -172,7 +173,12 @@ def test_scoped_plan_learning_resumes_at_scoped_sink(tmp_path: Path) -> None:
     )
     item = WorkItem(repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.PLAN_REVIEW)
     item.learning_intents.append(
-        LearningIntent.approved_plan(repo="repo", issue=1, plan_revision=1, plan_fingerprint="abc")
+        LearningIntent.approved_plan(
+            repo="repo",
+            issue=1,
+            plan_revision=1,
+            plan_fingerprint="abc",
+        )
     )
 
     coordinator._route(item, StageOutcome(Disposition.ADVANCE, "plan approved"))
@@ -201,6 +207,8 @@ def test_restart_reconstructs_pending_intent_before_primary_stage(tmp_path: Path
         pool=FakeWorkerPool(),
         install_signals=False,
     )
+    approved_plan = "Use the approved plan."
+    coordinator.github.comments[1] = [render_current_plan(approved_plan, revision=1)]
     intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
     journal = coordinator._ctx_for_repo("repo").learning_journal
     journal.ensure_pending(intent.key, kind=intent.kind.value, identity=intent.journal_identity())
@@ -484,6 +492,43 @@ def test_no_learn_disables_recovered_intent_and_keeps_primary_route(tmp_path: Pa
     assert record["error"] == "learning_disabled"
 
 
+def test_no_learn_restores_terminal_cleanup_before_disabling(tmp_path: Path) -> None:
+    """The no-learn switch preserves worktree cleanup from the journal."""
+    coordinator = Coordinator(
+        PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path, enable_learn=False),
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    original = WorkItem(
+        repo="repo",
+        kind=ItemKind.ISSUE,
+        issue=2705,
+        pr=12,
+        stage=StageName.MERGE_WAIT,
+        worktree="build/.worktrees/issue-2705",
+        branch="2705-fix",
+    )
+    intent = LearningIntent.post_merge(repo="repo", issue=2705, pr=12)
+    original.learning_intents.append(intent)
+    original.compact_for_post_processing(
+        ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+    )
+    journal = coordinator._ctx_for_repo("repo").learning_journal
+    journal.ensure_pending(
+        intent.key, kind=intent.kind.value, identity=original.learning_journal_identity(intent)
+    )
+    recovered = WorkItem(
+        repo="repo", kind=ItemKind.ISSUE, issue=2705, pr=12, stage=StageName.FINISHED
+    )
+
+    coordinator._restore_learning_intents(recovered, StageName.FINISHED, "already merged")
+
+    assert recovered.post_processing is not None
+    assert recovered.worktree == original.worktree
+    assert recovered.branch == original.branch
+
+
 def test_post_merge_persistence_failure_keeps_confirmed_result(tmp_path: Path) -> None:
     """Late auxiliary persistence cannot poison a confirmed merge result."""
     coordinator = Coordinator(
@@ -575,11 +620,18 @@ def test_single_main_worker_progresses_while_learning_is_blocked(
         auxiliary_pool=auxiliary,
         install_signals=False,
     )
+    approved_plan = "Use the approved plan."
+    coordinator.github.comments[1] = [render_current_plan(approved_plan, revision=1)]
     learning = WorkItem(
         repo="repo", kind=ItemKind.ISSUE, issue=1, stage=StageName.LEARNING, state="ENTER"
     )
     learning.learning_intents.append(
-        LearningIntent.approved_plan(repo="repo", issue=1, plan_revision=1, plan_fingerprint="abc")
+        LearningIntent.approved_plan(
+            repo="repo",
+            issue=1,
+            plan_revision=1,
+            plan_fingerprint=plan_fingerprint(approved_plan),
+        )
     )
     learning.learning_resume_stage = StageName.IMPLEMENTATION
     assert coordinator._push_item(learning, StageName.LEARNING, enter=True)
@@ -680,8 +732,8 @@ def test_terminal_handoff_compacts_payload_and_preserves_merge_result(tmp_path: 
     assert item.result.final_stage is StageName.MERGE_WAIT
 
 
-def test_learning_completion_exception_preserves_confirmed_merge(tmp_path: Path) -> None:
-    """A journal callback error cannot rewrite a confirmed merge as failed."""
+def test_learning_completion_exception_parks_before_cleanup(tmp_path: Path) -> None:
+    """A journal callback error preserves the claim and defers cleanup."""
 
     class RaisingStage:
         def on_job_done(self, item: WorkItem, result: object, ctx: object) -> None:
@@ -724,9 +776,13 @@ def test_learning_completion_exception_preserves_confirmed_merge(tmp_path: Path)
 
     coordinator._handle_completion(handle, JobResult(ok=False, error="disk"), auxiliary=True)
 
-    assert item.stage is StageName.FINISHED
-    assert item.result == primary
+    assert item.stage is StageName.LEARNING
+    assert item.post_processing is not None
+    assert item.post_processing.result == primary
+    assert item.result is not None and item.result.reason == "resumable at learning"
     assert item.payload["learning_failures"][0]["error"] == "journal_completion_failed"
+    assert item in coordinator.items
+    assert coordinator._terminal_summary.dispositions["resumable"] == 1
 
 
 def test_learning_completion_capacity_covers_all_learning_workers(tmp_path: Path) -> None:

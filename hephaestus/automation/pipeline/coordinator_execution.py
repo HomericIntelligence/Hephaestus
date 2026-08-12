@@ -217,17 +217,8 @@ class ExecutionCoordinator(_CoordinatorHost):
                         "error": "journal_completion_failed",
                     }
                 )
-                if item.post_processing is not None:
-                    self._handoff_item(
-                        item,
-                        StageName.FINISHED,
-                        enter=True,
-                        result=item.post_processing.result,
-                    )
-                    return
-                if item.learning_resume_stage is not None:
-                    self._handoff_item(item, item.learning_resume_stage, enter=True)
-                    return
+                self._park_resumable(item)
+                return
             self._finish(item, passed=False, reason="poisoned: on_job_done raised")
             return
         self._register_pipeline_writer_worktree(item, handle.job, result)

@@ -355,6 +355,8 @@ class FinishedStage(Stage):
                 >= _RESERVATION_RELEASE_RETRY_CAP
             ):
                 item.payload["_direct_scope_reservation_release_attempted"] = True
+                item.payload["_learning_cleanup_succeeded"] = False
+                item.payload["_learning_cleanup_error"] = result.error
                 logger.warning(
                     "finished:%s: direct-scope reservation release failed after retries: %s",
                     item.issue or item.repo,

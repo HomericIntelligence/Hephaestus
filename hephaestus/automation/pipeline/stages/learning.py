@@ -8,6 +8,7 @@ from typing import Any
 from hephaestus.automation.agent_config import learn_claude_timeout
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
+from hephaestus.automation.review_journal import journal_snapshot, plan_fingerprint
 from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
@@ -177,14 +178,16 @@ class LearningStage:
                     Disposition.EJECT,
                     "learning_claim_owned_elsewhere",
                 )
-            if journal.fail_abandoned_claim(intent.key, error="outcome_unknown") is None:
+            abandoned = journal.fail_abandoned_claim(intent.key, error="outcome_unknown")
+            if abandoned is None:
                 return StageOutcome(
                     Disposition.EJECT,
                     "learning_claim_owned_elsewhere",
                 )
-            item.payload.setdefault("learning_failures", []).append(
-                {"key": intent.key, "error": "outcome_unknown"}
-            )
+            if abandoned.get("status") == "failed" and abandoned.get("error") == "outcome_unknown":
+                item.payload.setdefault("learning_failures", []).append(
+                    {"key": intent.key, "error": "outcome_unknown"}
+                )
             return Continue(next_state=CLAIM)
         if record["status"] in {"succeeded", "failed"}:
             return Continue(next_state=CLAIM)
@@ -213,4 +216,14 @@ class LearningStage:
             for label in issue.get("labels", [])
             if isinstance(label, dict)
         ]
-        return is_exclusive_plan_state(labels, STATE_PLAN_GO)
+        if not is_exclusive_plan_state(labels, STATE_PLAN_GO):
+            return False
+        try:
+            snapshot = journal_snapshot(ctx.github.issue_comments(intent.issue))
+        except Exception:
+            return None
+        return bool(
+            snapshot.current_plan
+            and snapshot.revision == intent.plan_revision
+            and plan_fingerprint(snapshot.current_plan) == intent.plan_fingerprint
+        )

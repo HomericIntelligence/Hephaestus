@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         github: StageGitHub
         _github_factory: Callable[[str, Path], StageGitHub] | None
         shutdown: Event
+        _force_shutdown: Event
         completion_q: CompletionQueue
         pool: Any
         queues: dict[StageName, StageQueue]
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
         _stage_config: _StageRunConfig
         _ctx_cache: OrderedDict[str, StageContext]
         _ctx_cache_capacity: int
+        _learning_claim_registry: Any
         _event_log_disabled: bool
         _observed_inflight_repos: set[str]
         _observed_circuit_breaker_states: dict[str, str]

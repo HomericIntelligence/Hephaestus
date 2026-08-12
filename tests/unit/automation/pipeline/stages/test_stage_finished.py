@@ -334,6 +334,11 @@ class TestCleanup:
         assert isinstance(second.job, GitJob)
         assert second.job.op == "release_branch_reservation"
 
+        stage.on_job_done(item, JobResult(ok=False, error="still unavailable"), ctx)
+
+        assert item.payload["_learning_cleanup_succeeded"] is False
+        assert item.payload["_learning_cleanup_error"] == "still unavailable"
+
     def test_noop_local_branch_cleanup_is_coupled_to_worktree_removal(
         self, stage: FinishedStage, make_ctx: Any
     ) -> None:

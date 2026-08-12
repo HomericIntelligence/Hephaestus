@@ -20,8 +20,18 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.base import Disposition
 from hephaestus.automation.pipeline.work_item import LearningIntent
+from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+_APPROVED_PLAN = "Use the approved plan."
+_APPROVED_FINGERPRINT = plan_fingerprint(_APPROVED_PLAN)
+
+
+def _approved_github(issue: int = 2705, revision: int = 8) -> FakeStageGitHub:
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    github.comments[issue] = [render_current_plan(_APPROVED_PLAN, revision=revision)]
+    return github
 
 
 def test_learning_stage_owns_claim_and_submits_only_host_job(
@@ -32,7 +42,7 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     journal = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(
         learning_journal=journal,
-        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        github=_approved_github(),
     )
     item = make_work_item(issue=2705, state="ENTER")
     item.learning_intents.append(
@@ -40,7 +50,7 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
             repo=item.repo,
             issue=2705,
             plan_revision=8,
-            plan_fingerprint="abc",
+            plan_fingerprint=_APPROVED_FINGERPRINT,
         )
     )
     item.learning_resume_stage = StageName.IMPLEMENTATION
@@ -67,7 +77,7 @@ def _claimed_learning(
     ctx = make_ctx(
         learning_journal=journal,
         budget_fn=lambda _name: budget,
-        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        github=_approved_github(),
     )
     item = make_work_item(issue=2705, state="ENTER")
     item.learning_intents.append(
@@ -75,7 +85,7 @@ def _claimed_learning(
             repo=item.repo,
             issue=2705,
             plan_revision=8,
-            plan_fingerprint="abc",
+            plan_fingerprint=_APPROVED_FINGERPRINT,
         )
     )
     item.learning_resume_stage = StageName.IMPLEMENTATION
@@ -163,7 +173,7 @@ def test_live_claim_is_ejected_without_terminalizing_owner(
     observer = LearningJournalStore(lambda: tmp_path)
     ctx = make_ctx(
         learning_journal=observer,
-        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        github=_approved_github(),
     )
     item = make_work_item(issue=2705, state="CLAIM")
     intent = LearningIntent.approved_plan(
@@ -260,13 +270,16 @@ def test_cleanup_barrier_waits_for_every_intent(
     ctx = make_ctx(
         learning_journal=journal,
         budget_fn=lambda _name: 1,
-        github=FakeStageGitHub(labels=[STATE_PLAN_GO]),
+        github=_approved_github(),
     )
     item = make_work_item(issue=2705, state="ENTER")
     item.learning_intents.extend(
         [
             LearningIntent.approved_plan(
-                repo=item.repo, issue=2705, plan_revision=8, plan_fingerprint="abc"
+                repo=item.repo,
+                issue=2705,
+                plan_revision=8,
+                plan_fingerprint=_APPROVED_FINGERPRINT,
             ),
             LearningIntent.post_merge(repo=item.repo, issue=2705, pr=99),
         ]
@@ -313,6 +326,34 @@ def test_stale_plan_authority_skips_host_and_returns_to_review(
     assert record["error"] == "plan_state_changed"
 
     assert stage.step(item, ctx) == StageOutcome(Disposition.FAIL_BACK, "resume_plan_review")
+
+
+def test_changed_plan_revision_invalidates_old_learning_intent(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A GO label cannot approve learning for a replaced plan revision."""
+    current_plan = render_current_plan("Use the current plan.", revision=9)
+    github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+    github.comments[2705] = [current_plan]
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(learning_journal=journal, github=github)
+    item = make_work_item(issue=2705, state="ENTER")
+    intent = LearningIntent.approved_plan(
+        repo=item.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint=plan_fingerprint("Use the old plan."),
+    )
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.IMPLEMENTATION
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+
+    assert stage.step(item, ctx) == Continue(next_state="CLAIM")
+    record = journal.load(intent.key)
+    assert record is not None and record["error"] == "plan_state_changed"
+    assert item.learning_resume_stage is StageName.PLAN_REVIEW
 
 
 def test_unavailable_plan_read_is_ancillary_and_does_not_block_implementation(

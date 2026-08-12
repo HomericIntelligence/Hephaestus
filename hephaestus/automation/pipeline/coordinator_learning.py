@@ -17,7 +17,7 @@ from .work_item import LearningIntent
 class LearningRecoveryCoordinator(_CoordinatorHost):
     """Restore durable learning work before an item's primary route."""
 
-    def _restore_learning_intents(
+    def _restore_learning_intents(  # noqa: C901 - recovery validates durable mixed states
         self,
         item: WorkItem,
         primary_stage: StageName | None,
@@ -34,9 +34,6 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
             records = self._adopt_legacy_post_merge_intent(item, journal)
         if not records:
             return
-        if not self.config.enable_learn:
-            self._disable_valid_records(records, journal)
-            return
         restored: list[LearningIntent] = []
         for record in records:
             try:
@@ -50,6 +47,16 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
                 )
         if not restored:
             return
+        if not self.config.enable_learn:
+            disabled = self._disable_valid_records(records, journal)
+            if primary_stage is StageName.FINISHED:
+                terminal_record = next(
+                    (record for record in records if "post_processing" in record),
+                    records[0],
+                )
+                item.restore_post_processing(terminal_record)
+            if disabled:
+                return
         item.learning_intents = restored
         item.learning_resume_stage = primary_stage
         if primary_stage is StageName.FINISHED:
@@ -66,15 +73,16 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
     @staticmethod
     def _disable_valid_records(
         records: list[dict[str, Any]], journal: LearningJournalStore
-    ) -> None:
+    ) -> bool:
         """Disable records that contain a usable deterministic key."""
+        all_disabled = True
         for record in records:
             key = record.get("key")
-            if isinstance(key, str) and key:
-                if record.get("status") == "claimed" and journal.claim_is_active(key):
-                    logger.info("learning:%s: active claim belongs to another loop", key)
-                    continue
-                journal.disable(key)
+            if isinstance(key, str) and key and journal.disable(key) is None:
+                logger.info("learning:%s: active claim belongs to another loop", key)
+                all_disabled = False
+                continue
+        return all_disabled
 
     def _adopt_legacy_post_merge_intent(
         self,

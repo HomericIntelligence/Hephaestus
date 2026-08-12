@@ -28,14 +28,29 @@ class LearningJournalError(RuntimeError):
     """Report unreadable or invalid durable learning evidence."""
 
 
+class LearningClaimRegistry:
+    """Retain process-owned claim locks across repository context eviction."""
+
+    def __init__(self) -> None:
+        """Create an empty thread-safe ownership registry."""
+        self.locks: dict[str, AbstractContextManager[None]] = {}
+        self.guard = Lock()
+
+
 class LearningJournalStore:
     """Persist strict, bounded state for auxiliary learning intents."""
 
-    def __init__(self, state_dir_provider: Callable[[], Path]) -> None:
+    def __init__(
+        self,
+        state_dir_provider: Callable[[], Path],
+        *,
+        claim_registry: LearningClaimRegistry | None = None,
+    ) -> None:
         """Use the current automation state directory on every operation."""
         self._state_dir_provider = state_dir_provider
-        self._claim_locks: dict[str, AbstractContextManager[None]] = {}
-        self._claim_locks_guard = Lock()
+        self._claim_registry = claim_registry or LearningClaimRegistry()
+        self._claim_locks = self._claim_registry.locks
+        self._claim_locks_guard = self._claim_registry.guard
 
     @staticmethod
     def _digest(key: str) -> str:
@@ -170,21 +185,29 @@ class LearningJournalStore:
             ):
                 yield dict(raw)
 
-    def disable(self, key: str) -> dict[str, Any]:
+    def disable(self, key: str) -> dict[str, Any] | None:
         """Mark reconstructed nonterminal work disabled without host dispatch."""
-        with file_lock(self.lock_path(key), require_exclusive=True):
-            record = self.load(key)
-            if record is None:
-                raise KeyError(key)
-            if record["status"] not in {"pending", "claimed"}:
+        claim_lock = file_lock(self.claim_lock_path(key), blocking=False, require_exclusive=True)
+        try:
+            claim_lock.__enter__()
+        except LockUnavailableError:
+            return None
+        try:
+            with file_lock(self.lock_path(key), require_exclusive=True):
+                record = self.load(key)
+                if record is None:
+                    raise KeyError(key)
+                if record["status"] not in {"pending", "claimed"}:
+                    return record
+                record.update(
+                    status="failed",
+                    error="learning_disabled",
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+                self._write(key, record)
                 return record
-            record.update(
-                status="failed",
-                error="learning_disabled",
-                updated_at=datetime.now(UTC).isoformat(),
-            )
-            self._write(key, record)
-            return record
+        finally:
+            claim_lock.__exit__(None, None, None)
 
     def claim(self, key: str) -> bool:
         """Commit ``pending -> claimed`` and return whether this call won."""
@@ -232,7 +255,11 @@ class LearningJournalStore:
             return None
         try:
             with file_lock(self.lock_path(key), require_exclusive=True):
-                record = self._require_claimed(key)
+                record = self.load(key)
+                if record is None:
+                    raise KeyError(key)
+                if record["status"] != "claimed":
+                    return record
                 record.update(
                     status="failed",
                     updated_at=datetime.now(UTC).isoformat(),

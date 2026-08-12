@@ -80,6 +80,7 @@ class Coordinator(
         if config.learning_queue_capacity < 1:
             raise ValueError("learning_queue_capacity must be positive")
         self.shutdown = threading.Event()
+        self._force_shutdown = threading.Event()
         # These latches are the control plane for the bounded completion
         # queue.  They carry no WorkItem/JobResult payload and therefore
         # cannot become a second, unbounded completion buffer.
@@ -145,7 +146,7 @@ class Coordinator(
 
             auxiliary_pool = AuxiliaryWorkerPool(
                 size=config.learning_workers,
-                shutdown=self.shutdown,
+                shutdown=self._force_shutdown,
                 completion_q=self.auxiliary_completion_q,
                 athena_skill_executor=athena_executor,
                 cleanup_runner=getattr(pool, "_run_cleanup_git", None),
@@ -308,6 +309,9 @@ class Coordinator(
         # retaining one accessor per repository.
         self._ctx_cache: OrderedDict[str, StageContext] = OrderedDict()
         self._ctx_cache_capacity = work_window
+        from hephaestus.automation.arming_state import LearningClaimRegistry
+
+        self._learning_claim_registry = LearningClaimRegistry()
 
     def _direct_issue_identity(
         self, repo: str, issue: int, run_nonce: str
