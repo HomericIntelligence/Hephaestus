@@ -41,7 +41,9 @@ The existing in-process `register_pi_isolation_adapter()` seam remains
 available to embedding applications. Both bootstrap paths end at the same
 `PiIsolationAdapter.invoke()` boundary; the external implementation remains
 responsible for enforcing every filesystem and network grant in the resolved
-`ExecutionPolicy`.
+`ExecutionPolicy`. Hephaestus supplies the complete minimized child environment
+at that boundary. This is the only supported channel for an operator-selected
+`PI_CODING_AGENT_DIR`; adapters must not inherit the ambient host environment.
 
 ## Alternatives considered
 
@@ -63,6 +65,9 @@ responsible for enforcing every filesystem and network grant in the resolved
   Hephaestus console entry point without modifying pipeline code.
 - Stock installations and installed-but-unselected broker packages remain
   fail-closed.
+- The adapter must launch the supplied non-interactive command with the
+  supplied child environment so the exact operator-local Pi profile and model
+  selection survive external isolation without forwarding host credentials.
 - Broker implementation, OS-level enforcement, adversarial validation, and
   deployment remain a separate deliverable tracked by #2738; this decision
   adds no claim that Stage 6 evidence is complete.

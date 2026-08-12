@@ -56,7 +56,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
+from hephaestus.agents.runtime import (
+    DEFAULT_AGENT,
+    agent_supports_model_reasoning_effort,
+    direct_agent_model,
+)
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
@@ -603,11 +607,13 @@ def stage_model(
     provider: str | None = None,
 ) -> str:
     """Return a phase model override, the catch-all model, or the legacy fallback."""
+    selected_provider = provider or agent_provider(ctx)
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
-    model = str(phase_value or catch_all or fallback())
+    configured_model = str(phase_value or catch_all or fallback())
+    model = direct_agent_model(selected_provider, codex_default=configured_model)
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
-    if reasoning_effort and agent_supports_model_reasoning_effort(provider or agent_provider(ctx)):
+    if reasoning_effort and agent_supports_model_reasoning_effort(selected_provider):
         base_model, separator, current_effort = model.rpartition(":")
         if separator and current_effort in {"default", "low", "medium", "high", "xhigh"}:
             model = base_model
