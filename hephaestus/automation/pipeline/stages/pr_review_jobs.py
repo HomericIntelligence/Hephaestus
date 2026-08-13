@@ -325,7 +325,7 @@ class PrReviewJobs(_PrReviewHost):
         if isinstance(prior_generation, bool) or not isinstance(prior_generation, int):
             prior_generation = 0
         item.payload["reviewed_pr_proof_generation"] = prior_generation + 1
-        verifications = _host_verification_specs(item.payload.get("pr_diff"))
+        verifications = _prepare_host_checks(item.payload, _worktree_path(item, ctx), expected_head)
         if verifications:
             logger.info(
                 "pr_review:%d: requesting %d host verifications",
@@ -578,7 +578,7 @@ class PrReviewJobs(_PrReviewHost):
 
     def _host_verification_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Submit primary review only after its host verification passed."""
-        verifications = _host_verification_specs(item.payload.get("pr_diff"))
+        verifications = _payload_host_verification_specs(item.payload)
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         receipts = item.payload.get("host_verification_receipts")
         if not isinstance(receipts, list) or len(receipts) > len(verifications):
@@ -995,7 +995,7 @@ class PrReviewJobs(_PrReviewHost):
     @staticmethod
     def _store_host_verification_result(item: WorkItem, result: JobResult) -> None:
         """Append a bounded, head-bound receipt from the fixed host plan."""
-        specs = _host_verification_specs(item.payload.get("pr_diff"))
+        specs = _payload_host_verification_specs(item.payload)
         reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
         receipts = item.payload.get("host_verification_receipts")
         if (

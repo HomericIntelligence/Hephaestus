@@ -15,10 +15,10 @@ class _HostVerificationSpec:
     descr: str
 
 
-# Python reviews run read-only by design. The host therefore performs the
-# deterministic static validation against an immutable snapshot before the
-# reviewer sees it. Changed unit tests are added separately below; broader
-# suites can legitimately require host capabilities denied to the reviewer.
+_HostPlan = tuple[_HostVerificationSpec, ...]
+
+
+# Run static validation on immutable snapshots before read-only Python reviews.
 _PYTHON_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
         changed_path=None,
@@ -73,9 +73,8 @@ _FULL_UNIT_COVERAGE_SPEC = _HostVerificationSpec(
 _NONHERMETIC_HOST_UNIT_TEST_PATHS = frozenset(
     {"tests/unit/automation/pipeline/test_worker_pool.py"}
 )
-# Some Python regressions require additional bounded execution beyond the
-# baseline review plan. Their path trigger is derived only from a real Git
-# diff header, never from reviewer or GitHub prose.
+# Additional bounded execution is derived only from a real Git diff header,
+# never from reviewer or GitHub prose.
 _PATH_HOST_VERIFICATION_SPECS: tuple[_HostVerificationSpec, ...] = (
     _HostVerificationSpec(
         changed_path="docs/MIGRATION.md",
@@ -175,9 +174,9 @@ def _changed_unit_pytest_argv(target: str) -> tuple[str, ...]:
     )
 
 
-def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ...]:
+def _host_verification_specs(pr_diff: object, *, profile: str | None = "hephaestus") -> _HostPlan:
     """Return the complete fixed host plan activated by the verified diff."""
-    if not isinstance(pr_diff, str):
+    if profile != "hephaestus" or not isinstance(pr_diff, str):
         return ()
     changed_paths = {match.group(2) for match in _DIFF_GIT_HEADER_RE.finditer(pr_diff)}
     path_triggered_specs = tuple(
@@ -244,7 +243,8 @@ def _host_verification_specs(pr_diff: object) -> tuple[_HostVerificationSpec, ..
 __all__ = [
     'HOST_VERIFICATION_DIAGNOSTIC_MAX', 'HOST_VERIFICATION_TIMEOUT_S', '_DIFF_GIT_HEADER_RE',
     '_NONHERMETIC_HOST_UNIT_TEST_PATHS', '_PATH_HOST_VERIFICATION_SPECS',
-    '_PYTHON_HOST_VERIFICATION_SPECS', '_PYTHON_VALIDATION_CONFIG_PATHS', '_HostVerificationSpec',
+    '_PYTHON_HOST_VERIFICATION_SPECS', '_PYTHON_VALIDATION_CONFIG_PATHS', '_HostPlan',
+    '_HostVerificationSpec',
     '_changed_new_side_paths', '_changed_unit_pytest_argv', '_host_verification_specs',
     'annotations', 'dataclass', 're']
 # fmt: on
