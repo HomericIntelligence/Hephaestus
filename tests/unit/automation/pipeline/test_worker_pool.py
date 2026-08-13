@@ -4307,7 +4307,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -4363,7 +4363,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -4407,7 +4407,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -4494,8 +4494,8 @@ class TestGitOps:
             for argv in argvs
         )
 
-    def test_checkout_state_rejects_untracked_files(self, tmp_path: Path) -> None:
-        """Non-ignored intermediate files keep a reusable checkout from synchronizing."""
+    def test_checkout_state_allows_untracked_files(self, tmp_path: Path) -> None:
+        """Untracked files do not block reusable-main synchronization."""
         checkout = tmp_path / "checkout"
         subprocess.run(
             ["git", "init", "-b", "main", str(checkout)],
@@ -4504,11 +4504,14 @@ class TestGitOps:
         )
         (checkout / "intermediate.txt").write_text("pipeline output\n")
 
-        assert WorkerPool._checkout_state_error(
-            checkout=checkout,
-            default_branch="main",
-            timeout_s=120,
-        ) == (f"checkout has uncommitted changes: {checkout}: ?? intermediate.txt")
+        assert (
+            WorkerPool._checkout_state_error(
+                checkout=checkout,
+                default_branch="main",
+                timeout_s=120,
+            )
+            is None
+        )
 
     def test_checkout_state_allows_ignored_intermediate_files(self, tmp_path: Path) -> None:
         """Ignored build and log output do not make a reusable checkout dirty."""
@@ -4548,6 +4551,47 @@ class TestGitOps:
             is None
         )
 
+    @pytest.mark.parametrize("staged", [False, True])
+    def test_checkout_state_rejects_tracked_changes(self, tmp_path: Path, *, staged: bool) -> None:
+        """Tracked staged and unstaged edits block reusable-main synchronization."""
+        checkout = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "init", "-b", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+        )
+        tracked = checkout / "tracked.txt"
+        tracked.write_text("before\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=checkout, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "test: add tracked file",
+            ],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+        )
+        tracked.write_text("after\n")
+        if staged:
+            subprocess.run(["git", "add", "tracked.txt"], cwd=checkout, check=True)
+
+        error = WorkerPool._checkout_state_error(
+            checkout=checkout,
+            default_branch="main",
+            timeout_s=120,
+        )
+
+        assert error is not None
+        assert "checkout has uncommitted changes" in error
+        assert "tracked.txt" in error
+
     def test_sync_checkout_rejects_dirty_worktree_before_fetching(
         self,
         pool: WorkerPool,
@@ -4585,7 +4629,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -5137,7 +5181,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,
@@ -5199,7 +5243,7 @@ class TestGitOps:
                     "core.fsmonitor=false",
                     "status",
                     "--porcelain",
-                    "--untracked-files=all",
+                    "--untracked-files=no",
                 ],
                 cwd=checkout,
                 timeout=120,

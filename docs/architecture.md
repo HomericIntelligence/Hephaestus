@@ -701,13 +701,13 @@ Before it reads a direct `--issues` / `--prs` scope, performs a label mutation,
 or dispatches an agent, repo intake proves its reusable checkout is the
 expected repository, clean, on the remote default branch, and fast-forwarded
 to that branch's fetched head. Here, clean means that
-`git status --porcelain --untracked-files=all` reports neither tracked changes
-nor non-ignored untracked files. Every log, build product, and other
-intermediate file created before this check must therefore be covered by the
-repository's `.gitignore`; `build/` is the sanctioned scratch location. A
-missing checkout is cloned and then subjected to the same synchronization
-proof. Any failure is terminal for that scope; it never falls through to an
-ambient or stale checkout.
+`git status --porcelain --untracked-files=no` reports no staged or unstaged
+tracked changes. Untracked files stay in place and do not block intake because
+issue implementation runs in isolated worktrees. Writer-worktree commit and
+cleanup checks remain strict and include untracked files. A missing checkout is
+cloned and then subjected to the same synchronization proof. Any failure is
+terminal for that scope; it never falls through to an ambient or stale
+checkout.
 
 #### Boundary diagram
 
