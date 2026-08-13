@@ -2631,8 +2631,8 @@ class WorkerPool:
     def _git_sync_checkout(self, job: GitJob) -> JobResult:
         """Validate and fast-forward a clean reusable checkout.
 
-        Generated and intermediate files must be covered by the repository's
-        ignore rules; any other uncommitted path blocks synchronization.
+        Tracked staged or unstaged changes block synchronization. Untracked
+        files are left in place because issue work runs in isolated worktrees.
         """
         expected_repo = str(job.kwargs.get("repo") or "")
         dest = str(job.kwargs.get("dest") or "")
@@ -2696,7 +2696,7 @@ class WorkerPool:
                 "core.fsmonitor=false",
                 "status",
                 "--porcelain",
-                "--untracked-files=all",
+                "--untracked-files=no",
             ],
             cwd=checkout,
             timeout=timeout_s,
@@ -2759,7 +2759,7 @@ class WorkerPool:
                 "core.fsmonitor=false",
                 "status",
                 "--porcelain",
-                "--untracked-files=all",
+                "--untracked-files=no",
             ],
             cwd=checkout,
             timeout=timeout_s,
