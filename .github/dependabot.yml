@@ -1,33 +1,51 @@
+# Dependabot configuration — HomericIntelligence fleet baseline
+# Cadence: monthly. Grouping: minor+patch updates in one PR, major-version
+# bumps in their own PR for focused review. See the Dependabot options
+# reference for details.
+
 version: 2
 updates:
-  - package-ecosystem: "uv"
-    directory: "/"
+  - package-ecosystem: 'uv'
+    directory: '/'
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 5
     labels:
       - "dependencies"
-    # GitHub applies commit-message.prefix to commit subjects and PR titles.
-    # A prefix ending in ")" receives the required colon: "chore(deps): ...".
-    # https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+      - "python"
     commit-message:
-      prefix: "chore(deps)"
+      prefix: 'chore(deps)'
     groups:
-      python-dependencies:
+      minor-patch:
         patterns:
           - "*"
-
-  - package-ecosystem: "github-actions"
-    directory: "/"
+        update-types:
+          - "minor"
+          - "patch"
+      major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+  - package-ecosystem: 'github-actions'
+    directory: '/'
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 5
     labels:
       - "dependencies"
-      - "ci/cd"
-    # The same explicit prefix keeps Dependabot PR titles Conventional Commit
-    # compliant when the required PR-title gate validates them.
+      - "ci"
     commit-message:
-      prefix: "chore(deps)"
+      prefix: 'chore(ci)'
     groups:
-      github-actions:
+      minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
