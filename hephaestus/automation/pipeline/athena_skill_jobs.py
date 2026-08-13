@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from hephaestus.agents.workspace import WorkspaceBinding
+
 AthenaSkillKind = Literal["advise", "learn"]
 
 
@@ -20,6 +22,7 @@ class AthenaSkillRequest:
     model: str
     cwd: Path
     timeout_s: int
+    workspace: WorkspaceBinding | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     dry_run: bool = False
 
@@ -56,6 +59,7 @@ def build_athena_skill_request(
     model: str,
     cwd: Path,
     timeout_s: int,
+    workspace: WorkspaceBinding | None = None,
     payload: dict[str, Any] | None = None,
     dry_run: bool = False,
 ) -> AthenaSkillRequest:
@@ -68,6 +72,7 @@ def build_athena_skill_request(
         model=model,
         cwd=cwd,
         timeout_s=timeout_s,
+        workspace=workspace,
         payload=dict(payload or {}),
         dry_run=dry_run,
     )

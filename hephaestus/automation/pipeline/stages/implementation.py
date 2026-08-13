@@ -78,6 +78,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
     _parse_addressed_block,
@@ -158,6 +159,7 @@ from .base import (
     _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
+    source_workspace_binding,
     stage_model,
     write_skip_label,
 )
@@ -458,6 +460,7 @@ class ImplementationStage(Stage):
             # never discards pushed commits). Values coordinator-vetted.
             "refresh_base": not adopted and direct_base_sha is None,
             "repo_root": str(ctx.paths.repo_root),
+            "source_lane": "impl",
         }
         direct_worktree_nonce = item.payload.get(DIRECT_SCOPE_WORKTREE_NONCE_KEY)
         direct_branch_prefix = f"{issue}-auto-impl-direct-"
@@ -722,6 +725,18 @@ class ImplementationStage(Stage):
             logger.info("implementation:%d: advise disabled; skipping", issue)
             return Continue(next_state=IMPLEMENT_WAIT)
         logger.info("implementation:%d: requesting advise job", issue)
+        workspace = source_workspace_binding(
+            item,
+            ctx,
+            SourceLane.IMPLEMENTATION,
+            revision=str(
+                item.payload.get("_worktree_cleanup_head_sha")
+                or item.payload.get("_impl_source_revision")
+                or item.payload.get("_synced_default_branch_sha")
+                or ""
+            ),
+            branch=item.branch or None,
+        )
         job = AthenaSkillJob(
             request=AthenaSkillRequest(
                 kind="advise",
@@ -729,8 +744,9 @@ class ImplementationStage(Stage):
                 issue=issue,
                 agent=agent_provider(ctx),
                 model=stage_model(ctx, "advise", advise_model),
-                cwd=_worktree_path(item, ctx),
+                cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
                 timeout_s=advise_claude_timeout(),
+                workspace=workspace,
                 payload={
                     "issue_number": item.issue,
                     "issue_title": item.payload.get("issue_title", ""),
@@ -765,6 +781,18 @@ class ImplementationStage(Stage):
                 "implementation:%d: addressing %d review thread(s)",
                 issue,
                 len(remediation_threads),
+            )
+            workspace = source_workspace_binding(
+                item,
+                ctx,
+                SourceLane.IMPLEMENTATION,
+                revision=str(
+                    item.payload.get("reviewed_pr_head_sha")
+                    or item.payload.get("_worktree_cleanup_head_sha")
+                    or item.payload.get("_impl_source_revision")
+                    or ""
+                ),
+                branch=item.branch or None,
             )
             scope_retraction_paths = scope_retraction_paths_for_threads(remediation_threads)
             if scope_retraction_paths is None:
@@ -803,8 +831,9 @@ class ImplementationStage(Stage):
                 agent=agent_provider(ctx),
                 model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_address_review_prompt,
-                cwd=_worktree_path(item, ctx),
+                cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
                 timeout_s=implementer_claude_timeout(),
+                workspace=workspace,
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_IMPLEMENTER,
                 resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
@@ -840,14 +869,27 @@ class ImplementationStage(Stage):
             )
             return JobRequest(job, on_done_state=TEST_WAIT)
         logger.info("implementation:%d: requesting implement job", issue)
+        workspace = source_workspace_binding(
+            item,
+            ctx,
+            SourceLane.IMPLEMENTATION,
+            revision=str(
+                item.payload.get("_worktree_cleanup_head_sha")
+                or item.payload.get("_impl_source_revision")
+                or item.payload.get("_synced_default_branch_sha")
+                or ""
+            ),
+            branch=item.branch or None,
+        )
         job = AgentJob(
             repo=item.repo,
             issue=issue,
             agent=agent_provider(ctx),
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
-            cwd=_worktree_path(item, ctx),
+            cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
             timeout_s=implementer_claude_timeout(),
+            workspace=workspace,
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),

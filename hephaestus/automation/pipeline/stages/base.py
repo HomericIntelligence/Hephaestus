@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
+from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -96,6 +97,7 @@ __all__ = [
     "StepResult",
     "WorkItem",
     "agent_provider",
+    "source_workspace_binding",
     "stage_model",
     "write_skip_label",
 ]
@@ -581,6 +583,46 @@ def stage_model(
             model = base_model
         return f"{model}:{reasoning_effort}"
     return model
+
+
+def source_workspace_binding(
+    item: WorkItem,
+    ctx: StageContext,
+    lane: SourceLane,
+    *,
+    revision: str | None = None,
+    branch: str | None = None,
+) -> WorkspaceBinding | None:
+    """Prepare a typed source lane when production workspace ownership is wired.
+
+    Lightweight stage fixtures intentionally omit the manager; returning
+    ``None`` preserves their construction-only behavior. The production
+    coordinator always injects it, and missing revision evidence then fails
+    closed before a source-reading job can be submitted.
+    """
+    manager = getattr(ctx.paths, "source_workspaces", None)
+    if manager is None:
+        return None
+    if callable(manager):
+        manager = manager()
+        ctx.paths.source_workspaces = manager
+        if manager is None:
+            return None
+    item_number = item.issue or item.pr
+    if item_number is None:
+        raise RuntimeError("source workspace requires an issue or pull request number")
+    target = revision or str(
+        item.payload.get("reviewed_pr_head_sha")
+        or item.payload.get("pr_head_sha")
+        or item.payload.get("_synced_default_branch_sha")
+        or ""
+    )
+    if len(target) != 40:
+        raise RuntimeError("source workspace requires a captured full revision")
+    binding: WorkspaceBinding = manager.prepare(item_number, lane, target, branch=branch)
+    if lane is SourceLane.IMPLEMENTATION:
+        item.payload["_impl_source_revision"] = binding.revision
+    return binding
 
 
 def _issue_labels(item: WorkItem, ctx: StageContext) -> list[str]:

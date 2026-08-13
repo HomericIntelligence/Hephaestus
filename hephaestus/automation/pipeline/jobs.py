@@ -16,6 +16,7 @@ from typing import Any
 
 from hephaestus.agents.execution_policy import ExecutionRequest
 from hephaestus.agents.pi_session import AgentSessionBinding
+from hephaestus.agents.workspace import WorkspaceBinding, validate_workspace_binding
 
 from .git_jobs import GIT_OPS, WORKTREE_MATERIALIZED_KEY, GitJob
 from .job_results import JobHandle, JobResult
@@ -29,7 +30,13 @@ __all__ = [
     "GitJob",
     "JobHandle",
     "JobResult",
+    "JobWorkspaceError",
+    "validate_job_workspace",
 ]
+
+
+class JobWorkspaceError(RuntimeError):
+    """Raised when a job attempts to use an unbound source checkout."""
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,7 @@ class AgentJob:
     prompt_builder: Callable[..., str]
     cwd: Path
     timeout_s: int
+    workspace: WorkspaceBinding | None = None
     session_agent: str = ""
     # Stable cycle-scoped identity.  Unlike ``session_agent`` this must not
     # be shared by separate issues or explicit planning cycles.
@@ -71,6 +79,29 @@ class AgentJob:
     # output parsing, closing the restart window for durable conversations.
     session_checkpoint: Callable[[str, AgentSessionBinding | None], None] | None = None
     descr: str = ""
+
+
+def validate_job_workspace(job: AgentJob) -> Path:
+    """Resolve and fail-closed validate an agent job's execution directory."""
+    tools = job.allowed_tools
+    if tools is None and job.sandbox in {"read-only", "workspace-write"}:
+        tools = "Read,Glob,Grep,Write,Edit,Bash"
+    if job.workspace is not None:
+        canonical = validate_workspace_binding(job.workspace, allowed_tools=tools or "")
+        if canonical != job.cwd.resolve(strict=True):
+            raise JobWorkspaceError("job cwd does not match its workspace binding")
+        return canonical
+    canonical = job.cwd.resolve(strict=True)
+    source_capable = bool(
+        {"Read", "Glob", "Grep", "Write", "Edit", "Bash"}
+        & {value.strip() for value in (tools or "").split(",") if value.strip()}
+    )
+    # A primary checkout has a .git directory. Linked worktrees have a .git
+    # file, so legacy isolated callers remain compatible while every ambient
+    # reusable-root invocation fails before provider resolution.
+    if source_capable and (canonical / ".git").is_dir():
+        raise JobWorkspaceError("source-reading agent cannot use the reusable repository root")
+    return job.cwd
 
 
 @dataclass(frozen=True)

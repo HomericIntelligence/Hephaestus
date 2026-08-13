@@ -35,6 +35,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
@@ -87,6 +88,7 @@ from .base import (
     WorkItem,
     _require_issue_labels,
     agent_provider,
+    source_workspace_binding,
     stage_model,
 )
 
@@ -584,6 +586,7 @@ class PlanningStage(Stage):
 
         if item.state == "ADVISE_WAIT":
             logger.info("planning:%d: requesting advise job", item.issue)
+            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
             advise_job = AthenaSkillJob(
                 request=AthenaSkillRequest(
                     kind="advise",
@@ -591,8 +594,9 @@ class PlanningStage(Stage):
                     issue=item.issue,
                     agent=agent_provider(ctx),
                     model=stage_model(ctx, "advise", advise_model),
-                    cwd=ctx.paths.worktree,
+                    cwd=workspace.cwd if workspace else ctx.paths.worktree,
                     timeout_s=advise_claude_timeout(),
+                    workspace=workspace,
                     payload={
                         "issue_number": item.issue,
                         "issue_title": item.payload.get("issue_title", ""),
@@ -607,14 +611,16 @@ class PlanningStage(Stage):
             if item.payload.get("athena_advise_error"):
                 return StageOutcome(Disposition.FINISH_FAIL, "athena_advise_failed")
             logger.info("planning:%d: requesting plan job", item.issue)
+            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
                 agent=agent_provider(ctx),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
-                cwd=ctx.paths.worktree,
+                cwd=workspace.cwd if workspace else ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,

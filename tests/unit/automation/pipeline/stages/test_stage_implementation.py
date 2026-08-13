@@ -597,6 +597,7 @@ class TestGate:
             "branch_name": "1-some-real-branch",
             "refresh_base": False,
             "repo_root": "/tmp/repo",
+            "source_lane": "impl",
             "sync_to_remote": True,
             "pr_number": 1001,
         }
@@ -1211,6 +1212,7 @@ class TestWorktreeAndAdvise:
             "branch_name": "1-auto-impl",
             "refresh_base": True,
             "repo_root": "/tmp/repo",
+            "source_lane": "impl",
         }
         assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
@@ -1322,6 +1324,7 @@ class TestWorktreeAndAdvise:
             "branch_name": "1-auto-impl",
             "refresh_base": False,
             "repo_root": "/tmp/repo",
+            "source_lane": "impl",
             "base_sha": "a" * 40,
         }
 
@@ -1374,6 +1377,7 @@ class TestWorktreeAndAdvise:
             "branch_name": f"1-auto-impl-direct-{run_nonce}",
             "refresh_base": False,
             "repo_root": "/tmp/repo",
+            "source_lane": "impl",
             "direct_worktree_nonce": run_nonce,
             "sync_to_remote": True,
             "pr_number": 1001,

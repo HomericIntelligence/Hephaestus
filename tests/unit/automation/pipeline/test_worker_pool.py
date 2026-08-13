@@ -6092,6 +6092,7 @@ class TestShutdownReapsSubprocess:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
     ) -> None:
         """A direct Codex session is registered and reaped with the worker pool."""
         sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -6100,7 +6101,7 @@ class TestShutdownReapsSubprocess:
             model="reap-test",
             timeout_s=60,
             session_agent="implementer",
-            cwd=Path.cwd(),
+            cwd=tmp_path,
         )
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
@@ -6125,6 +6126,7 @@ class TestShutdownReapsSubprocess:
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
+        tmp_path: Path,
     ) -> None:
         """A slow claude job is reaped by shutdown() instead of running to timeout.
 
@@ -6150,7 +6152,7 @@ class TestShutdownReapsSubprocess:
             model="reap-test",
             timeout_s=60,
             session_agent="implementer",
-            cwd=Path.cwd(),
+            cwd=tmp_path,
         )
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),

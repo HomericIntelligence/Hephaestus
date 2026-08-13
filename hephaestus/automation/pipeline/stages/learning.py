@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import learn_claude_timeout
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
@@ -16,6 +17,7 @@ from ..job_results import JobResult
 from ..routing import Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import LearningIntent, WorkItem
+from .base import source_workspace_binding
 
 StepResult = Continue | JobRequest | StageOutcome
 
@@ -78,6 +80,19 @@ class LearningStage:
         delivery = item.payload.get("learn_delivery")
         if isinstance(delivery, dict):
             payload["learn_delivery"] = dict(delivery)
+        revision = str(
+            item.payload.get("_worktree_cleanup_head_sha")
+            or item.payload.get("_impl_source_revision")
+            or item.payload.get("_synced_default_branch_sha")
+            or ""
+        )
+        workspace = source_workspace_binding(
+            item,
+            ctx,
+            SourceLane.IMPLEMENTATION,
+            revision=revision or None,
+            branch=item.branch or None,
+        )
         return JobRequest(
             AthenaSkillJob(
                 request=AthenaSkillRequest(
@@ -89,8 +104,13 @@ class LearningStage:
                         getattr(ctx.config, "implementer_model", "")
                         or getattr(ctx.config, "model", "")
                     ),
-                    cwd=Path(item.worktree or str(ctx.paths.worktree)),
+                    cwd=(
+                        workspace.cwd
+                        if workspace
+                        else Path(item.worktree or str(ctx.paths.worktree))
+                    ),
                     timeout_s=learn_claude_timeout(),
+                    workspace=workspace,
                     payload=payload,
                 ),
                 descr=f"auxiliary_learn_{intent.kind.value}",
