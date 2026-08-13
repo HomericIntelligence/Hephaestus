@@ -36,7 +36,7 @@ updates:
       - "dependencies"
       - "ci"
     commit-message:
-      prefix: 'chore(ci)'
+      prefix: 'chore(deps)'
     groups:
       minor-patch:
         patterns:
