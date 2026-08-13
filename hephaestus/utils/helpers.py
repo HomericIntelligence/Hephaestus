@@ -5,9 +5,11 @@ General utility functions that don't fit in other specific modules.
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import unicodedata
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -178,14 +180,77 @@ def _tail_for_log(value: str, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
     return f"...({omitted} earlier chars){value[-limit:]}"
 
 
+def _run_tracked_process_group(
+    cmd: list[str],
+    *,
+    cwd: str | Path | None,
+    timeout: float | None,
+    check: bool,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Run one command and terminate its full process group on timeout."""
+    from hephaestus.utils import subprocess_registry
+
+    if not subprocess_registry.supported():
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout,
+            env=env,
+        )
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    with subprocess_registry.track_process_group(process.pid):
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                stdout, stderr = process.communicate(timeout=1)
+            raise subprocess.TimeoutExpired(
+                cmd,
+                float(timeout or 0),
+                output=stdout,
+                stderr=stderr,
+            ) from None
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+
 def run_subprocess(
     cmd: list[str],
-    cwd: str | None = None,
-    timeout: int | None = None,
+    cwd: str | Path | None = None,
+    timeout: float | None = None,
     check: bool = True,
     dry_run: bool = False,
     log_on_error: bool = True,
     env: dict[str, str] | None = None,
+    track_process_group: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
 
@@ -199,6 +264,8 @@ def run_subprocess(
             Use when failure is expected and already handled by the caller.
         env: Optional environment dict to pass to subprocess.run().
             If provided, replaces the current process environment.
+        track_process_group: Run the child in a tracked POSIX process group so
+            an owning host can stop active work during forced shutdown.
 
     Returns:
         Completed process object
@@ -221,16 +288,25 @@ def run_subprocess(
         effective_env["GH_TRACE_ID"] = cid
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=check,
-            timeout=timeout,
-            env=effective_env,
-        )
+        if track_process_group:
+            result = _run_tracked_process_group(
+                cmd,
+                cwd=cwd,
+                timeout=timeout,
+                check=check,
+                env=effective_env,
+            )
+        else:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=check,
+                timeout=timeout,
+                env=effective_env,
+            )
         return result
     except subprocess.TimeoutExpired:
         if log_on_error:

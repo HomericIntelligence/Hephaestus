@@ -19,6 +19,7 @@ from .base import (
 )
 from .finished import FinishedStage
 from .implementation import ImplementationStage
+from .learning import LearningStage
 from .merge_wait import MergeWaitStage
 from .plan_review import PlanReviewStage
 from .planning import PlanningStage
@@ -32,6 +33,7 @@ __all__ = [
     "ImplementationStage",
     "ImplementationThreadReplyResult",
     "JobRequest",
+    "LearningStage",
     "MergeWaitStage",
     "PlanReviewStage",
     "PlanningStage",

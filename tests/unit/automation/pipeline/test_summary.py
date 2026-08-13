@@ -141,13 +141,24 @@ class TestPrintSummaryRows:
 
         with caplog.at_level(logging.INFO):
             print_summary(
-                items, _stats(loops_run=2, agent_job_count=5, wall_s=99.5), [], json_out=False
+                items,
+                _stats(
+                    loops_run=2,
+                    agent_job_count=5,
+                    wall_s=99.5,
+                    auxiliary_job_count=2,
+                    auxiliary_job_time_s=3.5,
+                    auxiliary_job_failure_count=1,
+                ),
+                [],
+                json_out=False,
             )
 
         text = caplog.text
         assert "'pass': 2" in text
         assert "'fail': 1" in text
         assert "agent jobs: 5" in text
+        assert "auxiliary jobs: 2 (3.5s total, 1 failed)" in text
         assert "loops: 2" in text
         assert "wall: 99.5s" in text
 
@@ -235,7 +246,13 @@ class TestJsonEnvelope:
 
         print_summary(
             items,
-            _stats(exit_code=130, loops_run=3),
+            _stats(
+                exit_code=130,
+                loops_run=3,
+                auxiliary_job_count=2,
+                auxiliary_job_time_s=3.5,
+                auxiliary_job_failure_count=1,
+            ),
             [("repo-a", 2, "/wt/2")],
             json_out=True,
         )
@@ -246,6 +263,9 @@ class TestJsonEnvelope:
         assert envelope["message"] == "pipeline interrupted"
         assert envelope["dispositions"] == {"pass": 1, "resumable": 1}
         assert envelope["loops_run"] == 3
+        assert envelope["auxiliary_jobs"] == 2
+        assert envelope["auxiliary_job_time_s"] == 3.5
+        assert envelope["auxiliary_job_failures"] == 1
         assert envelope["resumable"] == ["repo-a#2@pr_review"]
         assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
         assert envelope["recovery_worktrees"] == []

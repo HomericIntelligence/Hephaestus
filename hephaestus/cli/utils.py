@@ -309,7 +309,7 @@ def _finite_float(value: str) -> float:
     return parsed
 
 
-def _positive_int(value: str) -> int:
+def positive_int(value: str) -> int:
     """Parse a strictly positive integer for timeout CLI options."""
     try:
         parsed = int(value)
@@ -318,6 +318,9 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
     return parsed
+
+
+_positive_int = positive_int
 
 
 def _non_negative_float(value: str) -> float:

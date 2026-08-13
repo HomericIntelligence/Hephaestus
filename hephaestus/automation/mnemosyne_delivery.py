@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from hephaestus.utils.helpers import NETWORK_TIMEOUT
+from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
 
 class LearnDeliveryError(RuntimeError):
@@ -86,13 +86,12 @@ class LearnDeliveryReceipt:
 
 
 def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ("git", *argv),
+    return run_subprocess(
+        ["git", *argv],
         cwd=cwd,
         check=False,
-        capture_output=True,
-        text=True,
         timeout=timeout_s,
+        track_process_group=True,
     )
 
 

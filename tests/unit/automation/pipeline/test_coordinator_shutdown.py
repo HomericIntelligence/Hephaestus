@@ -33,7 +33,12 @@ from hephaestus.automation.pipeline.stages.base import (
 from hephaestus.automation.pipeline.stages.implementation import ImplementationStage
 from hephaestus.automation.pipeline.stages.plan_review import PlanReviewStage
 from hephaestus.automation.pipeline.stages.planning import PlanningStage
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.work_item import (
+    ItemKind,
+    ItemResult,
+    LearningIntent,
+    WorkItem,
+)
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -130,6 +135,26 @@ class GracefulSignalCompletionPool(FakeWorkerPool):
 
 class SecondSignalPool(FakeWorkerPool):
     """Send two SIGTERMs during submit and leave the job in flight."""
+
+    def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
+        del kwargs
+        handle = JobHandle(job=job, on_done_state=on_done_state)
+        self.submitted.append(handle)
+        _raise_sigterm()
+        _raise_sigterm()
+        return handle
+
+
+class GracefulAuxiliarySignalPool(FakeWorkerPool):
+    """Send one SIGTERM while an auxiliary learning request is active."""
+
+    def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
+        _raise_sigterm()
+        return super().submit(job, on_done_state, **kwargs)
+
+
+class ForcedAuxiliarySignalPool(FakeWorkerPool):
+    """Send two SIGTERMs and leave an auxiliary learning request active."""
 
     def submit(self, job: Any, on_done_state: Any, **kwargs: Any) -> Any:
         del kwargs
@@ -305,6 +330,131 @@ class TestInterruptSemantics:
         assert caplog.messages[-1] == (
             "Ctrl+C received: timed graceful shutdown started (17s); "
             "press Ctrl+C again to force teardown"
+        )
+
+    def test_graceful_signal_drains_active_learning_and_restart_recovers_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Graceful shutdown records active learning before restart cleanup."""
+        _capture_signal_handlers(monkeypatch)
+        auxiliary_pool = GracefulAuxiliarySignalPool()
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=auxiliary_pool,
+            install_signals=False,
+        )
+        intent = LearningIntent.post_merge(repo="repo-a", issue=81, pr=181)
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=81,
+            pr=181,
+            stage=StageName.LEARNING,
+        )
+        item.learning_intents.append(intent)
+        item.compact_for_post_processing(
+            ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+        )
+        journal = coordinator._ctx_for_repo("repo-a").learning_journal
+        journal.ensure_pending(
+            intent.key,
+            kind=intent.kind.value,
+            identity=item.learning_journal_identity(intent),
+        )
+        assert coordinator._push_item(item, StageName.LEARNING, enter=True)
+        coordinator._install_signal_handlers()
+
+        assert coordinator.run() == 130
+        assert len(auxiliary_pool.submitted) == 1
+        assert item.result is not None
+        assert item.result.reason == "resumable at learning"
+        record = journal.load(intent.key)
+        assert record is not None and record["status"] == "succeeded"
+        assert record["cleanup_status"] == "pending"
+
+        restarted = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        recovered = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=81, pr=181)
+        restarted._restore_learning_intents(recovered, StageName.FINISHED, "merged")
+
+        assert recovered.stage is StageName.LEARNING
+        assert recovered.learning_intents == [intent]
+        assert recovered.post_processing is not None
+        assert recovered.post_processing.result.reason == "merged"
+
+    def test_second_signal_parks_active_learning_and_restart_marks_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Forced shutdown preserves an active claim for restart recovery."""
+        _capture_signal_handlers(monkeypatch)
+        auxiliary_pool = ForcedAuxiliarySignalPool()
+        coordinator = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=auxiliary_pool,
+            install_signals=False,
+        )
+        intent = LearningIntent.post_merge(repo="repo-a", issue=82, pr=182)
+        item = WorkItem(
+            repo="repo-a",
+            kind=ItemKind.ISSUE,
+            issue=82,
+            pr=182,
+            stage=StageName.LEARNING,
+        )
+        item.learning_intents.append(intent)
+        item.compact_for_post_processing(
+            ItemResult(passed=True, reason="merged", final_stage=StageName.MERGE_WAIT)
+        )
+        journal = coordinator._ctx_for_repo("repo-a").learning_journal
+        journal.ensure_pending(
+            intent.key,
+            kind=intent.kind.value,
+            identity=item.learning_journal_identity(intent),
+        )
+        assert coordinator._push_item(item, StageName.LEARNING, enter=True)
+        coordinator._install_signal_handlers()
+
+        assert coordinator.run() == 130
+        assert len(auxiliary_pool.submitted) == 1
+        assert item.result is not None
+        assert item.result.reason == "resumable at learning"
+        record = journal.load(intent.key)
+        assert record is not None and record["status"] == "claimed"
+
+        # Simulate process exit. The operating system releases this lock before
+        # a new coordinator reconstructs the durable item.
+        journal._release_claim_lock(intent.key)
+        restarted = Coordinator(
+            PipelineConfig(org="org", repos=[], projects_dir=tmp_path),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        recovered = WorkItem(repo="repo-a", kind=ItemKind.ISSUE, issue=82, pr=182)
+        restarted._restore_learning_intents(recovered, StageName.FINISHED, "merged")
+        assert recovered.stage is StageName.LEARNING
+        assert restarted._push_item(recovered, StageName.LEARNING, enter=True)
+
+        assert restarted.run() == 0
+        recovered_record = restarted._ctx_for_repo("repo-a").learning_journal.load(intent.key)
+        assert recovered_record is not None
+        assert recovered_record["status"] == "failed"
+        assert recovered_record["error"] == "outcome_unknown"
+        assert recovered_record["cleanup_status"] == "succeeded"
+        assert recovered.result == ItemResult(
+            passed=True,
+            reason="merged",
+            final_stage=StageName.MERGE_WAIT,
         )
 
 

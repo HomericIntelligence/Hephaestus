@@ -6,8 +6,7 @@ binding contract). It fully owns the review/amend/learn loop that the legacy
 planner review loop used to run before ``hephaestus-plan-issues`` was
 re-pointed at the pipeline (#1820):
 
-- States: ENTER -> REVIEW_WAIT -> EVAL -> AMEND_WAIT -> (loop) -> LEARN_WAIT
-  -> PLAN_FINISH.
+- States: ENTER -> REVIEW_WAIT -> EVAL -> AMEND_WAIT -> (loop) -> ADVANCE.
 - Budgets: ``plan_review_iter`` = 3 (max review iterations per cycle),
   ``plan_cycles`` = 2 (max plan->review->amend cycles before giving up).
 - Iteration accounting: ``item.attempts["plan_review_iter"]`` is the
@@ -63,13 +62,12 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.automation.agent_config import (
-    learn_claude_timeout,
     plan_reviewer_claude_timeout,
     planner_claude_timeout,
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
+from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
@@ -83,6 +81,7 @@ from hephaestus.automation.review_journal import (
     current_plan_context,
     journal_snapshot,
     parse_plan_review_state,
+    plan_fingerprint,
     render_current_review,
 )
 from hephaestus.automation.review_types import ReviewVerdict
@@ -99,17 +98,16 @@ from hephaestus.automation.state_labels import (
 from hephaestus.prompts import PromptCatalog
 
 from ..plan_journal import publish_plan_revision, reconcile_plan_journal
+from ..work_item import LearningIntent
 from .base import (
     AgentJob,
-    AthenaSkillJob,
-    AthenaSkillRequest,
-    AthenaSkillResult,
     Continue,
     Disposition,
     JobRequest,
     JobResult,
     Stage,
     StageContext,
+    StageName,
     StageOutcome,
     StepResult,
     WorkItem,
@@ -126,9 +124,6 @@ ENTER = "ENTER"
 REVIEW_WAIT = "REVIEW_WAIT"
 EVAL = "EVAL"
 AMEND_WAIT = "AMEND_WAIT"
-LEARN_WAIT = "LEARN_WAIT"
-PLAN_FINISH = "PLAN_FINISH"
-FINISH = PLAN_FINISH
 
 #: Max CONSECUTIVE reviewer-infrastructure failures (ERROR verdicts or
 #: failed/valueless review jobs) tolerated before the item FINISH_FAILs.
@@ -296,8 +291,8 @@ class PlanReviewStage(Stage):
       in ``item.payload["review_verdict"]``.
     - EVAL [M]: real verdicts (GO/NOGO/BLOCKED) advance both iteration
       counters; ERROR/missing verdicts never do. GO -> durably apply
-      ``state:plan-go`` (write BEFORE the advancing outcome) then learn
-      step or ADVANCE; NOGO within the cycle-relative iteration budget ->
+      ``state:plan-go`` (write BEFORE the advancing outcome), emit an immutable
+      learning intent, then ADVANCE; NOGO within the cycle-relative iteration budget ->
       durably apply ``state:plan-no-go`` and enter AMEND_WAIT within budget,
       or FAIL_BACK("nogo") while plan cycles remain;
       BLOCKED applies and confirms ``state:plan-blocked`` first, publishes its
@@ -307,9 +302,6 @@ class PlanReviewStage(Stage):
       ``REVIEW_ERROR_RETRY_CAP`` consecutive failures, then FINISH_FAIL).
     - AMEND_WAIT: submit the planner amend job (:func:`build_amend_prompt`
       carries the reviewer feedback block), loop to REVIEW_WAIT.
-    - LEARN_WAIT (GO only, gated by ``enable_learn``): submit the learn job,
-      then ADVANCE.
-
     Fail routes (ROUTES): "nogo" -> planning, "plan_cycles_exhausted" ->
     finished(fail).
     """
@@ -510,42 +502,8 @@ class PlanReviewStage(Stage):
             )
             return JobRequest(job, on_done_state="REVIEW_WAIT")
 
-        if item.state == "LEARN_WAIT":
-            logger.info("plan_review:%d: requesting learn job", item.issue)
-            learn_job = AthenaSkillJob(
-                request=AthenaSkillRequest(
-                    kind="learn",
-                    repo=item.repo,
-                    issue=item.issue,
-                    agent=agent_provider(ctx),
-                    model=stage_model(ctx, "planner", planner_model),
-                    cwd=ctx.paths.worktree,
-                    timeout_s=learn_claude_timeout(),
-                    payload={"context": item.payload.get("plan_text", "")},
-                ),
-                descr="learn",
-            )
-            return JobRequest(learn_job, on_done_state=PLAN_FINISH)
-
-        if item.state == PLAN_FINISH:
-            return self._finish_after_learning(item, ctx)
-
         logger.warning("plan_review:%d: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
-
-    @staticmethod
-    def _finish_after_learning(item: WorkItem, ctx: StageContext) -> StageOutcome:
-        """Advance only while the approved label remains live and exclusive."""
-        if not valid_delivery_receipt(item.payload.get("athena_learn_delivery_receipt")):
-            return StageOutcome(Disposition.FINISH_FAIL, "learn_delivery_missing")
-        live_labels = _require_issue_labels(item, ctx)
-        if not is_exclusive_plan_state(live_labels, STATE_PLAN_GO):
-            return StageOutcome(
-                Disposition.RETRY,
-                "exclusive plan-go label was not confirmed after learning",
-            )
-        logger.info("plan_review:%d: learn completed; advancing", item.issue)
-        return StageOutcome(Disposition.ADVANCE, "plan approved and learned")
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """EVAL [M]: decide the next action from the parsed reviewer verdict.
@@ -722,18 +680,33 @@ class PlanReviewStage(Stage):
         return outcome
 
     def _complete_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Apply and confirm GO before learn or implementation routing."""
+        """Apply GO, record auxiliary learning, and release the main stage."""
         assert item.issue is not None  # noqa: S101 - _eval narrows the issue
         logger.info("plan_review:%d: GO verdict; applying label and advancing", item.issue)
+        if ctx.config.enable_learn:
+            plan_text = str(item.payload.get("plan_text") or "")
+            intent = LearningIntent.approved_plan(
+                repo=item.repo,
+                issue=item.issue,
+                plan_revision=int(item.payload.get("plan_revision") or 0),
+                plan_fingerprint=plan_fingerprint(plan_text) if plan_text else "",
+            )
+            if intent not in item.learning_intents:
+                item.learning_intents.append(intent)
+            if isinstance(ctx.learning_journal, LearningJournalStore):
+                ctx.learning_journal.ensure_pending(
+                    intent.key,
+                    kind=intent.kind.value,
+                    identity=intent.journal_identity(),
+                )
+            item.learning_resume_stage = StageName.IMPLEMENTATION
         self._write_verdict_labels(item.issue, ctx, is_go=True)
         if not is_exclusive_plan_state(
             _require_issue_labels(item, ctx),
             STATE_PLAN_GO,
         ):
             return StageOutcome(Disposition.RETRY, "plan-go label was not confirmed")
-        if ctx.config.enable_learn:
-            return Continue(next_state="LEARN_WAIT")
-        return StageOutcome(Disposition.ADVANCE, "plan approved (learn disabled)")
+        return StageOutcome(Disposition.ADVANCE, "plan approved")
 
     @staticmethod
     def _write_verdict_labels(issue_number: int, ctx: StageContext, *, is_go: bool) -> None:
@@ -764,11 +737,6 @@ class PlanReviewStage(Stage):
             ctx: Stage context.
 
         """
-        if item.state == "LEARN_WAIT" and not result.ok:
-            item.payload["athena_learn_error"] = result.error or "learn failed"
-            logger.warning("plan_review:%s: learn failed: %s", item.issue, result.error)
-            return
-
         if not result.ok:
             reason = _safe_agent_failure_reason(result.error)
             diagnostic = _safe_agent_failure_diagnostic(result.stderr_tail)
@@ -781,14 +749,6 @@ class PlanReviewStage(Stage):
                 )
             else:
                 logger.warning("plan_review:%s: job failed: %s", item.issue, reason)
-            return
-
-        if item.state == "LEARN_WAIT":
-            if not isinstance(result.value, AthenaSkillResult) or not result.value.ok:
-                item.payload["athena_learn_error"] = "invalid Athena learn result"
-                return
-            item.payload["athena_learn_receipt"] = result.value.receipt
-            item.payload["athena_learn_delivery_receipt"] = result.value.delivery_receipt
             return
 
         if result.value is not None:
@@ -829,6 +789,3 @@ class PlanReviewStage(Stage):
                     ctx.github.edit_labels(item.issue, add=add, remove=remove)
                     item.payload["needs_plan_transition_pending"] = True
                     item.payload.pop("no_progress_reason", None)
-            # LEARN_WAIT intentionally has no branch: the learn job's output
-            # is a side effect for the Mnemosyne skill store, not a payload
-            # value any later state consumes.

@@ -284,6 +284,7 @@ class PrReviewJobs(_PrReviewHost):
         base_branch = str(review_context.get("pr_base_branch") or "main")
         item.payload.update(review_context)
         item.payload["review_checkout_expected_head"] = expected_head
+        item.payload["review_worktree_expected_head"] = expected_head
         item.payload["review_checkout_pending"] = True
         job = GitJob(
             repo=item.repo,
@@ -792,13 +793,15 @@ class PrReviewJobs(_PrReviewHost):
         if not isinstance(review_worktree, str) or not review_worktree:
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_invalid")
         if item.payload.pop("review_worktree_cleanup_error", None):
-            # Keep the disposable checkout visible to Finished's diagnostic
-            # preservation path.  The writer remains separately recorded and
-            # cannot be confused for reviewer evidence.
             item.worktree = review_worktree
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_failed")
         cleanup_state = item.payload.get("review_worktree_cleanup_done")
         if cleanup_state == "pending":
+            expected_head = item.payload.get("review_worktree_expected_head")
+            if not is_full_commit_sha(expected_head):
+                return StageOutcome(
+                    Disposition.FINISH_FAIL, "review_worktree_cleanup_identity_invalid"
+                )
             job = GitJob(
                 repo=item.repo,
                 op="remove_worktree",
@@ -806,6 +809,9 @@ class PrReviewJobs(_PrReviewHost):
                 kwargs={
                     "worktree_path": review_worktree,
                     "repo_root": str(ctx.paths.repo_root),
+                    "issue_number": item.issue or item.pr or 0,
+                    "expected_head": expected_head,
+                    "expected_detached": True,
                     "force": False,
                 },
                 descr="remove_read_only_review_worktree",
@@ -813,7 +819,6 @@ class PrReviewJobs(_PrReviewHost):
             return JobRequest(job, on_done_state=CLEANUP_REVIEW_WORKTREE_WAIT)
         if cleanup_state is not True:
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_state_invalid")
-
         outcome_value = item.payload.pop("review_worktree_cleanup_outcome", None)
         note = str(item.payload.pop("review_worktree_cleanup_note", "") or "")
         try:
@@ -821,9 +826,6 @@ class PrReviewJobs(_PrReviewHost):
         except ValueError:
             return StageOutcome(Disposition.FINISH_FAIL, "review_worktree_cleanup_outcome_invalid")
         if disposition is Disposition.RETRY:
-            # A retry requires a new detached snapshot.  Do not requeue the
-            # already-consumed cleanup state, and do not temporarily expose a
-            # retained implementation checkout as reviewer input.
             item.worktree = ""
             if item.payload.get("writer_worktree"):
                 item.payload["reviewer_checkout_needed"] = True
@@ -831,9 +833,10 @@ class PrReviewJobs(_PrReviewHost):
         else:
             self._restore_writer_worktree(item)
         item.payload.pop("review_worktree", None)
-        item.payload.pop("direct_pr_worktree", None)
-        item.payload.pop("direct_pr_worktree_dirty", None)
+        for key in ("direct_pr_worktree", "direct_pr_worktree_dirty"):
+            item.payload.pop(key, None)
         item.payload.pop("review_worktree_cleanup_done", None)
+        item.payload.pop("review_worktree_expected_head", None)
         return StageOutcome(disposition, note)
 
     def on_job_done(  # noqa: C901

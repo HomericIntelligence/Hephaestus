@@ -10,7 +10,7 @@ from typing import Any
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
-from hephaestus.utils.helpers import METADATA_TIMEOUT
+from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
 
 class MnemosyneCorpusError(RuntimeError):
@@ -53,13 +53,12 @@ class MnemosyneCorpusResult:
 
 
 def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ("git", *argv),
+    return run_subprocess(
+        ["git", *argv],
         cwd=cwd,
         check=False,
-        capture_output=True,
-        text=True,
         timeout=timeout_s,
+        track_process_group=True,
     )
 
 

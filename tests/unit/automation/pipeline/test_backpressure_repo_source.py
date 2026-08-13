@@ -283,16 +283,22 @@ def test_repo_sources_round_robin_across_repositories_at_capacity_two(
 
     assert coordinator.run() == 0
 
-    assert events == [
+    assert events[:4] == [
         ("classify", 101),
         ("classify", 201),
         ("complete", 101),
         ("complete", 201),
-        ("classify", 102),
-        ("classify", 202),
-        ("complete", 102),
-        ("complete", 202),
     ]
+    assert sorted(events[4:]) == sorted(
+        [
+            ("classify", 102),
+            ("classify", 202),
+            ("complete", 102),
+            ("complete", 202),
+        ]
+    )
+    for issue in (102, 202):
+        assert events.index(("classify", issue)) < events.index(("complete", issue))
     assert coordinator._all_idle()
     assert coordinator.live_work_count == 0
 

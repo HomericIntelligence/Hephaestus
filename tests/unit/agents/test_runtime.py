@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
+from hephaestus.agents.execution_policy import ExecutionPolicyError
 
 PI_SMOKE_COMMAND_PREFIX = [
     "pi",
@@ -1123,7 +1124,13 @@ def test_run_pi_text_rejects_unadmitted_execution(tmp_path: Path) -> None:
 
 def test_private_pi_helpers_reject_unadmitted_execution(tmp_path: Path) -> None:
     """Reflective private-helper access cannot bypass the Pi admission boundary."""
-    with patch("subprocess.run") as run:
+    with (
+        patch("subprocess.run") as run,
+        patch(
+            "hephaestus.agents.runtime._require_pi_automation_admission",
+            side_effect=RuntimeError("Pi automation preflight is unavailable"),
+        ),
+    ):
         with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
             agent_runtime._invoke_pi_session(
                 "prompt",
@@ -2030,27 +2037,45 @@ def test_agent_json_stdout_wraps_direct_agent_text() -> None:
 
 
 def test_run_agent_text_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
-    """The shared text boundary cannot bypass Pi admission through direct use."""
-    with patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text:
-        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+    """The shared text boundary requires a scoped execution request."""
+    with (
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
+        patch("hephaestus.agents.runtime.run_pi_text") as run_pi_text,
+    ):
+        with pytest.raises(
+            ExecutionPolicyError,
+            match="Pi automation requires an ExecutionRequest",
+        ):
             agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
 
     run_pi_text.assert_not_called()
 
 
 def test_run_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
-    """The shared session boundary cannot bypass Pi admission through direct use."""
-    with patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session:
-        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+    """The shared session boundary requires a scoped execution request."""
+    with (
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
+        patch("hephaestus.agents.runtime.run_pi_session") as run_pi_session,
+    ):
+        with pytest.raises(
+            ExecutionPolicyError,
+            match="Pi automation requires an ExecutionRequest",
+        ):
             agent_runtime.run_agent_session("pi", "prompt", cwd=tmp_path, timeout=30)
 
     run_pi_session.assert_not_called()
 
 
 def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Path) -> None:
-    """The shared resume boundary cannot bypass Pi admission through direct use."""
-    with patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session:
-        with pytest.raises(RuntimeError, match="Pi automation preflight is unavailable"):
+    """The shared resume boundary requires a scoped execution request."""
+    with (
+        patch("hephaestus.agents.runtime._require_pi_automation_admission"),
+        patch("hephaestus.agents.runtime.resume_pi_session") as resume_pi_session,
+    ):
+        with pytest.raises(
+            ExecutionPolicyError,
+            match="Pi automation requires an ExecutionRequest",
+        ):
             agent_runtime.resume_agent_session(
                 "pi",
                 "pi-session-123",

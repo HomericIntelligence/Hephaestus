@@ -29,6 +29,14 @@ from typing import Any
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import load_state_file
+from .learning_journal import LearningClaimRegistry, LearningJournalError, LearningJournalStore
+
+__all__ = [
+    "ArmingStateStore",
+    "LearningClaimRegistry",
+    "LearningJournalError",
+    "LearningJournalStore",
+]
 
 logger = logging.getLogger(__name__)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,11 +13,11 @@ from hephaestus.automation.pipeline.jobs import JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import (
     ConditionalMergeResult,
-    Continue,
     JobRequest,
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.merge_wait import MergeWaitStage
+from hephaestus.automation.pipeline.work_item import LearningIntent
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -603,18 +604,75 @@ def test_already_merged_retry_never_attempts_a_second_merge(
     assert github.merge_attempts == []
 
 
-def test_already_merged_retry_preserves_post_merge_learning(
-    make_ctx: Any, make_work_item: Any
+def test_merged_emits_post_merge_intent_without_job(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:
-    """A retry that discovers a merge keeps the existing exactly-once learn path."""
+    """A confirmed merge records auxiliary work without blocking merge success."""
+    from hephaestus.automation.arming_state import LearningJournalStore
+
     github = _ConditionalGitHub(states=[{"state": "MERGED"}])
+    item = _reviewed_item(make_work_item)
+    journal = LearningJournalStore(lambda: tmp_path)
 
     result = _complete_merge_cycle(
-        MergeWaitStage(), _reviewed_item(make_work_item), make_ctx(github=github)
+        MergeWaitStage(), item, make_ctx(github=github, learning_journal=journal)
     )
 
-    assert result == Continue(next_state="LEARN_WAIT")
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert item.learning_intents == [LearningIntent.post_merge(repo=item.repo, issue=1, pr=12)]
+    record = journal.load(item.learning_intents[0].key)
+    assert record is not None and record["status"] == "pending"
     assert github.merge_attempts == []
+
+
+def test_post_merge_journal_failure_is_ancillary(make_ctx: Any, make_work_item: Any) -> None:
+    """A journal failure after merge confirmation cannot change merge success."""
+    from hephaestus.automation.arming_state import LearningJournalStore
+
+    class BrokenJournal(LearningJournalStore):
+        def ensure_pending(
+            self,
+            key: str,
+            *,
+            kind: str,
+            identity: dict[str, object] | None = None,
+        ) -> dict[str, Any]:
+            raise OSError("journal unavailable")
+
+    github = _ConditionalGitHub(states=[{"state": "MERGED"}])
+    item = _reviewed_item(make_work_item)
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(),
+        item,
+        make_ctx(github=github, learning_journal=BrokenJournal(lambda: Path("."))),
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    assert item.payload["learning_failures"][0]["error"] == "learning_intent_persist_failed"
+
+
+def test_legacy_inflight_learning_is_not_dispatched_again(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A legacy ambiguous claim becomes an ancillary terminal journal result."""
+    from hephaestus.automation.arming_state import LearningJournalStore
+
+    github = _ConditionalGitHub(states=[{"state": "MERGED"}])
+    github.learn_claims.add(1)
+    item = _reviewed_item(make_work_item)
+    journal = LearningJournalStore(lambda: tmp_path)
+
+    result = _complete_merge_cycle(
+        MergeWaitStage(), item, make_ctx(github=github, learning_journal=journal)
+    )
+
+    assert result == StageOutcome(Disposition.FINISH_PASS, "merged")
+    intent = LearningIntent.post_merge(repo=item.repo, issue=1, pr=12)
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["status"] == "failed"
+    assert record["error"] == "legacy_outcome_unknown"
 
 
 def test_ambiguous_transport_reconciles_a_merged_pr_without_duplicate_put(

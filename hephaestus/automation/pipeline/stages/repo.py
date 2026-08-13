@@ -32,11 +32,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Any, TypeGuard
 
 import hephaestus.automation.loop_repo_manager as _repo_manager
 import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     IssueWaveError,
@@ -453,7 +455,9 @@ class RepoStage(Stage):
     def _discover(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """[M] Initialize a bounded metadata source; do not classify eagerly."""
         try:
-            source = RepoIssueSource(_repo_manager._iter_open_issue_meta(ctx.org, item.repo))
+            open_issues = _repo_manager._iter_open_issue_meta(ctx.org, item.repo)
+            recovered = self._iter_closed_learning_meta(item.repo, ctx)
+            source = RepoIssueSource(chain(open_issues, recovered))
         except Exception as exc:
             logger.warning("repo:%s: discovery failed: %s", item.repo, exc)
             return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")
@@ -466,6 +470,29 @@ class RepoStage(Stage):
 
         item.payload["_repo_issue_source"] = source
         return Continue(next_state="SOURCE")
+
+    @staticmethod
+    def _iter_closed_learning_meta(repo: str, ctx: StageContext) -> Iterator[dict[str, object]]:
+        """Yield closed issues that still own durable learning work."""
+        journal = ctx.learning_journal
+        if not isinstance(journal, LearningJournalStore):
+            return
+        for record in journal.incomplete_for_repo(repo=repo):
+            issue = record.get("issue")
+            if isinstance(issue, bool) or not isinstance(issue, int):
+                continue
+            issue_data = ctx.github.gh_issue_json(issue)
+            if str(issue_data.get("state") or "").upper() != "CLOSED":
+                continue
+            yield {
+                "number": issue,
+                "labels": [
+                    str(label.get("name") or "")
+                    for label in issue_data.get("labels", [])
+                    if isinstance(label, dict)
+                ],
+                "title": str(issue_data.get("title") or "durable learning recovery"),
+            }
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
         """Record checkout preparation success/failure (state still CLONE_WAIT).

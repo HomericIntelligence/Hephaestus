@@ -214,6 +214,21 @@ def test_parse_args_default_max_workers_is_six() -> None:
     assert args.max_workers == 6
 
 
+def test_parse_args_learning_lane_defaults_and_overrides() -> None:
+    """Learning has one worker and one queue slot unless set explicitly."""
+    defaults = loop_runner._parse_args([])
+    assert defaults.learning_workers == 1
+    assert defaults.learning_queue_capacity == 1
+    assert defaults.no_learn is False
+
+    configured = loop_runner._parse_args(
+        ["--learning-workers", "2", "--learning-queue-capacity", "3", "--no-learn"]
+    )
+    assert configured.learning_workers == 2
+    assert configured.learning_queue_capacity == 3
+    assert configured.no_learn is True
+
+
 def test_parse_args_serialize_file_overlap_default_on() -> None:
     """File-overlap serialization is on by default; the flag disables it (#1623)."""
     assert loop_runner._parse_args([]).serialize_file_overlap is True

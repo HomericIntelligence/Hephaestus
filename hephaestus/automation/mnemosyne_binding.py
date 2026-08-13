@@ -11,7 +11,7 @@ from typing import Any
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.github.mnemosyne_repo import MnemosyneTarget, resolve_mnemosyne_target
-from hephaestus.utils.helpers import NETWORK_TIMEOUT
+from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
 
 class MnemosyneBindingError(RuntimeError):
@@ -48,13 +48,12 @@ def default_mnemosyne_root() -> Path:
 
 
 def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ("git", *argv),
+    return run_subprocess(
+        ["git", *argv],
         cwd=cwd,
         check=False,
-        capture_output=True,
-        text=True,
         timeout=timeout_s,
+        track_process_group=True,
     )
 
 

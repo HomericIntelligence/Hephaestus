@@ -105,7 +105,7 @@ class TestStepResultTypes:
 
     def test_job_request_carries_on_done_state(self) -> None:
         """JobRequest names the state entered after on_job_done."""
-        request = JobRequest(job=None, on_done_state="EVAL")  # type: ignore[arg-type]
+        request = JobRequest(job=None, on_done_state="EVAL")
         assert request.on_done_state == "EVAL"
 
 

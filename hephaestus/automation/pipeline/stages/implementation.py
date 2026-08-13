@@ -1385,6 +1385,9 @@ class ImplementationStage(Stage):
         """Record commit+push success, no-commit skip, or git failure."""
         if result.ok:
             receipt = result.value if isinstance(result.value, dict) else {}
+            receipt_head = receipt.get("head_sha")
+            if is_full_commit_sha(receipt_head):
+                item.payload["_worktree_cleanup_head_sha"] = receipt_head
             pushed = receipt.get("pushed") is True if receipt else bool(result.value)
             if not pushed:
                 item.payload["no_commits"] = True

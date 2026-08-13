@@ -41,6 +41,7 @@ from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
+    positive_int,
 )
 from hephaestus.config.paths import resolve_projects_dir
 
@@ -152,6 +153,23 @@ Examples:
         help="Skip the advise step before loop review",
     )
     parser.add_argument(
+        "--learning-workers",
+        type=positive_int,
+        default=1,
+        help="Independent auxiliary learning workers (default: 1)",
+    )
+    parser.add_argument(
+        "--learning-queue-capacity",
+        type=positive_int,
+        default=1,
+        help="Bounded auxiliary learning queue capacity (default: 1)",
+    )
+    parser.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Do not create or execute auxiliary learning intents",
+    )
+    parser.add_argument(
         "--no-include-bot-prs",
         dest="include_bot_prs",
         action="store_false",
@@ -252,9 +270,12 @@ def main() -> int:
             loops=1,
             # --max-workers maps to the pipeline worker-pool size.
             max_workers=args.max_workers,
+            learning_workers=args.learning_workers,
+            learning_queue_capacity=args.learning_queue_capacity,
             dry_run=args.dry_run,
             agent=agent,
             no_advise=args.no_advise,
+            enable_learn=not args.no_learn,
             drive_green_all=drive_green_all,
             include_bot_prs=args.include_bot_prs,
             include_all_authors=args.include_all_authors,

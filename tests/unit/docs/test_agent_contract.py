@@ -46,7 +46,7 @@ REQUIRED_SECTIONS = {
         'dynamic = ["version"]',
         "Make sure all temporary files are in the build/ directory.",
     ),
-    "## AI-agent topology": ("seven in-memory stage queues",),
+    "## AI-agent topology": ("six main-lane queues and two\nauxiliary queues",),
     "## Canonical architecture reference": ("docs/architecture.md",),
 }
 

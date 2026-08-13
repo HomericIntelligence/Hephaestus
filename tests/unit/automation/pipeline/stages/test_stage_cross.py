@@ -234,6 +234,7 @@ class TestPostReviewRebaseReusesRestoredWriter:
             {
                 "writer_worktree": "/tmp/implementation-writer",
                 "review_worktree": "/tmp/detached-review",
+                "review_worktree_expected_head": "a" * 40,
             }
         )
 
