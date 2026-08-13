@@ -533,14 +533,16 @@ Make sure all temporary files are in the build/ directory.
 
 The remainder of this document is a single-page map of the AI-agent topology and
 conventions used by Hephaestus and the wider HomericIntelligence ecosystem.
-The queue topology below is implemented as seven in-memory stage queues.
+The queue topology below is implemented as six main-lane queues and two
+auxiliary queues.
 
 ## Agents the codebase orchestrates
 
 The default `hephaestus-automation-loop` path is the queue-based in-process
 pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
-seven in-memory stage queues and dispatches agent/build/git jobs to a worker
-pool. Each agent job runs either **Claude Code** or **Codex**, chosen via the
+eight bounded stage queues. A main worker pool runs ordinary work. A separate
+host-only pool runs learning and terminal cleanup. Each agent job runs either
+**Claude Code** or **Codex**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
@@ -562,8 +564,12 @@ mutates native auto-merge.
 | plan_review | `hephaestus.automation.pipeline.stages.plan_review` | Strict plan review, amendment, and plan labels |
 | implementation | `hephaestus.automation.pipeline.stages.implementation` | PR-writer worktree, rebase, implementation, tests, commit/push, and PR creation |
 | pr_review | `hephaestus.automation.pipeline.stages.pr_review` | Detached read-only snapshot review, validation, one batched inline review, and implementation labels |
-| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the exact reviewed head and preserves post-merge learning |
-| finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and worktree cleanup/preservation |
+| merge_wait | `hephaestus.automation.pipeline.stages.merge_wait` | Conditionally merges the exact reviewed head and emits post-merge learning intent |
+| learning | `hephaestus.automation.pipeline.stages.learning` | Claims durable intents and submits host-owned learning work |
+| finished | `hephaestus.automation.pipeline.stages.finished` | Terminal ledger and auxiliary worktree cleanup/preservation |
+
+`--learning-workers` and `--learning-queue-capacity` bound the auxiliary lane
+independently. Both default to `1`. `--no-learn` bypasses new learning work.
 
 Console scripts preserve their historical names. Stage-scoped wrappers are
 thin queue-pipeline scoped entry points over the coordinator; manual commands

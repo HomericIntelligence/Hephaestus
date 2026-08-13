@@ -410,6 +410,33 @@ class TestQuiescence:
         assert item.branch == ""
         assert item.payload["existing_pr"] is True
 
+    def test_duplicate_explicit_issue_is_ejected_from_source_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeated explicit issue cannot run after its first copy finishes."""
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            issues=[617, 617],
+            loops=1,
+            projects_dir=tmp_path,
+        )
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+            lambda _repo, issues: list(issues),
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(labels=["state:plan-go"]),
+            pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator._begin_direct_issue_source("repo-a", "a" * 40)
+
+        assert coordinator._drain_direct_issue_source() == 1
+        assert coordinator._direct_issue_source is None
+        assert [item.issue for item in coordinator.items] == [617]
+
     def test_direct_issue_source_rotates_overlap_and_admits_independent_work(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2918,6 +2945,58 @@ class TestDurableEventLog:
         assert "hephaestus_pipeline_stalled_ticks 2" in rendered
         assert "hephaestus_pipeline_loops_total 0" in rendered
 
+    def test_auxiliary_lane_exports_nonzero_depth_inflight_failure_and_time(
+        self, tmp_path: Path
+    ) -> None:
+        """Auxiliary queue, ownership, duration, and failure stay observable."""
+        coordinator = Coordinator(
+            PipelineConfig(
+                org="org",
+                repos=["repo-a"],
+                projects_dir=tmp_path,
+                metrics_port=9123,
+            ),
+            github=FakeStageGitHub(),
+            pool=FakeWorkerPool(),
+            auxiliary_pool=FakeWorkerPool(),
+            install_signals=False,
+        )
+        coordinator.queues[StageName.PLANNING].push(_issue_item(10, StageName.PLANNING))
+        coordinator.queues[StageName.LEARNING].push(_issue_item(11, StageName.LEARNING))
+        _fake_in_flight_item(coordinator, _issue_item(12, StageName.IMPLEMENTATION))
+        auxiliary_item = _issue_item(13, StageName.LEARNING)
+        auxiliary_handle = JobHandle(
+            job=GitJob(repo="repo-a", op="push", timeout_s=1),
+            on_done_state="DONE",
+        )
+        coordinator.auxiliary_in_flight[auxiliary_handle] = auxiliary_item
+        coordinator.stages[StageName.LEARNING] = StubStage()
+
+        snapshot = coordinator._observability_snapshot()
+        assert snapshot["lane_queue_depths"] == {"main": 1, "auxiliary": 1}
+        assert snapshot["inflight_by_lane"] == {"main": 1, "auxiliary": 1}
+        coordinator._emit_observability_tick()
+
+        assert coordinator._metrics_registry is not None
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_pipeline_lane_queue_depth{lane="main"} 1' in rendered
+        assert 'hephaestus_pipeline_lane_queue_depth{lane="auxiliary"} 1' in rendered
+        assert 'hephaestus_pipeline_lane_inflight_jobs{lane="main"} 1' in rendered
+        assert 'hephaestus_pipeline_lane_inflight_jobs{lane="auxiliary"} 1' in rendered
+
+        coordinator.shutdown.set()
+        coordinator._handle_completion(
+            auxiliary_handle,
+            JobResult(ok=False, error="delivery failed", duration_s=2.5),
+            auxiliary=True,
+        )
+
+        rendered = coordinator._metrics_registry.render_prometheus()
+        assert 'hephaestus_pipeline_jobs_total{outcome="failed",stage="learning"} 1' in rendered
+        assert "hephaestus_pipeline_auxiliary_job_seconds_total 2.5" in rendered
+        assert coordinator._auxiliary_job_count == 1
+        assert coordinator._auxiliary_job_failure_count == 1
+
     def test_completion_increments_jobs_total_by_stage_and_outcome(self, tmp_path: Path) -> None:
         """Each completed job increments the jobs_total counter by outcome."""
         coordinator = Coordinator(
@@ -3094,6 +3173,7 @@ class TestDurableEventLog:
                 "duration_s": 0.0,
                 "error": None,
                 "interrupted": False,
+                "lane": "main",
                 "ok": True,
             },
         ]
@@ -3319,10 +3399,11 @@ class TestPipelineScopeWiring:
             config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
         )
 
-        # Only the two in-scope stages plus the always-present FINISHED sink.
+        # Auxiliary learning and the FINISHED sink are implicit in every scope.
         assert set(coordinator._routes) == {
             StageName.PLANNING,
             StageName.PLAN_REVIEW,
+            StageName.LEARNING,
             StageName.FINISHED,
         }
         # PLANNING.next (PLAN_REVIEW) stays in scope; PLAN_REVIEW.next

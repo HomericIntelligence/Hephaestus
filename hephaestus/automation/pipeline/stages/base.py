@@ -65,6 +65,7 @@ from ..events import StageEvent
 from ..github_jobs import GitHubJob
 from ..jobs import AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
 from ..routing import ROUTES, Disposition, StageName, StageOutcome
+from ..stage_results import Continue, JobRequest
 from ..work_item import ItemKind, WorkItem
 
 __all__ = [
@@ -496,29 +497,6 @@ class StageGitHub(Protocol):
         ...
 
 
-@dataclass(frozen=True)
-class Continue:
-    """Advance to the next state without requesting a job."""
-
-    next_state: str
-
-
-@dataclass(frozen=True)
-class JobRequest:
-    """Request a job be submitted to the worker pool.
-
-    Attributes:
-        job: The frozen job spec to submit (agent, build/test, git, GitHub, or
-            session compaction — the same union :class:`~..jobs.JobHandle` carries).
-        on_done_state: The state the coordinator moves the item to after the
-            job completes and ``on_job_done`` has run.
-
-    """
-
-    job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob
-    on_done_state: str
-
-
 type StepResult = "Continue | JobRequest | StageOutcome"
 type BranchWorktreeOwnerStatus = Literal["verified", "pending", "unverified"]
 
@@ -548,6 +526,7 @@ class StageContext:
     now_fn: Callable[[], float] | None = None  # injectable clock (tests pass a fake)
     budget_fn: Callable[[str], int] | None = None  # injected overrides; falls back to ROUTES
     event_fn: Callable[[StageEvent], None] | None = None
+    learning_journal: Any = None
     # A worktree-holder result is only a diagnostic fact from Git.  The
     # coordinator proves that it belongs to a live pipeline sibling before
     # implementation can treat a collision as redundant work.  Leaving this

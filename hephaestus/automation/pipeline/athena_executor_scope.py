@@ -12,10 +12,7 @@ def pipeline_requires_athena_executor(config: Any) -> bool:
     if config.dry_run:
         return False
     stages = config.scope.stages if config.scope is not None else frozenset(ROUTES)
-    return (
+    return bool(config.enable_learn) or (
         not config.no_advise
         and bool(stages.intersection({StageName.PLANNING, StageName.IMPLEMENTATION}))
-    ) or (
-        config.enable_learn
-        and bool(stages.intersection({StageName.PLAN_REVIEW, StageName.MERGE_WAIT}))
     )

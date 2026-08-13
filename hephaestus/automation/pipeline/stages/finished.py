@@ -1,6 +1,6 @@
 """Finished stage: record outcomes and clean up worktrees (epic #1809).
 
-Binding contract: docs/architecture.md §5.7 "finished".
+Binding contract: docs/architecture.md §5.8 "finished".
 
 The universal sink. States: ENTER -> RECORD -> CLEANUP -> DONE.
 
@@ -9,11 +9,11 @@ Steps:
 1. [M] RECORD: append the item's :class:`~..work_item.ItemResult` to the run
    ledger (the coordinator injects its ledger list at construction — queue
    and ledger ownership stay with the coordinator).
-2. [W:G] CLEANUP: remove the implementation worktree on pass; on fail, preserve that writer
-   worktree for debugging and record it in the preserved list the end-of-run
-   summary prints. A direct-scope no-op is the exception: its remote reservation
-   has already been released, so cleanup attempts a non-forced removal of its
-   known-clean worktree and local branch; a late dirty edit is preserved.
+2. [W:G] CLEANUP: after all durable learning records are terminal, remove a clean
+   implementation worktree on pass. On fail, or while learning is pending,
+   preserve that writer worktree and record it in the preserved list that the
+   end-of-run summary prints. Cleanup never forces removal. A direct-scope no-op
+   also removes its local branch only when its ownership receipt still matches.
 
 Verdicts: terminal — no outgoing routes (the coordinator drops the item
 when the sink emits its final outcome).
@@ -170,19 +170,47 @@ class FinishedStage(Stage):
             return self._cleanup(item, ctx)
 
         if item.state == "DONE":
+            self._record_cleanup_terminal(item, ctx)
             return StageOutcome(Disposition.FINISH_PASS, note="done")
 
         return StageOutcome(Disposition.FINISH_FAIL, note=f"unknown state: {item.state}")
 
-    def _cleanup(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    @staticmethod
+    def _record_cleanup_terminal(item: WorkItem, ctx: StageContext) -> None:
+        """Close durable cleanup obligations after the sink reaches DONE."""
+        if item.post_processing is None:
+            return
+        succeeded = bool(item.payload.pop("_learning_cleanup_succeeded", True))
+        error = str(item.payload.pop("_learning_cleanup_error", ""))
+        for key in item.post_processing.intent_keys:
+            try:
+                ctx.learning_journal.finish_cleanup(
+                    key,
+                    succeeded=succeeded,
+                    error=error,
+                )
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "finished:%s: could not record cleanup completion for %s: %s",
+                    item.issue or item.repo,
+                    key,
+                    exc,
+                )
+
+    def _cleanup(  # noqa: C901 - cleanup validates independent durable receipts
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
         """Clean or preserve the writer worktree."""
         recovery_worktrees = self._record_recovery_worktrees(item, ctx)
+        if item.worktree and not self._learning_is_terminal(item, ctx):
+            return self._preserve_pending_learning_worktree(item)
         reservation = item.payload.get(DIRECT_SCOPE_RESERVATION_KEY)
         if not item.payload.get("_direct_scope_reservation_release_attempted", False):
             if isinstance(reservation, dict):
                 branch_name = reservation.get("branch")
                 base_sha = reservation.get("base_sha")
-                if isinstance(branch_name, str) and is_full_commit_sha(base_sha):
+                owns_branch = isinstance(branch_name, str) and branch_name == item.branch
+                if owns_branch and is_full_commit_sha(base_sha):
                     # The branch contains no coordinator-published commit.
                     # Release only if its remote ref is still the exact base
                     # we reserved, so a later human/concurrent writer is
@@ -215,10 +243,12 @@ class FinishedStage(Stage):
                     )
                 else:
                     logger.warning(
-                        "finished:%s: invalid direct-scope reservation receipt; "
+                        "finished:%s: invalid or stale direct-scope reservation receipt; "
                         "not releasing branch",
                         item.issue or item.repo,
                     )
+                    item.payload["_learning_cleanup_succeeded"] = False
+                    item.payload["_learning_cleanup_error"] = "cleanup ownership changed"
             item.payload["_direct_scope_reservation_release_attempted"] = True
 
         if not item.worktree:
@@ -265,11 +295,18 @@ class FinishedStage(Stage):
         kwargs: dict[str, object] = {
             "worktree_path": item.worktree,
             "repo_root": str(ctx.paths.repo_root),
+            "issue_number": item.issue or item.pr or 0,
             # A no-op direct scope is known-clean at commit/push time, but a
             # human may edit it before this terminal cleanup runs. Refuse to
             # discard that late edit; on failure the worktree is preserved.
-            "force": not is_direct_noop,
+            # Learning has finished, but a user can still edit the checkout.
+            # Cleanup must preserve those edits instead of forcing removal.
+            "force": False,
+            **({"expected_branch": item.branch} if item.branch else {}),
         }
+        expected_head = item.payload.get("_worktree_cleanup_head_sha")
+        if is_full_commit_sha(expected_head):
+            kwargs["expected_head"] = expected_head
         if is_direct_noop:
             kwargs["local_branch_cleanup"] = local_cleanup
             item.payload["_direct_scope_noop_cleanup_inflight"] = True
@@ -283,6 +320,39 @@ class FinishedStage(Stage):
             descr=f"remove worktree {item.worktree}",
         )
         return JobRequest(job=job, on_done_state="DONE")
+
+    def _preserve_pending_learning_worktree(self, item: WorkItem) -> StageOutcome:
+        """Eject a writer checkout until all learning work is terminal."""
+        entry = (item.repo, item.issue or item.pr or 0, item.worktree)
+        if entry not in self._preserved:
+            self._preserved.append(entry)
+        logger.warning(
+            "finished:%s: preserving worktree until learning is terminal: %s",
+            item.issue or item.repo,
+            item.worktree,
+        )
+        return StageOutcome(Disposition.EJECT, "learning_cleanup_pending")
+
+    @staticmethod
+    def _learning_is_terminal(item: WorkItem, ctx: StageContext) -> bool:
+        """Return whether all cleanup-bound learning records are terminal."""
+        if item.post_processing is None:
+            return True
+        journal = ctx.learning_journal
+        if journal is None:
+            return False
+        for key in item.post_processing.intent_keys:
+            try:
+                record = journal.load(key)
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                return False
+            if not isinstance(record, dict) or record.get("status") not in {
+                "succeeded",
+                "failed",
+                "disabled",
+            }:
+                return False
+        return True
 
     def _record_recovery_worktrees(self, item: WorkItem, ctx: StageContext) -> set[str]:
         """Record receipt-backed recoveries and return their concrete paths."""
@@ -331,6 +401,8 @@ class FinishedStage(Stage):
                 >= _RESERVATION_RELEASE_RETRY_CAP
             ):
                 item.payload["_direct_scope_reservation_release_attempted"] = True
+                item.payload["_learning_cleanup_succeeded"] = False
+                item.payload["_learning_cleanup_error"] = result.error
                 logger.warning(
                     "finished:%s: direct-scope reservation release failed after retries: %s",
                     item.issue or item.repo,
@@ -338,6 +410,8 @@ class FinishedStage(Stage):
                 )
             return
         if not result.ok:
+            item.payload["_learning_cleanup_succeeded"] = False
+            item.payload["_learning_cleanup_error"] = result.error
             if item.payload.pop("_direct_scope_noop_cleanup_inflight", False):
                 entry = (item.repo, item.issue or item.pr or 0, item.worktree)
                 if entry not in self._preserved:

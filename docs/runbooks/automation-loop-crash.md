@@ -58,11 +58,19 @@ failures:
   <stage>` in `=== Pipeline summary ===`; they are never FAILED by the
   interrupt path and do not run through normal stage success/failure routing.
 - Restart reconstructs the in-memory queues from the durable journal: GitHub
-  labels, PR state, and local worktrees. There is no persisted queue snapshot.
+  labels, PR state, local worktrees, and `build/.automation-state/learning-intent-*.json`.
+  There is no persisted queue snapshot.
   Re-run the same scoped command to let seeding classify the issue back into
   the correct entry queue.
 - To inspect journal reconstruction without launching work, run the scoped
   pipeline command with `--dry-run --loops 1 -v`.
+
+Inspect learning records before rollback. `pending` can run again. A crash-left
+`claimed` record becomes terminal `failed` with `outcome_unknown` and is not
+submitted twice. `succeeded` and `failed` are terminal. Do not start an older
+Hephaestus executable until every learning record is terminal or has been
+parked and handled by the new version. Use `--no-learn` only to bypass new
+learning; it does not make an older executable understand the new journal.
 
 ## Recover
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Tests for general utilities."""
 
+import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -533,3 +536,39 @@ class TestRunSubprocessTimeoutLogging:
                 run_subprocess(["sleep", "99"], timeout=1, log_on_error=False)
 
         mock_error.assert_not_called()
+
+    def test_tracked_process_falls_back_when_process_groups_are_unavailable(self) -> None:
+        """A non-POSIX host uses the normal bounded subprocess path."""
+        completed = subprocess.CompletedProcess(["tool"], 0, stdout="ok", stderr="")
+        with (
+            patch("hephaestus.utils.subprocess_registry.supported", return_value=False),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            result = run_subprocess(["tool"], track_process_group=True)
+
+        assert result is completed
+        run.assert_called_once()
+
+    @pytest.mark.skipif(
+        not hasattr(os, "killpg"),
+        reason="requires POSIX process groups",
+    )
+    def test_tracked_timeout_terminates_descendants_within_bound(self) -> None:
+        """A timed-out tracked command cannot wait for a child that holds pipes."""
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_subprocess(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess,sys,time; "
+                        "subprocess.Popen([sys.executable,'-c','import time; time.sleep(5)']); "
+                        "time.sleep(5)"
+                    ),
+                ],
+                timeout=0.1,
+                track_process_group=True,
+            )
+
+        assert time.monotonic() - started < 2

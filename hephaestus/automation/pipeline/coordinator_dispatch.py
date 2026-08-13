@@ -366,6 +366,10 @@ class ImplementationDispatcher(_CoordinatorHost):
 
     def _admit(self, item: WorkItem) -> bool:
         """Admission control: per-repo in-flight cap (O(1) Counter lookup)."""
+        if getattr(self, "_auxiliary_pool_separate", False) and self._is_auxiliary_stage(
+            item.stage
+        ):
+            return len(self.auxiliary_in_flight) < self.config.learning_workers
         return len(self.in_flight) < _work_window(self.config) and self.inflight_per_repo[
             item.repo
         ] < max(1, self.config.max_workers)

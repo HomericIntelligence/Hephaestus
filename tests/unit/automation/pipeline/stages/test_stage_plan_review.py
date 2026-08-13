@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob
+from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, plan_review
 from hephaestus.automation.pipeline.stages.plan_review import (
-    PLAN_FINISH,
     REVIEW_ERROR_RETRY_CAP,
     PlanReviewStage,
     build_amend_prompt,
 )
+from hephaestus.automation.pipeline.work_item import LearningIntent
 from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import (
@@ -550,21 +551,37 @@ class TestPlanReviewStageStep:
         assert result.disposition == Disposition.RETRY
         assert github.labels[205] == {initial_label, target_label}
 
-    def test_eval_go_with_learn_continues_to_learn(
-        self, make_ctx: Any, make_work_item: Any
+    def test_go_emits_approved_plan_intent_without_job(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """GO with learn enabled writes the label then continues to LEARN_WAIT."""
+        """GO records learning work and releases the main stage at once."""
+        from hephaestus.automation.arming_state import LearningJournalStore
+        from hephaestus.automation.review_journal import plan_fingerprint
+
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
+        journal = LearningJournalStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, learning_journal=journal)
         ctx.config.enable_learn = True
         item = make_work_item(issue=3, state="EVAL")
+        item.payload["plan_text"] = "# Approved plan\n\nImplement the queue."
+        item.payload["plan_revision"] = 8
         item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, Continue)
-        assert result.next_state == "LEARN_WAIT"
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+        assert item.learning_intents == [
+            LearningIntent.approved_plan(
+                repo=item.repo,
+                issue=3,
+                plan_revision=8,
+                plan_fingerprint=plan_fingerprint(item.payload["plan_text"]),
+            )
+        ]
+        record = journal.load(item.learning_intents[0].key)
+        assert record is not None and record["status"] == "pending"
         assert STATE_PLAN_GO in github.labels[3]
 
     def test_eval_nogo_within_budget_amends(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -738,64 +755,21 @@ class TestPlanReviewStageStep:
             "plan_history": "",
         }
 
-    def test_learn_wait_requests_learn(self, make_ctx: Any, make_work_item: Any) -> None:
-        """LEARN_WAIT submits the learn job carrying the approved plan."""
+    def test_plan_review_never_submits_learning_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The main plan-review stage records intent but does not run learning."""
         stage = PlanReviewStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=11, state="LEARN_WAIT")
+        ctx = make_ctx(github=FakeStageGitHub())
+        item = make_work_item(issue=11, state="EVAL")
         item.payload["plan_text"] = "# My Plan\n..."
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AthenaSkillJob)  # narrow the job union
-        assert result.on_done_state == PLAN_FINISH
-        assert result.job.descr == "learn"
-        assert result.job.request.kind == "learn"
-        assert result.job.request.payload == {"context": "# My Plan\n..."}
-
-    def test_finish_advances(self, make_ctx: Any, make_work_item: Any) -> None:
-        """PLAN_FINISH advances only while the live GO label remains exclusive."""
-        stage = PlanReviewStage()
-        ctx = make_ctx(github=FakeStageGitHub(labels=[STATE_PLAN_GO]))
-        item = make_work_item(issue=12, state=PLAN_FINISH)
-        item.payload["athena_learn_delivery_receipt"] = _valid_delivery_receipt()
+        item.payload["review_verdict"] = _verdict("GO")
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
-
-    def test_finish_stops_if_operator_blocks_during_learn(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """A BLOCKED label applied after GO prevents the final stage transition."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED])
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=120, state=PLAN_FINISH)
-        item.payload["athena_learn_delivery_receipt"] = _valid_delivery_receipt()
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.BLOCKED
-        assert github.labels[120] == {STATE_PLAN_BLOCKED}
-
-    def test_finish_cannot_advance_without_exclusive_live_go(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
-        """Cached or historical GO is insufficient after the learn job."""
-        stage = PlanReviewStage()
-        github = FakeStageGitHub(labels=[STATE_PLAN_GO, STATE_PLAN_NO_GO])
-        ctx = make_ctx(github=github)
-        item = make_work_item(issue=121, state=PLAN_FINISH)
-        item.payload["athena_learn_delivery_receipt"] = _valid_delivery_receipt()
-
-        result = stage.step(item, ctx)
-
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.RETRY
+        assert not isinstance(result, JobRequest)
 
     def test_unknown_state_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """An unknown state finishes failed instead of looping silently."""
@@ -1223,6 +1197,40 @@ class TestDurableWriteOrdering:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
 
+    def test_learning_intent_is_durable_before_plan_go_label(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A crash after plan-GO cannot lose its approved-plan learning intent."""
+        events: list[str] = []
+
+        class OrderedJournal(LearningJournalStore):
+            def ensure_pending(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                events.append("journal")
+                return super().ensure_pending(*args, **kwargs)
+
+        class OrderedGitHub(FakeStageGitHub):
+            def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+                events.append("label")
+                super().edit_labels(issue_number, add=add, remove=remove)
+
+        journal = OrderedJournal(lambda: tmp_path)
+        github = OrderedGitHub()
+        ctx = make_ctx(github=github, learning_journal=journal)
+        item = make_work_item(issue=11, state="EVAL")
+        item.payload.update(
+            {
+                "review_verdict": _verdict("GO"),
+                "plan_text": "Implement the durable learning lane.",
+                "plan_revision": 4,
+            }
+        )
+
+        result = PlanReviewStage().step(item, ctx)
+
+        assert events == ["journal", "label"]
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.ADVANCE
+
     def test_nogo_exhausted_mutation_before_fail_back(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1606,8 +1614,7 @@ class TestReviewFlowWithFakePool:
     def test_full_walk_enter_to_advance(self, make_ctx: Any, make_work_item: Any) -> None:
         """Full pool-driven walk of the whole stage.
 
-        ENTER -> REVIEW -> EVAL(NOGO) -> AMEND -> REVIEW -> EVAL(GO) ->
-        LEARN -> PLAN_FINISH -> ADVANCE.
+        ENTER -> REVIEW -> EVAL(NOGO) -> AMEND -> REVIEW -> EVAL(GO) -> ADVANCE.
         """
         from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 
@@ -1624,7 +1631,6 @@ class TestReviewFlowWithFakePool:
             JobResult(ok=True, value=_verdict("NOGO")),  # review round 1
             JobResult(ok=True, value="# Plan v2"),  # amend
             JobResult(ok=True, value=_verdict("GO")),  # review round 2
-            JobResult(ok=True, value="learn bullets"),  # learn
         )
 
         assert stage.on_enter(item, ctx) is None
@@ -1650,8 +1656,8 @@ class TestReviewFlowWithFakePool:
         # The amended plan and both counters reflect the two real rounds.
         assert item.payload["plan_text"] == "# Plan v2"
         assert item.attempts["plan_review_iter"] == 2
-        # All four jobs ran, in order.
-        assert [h.job.descr for h in pool.submitted] == ["review", "amend", "review", "learn"]
+        # Learning is now auxiliary, so the main stage runs only its three jobs.
+        assert [h.job.descr for h in pool.submitted] == ["review", "amend", "review"]
         # Durable amended-plan write happens before the GO label write and ADVANCE outcome.
         assert github.mutation_log == [
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),

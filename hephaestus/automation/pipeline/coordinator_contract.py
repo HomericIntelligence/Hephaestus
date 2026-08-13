@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         github: StageGitHub
         _github_factory: Callable[[str, Path], StageGitHub] | None
         shutdown: Event
+        _force_shutdown: Event
         completion_q: CompletionQueue
         pool: Any
         queues: dict[StageName, StageQueue]
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
         _stage_config: _StageRunConfig
         _ctx_cache: OrderedDict[str, StageContext]
         _ctx_cache_capacity: int
+        _learning_claim_registry: Any
         _event_log_disabled: bool
         _observed_inflight_repos: set[str]
         _observed_circuit_breaker_states: dict[str, str]
@@ -85,6 +87,8 @@ if TYPE_CHECKING:
         _seq: int
         _agent_job_count: int
         _agent_job_time_s: float
+        _auxiliary_job_count: int
+        _auxiliary_job_time_s: float
 
         @property
         def live_work_count(self) -> int:
@@ -96,7 +100,7 @@ if TYPE_CHECKING:
         def _record_event(self, event: str, *fields: Any) -> None:
             pass
 
-        def _try_acquire_work_permit(self, item: WorkItem) -> bool:
+        def _try_acquire_work_permit(self, item: WorkItem, stage: StageName | None = None) -> bool:
             pass
 
         def _release_work_permit(self, item: WorkItem) -> None:

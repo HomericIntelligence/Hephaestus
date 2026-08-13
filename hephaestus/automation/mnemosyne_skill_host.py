@@ -36,6 +36,8 @@ from hephaestus.automation.mnemosyne_delivery import (
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest, AthenaSkillResult
 from hephaestus.github.client import gh_call
 from hephaestus.io.utils import write_secure
+from hephaestus.utils import subprocess_registry
+from hephaestus.utils.helpers import run_subprocess
 
 
 class BindingService(Protocol):
@@ -89,6 +91,7 @@ class GitHubLearnDeliveryAdapter:
                 body,
             ],
             check=False,
+            track_process_group=True,
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
@@ -103,6 +106,7 @@ class GitHubLearnDeliveryAdapter:
         result = self._gh(
             ["pr", "view", str(number), "--repo", repository, "--json", "url,headRefOid"],
             check=False,
+            track_process_group=True,
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
@@ -133,6 +137,7 @@ class GitHubLearnDeliveryAdapter:
                 "url,state,baseRefName,headRefName,headRefOid,headRepository",
             ],
             check=False,
+            track_process_group=True,
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
@@ -298,12 +303,11 @@ class DefaultCorpusReader:
     def _subprocess_git_output(root: Path, argv: tuple[str, ...]) -> str:
         """Read one committed Git object while preserving fail-closed errors."""
         try:
-            result = subprocess.run(
-                ("git", *argv),
+            result = run_subprocess(
+                ["git", *argv],
                 cwd=root,
                 check=False,
-                capture_output=True,
-                text=True,
+                track_process_group=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise MnemosyneCorpusError(f"Mnemosyne corpus search failed: {exc}") from exc
@@ -502,6 +506,11 @@ class MnemosyneSkillHost:
             )
         except Exception as exc:
             return AthenaSkillResult(kind=str(request.kind), error=str(exc))
+
+    @staticmethod
+    def cancel() -> None:
+        """Stop active host-owned subprocess groups during forced shutdown."""
+        subprocess_registry.terminate_all()
 
     @staticmethod
     def _load_contract() -> AthenaContractReceipt:

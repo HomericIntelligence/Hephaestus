@@ -4,11 +4,10 @@ from typing import Any, cast
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_sessions import store_agent_session_result
+from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
 
-# This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
 
 
@@ -33,17 +32,19 @@ logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 _DYNAMIC_METRIC_SERIES_CAP = 100
 _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
+_LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
 
 
-class CoordinatorRuntime(_CoordinatorHost):
+class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     """Own the event loop, timers, completions, routing, and shutdown."""
 
     _event_log_disabled: bool
     _grace_deadline: float | None
     _observed_circuit_breaker_states: dict[str, str]
     _observed_inflight_repos: set[str]
+    _auxiliary_job_failure_count: int
     _pool_shut_down: bool
 
     def _default_stages(self) -> dict[StageName, Stage]:
@@ -55,6 +56,7 @@ class CoordinatorRuntime(_CoordinatorHost):
             StageName.IMPLEMENTATION: ImplementationStage(),
             StageName.PR_REVIEW: PrReviewStage(),
             StageName.MERGE_WAIT: MergeWaitStage(),
+            StageName.LEARNING: LearningStage(),
             StageName.FINISHED: FinishedStage(
                 self.ledger,
                 self.preserved,
@@ -69,6 +71,11 @@ class CoordinatorRuntime(_CoordinatorHost):
             self._ctx_cache.move_to_end(repo)
         else:
             root = _effective_repo_root(self.config, repo)
+            from hephaestus.automation.arming_state import LearningJournalStore
+
+            def learning_state_dir() -> Path:
+                return root / "build" / ".automation-state"
+
             ctx = StageContext(
                 config=self._stage_config,
                 org=self.config.org,
@@ -86,6 +93,10 @@ class CoordinatorRuntime(_CoordinatorHost):
                 now_fn=time.monotonic,
                 budget_fn=self._budget_for,
                 event_fn=self._record_stage_event,
+                learning_journal=LearningJournalStore(
+                    learning_state_dir,
+                    claim_registry=self._learning_claim_registry,
+                ),
                 branch_worktree_owner_status=self._branch_worktree_owner_status,
             )
             if len(self._ctx_cache) >= self._ctx_cache_capacity:
@@ -145,9 +156,10 @@ class CoordinatorRuntime(_CoordinatorHost):
             allowed_labels={},
             series_cap=1,
         ).set(snapshot["inflight_jobs"])
+        self._emit_lane_gauges(registry, snapshot)
         inflight_by_repo = registry.gauge(
             "hephaestus_pipeline_inflight_per_repo",
-            "Pipeline jobs currently in flight by repository.",
+            "Main-lane pipeline jobs currently in flight by repository.",
             allowed_labels={"repo": None},
             series_cap=_DYNAMIC_METRIC_SERIES_CAP,
         )
@@ -166,6 +178,7 @@ class CoordinatorRuntime(_CoordinatorHost):
             allowed_labels={},
             series_cap=1,
         ).set(snapshot["loops_run"])
+
         registry.gauge(
             "hephaestus_pipeline_stalled_ticks",
             "Consecutive drain ticks without pipeline progress.",
@@ -220,6 +233,25 @@ class CoordinatorRuntime(_CoordinatorHost):
                 },
             )
 
+    @staticmethod
+    def _emit_lane_gauges(registry: Any, snapshot: dict[str, Any]) -> None:
+        """Update the two fixed-cardinality auxiliary-lane gauges."""
+        queue_gauge = registry.gauge(
+            "hephaestus_pipeline_lane_queue_depth",
+            "Queued pipeline work items by worker lane.",
+            allowed_labels={"lane": _LANE_LABELS},
+            series_cap=len(_LANE_LABELS),
+        )
+        inflight_gauge = registry.gauge(
+            "hephaestus_pipeline_lane_inflight_jobs",
+            "Pipeline jobs currently in flight by worker lane.",
+            allowed_labels={"lane": _LANE_LABELS},
+            series_cap=len(_LANE_LABELS),
+        )
+        for lane in _LANE_LABELS:
+            queue_gauge.set(snapshot["lane_queue_depths"][lane], labels={"lane": lane})
+            inflight_gauge.set(snapshot["inflight_by_lane"][lane], labels={"lane": lane})
+
     def _wake_completion_wait(self) -> None:
         """Wake the coordinator without writing a sentinel into its bounded queue."""
         self._completion_wakeup.set()
@@ -255,7 +287,7 @@ class CoordinatorRuntime(_CoordinatorHost):
                 self._emit_observability_tick()
                 if self.shutdown.is_set():
                     # Graceful: stop admitting; drain in-flight to RESUMABLE.
-                    if not self.in_flight:
+                    if not self.in_flight and not self.auxiliary_in_flight:
                         break
                     self._wait_for_completion(timeout=0.2)
                     continue
@@ -286,6 +318,9 @@ class CoordinatorRuntime(_CoordinatorHost):
                 agent_job_count=self._agent_job_count,
                 agent_job_time_s=self._agent_job_time_s,
                 wall_s=time.monotonic() - started,
+                auxiliary_job_count=self._auxiliary_job_count,
+                auxiliary_job_time_s=self._auxiliary_job_time_s,
+                auxiliary_job_failure_count=self._auxiliary_job_failure_count,
             )
             summary_items = self._effective_items()
             preserved = self._active_preserved_worktrees()
@@ -374,6 +409,7 @@ class CoordinatorRuntime(_CoordinatorHost):
             all(len(q) == 0 for q in self.queues.values())
             and not self.timers
             and not self.in_flight
+            and not self.auxiliary_in_flight
             and not self._leases
             and not self._pending_handoffs
             and self._direct_issue_source is None
@@ -381,25 +417,6 @@ class CoordinatorRuntime(_CoordinatorHost):
             and self._repo_entry_source is None
             and not self._repo_issue_sources
         )
-
-    @property
-    def live_work_count(self) -> int:
-        """Return the number of nonterminal work permits currently held."""
-        return len(self._live_work_permit_ids)
-
-    def _try_acquire_work_permit(self, item: WorkItem) -> bool:
-        """Reserve one global live-work slot for a newly admitted item."""
-        item_id = id(item)
-        if item_id in self._live_work_permit_ids:
-            return True
-        if self.live_work_count >= _work_window(self.config):
-            return False
-        self._live_work_permit_ids.add(item_id)
-        return True
-
-    def _release_work_permit(self, item: WorkItem) -> None:
-        """Release *item*'s permit after the terminal sink has completed."""
-        self._live_work_permit_ids.discard(id(item))
 
     def _record_terminal_result(self, item: WorkItem) -> None:
         """Aggregate one completed/resumable item and trim detailed retention.
@@ -449,7 +466,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         lease = self.queues[stage_name].claim_at(index)
         if lease is None:
             return None
-        item = lease.item
+        item = cast(WorkItem, lease.item)
         item_id = id(item)
         if item_id in self._leases:  # pragma: no cover - internal invariant
             lease.restore()
@@ -490,7 +507,16 @@ class CoordinatorRuntime(_CoordinatorHost):
         result: ItemResult | None,
     ) -> None:
         """Publish a route only after its destination accepted the item."""
+        source = item.stage
         self._clear_implementation_file_claims_on_exit(item, target)
+        source_auxiliary = self._is_auxiliary_stage(source)
+        target_auxiliary = self._is_auxiliary_stage(target)
+        if not source_auxiliary and target_auxiliary:
+            self._live_work_permit_ids.discard(id(item))
+            self._learning_work_permit_ids.add(id(item))
+        elif source_auxiliary and not target_auxiliary:
+            self._learning_work_permit_ids.discard(id(item))
+            self._live_work_permit_ids.add(id(item))
         item.stage = target
         if enter:
             item.state = "ENTER"
@@ -519,7 +545,16 @@ class CoordinatorRuntime(_CoordinatorHost):
         if lease is None:
             if result is not None:
                 item.result = result
+            source = item.stage
             self._push_item(item, target, enter=enter)
+            source_auxiliary = self._is_auxiliary_stage(source)
+            target_auxiliary = self._is_auxiliary_stage(target)
+            if not source_auxiliary and target_auxiliary:
+                self._live_work_permit_ids.discard(id(item))
+                self._learning_work_permit_ids.add(id(item))
+            elif source_auxiliary and not target_auxiliary:
+                self._learning_work_permit_ids.discard(id(item))
+                self._live_work_permit_ids.add(id(item))
             return True
 
         if target is item.stage:
@@ -529,14 +564,18 @@ class CoordinatorRuntime(_CoordinatorHost):
                 raise RuntimeError("terminal result cannot route to the source stage")
             return self._restore_source_lease(item)
 
-        if lease.handoff(self.queues[target]):
+        if not self._lane_handoff_capacity(item, target):
+            accepted = False
+        else:
+            accepted = lease.handoff(self.queues[target])
+        if accepted:
             self._leases.pop(id(item), None)
             self._pending_handoffs.pop(id(item), None)
             self._activate_handoff(item, target, enter=enter, result=result)
             self._progress = True
             return True
 
-        pending = _PendingHandoff(target=target, enter=enter, result=result)
+        pending = _PendingHandoff(item=item, target=target, enter=enter, result=result)
         existing = self._pending_handoffs.setdefault(id(item), pending)
         if existing != pending:  # pragma: no cover - no item can route twice while leased
             raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
@@ -550,15 +589,21 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _drain_pending_handoffs(self) -> None:
         """Retry every retained route whose destination may have opened."""
+        self._drain_complementary_handoff_pairs()
         for item_id, pending in list(self._pending_handoffs.items()):
             lease = self._leases.get(item_id)
-            if lease is None:  # pragma: no cover - defensive bookkeeping repair
-                self._pending_handoffs.pop(item_id, None)
+            item = pending.item
+            if not self._lane_handoff_capacity(item, pending.target):
                 continue
-            item = lease.item
-            if not lease.handoff(self.queues[pending.target]):
+            accepted = (
+                lease.handoff(self.queues[pending.target])
+                if lease is not None
+                else self.queues[pending.target].offer(item)
+            )
+            if not accepted:
                 continue
-            self._leases.pop(item_id, None)
+            if lease is not None:
+                self._leases.pop(item_id, None)
             self._pending_handoffs.pop(item_id, None)
             self._activate_handoff(
                 item,
@@ -592,7 +637,7 @@ class CoordinatorRuntime(_CoordinatorHost):
         if self._progress:
             self._progress = False
             self._stalled_ticks = 0
-        elif not self.in_flight and not self.timers:
+        elif not self.in_flight and not self.auxiliary_in_flight and not self.timers:
             self._stalled_ticks += 1
             if self._stalled_ticks >= _compat("_STALL_TICKS_BEFORE_FORCE"):
                 self._force_run_one()
@@ -604,7 +649,9 @@ class CoordinatorRuntime(_CoordinatorHost):
 
     def _force_run_one(self) -> None:
         """Run the first item of the most-downstream non-empty queue."""
-        assert not self.in_flight, "force-run requires no in-flight work"  # noqa: S101
+        assert not self.in_flight and not self.auxiliary_in_flight, (  # noqa: S101
+            "force-run requires no in-flight work"
+        )
         self._stalled_ticks = 0
         for stage_name in _DRAIN_ORDER:
             q = self.queues[stage_name]
@@ -648,126 +695,6 @@ class CoordinatorRuntime(_CoordinatorHost):
                 return
             heapq.heappop(self.timers)
             self._progress = True
-
-    def _drain_completions(self) -> None:
-        """Drain ALL ready completions without blocking."""
-        # Clear before inspection.  A callback that publishes between this
-        # clear and the final get_nowait() either has its result drained now
-        # (leaving a harmless set latch) or sets the latch for the next wait.
-        self._completion_wakeup.clear()
-        while True:
-            try:
-                handle, result = self.completion_q.get_nowait()
-            except queue_mod.Empty:
-                break
-            self._handle_completion(handle, result)
-
-        if self._completion_saturation.is_set():
-            # This cannot occur when the C-in-flight invariant holds: each
-            # active job has one reserved slot in the C-sized completion
-            # queue.  A WorkerPool callback never blocks or spills when that
-            # invariant is violated; fail the run and finalize its still-live
-            # item resumably instead.  Crucially, this is not a signal.
-            self._record_event("completion_saturation")
-            raise RuntimeError("completion queue saturated")
-
-    def _wait_for_completion(self, timeout: float) -> None:
-        """Wait for a completion, a saturation fault, or a signal wake latch."""
-        # A test double may synchronously enqueue without owning the notifier;
-        # avoid an unnecessary idle wait in that compatible case.  Production
-        # callbacks set the event after every accepted completion.
-        if self.completion_q.empty() and not self._completion_saturation.is_set():
-            self._completion_wakeup.wait(timeout=timeout)
-        self._drain_completions()
-
-    def _handle_completion(self, handle: JobHandle, result: JobResult) -> None:
-        """Route one completed job back to its item.
-
-        Interrupted results park the item RESUMABLE — they never advance and
-        never reach ``on_job_done`` (base-protocol contract).
-        """
-        self._progress = True
-        item = self.in_flight.pop(handle, None)
-        self._inflight_implementation_claims.pop(handle, None)
-        if item is None:
-            self._record_event(
-                "complete_unknown",
-                type(handle.job).__name__,
-                handle.on_done_state,
-                self._job_result_event_fields(result),
-            )
-            logger.warning("completion for unknown handle (already torn down?): %s", handle)
-            return
-        self._record_event(
-            "complete",
-            type(handle.job).__name__,
-            self._item_key(item),
-            item.stage.value,
-            handle.on_done_state,
-            {
-                "descr": getattr(handle.job, "descr", ""),
-                **self._job_result_event_fields(result),
-            },
-        )
-        self.inflight_per_repo[item.repo] -= 1
-        if self.inflight_per_repo[item.repo] <= 0:
-            del self.inflight_per_repo[item.repo]
-        if isinstance(handle.job, AgentJob):
-            self._agent_job_count += 1
-            self._agent_job_time_s += result.duration_s
-        if self._metrics_registry is not None:
-            outcome = "interrupted" if result.interrupted else ("ok" if result.ok else "failed")
-            self._metrics_registry.counter(
-                "hephaestus_pipeline_jobs_total",
-                "Completed pipeline jobs by stage and outcome.",
-                allowed_labels={
-                    "stage": _PIPELINE_STAGE_LABELS,
-                    "outcome": _JOB_OUTCOME_LABELS,
-                },
-                series_cap=len(_PIPELINE_STAGE_LABELS) * len(_JOB_OUTCOME_LABELS),
-            ).inc(labels={"stage": item.stage.value, "outcome": outcome})
-            if isinstance(handle.job, AgentJob):
-                # Counter.inc rejects negative amounts; a monotonic-clock skew
-                # could yield a tiny negative duration, so clamp defensively.
-                self._metrics_registry.counter(
-                    "hephaestus_pipeline_agent_job_seconds_total",
-                    "Cumulative agent job wall-clock seconds.",
-                    allowed_labels={},
-                    series_cap=1,
-                ).inc(max(result.duration_s, 0.0))
-
-        if result.interrupted:
-            self._park_resumable(item)
-            return
-
-        if isinstance(handle.job, AgentJob):
-            session_error = store_agent_session_result(item, handle.job, result)
-            if session_error is not None:
-                self._finish(item, passed=False, reason=session_error)
-                return
-        stage = self.stages[item.stage]
-        ctx = self._ctx_for(item)
-        try:
-            stage.on_job_done(item, result, ctx)
-        except Exception:
-            logger.exception(
-                "on_job_done poisoned item %s at %s", self._item_key(item), item.stage.value
-            )
-            self._finish(item, passed=False, reason="poisoned: on_job_done raised")
-            return
-        self._register_pipeline_writer_worktree(item, handle.job, result)
-        item.state = (
-            handle.on_done_state.value
-            if isinstance(handle.on_done_state, StageName)
-            else handle.on_done_state
-        )
-        if self.shutdown.is_set():
-            # Graceful shutdown: the durable write for this completion is
-            # already journaled by on_job_done's owning stage; do not step
-            # further (stepping could submit new work). Park RESUMABLE.
-            self._park_resumable(item)
-            return
-        self._run_item(item)
 
     def _park_resumable(self, item: WorkItem) -> None:
         """Park *item* as RESUMABLE at its current stage (interrupt semantics).
@@ -965,57 +892,9 @@ class CoordinatorRuntime(_CoordinatorHost):
             )
         return result
 
-    def _submit(self, item: WorkItem, request: JobRequest) -> None:
-        """Submit the requested job; register in-flight bookkeeping.
-
-        Rate gate (non-blocking): an AgentJob submitted while the GraphQL
-        budget is low is timer-parked until the upstream reset instead
-        (``will_submit_agent`` does not exist on the merged stage protocol,
-        so the gate lives here at the submit chokepoint — the plan's
-        sanctioned fallback).
-        """
-        assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
-        job: Any = request.job
-        if isinstance(job, AgentJob):
-            ok, delay = self._rate_budget_ok()
-            if not ok:
-                logger.info(
-                    "rate budget low; timer-parking %s for %.0fs (no sleep)",
-                    self._item_key(item),
-                    delay,
-                )
-                self._timer_park(item, delay)
-                return
-            if self.config.phase_timeout_s and self.config.phase_timeout_s > 0:
-                # --phase-timeout bounds each AGENT JOB, not a phase subprocess.
-                job = replace(job, timeout_s=int(self.config.phase_timeout_s))
-        implementation_claims = self._capture_implementation_file_claims(item)
-        handle = self.pool.submit(
-            job,
-            request.on_done_state,
-            claim_key=self._item_key(item),
-            claim_stage=item.stage.value,
-        )
-        self.in_flight[handle] = item
-        if implementation_claims:
-            self._inflight_implementation_claims[handle] = implementation_claims
-        self.inflight_per_repo[item.repo] += 1
-        self._record_event(
-            "submit",
-            type(job).__name__,
-            self._item_key(item),
-            request.on_done_state,
-        )
-
-    def _rate_budget_ok(self) -> tuple[bool, float]:
-        """Non-blocking rate-budget check (``(ok, park_delay_s)``)."""
-        # Imported lazily to keep coordinator imports zero-I/O. The transport
-        # proxy still resolves the historical façade patch seam.
-        from hephaestus.automation.pipeline_github_transport import rate_budget_ok
-
-        return rate_budget_ok()
-
-    def _route(self, item: WorkItem, outcome: StageOutcome) -> None:
+    def _route(  # noqa: C901 - disposition table includes an auxiliary detour
+        self, item: WorkItem, outcome: StageOutcome
+    ) -> None:
         """Apply the Disposition -> action table (plan #1817)."""
         if item.stage is StageName.REPO and item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._route_direct_scope_bootstrap(item, outcome)
@@ -1049,9 +928,26 @@ class CoordinatorRuntime(_CoordinatorHost):
 
         if disposition is Disposition.ADVANCE:
             self._seed_products(item)
-            target = route.next
+            if item.stage is StageName.PLAN_REVIEW and item.learning_intents:
+                # Preserve the scope-trimmed primary destination before the
+                # auxiliary detour. A planner-only run must return to its sink
+                # instead of escaping into implementation.
+                item.learning_resume_stage = route.next
+                self._persist_learning_intents(item)
+                target = StageName.LEARNING
+            else:
+                target = route.next
             if target is StageName.FINISHED:
-                self._finish(item, passed=True, reason=outcome.note or "advance")
+                reason = str(item.payload.pop("_learning_primary_reason", ""))
+                if item.post_processing is not None:
+                    self._handoff_item(
+                        item,
+                        StageName.FINISHED,
+                        enter=True,
+                        result=item.post_processing.result,
+                    )
+                else:
+                    self._finish(item, passed=True, reason=reason or outcome.note or "advance")
             else:
                 self._handoff_item(item, target, enter=True)
             return
@@ -1067,11 +963,56 @@ class CoordinatorRuntime(_CoordinatorHost):
         if disposition is Disposition.SKIP:
             self._finish(item, passed=False, reason=f"skip: {outcome.note}")
             return
+        if disposition is Disposition.EJECT:
+            item.result = ItemResult(
+                passed=True,
+                reason=f"ejected: {outcome.note}",
+                final_stage=item.stage,
+            )
+            self._record_terminal_result(item)
+            self._release_source_lease(item)
+            self._release_work_permit(item)
+            return
         if disposition is Disposition.BLOCKED:
             self._finish(item, passed=False, reason=f"blocked: {outcome.note}")
             return
         if disposition is Disposition.FINISH_PASS:
             self._seed_products(item)
+            if item.stage is StageName.MERGE_WAIT and item.learning_intents:
+                primary_reason = outcome.note or "merged"
+                item.payload["_learning_primary_reason"] = primary_reason
+                terminal_result = ItemResult(
+                    passed=True,
+                    reason=primary_reason,
+                    final_stage=StageName.MERGE_WAIT,
+                )
+                try:
+                    item.compact_for_post_processing(terminal_result)
+                    self._persist_learning_intents(item)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    logger.warning(
+                        "merge_wait:%s: could not persist ancillary learning: %s",
+                        item.issue or item.repo,
+                        exc,
+                    )
+                    item.payload.setdefault("learning_failures", []).append(
+                        {"key": "post_merge", "error": str(exc)[:1000]}
+                    )
+                    item.learning_intents.clear()
+                    self._handoff_item(
+                        item,
+                        StageName.FINISHED,
+                        enter=True,
+                        result=terminal_result,
+                    )
+                    return
+                self._handoff_item(
+                    item,
+                    StageName.LEARNING,
+                    enter=True,
+                    result=terminal_result,
+                )
+                return
             self._finish(item, passed=True, reason=outcome.note or "pass")
             return
         # FINISH_FAIL (exhaustive over Disposition)
@@ -1344,6 +1285,7 @@ class CoordinatorRuntime(_CoordinatorHost):
     def _teardown_immediate(self) -> None:
         """Cancel the pool and synthesize interrupted results for in-flight items."""
         self.shutdown.set()
+        self._force_shutdown.set()
         self._shutdown_pool()
 
     def _shutdown_pool(self) -> None:
@@ -1367,9 +1309,22 @@ class CoordinatorRuntime(_CoordinatorHost):
             self.pool.shutdown(mark_interrupted=self.shutdown.is_set())
         except Exception:  # pragma: no cover - defensive
             logger.exception("pool shutdown raised")
+        if self._auxiliary_pool_separate:
+            try:
+                self.auxiliary_pool.shutdown(mark_interrupted=self.shutdown.is_set())
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("auxiliary pool shutdown raised")
+        try:
+            self._drain_completions()
+        except RuntimeError as exc:
+            if str(exc) != "completion queue saturated":
+                raise
         for item in list(self.in_flight.values()):
             self._park_resumable(item)
+        for item in list(self.auxiliary_in_flight.values()):
+            self._park_resumable(item)
         self.in_flight.clear()
+        self.auxiliary_in_flight.clear()
         self._inflight_implementation_claims.clear()
         self._implementation_file_claims.clear()
         self.inflight_per_repo.clear()
@@ -1384,7 +1339,9 @@ class CoordinatorRuntime(_CoordinatorHost):
                 continue
             leftovers.extend(q.snapshot())
         leftovers.extend(self.in_flight.values())
+        leftovers.extend(self.auxiliary_in_flight.values())
         leftovers.extend(lease.item for lease in self._leases.values())
+        leftovers.extend(pending.item for pending in self._pending_handoffs.values())
         seen: set[int] = set()
         for item in leftovers:
             if id(item) in seen:

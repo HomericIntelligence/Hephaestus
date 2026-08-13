@@ -32,6 +32,7 @@ from hephaestus.cli.utils import (
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
+    positive_int,
 )
 from hephaestus.config.paths import resolve_projects_dir
 
@@ -129,6 +130,23 @@ Examples:
         "--no-advise",
         action="store_true",
         help="Skip the advise step (don't search team knowledge base before planning)",
+    )
+    parser.add_argument(
+        "--learning-workers",
+        type=positive_int,
+        default=1,
+        help="Independent auxiliary learning workers (default: 1)",
+    )
+    parser.add_argument(
+        "--learning-queue-capacity",
+        type=positive_int,
+        default=1,
+        help="Bounded auxiliary learning queue capacity (default: 1)",
+    )
+    parser.add_argument(
+        "--no-learn",
+        action="store_true",
+        help="Do not create or execute auxiliary learning intents",
     )
     add_agent_timeout_arg(parser)
     add_advise_timeout_arg(parser)
@@ -235,9 +253,12 @@ def main() -> int:
         loops=1,
         # --parallel maps to the pipeline worker-pool size.
         max_workers=args.parallel,
+        learning_workers=args.learning_workers,
+        learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
         no_advise=args.no_advise,
+        enable_learn=not args.no_learn,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,
         scope=PipelineScope(_PLANNER_SCOPE_STAGES),

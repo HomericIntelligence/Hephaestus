@@ -49,6 +49,7 @@ from hephaestus.cli.utils import (
     add_follow_up_timeout_arg,
     add_git_message_timeout_arg,
     add_learn_timeout_arg,
+    positive_int,
 )
 from hephaestus.config.paths import resolve_projects_dir
 from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
@@ -199,7 +200,19 @@ Examples:
     parser.add_argument(
         "--no-learn",
         action="store_true",
-        help="Disable /learn after implementation (enabled by default)",
+        help="Do not create or execute auxiliary learning intents",
+    )
+    parser.add_argument(
+        "--learning-workers",
+        type=positive_int,
+        default=1,
+        help="Independent auxiliary learning workers (default: 1)",
+    )
+    parser.add_argument(
+        "--learning-queue-capacity",
+        type=positive_int,
+        default=1,
+        help="Bounded auxiliary learning queue capacity (default: 1)",
     )
     parser.add_argument(
         "--no-follow-up",
@@ -529,9 +542,12 @@ def main() -> int:
         loops=1,
         # --max-workers maps to the pipeline worker-pool size.
         max_workers=args.max_workers,
+        learning_workers=args.learning_workers,
+        learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
         no_advise=args.no_advise,
+        enable_learn=not args.no_learn,
         nitpick=args.nitpick,
         projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
         json_out=args.json,

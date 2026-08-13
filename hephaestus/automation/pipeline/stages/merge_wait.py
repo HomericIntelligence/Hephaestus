@@ -12,15 +12,10 @@ The implemented mini-state graph is:
   reviewed-head proof and the PR-level implementation-GO label; readiness may
   retry ``MERGE`` within its bounded wait.
 - A PR observed as already merged, or a conditional merge freshly confirmed as
-  merged, enters ``_route_merged``. It exits directly with ``FINISH_PASS``
-  when learning is disabled or already terminal, or follows
-  ``MERGE -> LEARN_WAIT -> MW_FINISH -> FINISH_PASS`` when one post-merge
-  learning job must run.
-- The already-merged path can exit ``FINISH_FAIL`` when a learning result is
-  already in flight or unknown, its claim fails, or result persistence fails.
-  Live admission, readiness, and conditional-merge failures likewise exit
-  safely (or fail back to fresh PR review when the head-bound proof is absent
-  or stale).
+  merged, emits one immutable post-merge learning intent. The coordinator
+  transfers that intent to the auxiliary lane after the confirmed pass.
+- Live admission, readiness, and conditional-merge failures exit safely or
+  fail back to fresh PR review when the head-bound proof is absent or stale.
 """
 
 from __future__ import annotations
@@ -29,38 +24,33 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hephaestus.automation.agent_config import implementer_model, learn_claude_timeout
+from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     IssueWaveError,
     IssueWaveStore,
     WaveLease,
 )
-from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 
 from ..github_jobs import (
     GitHubJob,
     MergeWaitCycleCompleted,
     RunMergeWaitCycleRequest,
 )
+from ..work_item import LearningIntent
 from .base import (
-    AthenaSkillJob,
-    AthenaSkillRequest,
-    AthenaSkillResult,
     Continue,
     Disposition,
     JobRequest,
     JobResult,
     Stage,
     StageContext,
+    StageName,
     StageOutcome,
     StepResult,
     WorkItem,
     _is_confirmed_open_unarmed,
     _terminal_pr_outcome,
-    _worktree_path,
-    agent_provider,
-    stage_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +58,6 @@ logger = logging.getLogger(__name__)
 ENTER = "ENTER"
 MERGE = "MERGE"
 MERGE_APPLY = "MERGE_APPLY"
-LEARN_WAIT = "LEARN_WAIT"
 MW_FINISH = "MW_FINISH"
 FINISH = MW_FINISH
 
@@ -118,11 +107,7 @@ class MergeWaitStage(Stage):
             return self._merge(item, ctx)
         if item.state == MERGE_APPLY:
             return self._merge_apply(item, ctx)
-        if item.state == LEARN_WAIT:
-            return self._request_learn(item, ctx)
         if item.state == MW_FINISH:
-            if item.payload.pop("learn_result_persistence_failed", None):
-                return StageOutcome(Disposition.FINISH_FAIL, "learn_result_persistence_failed")
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         logger.warning("merge_wait:%s: unknown state %r", item.issue, item.state)
         return StageOutcome(Disposition.FINISH_FAIL, f"unknown state: {item.state}")
@@ -615,44 +600,49 @@ class MergeWaitStage(Stage):
         return StageOutcome(Disposition.RETRY, "merge_readiness_wait")
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Dispatch the existing deduplicated post-merge learning step."""
+        """Record post-merge learning without changing confirmed merge success."""
         if item.issue is None or not getattr(ctx.config, "enable_learn", True):
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         if ctx.github.drive_green_learn_terminal(item.issue):
             return StageOutcome(Disposition.FINISH_PASS, "merged")
-        if ctx.github.drive_green_learn_inflight(item.issue):
-            logger.error("merge_wait:%d: post-merge learning outcome is unknown", item.issue)
-            return StageOutcome(Disposition.FINISH_FAIL, "learn_outcome_unknown")
-        return Continue(next_state=LEARN_WAIT)
-
-    def _request_learn(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Dispatch the existing post-merge learning job exactly once."""
-        if item.issue is None or item.pr is None:
+        if item.pr is None:
             return StageOutcome(Disposition.FINISH_FAIL, "missing_learn_scope")
-        try:
-            claimed = ctx.github.claim_drive_green_learn(item.issue, item.pr)
-        except Exception as exc:
-            logger.error("merge_wait:%d: failed to claim /learn dispatch: %s", item.issue, exc)
-            return StageOutcome(Disposition.FINISH_FAIL, "learn_claim_failed")
-        if not claimed:
-            return StageOutcome(Disposition.FINISH_FAIL, "learn_outcome_unknown")
-        job = AthenaSkillJob(
-            request=AthenaSkillRequest(
-                kind="learn",
-                repo=item.repo,
-                issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "implementer", implementer_model),
-                cwd=_worktree_path(item, ctx),
-                timeout_s=learn_claude_timeout(),
-                payload={"issue_number": item.issue, "pr_number": item.pr},
-            ),
-            descr="drive_green_learn",
-        )
-        return JobRequest(job, on_done_state=MW_FINISH)
+        intent = LearningIntent.post_merge(repo=item.repo, issue=item.issue, pr=item.pr)
+        if intent not in item.learning_intents:
+            item.learning_intents.append(intent)
+        if isinstance(ctx.learning_journal, LearningJournalStore):
+            try:
+                record = ctx.learning_journal.ensure_pending(
+                    intent.key,
+                    kind=intent.kind.value,
+                    identity=intent.journal_identity(),
+                )
+                if (
+                    ctx.github.drive_green_learn_inflight(item.issue)
+                    and record["status"] == "pending"
+                    and ctx.learning_journal.claim(intent.key)
+                ):
+                    ctx.learning_journal.finish(
+                        intent.key,
+                        succeeded=False,
+                        error="legacy_outcome_unknown",
+                    )
+                    item.payload.setdefault("learning_failures", []).append(
+                        {"key": intent.key, "error": "legacy_outcome_unknown"}
+                    )
+            except (OSError, RuntimeError, TypeError, ValueError):
+                logger.exception("merge_wait:%s: could not persist learning intent", item.issue)
+                item.learning_intents.remove(intent)
+                item.payload.setdefault("learning_failures", []).append(
+                    {"key": intent.key, "error": "learning_intent_persist_failed"}
+                )
+        elif ctx.github.drive_green_learn_inflight(item.issue):
+            item.learning_intents.remove(intent)
+        item.learning_resume_stage = StageName.FINISHED
+        return StageOutcome(Disposition.FINISH_PASS, "merged")
 
     def on_job_done(self, item: WorkItem, result: JobResult, ctx: StageContext) -> None:
-        """Persist the post-merge learning result without changing merge outcome."""
+        """Store one immutable merge-cycle receipt."""
         if item.state == MERGE:
             if not result.ok:
                 item.payload[_MERGE_CYCLE_RECEIPT_ERROR] = result.error or "merge cycle failed"
@@ -665,20 +655,3 @@ class MergeWaitStage(Stage):
                 return
             item.payload[_MERGE_CYCLE_RECEIPT] = receipt
             return
-        if item.state != LEARN_WAIT or item.issue is None:
-            return
-        if not (
-            result.ok
-            and isinstance(result.value, AthenaSkillResult)
-            and result.value.ok
-            and valid_delivery_receipt(result.value.delivery_receipt)
-        ):
-            item.payload["athena_learn_error"] = result.error or "invalid Athena learn result"
-            return
-        item.payload["athena_learn_receipt"] = result.value.receipt
-        item.payload["athena_learn_delivery_receipt"] = result.value.delivery_receipt
-        try:
-            ctx.github.mark_drive_green_learn_result(item.issue, succeeded=True)
-        except Exception as exc:
-            logger.error("merge_wait:%d: failed to persist /learn result: %s", item.issue, exc)
-            item.payload["learn_result_persistence_failed"] = True

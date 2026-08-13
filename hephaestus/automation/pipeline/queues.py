@@ -1,7 +1,8 @@
-"""Stage queues and cross-thread completion channel. Pure data, zero I/O (epic #1809).
+"""Stage queues and cross-thread completion channels. Pure data, zero I/O (epic #1809).
 
 The StageQueue is FIFO and deliberately not thread-safe — owned exclusively by
-the coordinator thread. The CompletionQueue is the only cross-thread channel.
+the coordinator thread. The main and auxiliary completion queues are the only
+cross-thread payload channels.
 """
 
 from __future__ import annotations
@@ -59,6 +60,35 @@ class StageQueueLease:
 
         self._source._release_lease(self.item, self._ticket)
         self._active = False
+        return True
+
+    def exchange(
+        self,
+        destination: StageQueue,
+        peer: StageQueueLease,
+        peer_destination: StageQueue,
+    ) -> bool:
+        """Atomically exchange two complementary active source leases.
+
+        This coordinator-thread-only operation handles the capacity-one case
+        where each lease targets the other lease's full source queue. Invalid
+        or stale lease identities leave both queues unchanged.
+        """
+        if (
+            self is peer
+            or not self._active
+            or not peer._active
+            or destination is not peer._source
+            or peer_destination is not self._source
+            or not self._source._owns_lease(self.item, self._ticket)
+            or not peer._source._owns_lease(peer.item, peer._ticket)
+        ):
+            return False
+
+        self._source._replace_lease(self.item, self._ticket, peer.item)
+        peer._source._replace_lease(peer.item, peer._ticket, self.item)
+        self._active = False
+        peer._active = False
         return True
 
     def release(self) -> None:
@@ -190,6 +220,10 @@ class StageQueue:
         """Restore one active lease in original FIFO order without opening capacity."""
         if self._leased.pop(id(item), None) != ticket:
             raise RuntimeError("StageQueue lease ticket mismatch")
+        self._insert_at_ticket(ticket, item)
+
+    def _insert_at_ticket(self, ticket: int, item: WorkItem) -> None:
+        """Insert one item at its reserved FIFO ticket."""
         index = next(
             (
                 position
@@ -199,6 +233,16 @@ class StageQueue:
             len(self._items),
         )
         self._items.insert(index, (ticket, item))
+
+    def _owns_lease(self, item: WorkItem, ticket: int) -> bool:
+        """Return whether this queue owns the exact active lease identity."""
+        return self._leased.get(id(item)) == ticket
+
+    def _replace_lease(self, item: WorkItem, ticket: int, replacement: WorkItem) -> None:
+        """Replace one validated leased slot without changing queue capacity."""
+        if self._leased.pop(id(item), None) != ticket:
+            raise RuntimeError("StageQueue lease ticket mismatch")
+        self._insert_at_ticket(ticket, replacement)
 
     def _release_lease(self, item: WorkItem, ticket: int) -> None:
         """Release one active lease after its item was admitted elsewhere."""

@@ -60,15 +60,17 @@ def test_global_permit_refuses_c_plus_one_across_distinct_stage_queues(tmp_path:
     assert coordinator.live_work_count == 1
     assert id(second) not in coordinator._seen_item_ids
 
-    # Routing to the finished sink retains the permit: cleanup/ledger work is
-    # still nonterminal. Only the sink's terminal outcome makes a slot free.
+    # Routing to the auxiliary finished sink transfers permit ownership. The
+    # main lane can admit new work while cleanup remains nonterminal.
     assert coordinator._claim_item(StageName.PLANNING) is first
     coordinator._finish(first, passed=True, reason="done")
-    assert coordinator.live_work_count == 1
-    _complete_finished_item(coordinator, first)
     assert coordinator.live_work_count == 0
+    assert coordinator.learning_work_count == 1
 
     assert coordinator._push_item(second, StageName.PLAN_REVIEW, enter=True) is True
+    assert coordinator.live_work_count == 1
+    _complete_finished_item(coordinator, first)
+    assert coordinator.learning_work_count == 0
     assert coordinator.live_work_count == 1
 
 

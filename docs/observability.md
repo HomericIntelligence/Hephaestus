@@ -76,15 +76,18 @@ points at the emission chokepoint in `coordinator_runtime.py`.
 
 | Metric | Type | Labels and allowed values | Series cap | Meaning |
 | --- | --- | --- | ---: | --- |
-| `hephaestus_pipeline_queue_depth` | gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `finished` | 7 | Queued work items waiting in each stage queue. |
-| `hephaestus_pipeline_inflight_jobs` | gauge | — | 1 | Jobs currently owned by the worker pool. |
-| `hephaestus_pipeline_inflight_per_repo` | gauge | `repo`: open repository names | 100 | In-flight jobs partitioned by repository. |
+| `hephaestus_pipeline_queue_depth` | gauge | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `learning`, `finished` | 8 | Queued work items waiting in each stage queue. |
+| `hephaestus_pipeline_inflight_jobs` | gauge | — | 1 | Jobs currently owned by both worker pools. |
+| `hephaestus_pipeline_lane_queue_depth` | gauge | `lane`: `main`, `auxiliary` | 2 | Queued work items partitioned by worker lane. |
+| `hephaestus_pipeline_lane_inflight_jobs` | gauge | `lane`: `main`, `auxiliary` | 2 | In-flight jobs partitioned by worker lane. |
+| `hephaestus_pipeline_inflight_per_repo` | gauge | `repo`: open repository names | 100 | Main-lane in-flight jobs partitioned by repository. Use the lane gauges for auxiliary work. |
 | `hephaestus_pipeline_loops_total` | gauge | — | 1 | Reseed passes run by this coordinator process. |
 | `hephaestus_pipeline_stalled_ticks` | gauge | — | 1 | Consecutive drain ticks without pipeline progress. |
 | `hephaestus_circuit_breaker_state` | gauge | `name`: open breaker names; `state`: `closed`, `open`, `half_open` | 100 | Circuit-breaker lifecycle state (the active state has value `1`, others `0`). |
 | `hephaestus_pipeline_alert_active` | gauge | `name`: `circuit_breaker_open`, `queue_depth_exceeds`, `pipeline_stalled` | 3 | Whether a named alert condition is currently active (`1`) or resolved (`0`). |
-| `hephaestus_pipeline_jobs_total` | counter | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `finished`; `outcome`: `ok`, `failed`, `interrupted` | 21 | Completed jobs by stage and outcome. |
+| `hephaestus_pipeline_jobs_total` | counter | `stage`: `repo`, `planning`, `plan_review`, `implementation`, `pr_review`, `merge_wait`, `learning`, `finished`; `outcome`: `ok`, `failed`, `interrupted` | 24 | Completed jobs by stage and outcome. |
 | `hephaestus_pipeline_agent_job_seconds_total` | counter | — | 1 | Cumulative agent-job wall-clock seconds (negative durations clamped to `0`). |
+| `hephaestus_pipeline_auxiliary_job_seconds_total` | counter | — | 1 | Cumulative host-learning and cleanup wall-clock seconds. |
 | `hephaestus_metrics_series_overflow_total` | counter | `family`: overflowing registered metric-family name | one per overflowing family | New metric-series updates discarded after a family cap. |
 
 Every metric family has a cap. The registry default is 100 series, while

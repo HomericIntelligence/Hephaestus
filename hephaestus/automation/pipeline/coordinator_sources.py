@@ -1,5 +1,4 @@
 import sys
-from typing import Any
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
@@ -158,16 +157,17 @@ class SourceCoordinator(_CoordinatorHost):
                         reason=entry.reason,
                         final_stage=StageName.FINISHED,
                     )
-                elif new_item.stage is not StageName.REPO:
+                self._restore_learning_intents(new_item, entry.stage, entry.reason)
+                if new_item.stage not in {StageName.REPO, StageName.FINISHED, StageName.LEARNING}:
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-                source.pending = None
-                if self._push_item(new_item, new_item.stage, enter=True):
+                if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
+                    source.pending = None
                     source.seeded_count += 1
                     self._progress = True
                     return True
-                self._progress = True
+                source.pending = metadata
                 return True
             except Exception as exc:
                 logger.warning("repo:%s: issue #%d classification failed: %s", repo, number, exc)
@@ -218,6 +218,9 @@ class SourceCoordinator(_CoordinatorHost):
         for it in self.in_flight.values():
             if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
+        for it in self.auxiliary_in_flight.values():
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
+                keys.add((it.repo, it.issue))
         for lease in self._leases.values():
             it = lease.item
             if it.kind is ItemKind.ISSUE and it.issue is not None:
@@ -263,7 +266,7 @@ class SourceCoordinator(_CoordinatorHost):
         ):
             logger.info("seed skipped: #%s already queued/in-flight in %s", item.issue, item.repo)
             return False
-        if is_new_item and not self._try_acquire_work_permit(item):
+        if is_new_item and not self._try_acquire_work_permit(item, stage):
             logger.debug(
                 "global live-work capacity reached (%d); deferring %s",
                 _work_window(self.config),
@@ -426,9 +429,10 @@ class SourceCoordinator(_CoordinatorHost):
         if not self.config.issues:
             return
         open_issues = _admission._filter_open_issues(repo, self.config.issues)
+        unique_open_issues = list(dict.fromkeys(open_issues))
         self._direct_issue_source = _DirectIssueSource(
             repo=repo,
-            issues=deque(open_issues),
+            issues=deque(unique_open_issues),
             base_sha=base_sha,
             run_nonce=uuid.uuid4().hex,
             wave_lease=self._direct_wave_lease,
@@ -480,6 +484,7 @@ class SourceCoordinator(_CoordinatorHost):
             logger.info("seed excluded: %s", entry.reason)
             return None, False
         item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
+        self._restore_learning_intents(item, entry.stage, entry.reason)
         if existing_pr is not None:
             item.branch = branch
         if source.wave_lease is not None:
@@ -530,13 +535,16 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             if item is None:
                 continue
-            if self._push_item(item, item.stage, enter=True):
+            if self._push_item(item, item.stage, enter=True, defer_if_full=True):
                 pushed += 1
                 # Let the implementation drain establish ownership before a
                 # later source item is considered, otherwise two overlapping
                 # plans can be queued in the same bootstrap tick.
                 if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
                     break
+            else:
+                source.issues.appendleft(issue)
+                break
         if not source.issues:
             self._direct_issue_source = None
         elif pushed == 0 and blocked_by_overlap and scanned == scan_limit:
@@ -578,10 +586,14 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
 
             item = self._prepare_direct_item(entry, source.repo, source.base_sha)
+            self._restore_learning_intents(item, entry.stage, entry.reason)
             if source.wave_lease is not None:
                 item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
-            if self._push_item(item, item.stage, enter=True):
+            if self._push_item(item, item.stage, enter=True, defer_if_full=True):
                 pushed += 1
+            else:
+                source.pending_pr = pr
+                break
         return pushed
 
     def _clamp_seed_stage_to_scope(

@@ -4,7 +4,8 @@ Pure data and pure functions with ZERO I/O — no gh, no claude, no
 subprocess, no imports of github_api/claude_invoke. Part of epic #1809.
 
 Thread-safety: a WorkItem and its StageQueue are only ever touched by the
-coordinator thread. The single cross-thread channel is CompletionQueue.
+coordinator thread. The bounded main and auxiliary completion queues are the
+only cross-thread payload channels.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
+    from .auxiliary_worker_pool import AuxiliaryWorkerPool
     from .coordinator import PipelineConfig, run_pipeline
     from .jobs import GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
         StageName,
         StageOutcome,
     )
-    from .work_item import HistoryEvent, ItemKind, ItemResult, WorkItem
+    from .work_item import HistoryEvent, ItemKind, ItemResult, LearningIntent, WorkItem
     from .worker_pool import WorkerPool
 
 __all__ = [
@@ -35,6 +37,7 @@ __all__ = [
     "AthenaSkillJob",
     "AthenaSkillRequest",
     "AthenaSkillResult",
+    "AuxiliaryWorkerPool",
     "BuildTestJob",
     "CompactJob",
     "CompletionQueue",
@@ -45,6 +48,7 @@ __all__ = [
     "ItemResult",
     "JobHandle",
     "JobResult",
+    "LearningIntent",
     "PipelineConfig",
     "PipelineScope",
     "Route",
@@ -61,6 +65,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AthenaSkillJob": "hephaestus.automation.pipeline.athena_skill_jobs",
     "AthenaSkillRequest": "hephaestus.automation.pipeline.athena_skill_jobs",
     "AthenaSkillResult": "hephaestus.automation.pipeline.athena_skill_jobs",
+    "AuxiliaryWorkerPool": "hephaestus.automation.pipeline.auxiliary_worker_pool",
     "BuildTestJob": "hephaestus.automation.pipeline.jobs",
     "CompactJob": "hephaestus.automation.pipeline.jobs",
     "CompletionQueue": "hephaestus.automation.pipeline.queues",
@@ -70,6 +75,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "HistoryEvent": "hephaestus.automation.pipeline.work_item",
     "ItemKind": "hephaestus.automation.pipeline.work_item",
     "ItemResult": "hephaestus.automation.pipeline.work_item",
+    "LearningIntent": "hephaestus.automation.pipeline.work_item",
     "JobHandle": "hephaestus.automation.pipeline.jobs",
     "JobResult": "hephaestus.automation.pipeline.jobs",
     "PipelineConfig": "hephaestus.automation.pipeline.coordinator",

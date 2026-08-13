@@ -17,13 +17,14 @@ from unittest.mock import MagicMock
 import pytest
 
 import hephaestus.automation.loop_repo_manager as loop_repo_manager_mod
+from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.seeding import IssueFacts
 from hephaestus.automation.pipeline.stages.base import Continue, JobRequest, StageOutcome
 from hephaestus.automation.pipeline.stages.repo import RepoStage, product_to_work_item
-from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.pipeline.work_item import ItemKind, LearningIntent, WorkItem
 
 from .conftest import FakeStageGitHub
 
@@ -367,6 +368,44 @@ class TestDiscover:
         assert classified == []
         assert "products" not in repo_item.payload
         assert "seeded_count" not in repo_item.payload
+
+    def test_discovery_stream_includes_closed_issue_with_pending_learning(
+        self,
+        tmp_path: Path,
+        repo_item: WorkItem,
+        make_ctx: Callable[..., Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Closed issues remain discoverable while their journal work is pending."""
+        monkeypatch.setattr(
+            loop_repo_manager_mod,
+            "_iter_open_issue_meta",
+            lambda _org, _repo: iter(()),
+        )
+        journal = LearningJournalStore(lambda: tmp_path)
+        intent = LearningIntent.post_merge(repo="repo-a", issue=2705, pr=99)
+        journal.ensure_pending(
+            intent.key,
+            kind=intent.kind.value,
+            identity=intent.journal_identity(),
+        )
+        github = FakeStageGitHub(issue_state="CLOSED", issue_title="Merged work")
+        ctx = make_ctx(
+            paths=_RepoPaths(tmp_path),
+            github=github,
+            learning_journal=journal,
+        )
+        repo_item.state = "DISCOVER"
+
+        result = RepoStage().step(repo_item, ctx)
+
+        assert isinstance(result, Continue)
+        source = repo_item.payload["_repo_issue_source"]
+        assert next(source.metadata) == {
+            "number": 2705,
+            "labels": [],
+            "title": "Merged work",
+        }
 
     def test_discover_does_not_mutate_before_source_consumption(
         self,
