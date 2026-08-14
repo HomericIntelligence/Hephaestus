@@ -101,6 +101,14 @@ def _invalid_audit() -> ReviewAudit:
     )
 
 
+def _make_hephaestus_checkout(root: Path) -> str:
+    """Create the minimum immutable-checkout markers for the host profile."""
+    (root / "pyproject.toml").write_text("[project]\nname = 'HomericIntelligence-Hephaestus'\n")
+    (root / "hephaestus").mkdir()
+    (root / "tests").mkdir()
+    return str(root)
+
+
 def test_pr_review_post_dispatches_without_inline_github_calls(
     make_ctx: Any,
     make_work_item: Any,
@@ -590,6 +598,7 @@ class TestPrReviewStageOnEnter:
         item.payload.update(
             {
                 "reviewed_pr_head_sha": "a" * 40,
+                "host_verification_repository_profile": "hephaestus",
                 "pr_diff": "diff --git a/example.py b/example.py\n+new line\n",
             }
         )
@@ -1408,12 +1417,13 @@ class TestPrReviewStageStep:
         assert item.payload["review_audit_failure"] is True
 
     def test_checkout_runs_registered_host_verification_before_primary_reviewer(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A changed regression receives only hermetic host checks first."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -1972,12 +1982,13 @@ class TestPrReviewStageStep:
         assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A read-only Python review receives deterministic static receipts."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -1997,13 +2008,50 @@ class TestPrReviewStageStep:
         assert result.job.descr == "review_python_ruff_check"
         assert result.on_done_state == "HOST_VERIFICATION_WAIT"
 
+    def test_non_hephaestus_repository_has_no_hephaestus_host_plan(self) -> None:
+        specs = stage_module._host_verification_specs(
+            "diff --git a/scripts/validate.py b/scripts/validate.py\n",
+            profile=None,
+        )
+
+        assert specs == ()
+
+    def test_non_hephaestus_checkout_reports_unsupported_host_verification(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = str(tmp_path)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": "diff --git a/scripts/validate.py b/scripts/validate.py\n",
+            }
+        )
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "review"
+        assert json.loads(result.job.prompt_kwargs["host_verifications_json"]) == [
+            {
+                "head_sha": "a" * 40,
+                "immutable_source": True,
+                "reason": "repository_profile_unavailable",
+                "status": "unsupported",
+            }
+        ]
+
     def test_python_validation_config_changes_run_host_plan(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Dependency and tool configuration cannot bypass host validation."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -2019,12 +2067,13 @@ class TestPrReviewStageStep:
         assert result.job.descr == "review_python_ruff_check"
 
     def test_migration_docs_change_runs_version_currency_host_verification(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """MIGRATION.md release claims receive an exact-head docs guard receipt."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -2085,12 +2134,13 @@ class TestPrReviewStageStep:
         assert json.loads(review.job.prompt_kwargs["host_verifications_json"]) == [receipt]
 
     def test_integration_changes_do_not_add_a_nonhermetic_host_suite(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Integration suites remain with CI rather than the no-network reviewer."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -2123,13 +2173,13 @@ class TestPrReviewStageStep:
         assert request.job.descr == "review"
 
     def test_actionable_host_failure_hands_remediation_to_implementation(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A failed host check never turns the reviewer into a writer."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
-        item.worktree = "/tmp/wt"
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "existing_pr": True,
@@ -2165,12 +2215,13 @@ class TestPrReviewStageStep:
         assert failure["stdout_tail"] == "Found 1 error."
 
     def test_failed_host_verification_fails_closed_before_primary_reviewer(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A failed fixed command never reaches a reviewer or GO path."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -2253,12 +2304,13 @@ class TestPrReviewStageStep:
         assert "review_audit_failure" not in item.payload
 
     def test_timed_out_host_verification_writes_no_go_and_routes_to_address(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A verified test timeout is actionable, but never enters EVAL retry."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -2310,12 +2362,13 @@ class TestPrReviewStageStep:
         assert "review_audit_failure" not in item.payload
 
     def test_unsupported_host_boundary_is_explicitly_bypassed(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Only the temporary unsupported-platform condition may bypass review checks."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,
@@ -2345,7 +2398,7 @@ class TestPrReviewStageStep:
         assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
 
     def test_host_failure_comment_error_preserves_no_go_and_fails_closed(
-        self, make_ctx: Any, make_work_item: Any
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A missing diagnostic comment cannot silently enter remediation."""
 
@@ -2357,6 +2410,7 @@ class TestPrReviewStageStep:
         stage = PrReviewStage()
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
         item.payload.update(
             {
                 "review_checkout_expected_head": "a" * 40,

@@ -162,6 +162,10 @@ from .base import (
     stage_model,
     write_skip_label,
 )
+from .pr_review_repository import (
+    _payload_host_verification_specs,
+    _prepare_host_checks,
+)
 from .pr_review_verification import (
     HOST_VERIFICATION_DIAGNOSTIC_MAX,
     HOST_VERIFICATION_TIMEOUT_S,
@@ -346,6 +350,7 @@ _ROUND_PAYLOAD_KEYS = (
     "scope_retraction_paths",
     "reviewed_pr_base_sha",
     "host_verification_receipts",
+    "host_verification_repository_profile",
     "host_verification_failure",
     _HOST_VERIFICATION_PENDING,
 )
@@ -827,8 +832,9 @@ __all__ = [
     '_host_verification_receipt_matches', '_host_verification_receipts_match',
     '_host_verification_specs', '_implementation_reply_handoff', '_is_confirmed_open_unarmed',
     '_is_postable_finding', '_issue_number', '_normalize_remediation_threads',
-    '_parse_review_response', '_parse_validation_result', '_pr_is_current_open_head',
-    '_review_context_kind', '_reviewer_thread_decisions', '_scope_retraction_paths', '_thread_ids',
+    '_parse_review_response', '_parse_validation_result', '_payload_host_verification_specs',
+    '_pr_is_current_open_head', '_prepare_host_checks', '_review_context_kind',
+    '_reviewer_thread_decisions', '_scope_retraction_paths', '_thread_ids',
     '_validation_pr_metadata_fingerprint', '_validation_receipt_fingerprints',
     '_validation_thread_snapshots', '_without_duplicate_live_findings', '_worktree_path',
     'agent_provider', 'annotations', 'cast', 'dataclass', 'get_pr_review_analysis_prompt',
