@@ -8,6 +8,7 @@ are the only cross-thread payload channels.
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -83,6 +84,81 @@ class LearningIntent:
             "plan_revision": self.plan_revision,
             "plan_fingerprint": self.plan_fingerprint,
         }
+
+    def to_payload(self) -> dict[str, object]:
+        """Return the closed semantic request accepted by the learning host."""
+        payload: dict[str, object] = {
+            "kind": self.kind.value,
+            "repo": self.repo,
+            "issue": self.issue,
+            "intent_key": self.key,
+        }
+        if self.kind is LearningIntentKind.APPROVED_PLAN:
+            payload.update(
+                {
+                    "plan_revision": self.plan_revision,
+                    "plan_fingerprint": self.plan_fingerprint,
+                }
+            )
+        else:
+            payload["pr"] = self.pr
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> LearningIntent:
+        """Parse a complete learning intent without accepting extra fields."""
+        kind_raw = payload.get("kind")
+        try:
+            kind = LearningIntentKind(kind_raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("learning intent payload has invalid kind") from exc
+        common = {"kind", "repo", "issue", "intent_key"}
+        expected = common | (
+            {"plan_revision", "plan_fingerprint"}
+            if kind is LearningIntentKind.APPROVED_PLAN
+            else {"pr"}
+        )
+        if set(payload) != expected:
+            raise ValueError("learning intent payload has unsupported or missing fields")
+        repo = payload.get("repo")
+        issue = payload.get("issue")
+        intent_key = payload.get("intent_key")
+        if (
+            not isinstance(repo, str)
+            or len(repo) > 200
+            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None
+            or isinstance(issue, bool)
+            or not isinstance(issue, int)
+            or issue <= 0
+            or not isinstance(intent_key, str)
+            or not intent_key
+        ):
+            raise ValueError("learning intent payload has invalid identity fields")
+        if kind is LearningIntentKind.APPROVED_PLAN:
+            revision = payload.get("plan_revision")
+            fingerprint = payload.get("plan_fingerprint")
+            if (
+                isinstance(revision, bool)
+                or not isinstance(revision, int)
+                or revision <= 0
+                or not isinstance(fingerprint, str)
+                or not fingerprint
+            ):
+                raise ValueError("learning intent payload has invalid approved-plan fields")
+            intent = cls.approved_plan(
+                repo=repo,
+                issue=issue,
+                plan_revision=revision,
+                plan_fingerprint=fingerprint,
+            )
+        else:
+            pr = payload.get("pr")
+            if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
+                raise ValueError("learning intent payload has invalid post-merge fields")
+            intent = cls.post_merge(repo=repo, issue=issue, pr=pr)
+        if intent.key != intent_key:
+            raise ValueError("learning intent payload identity does not match its key")
+        return intent
 
     @classmethod
     def from_journal(cls, record: dict[str, Any]) -> LearningIntent:

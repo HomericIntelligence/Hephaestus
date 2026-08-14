@@ -74,12 +74,8 @@ class LearningStage:
 
         payload: dict[str, object] = {
             "issue_number": intent.issue,
-            "intent_key": intent.key,
-            "intent_kind": intent.kind.value,
+            "learning_intent": intent.to_payload(),
         }
-        delivery = item.payload.get("learn_delivery")
-        if isinstance(delivery, dict):
-            payload["learn_delivery"] = dict(delivery)
         revision = str(
             item.payload.get("_worktree_cleanup_head_sha")
             or item.payload.get("_impl_source_revision")

@@ -615,7 +615,10 @@ Athena `advise` and `learn` are host-owned operations, not agent-runtime
 operations. `AthenaSkillJob` routes them only to the Mnemosyne host executor.
 They do not invoke or validate Claude, Codex, Pi, or another harness. Provider
 package, policy, and isolation checks apply only when a job executes through
-that provider. See ADR-0025.
+that provider. Learning jobs carry a semantic intent; the host rebinds its
+approved-plan or merged-PR source, prepares one bounded validated skill change,
+then delegates the closed request to the signed PR-delivery service. See
+ADR-0025 and ADR-0029.
 
 Per-agent model/session/timeout configuration is centralised in
 `hephaestus.automation.agent_config`, all operator-tunable via explicit CLI flags

@@ -128,6 +128,30 @@ def test_delivery_commits_pushes_and_reads_back_pr(tmp_path: Path) -> None:
     assert github.created[0]["repository"] == "acme/Mnemosyne"
 
 
+def test_delivery_rejects_wrong_origin_before_staging(tmp_path: Path) -> None:
+    """Every create/reuse path is repository-bound before mutation."""
+
+    class WrongOriginGit(FakeGit):
+        def __call__(
+            self,
+            cwd: Path,
+            argv: tuple[str, ...],
+            timeout_s: int,
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(cwd, argv, timeout_s)
+            if argv == ("remote", "get-url", "origin"):
+                return _completed(stdout="git@github.com:acme/Other.git\n")
+            return result
+
+    git = WrongOriginGit()
+    service = LearnDeliveryService(git=git, github=FakeGitHub())
+
+    with pytest.raises(LearnDeliveryError, match="repository does not match worktree origin"):
+        service.deliver(_request(tmp_path))
+
+    assert not any(call[0] in {"add", "commit", "push"} for call in git.calls)
+
+
 def test_delivery_rejects_paths_outside_allowlist(tmp_path: Path) -> None:
     service = LearnDeliveryService(
         git=FakeGit(diff="skills/example.md\ndocs/extra.md\n"), github=FakeGitHub()
@@ -170,7 +194,8 @@ def test_existing_pr_mode_pushes_bound_branch_without_creating_competing_pr(tmp_
     assert receipt.pr_number == 12
     assert github.created == []
     assert github.read == [12, 12]
-    assert git.calls[:4] == [
+    assert git.calls[:5] == [
+        ("remote", "get-url", "origin"),
         ("fetch", "origin", "skill/example"),
         ("remote", "get-url", "origin"),
         ("rev-parse", "refs/remotes/origin/skill/example"),

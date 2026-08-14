@@ -144,6 +144,16 @@ class LearnDeliveryService:
         _validate_delivery_text(request.commit_message, "commit message")
         _validate_delivery_text(request.pr_title, "PR title")
         _validate_delivery_text(request.pr_body, "PR body")
+        origin = _require_success(
+            self.git(
+                request.worktree_path,
+                ("remote", "get-url", "origin"),
+                self.timeout_s,
+            ),
+            "delivery origin read",
+        )
+        if not _origin_matches_repository(origin, request.repository):
+            raise LearnDeliveryError("delivery repository does not match worktree origin")
         existing_pr = self._bind_existing_pr_worktree(request)
         changed_paths = self._changed_paths(request.worktree_path)
         outside = sorted(set(changed_paths).difference(request.allowed_paths))
@@ -298,7 +308,21 @@ class LearnDeliveryService:
             self.git(worktree_path, ("diff", "--name-only", "HEAD"), self.timeout_s),
             "changed path discovery",
         )
-        return tuple(line.strip() for line in output.splitlines() if line.strip())
+        untracked = _require_success(
+            self.git(
+                worktree_path,
+                ("ls-files", "--others", "--exclude-standard"),
+                self.timeout_s,
+            ),
+            "untracked path discovery",
+        )
+        return tuple(
+            dict.fromkeys(
+                line.strip()
+                for line in (*output.splitlines(), *untracked.splitlines())
+                if line.strip()
+            )
+        )
 
 
 def valid_delivery_receipt(value: object) -> bool:

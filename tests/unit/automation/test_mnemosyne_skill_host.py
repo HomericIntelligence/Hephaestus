@@ -277,6 +277,35 @@ def test_learn_without_closed_delivery_payload_fails_closed(tmp_path: Path) -> N
     assert result.error == "learn delivery payload is required"
 
 
+def test_learn_rejects_ambiguous_intent_and_delivery_payload(tmp_path: Path) -> None:
+    """The host accepts exactly one preparation input shape."""
+    host = MnemosyneSkillHost(contract_loader=_contract, binding_service=Binding())
+    request = _request("learn", tmp_path)
+    request.payload.update({"learning_intent": {}, "learn_delivery": {}})
+
+    result = host.execute(request)
+
+    assert result.ok is False
+    assert result.error == (
+        "learn request must contain exactly one of learning_intent or learn_delivery"
+    )
+
+
+def test_learn_rejects_incomplete_explicit_delivery_with_exact_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """Legacy closed callers retain field-specific malformed-input errors."""
+    host = MnemosyneSkillHost(contract_loader=_contract, binding_service=Binding())
+    request = _request("learn", tmp_path)
+    request.payload["learn_delivery"] = {
+        "repository": "HomericIntelligence/Mnemosyne",
+    }
+
+    result = host.execute(request)
+
+    assert result.error == "learn delivery payload lacks non-empty worktree_path"
+
+
 def test_default_host_constructs_and_uses_concrete_delivery_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,11 +319,11 @@ def test_default_host_constructs_and_uses_concrete_delivery_backend(
         def deliver(self, request: object) -> LearnDeliveryReceipt:
             self.requests.append(request)
             return LearnDeliveryReceipt(
-                repository="acme/Mnemosyne",
+                repository="HomericIntelligence/Mnemosyne",
                 branch="skill/example",
                 base_branch="main",
                 commit_sha="c" * 40,
-                pr_url="https://github.com/acme/Mnemosyne/pull/8",
+                pr_url="https://github.com/HomericIntelligence/Mnemosyne/pull/8",
                 pr_number=8,
                 readback_head_sha="c" * 40,
                 validation_evidence=("pytest",),
@@ -307,7 +336,7 @@ def test_default_host_constructs_and_uses_concrete_delivery_backend(
     request.payload.update(
         {
             "learn_delivery": {
-                "repository": "acme/Mnemosyne",
+                "repository": "HomericIntelligence/Mnemosyne",
                 "worktree_path": str(tmp_path),
                 "branch": "skill/example",
                 "base_branch": "main",
@@ -508,8 +537,13 @@ def test_github_delivery_adapter_rejects_malformed_existing_pr_source() -> None:
 
 def test_learn_requires_pr_backed_delivery_receipt(tmp_path: Path) -> None:
     class Delivery:
-        def deliver_from_request(self, request: AthenaSkillRequest) -> LearnDeliveryReceipt:
+        def deliver_from_request(
+            self,
+            request: AthenaSkillRequest,
+            binding: MnemosyneBindingReceipt,
+        ) -> LearnDeliveryReceipt:
             del request
+            assert binding == _binding()
             return LearnDeliveryReceipt(
                 repository="acme/Mnemosyne",
                 branch="skill/example",
