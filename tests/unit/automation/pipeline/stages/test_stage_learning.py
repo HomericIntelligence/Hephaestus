@@ -67,6 +67,11 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     assert isinstance(request, JobRequest)
     assert isinstance(request.job, AthenaSkillJob)
     assert request.job.request.kind == "learn"
+    assert request.job.request.payload == {
+        "issue_number": 2705,
+        "learning_intent": item.learning_intents[0].to_payload(),
+    }
+    assert "learn_delivery" not in request.job.request.payload
     record = journal.load(item.learning_intents[0].key)
     assert record is not None and record["status"] == "claimed"
 
@@ -288,7 +293,7 @@ def test_completion_is_bound_to_the_locally_submitted_intent(
     stage = LearningStage()
     request = stage.step(item, ctx)
     assert isinstance(request, JobRequest)
-    assert request.job.request.payload["intent_key"] == local.key
+    assert request.job.request.payload["learning_intent"]["intent_key"] == local.key
     sha = "a" * 40
     stage.on_job_done(
         item,
@@ -362,7 +367,7 @@ def test_cleanup_barrier_waits_for_every_intent(
     second = stage.step(item, ctx)
     assert isinstance(second, JobRequest)
     assert isinstance(second.job, AthenaSkillJob)
-    assert second.job.request.payload["intent_kind"] == "post_merge"
+    assert second.job.request.payload["learning_intent"]["kind"] == "post_merge"
     stage.on_job_done(item, JobResult(ok=False, error="second failed"), ctx)
 
     item.state = "CLAIM"

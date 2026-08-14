@@ -42,3 +42,4 @@ numbered, and listed here.
 | [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |
 | [0028](0028-source-reading-agent-workspace-isolation.md) | Deterministic source-reading agent workspace isolation | Accepted |
 | [0029](0029-explicit-pi-isolation-adapter-bootstrap.md) | Explicit Pi isolation-adapter bootstrap | Accepted |
+| [0030](0030-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |

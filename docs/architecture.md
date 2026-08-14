@@ -325,10 +325,13 @@ within that lane. A cross-lane handoff transfers permit ownership only after
 the destination accepts the item. The auxiliary permit is released after
 `finished` records the outcome.
 
-The auxiliary lane does not create Mnemosyne content or delivery authority.
-Issue #2754 owns that host preparation seam. Until it is complete, a missing
-prepared delivery becomes a terminal ancillary learning failure. It does not
-change the primary result, and cleanup still waits for that terminal state.
+The auxiliary lane carries only semantic learning intent. The Mnemosyne host
+rebinds that intent to immutable GitHub facts, prepares one bounded validated
+skill artifact, and converts it to the closed delivery request. Repository
+binding, allowed paths, signed DCO commit, PR creation/reuse, and head readback
+remain host-owned. Preparation or delivery failure is terminal only for the
+ancillary learning record; it does not change the primary result, and cleanup
+still waits for that terminal state.
 
 Queue draining claims an item through a
 [`StageQueueLease`](../hephaestus/automation/pipeline/queues.py). The lease keeps
@@ -1219,7 +1222,12 @@ Learning is an implicit auxiliary stage for every main-stage scope. Plan review
 emits an approved-plan intent after the plan label is confirmed. Merge wait
 emits a post-merge intent only after merge confirmation. The stage writes the
 intent journal before dispatch, claims one deterministic key, and submits only
-a host-owned `AthenaSkillJob`. Known failures retry within the `learn` budget.
+a host-owned `AthenaSkillJob`. The job contains a closed `learning_intent`, not
+provider instructions or a fabricated delivery receipt. The host validates the
+intent against the actor-owned approved plan or merged closing PR, creates one
+bounded `skills/*.md` change in an isolated Mnemosyne worktree, runs the fixed
+offline validator, and hands the resulting `LearnDeliveryRequest` to the
+signed PR-delivery service. Known failures retry within the `learn` budget.
 An ambiguous crash-left claim becomes terminal `failed` with
 `outcome_unknown`; it is not submitted twice. Learning failure is ancillary
 and cannot change a confirmed main result.
