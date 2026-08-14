@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -1690,6 +1691,74 @@ class TestAgentErrorHandling:
         assert result.error is not None
         assert result.error.startswith("agent_error: codex_nested_sandbox_unsupported")
         assert "outside the enclosing API sandbox" in result.error
+
+    def test_codex_skills_budget_notice_does_not_open_agent_breaker(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """An informational Codex notice remains successful across the worker boundary."""
+        job = _agent_job(agent="codex")
+        breaker = get_circuit_breaker("agent:codex")
+        notice = (
+            "Skill descriptions were shortened to fit the skills context budget. "
+            "Codex can still see every skill, but some descriptions are shorter. "
+            "Disable unused skills or plugins to leave more room for the rest."
+        )
+
+        def fake_popen(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            stdout = "\n".join(
+                [
+                    json.dumps({"type": "thread.started", "thread_id": "codex-session"}),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "id": "item_1",
+                                "type": "error",
+                                "message": notice,
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "turn.completed", "usage": {}}),
+                ]
+            )
+            output_path = Path(cmd[cmd.index("--output-last-message") + 1])
+            output_path.write_text(
+                "Completed despite the informational notice.",
+                encoding="utf-8",
+            )
+            process = MagicMock()
+            process.pid = 2468
+            process.returncode = 0
+            process.communicate.return_value = (stdout, "")
+            process.poll.return_value = 0
+            return process
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(
+                "hephaestus.agents.runtime.codex_approval_args",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.agents.runtime._codex_extra_writable_dirs",
+                return_value=[],
+            ),
+            patch(
+                "hephaestus.agents.runtime.subprocess.Popen",
+                side_effect=fake_popen,
+            ),
+            patch(
+                f"{_WP}.subprocess_registry.track_process_group",
+                side_effect=lambda _pid: nullcontext(),
+            ),
+        ):
+            results = [pool._run_agent(job) for _ in range(breaker.failure_threshold + 1)]
+
+        assert all(result.ok for result in results)
+        assert all(result.error is None for result in results)
+        assert breaker.snapshot()["state"] == "closed"
+        assert breaker.snapshot()["failure_count"] == 0
 
     def test_generic_exception_converted_to_error_result(
         self,
