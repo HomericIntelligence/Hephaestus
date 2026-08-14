@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Single-repo gh-tidy wrapper with agent conflict resolution.
 
-Runs `gh tidy --rebase-all --trunk <default_branch>` interactively (stdin
-passes through so the user can answer gh-tidy's own y/N delete prompts), then
+Runs `gh tidy --rebase-all --auto-delete-merged --trunk <default_branch>`, then
 spawns the selected coding agent per branch that gh-tidy failed to rebase.
 
 The swarm is constrained: it MUST NOT delete any branch or any worktree that
@@ -248,12 +247,20 @@ def parse_problem_branches(output: str) -> list[str]:
 
 
 def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
-    """Run gh tidy interactively, tee output to terminal + buffer.
+    """Run gh tidy with unattended merged-branch cleanup.
 
     Returns (exit_code, combined_output_buffer).
-    Stdin is connected to the user's terminal so gh-tidy's y/N prompts work.
+    Output is streamed to the terminal while also being retained for parsing.
     """
-    cmd = ["gh", "tidy", "--rebase-all", "--trunk", trunk, "--skip-gc"]
+    cmd = [
+        "gh",
+        "tidy",
+        "--rebase-all",
+        "--auto-delete-merged",
+        "--trunk",
+        trunk,
+        "--skip-gc",
+    ]
     if dry_run:
         logger.info("[dry-run] Would run: %s", " ".join(cmd))
         return 0, ""
@@ -261,10 +268,9 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
     logger.info("Running: %s", " ".join(cmd))
     buf: list[str] = []
 
-    # Use Popen so we can tee output while keeping stdin connected to the TTY.
+    # Use Popen so output can be tee'd to the terminal and retained for parsing.
     # Intentionally NOT routed through hephaestus.github.client.gh_call: that
-    # adapter captures stdout/stderr and detaches stdin, which would break
-    # gh-tidy's interactive y/N delete prompts (the whole point of this call).
+    # adapter captures stdout/stderr and would prevent live progress output.
     with subprocess.Popen(
         cmd,
         stdin=sys.stdin,

@@ -149,6 +149,38 @@ def test_no_problem_header_at_all() -> None:
     assert result == []
 
 
+def test_run_gh_tidy_rebases_and_auto_deletes_merged_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gh-tidy boundary uses the complete unattended cleanup argv."""
+    process = MagicMock()
+    process.stdout = iter(())
+    process.returncode = 0
+    popen = MagicMock()
+    popen.return_value.__enter__.return_value = process
+    monkeypatch.setattr(tidy_module.subprocess, "Popen", popen)
+
+    assert tidy_module._run_gh_tidy("main", dry_run=False) == (0, "")
+
+    popen.assert_called_once_with(
+        [
+            "gh",
+            "tidy",
+            "--rebase-all",
+            "--auto-delete-merged",
+            "--trunk",
+            "main",
+            "--skip-gc",
+        ],
+        stdin=tidy_module.sys.stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    process.wait.assert_called_once_with()
+
+
 def test_parse_worktree_porcelain_skips_main_and_detached_worktrees() -> None:
     """Cleanup candidates require a non-main worktree with an attached branch."""
     assert hasattr(tidy_module, "_parse_worktree_porcelain")
