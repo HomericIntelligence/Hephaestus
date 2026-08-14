@@ -88,6 +88,8 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
+_ADR_FILENAME_RE = re.compile(r"^(?P<number>[0-9]{4})-[a-z0-9-]+\.md$")
+_ADR_README_LINK_RE = re.compile(r"\(([0-9]{4}-[a-z0-9-]+\.md)\)")
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
@@ -2057,6 +2059,24 @@ class WorkerPool:
                 error=BRANCH_WORKTREE_OWNED,
                 value={"branch": exc.branch, "owner_path": str(exc.owner_path)},
             )
+        except git_utils.DetachedHeadPushRemoteHeadChangedError:
+            return JobResult(
+                ok=False,
+                error="publish failed: remote head changed",
+                value={"failure_kind": "publish_remote_head_changed"},
+            )
+        except git_utils.DetachedHeadPushRemoteHeadUnchangedError:
+            return JobResult(
+                ok=False,
+                error="publish failed: remote head unchanged",
+                value={"failure_kind": "publish_remote_head_unchanged"},
+            )
+        except git_utils.DetachedHeadPushRemoteProbeError:
+            return JobResult(
+                ok=False,
+                error="publish failed: remote head probe failed",
+                value={"failure_kind": "publish_remote_probe_failed"},
+            )
         except subprocess.TimeoutExpired as exc:
             return JobResult(
                 ok=False,
@@ -2389,6 +2409,68 @@ class WorkerPool:
             return "<absent>"
         return hashlib.sha256(target.read_bytes()).hexdigest()
 
+    @staticmethod
+    def _validate_rebased_tree(cwd: Path) -> JobResult | None:
+        """Reject known repository-structure damage before a rebase publish.
+
+        Conflict resolution is intentionally limited to the files Git reports
+        as conflicted.  That prevents an agent from editing unrelated files,
+        but it cannot prove that the resulting tree is semantically valid.  A
+        duplicate ADR number is the concrete failure this guard is designed to
+        catch; the README check catches the corresponding stale/missing index
+        entry.  Repositories without ``docs/adr`` are unaffected.
+        """
+        adr_dir = cwd / "docs" / "adr"
+        if not adr_dir.is_dir():
+            return None
+        try:
+            adr_files = sorted(path for path in adr_dir.glob("*.md") if path.name != "README.md")
+            numbers: dict[str, list[str]] = {}
+            for path in adr_files:
+                match = _ADR_FILENAME_RE.fullmatch(path.name)
+                if match is None:
+                    return JobResult(
+                        ok=False,
+                        value={"failure_kind": "semantic_validation"},
+                        error=(
+                            f"rebase semantic validation failed: malformed ADR filename {path.name}"
+                        ),
+                    )
+                numbers.setdefault(match.group("number"), []).append(path.name)
+            for number, names in sorted(numbers.items()):
+                if len(names) > 1:
+                    return JobResult(
+                        ok=False,
+                        value={"failure_kind": "semantic_validation"},
+                        error=(
+                            f"rebase semantic validation failed: duplicate ADR number {number} "
+                            f"({', '.join(names)})"
+                        ),
+                    )
+
+            readme = adr_dir / "README.md"
+            if readme.is_file():
+                linked = set(_ADR_README_LINK_RE.findall(readme.read_text(encoding="utf-8")))
+                on_disk = {path.name for path in adr_files}
+                if linked != on_disk:
+                    missing = sorted(on_disk - linked)
+                    stale = sorted(linked - on_disk)
+                    return JobResult(
+                        ok=False,
+                        value={"failure_kind": "semantic_validation"},
+                        error=(
+                            "rebase semantic validation failed: ADR README index out of sync "
+                            f"(missing={missing}, stale={stale})"
+                        ),
+                    )
+        except (OSError, UnicodeError) as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "semantic_validation"},
+                error=f"rebase semantic validation failed: cannot inspect ADR records ({exc})",
+            )
+        return None
+
     def _git_continue_rebase(self, job: GitJob) -> JobResult:
         """Validate edit-only conflict output, finish policy rebase, and lease-publish."""
         parsed = self._parse_rebase_continuation(job)
@@ -2437,6 +2519,9 @@ class WorkerPool:
         )
         if continued is not None:
             return continued
+        semantic = self._validate_rebased_tree(cwd)
+        if semantic is not None:
+            return semantic
         metadata = self._verify_rebased_commit_metadata(
             cwd, base_sha=base_sha, timeout=job.timeout_s
         )
