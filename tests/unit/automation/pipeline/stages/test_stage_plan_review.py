@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -18,6 +19,7 @@ from hephaestus.automation.pipeline.stages.plan_review import (
     build_amend_prompt,
 )
 from hephaestus.automation.pipeline.work_item import LearningIntent
+from hephaestus.automation.plan_review_session import PlanReviewSessionStore
 from hephaestus.automation.prompts._shared import get_untrusted_notice
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import (
@@ -345,6 +347,115 @@ class TestPlanReviewStageOnEnter:
 
 class TestPlanReviewStageStep:
     """step state machine: ENTER -> REVIEW_WAIT -> EVAL -> AMEND/LEARN."""
+
+    def test_multi_round_cycle_resumes_one_durable_reviewer_session(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """Review, amendment handoff, and re-review keep one opaque identity."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[639] = [render_current_plan("Plan v1")]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        item = make_work_item(
+            issue=639,
+            state="ENTER",
+            payload={"issue_title": "Task", "issue_body": "Body"},
+        )
+        stage = PlanReviewStage()
+
+        assert stage.on_enter(item, ctx) is None
+        item.state = "REVIEW_WAIT"
+        first_request = stage.step(item, ctx)
+        assert isinstance(first_request, JobRequest)
+        first_job = first_request.job
+        assert isinstance(first_job, AgentJob)
+        assert first_job.execution_request is not None
+        assert first_job.execution_request.lifecycle is SessionLifecycle.START_NEW
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=_verdict("NOGO"), session_id="opaque-reviewer"),
+            ctx,
+        )
+        item.state = "EVAL"
+        assert stage.step(item, ctx) == Continue(next_state="AMEND_WAIT")
+        item.state = "AMEND_WAIT"
+        stage.on_job_done(item, JobResult(ok=True, value="Plan v2 with tests"), ctx)
+        restarted = make_work_item(
+            issue=639,
+            state="ENTER",
+            payload={"issue_title": "Task", "issue_body": "Body"},
+        )
+        assert stage.on_enter(restarted, ctx) is None
+        restarted.state = "REVIEW_WAIT"
+
+        second_request = stage.step(restarted, ctx)
+        assert isinstance(second_request, JobRequest)
+        second_job = second_request.job
+        assert isinstance(second_job, AgentJob)
+        assert second_job.session_key == first_job.session_key
+        assert second_job.resume_session_id == "opaque-reviewer"
+        assert second_job.execution_request is not None
+        assert second_job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
+        assert second_job.prompt_kwargs["plan_revision"] == 2
+        assert (
+            second_job.prompt_kwargs["plan_fingerprint"]
+            != first_job.prompt_kwargs["plan_fingerprint"]
+        )
+        assert "review text (NOGO)" in second_job.prompt_kwargs["review_transcript"]
+        assert "Plan v2 with tests" in second_job.prompt_kwargs["review_transcript"]
+
+    def test_resume_failure_enters_observable_recovery_required_state(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """Provider session loss blocks instead of creating a fresh reviewer."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[2766] = [render_current_plan("Plan v1")]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        item = make_work_item(issue=2766, state="ENTER")
+        stage = PlanReviewStage()
+        assert stage.on_enter(item, ctx) is None
+        cycle_id = item.payload["plan_review_cycle_id"]
+        store.bind_session(cycle_id, "opaque-reviewer")
+        item.state = "REVIEW_WAIT"
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, error="review-session-lost", session_lost=True),
+            ctx,
+        )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.BLOCKED
+        assert outcome.note == "review-session-lost"
+        assert store.load(cycle_id).state == "recovery-required"
+        assert STATE_PLAN_BLOCKED in github.labels[2766]
+
+    def test_review_comment_without_session_state_fails_closed_after_amendment(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A lost journal cannot fork review while an amended plan awaits review."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[2766] = [
+            render_current_plan("Plan v2", revision=2),
+            archive_review_body(1, "Earlier finding\n\nstate:plan-no-go"),
+        ]
+        ctx = make_ctx(
+            github=github,
+            plan_review_sessions=PlanReviewSessionStore(lambda: tmp_path),
+        )
+
+        outcome = PlanReviewStage().on_enter(
+            make_work_item(issue=2766, state="ENTER"),
+            ctx,
+        )
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.BLOCKED
+        assert outcome.note == "review-session-lost"
+        assert STATE_PLAN_BLOCKED in github.labels[2766]
 
     def test_enter_routes_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""

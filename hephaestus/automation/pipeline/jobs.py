@@ -44,6 +44,9 @@ class AgentJob:
     cwd: Path
     timeout_s: int
     session_agent: str = ""
+    # Stable cycle-scoped identity.  Unlike ``session_agent`` this must not
+    # be shared by separate issues or explicit planning cycles.
+    session_key: str = ""
     # Direct-runner providers return an opaque session id.  The coordinator
     # stores it on the WorkItem and supplies it here on subsequent turns so
     # review/implementation context survives across loop iterations.
@@ -64,6 +67,9 @@ class AgentJob:
     # compatibility ``sandbox``/``allowed_tools`` inputs used by Claude/Codex.
     execution_request: ExecutionRequest | None = None
     resume_binding: AgentSessionBinding | None = None
+    # Invoked immediately after the provider returns its identity and before
+    # output parsing, closing the restart window for durable conversations.
+    session_checkpoint: Callable[[str, AgentSessionBinding | None], None] | None = None
     descr: str = ""
 
 

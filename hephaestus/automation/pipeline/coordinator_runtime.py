@@ -72,6 +72,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         else:
             root = _effective_repo_root(self.config, repo)
             from hephaestus.automation.arming_state import LearningJournalStore
+            from hephaestus.automation.plan_review_session import PlanReviewSessionStore
 
             def learning_state_dir() -> Path:
                 return root / "build" / ".automation-state"
@@ -97,6 +98,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     learning_state_dir,
                     claim_registry=self._learning_claim_registry,
                 ),
+                plan_review_sessions=PlanReviewSessionStore(learning_state_dir),
                 branch_worktree_owner_status=self._branch_worktree_owner_status,
             )
             if len(self._ctx_cache) >= self._ctx_cache_capacity:

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation import claude_invoke
 from hephaestus.automation.agent_config import OPUS_48
 from hephaestus.automation.claude_invoke import (
@@ -72,6 +73,24 @@ class TestCreateThenResume:
     for an unknown id — so the first call for a (repo, issue, agent, model) key
     must create the session, and later calls resume it.
     """
+
+    def test_resume_required_missing_transcript_fails_closed(
+        self, stub_run: MagicMock, fake_home: Path
+    ) -> None:
+        """Strict iterative review cannot downgrade a missing resume to create."""
+        cwd = fake_home / "work"
+        cwd.mkdir()
+        with pytest.raises(AgentSessionLostError, match="transcript is missing"):
+            invoke_claude_with_session(
+                repo="repo",
+                issue=2766,
+                agent="plan-reviewer-cycle-01234567-89ab-cdef-0123-456789abcdef",
+                prompt="review",
+                model="model",
+                cwd=cwd,
+                session_lifecycle="resume-required",
+            )
+        stub_run.assert_not_called()
 
     def test_first_call_creates_with_model_keyed_id(
         self, stub_run: MagicMock, fake_home: Path

@@ -53,7 +53,8 @@ re-pointed at the pipeline (#1820):
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -61,6 +62,8 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.pi_session import AgentSessionBinding
+from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation.agent_config import (
     plan_reviewer_claude_timeout,
     planner_claude_timeout,
@@ -68,6 +71,7 @@ from hephaestus.automation.agent_config import (
     reviewer_model,
 )
 from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
     get_plan_loop_review_prompt,
@@ -79,6 +83,7 @@ from hephaestus.automation.protocol import (
 from hephaestus.automation.review_journal import (
     IssueComment,
     current_plan_context,
+    is_pending_review,
     journal_snapshot,
     parse_plan_review_state,
     plan_fingerprint,
@@ -222,6 +227,184 @@ def _confirm_pending_amendment_transition(
     return None
 
 
+def _restore_review_conversation(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    plan_text: str,
+    revision: int,
+    has_prior_review: bool,
+) -> StageOutcome | None:
+    """Recover or create the cycle-scoped reviewer conversation."""
+    store = ctx.plan_review_sessions
+    if store is None or item.issue is None or not plan_text:
+        return None
+    reset_issues: set[int] = getattr(ctx.config, "reset_plan_review_sessions", set())
+    reset = item.issue in reset_issues
+    if reset:
+        reset_issues.discard(item.issue)
+    try:
+        active = None if reset else store.recover_active(repo=item.repo, issue=item.issue)
+        previous_cycle = item.payload.get("plan_review_cycle_number")
+        cycle_number = item.attempts.get("plan_cycles", 0)
+        if active is not None and previous_cycle is not None and previous_cycle != cycle_number:
+            store.complete(active.cycle_id)
+            active = None
+        if active is None and has_prior_review and not reset:
+            raise PlanReviewSessionLostError(
+                "durable review exists without resumable session state"
+            )
+        if active is not None and active.canonical_cwd != str(Path(ctx.paths.worktree).resolve()):
+            raise PlanReviewSessionLostError("reviewer checkout identity changed")
+        if active is not None and active.plan_fingerprint != plan_fingerprint(plan_text):
+            active = store.append_artifact(
+                active.cycle_id,
+                kind="amendment",
+                content=plan_text,
+                round_index=active.round_index,
+                plan_revision=revision,
+                plan_fingerprint=plan_fingerprint(plan_text),
+            )
+        if active is None or reset:
+            active = store.start_cycle(
+                repo=item.repo,
+                issue=item.issue,
+                provider=agent_provider(ctx),
+                model=stage_model(ctx, "reviewer", reviewer_model),
+                reviewer_config={
+                    "reasoning_effort": getattr(ctx.config, "reviewer_reasoning_effort", "")
+                },
+                cwd=ctx.paths.worktree,
+                plan_revision=revision,
+                plan_fingerprint=plan_fingerprint(plan_text),
+                reset=reset,
+            )
+        item.payload.update(
+            plan_review_cycle_id=active.cycle_id,
+            plan_review_session_id=active.session_id,
+            plan_review_cycle_number=cycle_number,
+        )
+    except PlanReviewSessionLostError as exc:
+        logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
+        raw_review = f"Reviewer conversation recovery required.\n\n{STATE_PLAN_BLOCKED}"
+        _publish_plan_blocked(item.issue, ctx, raw_review=raw_review, revision=revision)
+        item.payload["review_session_error"] = "review-session-lost"
+        return StageOutcome(Disposition.BLOCKED, "review-session-lost")
+    return None
+
+
+def _complete_review_cycle(item: WorkItem, ctx: StageContext) -> None:
+    """Close the active durable cycle when routing leaves plan review."""
+    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+    if ctx.plan_review_sessions is not None and cycle_id:
+        ctx.plan_review_sessions.complete(cycle_id)
+
+
+def _checkpoint_review_identity(item: WorkItem, result: JobResult, ctx: StageContext) -> bool:
+    """Persist provider identity and return whether recovery is now required."""
+    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+    store = ctx.plan_review_sessions
+    if store is not None and cycle_id and result.session_id and item.state == "REVIEW_WAIT":
+        try:
+            bound = store.bind_session(cycle_id, result.session_id, result.session_binding)
+            item.payload["plan_review_session_id"] = bound.session_id
+        except PlanReviewSessionLostError:
+            store.mark_recovery_required(cycle_id)
+            item.payload["review_session_error"] = "review-session-lost"
+            return True
+    if result.session_lost:
+        if store is not None and cycle_id:
+            store.mark_recovery_required(cycle_id)
+        item.payload["review_session_error"] = "review-session-lost"
+        return True
+    if (
+        not result.ok
+        and store is not None
+        and cycle_id
+        and item.state == "REVIEW_WAIT"
+        and store.load(cycle_id).session_id is None
+    ):
+        store.mark_recovery_required(cycle_id)
+        item.payload["review_session_error"] = "review-session-lost"
+        return True
+    return False
+
+
+def _review_session_checkpoint(
+    ctx: StageContext,
+    cycle_id: str,
+) -> Callable[[str, AgentSessionBinding | None], None]:
+    """Build the worker-side durable identity checkpoint for one cycle."""
+
+    def checkpoint(session_id: str, binding: AgentSessionBinding | None) -> None:
+        store = ctx.plan_review_sessions
+        if store is None:
+            return
+        try:
+            store.bind_session(cycle_id, session_id, binding)
+        except PlanReviewSessionLostError as exc:
+            store.mark_recovery_required(cycle_id)
+            raise AgentSessionLostError("reviewer identity checkpoint failed") from exc
+
+    return checkpoint
+
+
+def _record_review_value(item: WorkItem, value: object, ctx: StageContext) -> None:
+    """Record a parsed review and its immutable transcript artifact."""
+    item.payload["review_verdict"] = value
+    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+    if ctx.plan_review_sessions is not None and cycle_id:
+        ctx.plan_review_sessions.append_artifact(
+            cycle_id,
+            kind="review",
+            content=str(getattr(value, "raw", "")),
+            round_index=int(item.payload.get("review_round") or 0),
+            plan_revision=int(item.payload.get("plan_revision") or 1),
+            plan_fingerprint=plan_fingerprint(str(item.payload.get("plan_text") or "")),
+        )
+    if getattr(value, "verdict", None) == "NOGO":
+        raw_review = getattr(value, "raw", None)
+        assert isinstance(raw_review, str), (  # noqa: S101 - explicit worker contract
+            "plan_review REVIEW_WAIT NOGO verdict must expose raw review text"
+        )
+        item.payload["prior_review"] = raw_review
+
+
+def _record_amendment_value(item: WorkItem, plan_text: str, ctx: StageContext) -> None:
+    """Publish an amended plan and append its durable handoff artifact."""
+    assert item.issue is not None  # noqa: S101 - caller validates issue
+    publication = publish_plan_revision(item.issue, plan_text, ctx.github, require_change=True)
+    item.payload["plan_text"] = publication.plan
+    item.payload["plan_revision"] = publication.revision
+    cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+    if ctx.plan_review_sessions is not None and cycle_id:
+        ctx.plan_review_sessions.append_artifact(
+            cycle_id,
+            kind="amendment",
+            content=publication.plan,
+            round_index=int(item.payload.get("review_round") or 0),
+            plan_revision=publication.revision,
+            plan_fingerprint=plan_fingerprint(publication.plan),
+        )
+    if publication.is_stuck:
+        item.payload["no_progress_reason"] = publication.no_progress_reason
+        raw_review = (
+            "Planning is stuck and needs external feedback. "
+            f"{publication.no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
+        )
+        _publish_plan_blocked(
+            item.issue,
+            ctx,
+            raw_review=raw_review,
+            revision=publication.revision,
+        )
+        return
+    add, remove = enter_planning_transition()
+    ctx.github.edit_labels(item.issue, add=add, remove=remove)
+    item.payload["needs_plan_transition_pending"] = True
+    item.payload.pop("no_progress_reason", None)
+
+
 def _operator_blocked_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
     """Stop non-EVAL work when the operator latch appears between steps."""
     if item.state in {"ENTER", "EVAL"} or item.issue is None:
@@ -356,6 +539,25 @@ class PlanReviewStage(Stage):
             if snapshot.current_review and snapshot.current_review_revision == snapshot.revision:
                 item.payload["prior_review"] = snapshot.current_review
 
+            session_outcome = _restore_review_conversation(
+                item,
+                ctx,
+                plan_text=snapshot.current_plan,
+                revision=snapshot.revision,
+                has_prior_review=(
+                    any(artifact.kind == "review" for artifact in snapshot.history)
+                    or (
+                        bool(snapshot.current_review)
+                        and not is_pending_review(
+                            snapshot.current_review,
+                            revision=snapshot.current_review_revision or snapshot.revision,
+                        )
+                    )
+                ),
+            )
+            if session_outcome is not None:
+                return session_outcome
+
         cycle = item.attempts.get("plan_cycles", 0)
         if item.payload.get("review_cycle") != cycle:
             item.payload["review_cycle"] = cycle
@@ -380,6 +582,16 @@ class PlanReviewStage(Stage):
         """
         if not item.issue:
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+
+        if item.payload.get("review_session_error") == "review-session-lost":
+            raw_review = f"Reviewer conversation recovery required.\n\n{STATE_PLAN_BLOCKED}"
+            _publish_plan_blocked(
+                item.issue,
+                ctx,
+                raw_review=raw_review,
+                revision=int(item.payload.get("plan_revision") or 1),
+            )
+            return StageOutcome(Disposition.BLOCKED, "review-session-lost")
 
         # on_enter is not a durable lock. Re-check the operator latch before
         # every agent request and before the delayed post-learn transition.
@@ -420,26 +632,57 @@ class PlanReviewStage(Stage):
             # submission is not an iteration (#1554/#1794). The 0-based
             # prompt iteration is the cycle-relative round count.
             round_index = item.payload.get("review_round", 0)
+            store = ctx.plan_review_sessions
+            cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
+            review_session = store.load(cycle_id) if store is not None and cycle_id else None
+            transcript = store.transcript(cycle_id) if review_session is not None else ""
             # Clear any stale verdict at submission so a failed later round
             # can never replay an earlier round's verdict in EVAL.
             item.payload.pop("review_verdict", None)
             item.payload.pop("review_comment_published", None)
-            logger.info("plan_review:%d: requesting review job (round %d)", item.issue, round_index)
+            logger.info(
+                "plan_review:%d: requesting review job cycle=%s session=%s round=%d revision=%s",
+                item.issue,
+                cycle_id or "legacy",
+                (review_session.session_id if review_session is not None else None) or "pending",
+                round_index,
+                item.payload.get("plan_revision", 1),
+            )
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
-                agent=agent_provider(ctx),
-                model=stage_model(ctx, "reviewer", reviewer_model),
+                agent=(
+                    review_session.provider if review_session is not None else agent_provider(ctx)
+                ),
+                model=(
+                    review_session.reviewer_model
+                    if review_session is not None
+                    else stage_model(ctx, "reviewer", reviewer_model)
+                ),
                 prompt_builder=get_plan_loop_review_prompt,
                 cwd=ctx.paths.worktree,
                 timeout_s=plan_reviewer_claude_timeout(),
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLAN_REVIEWER,
+                session_key=review_session.session_key if review_session is not None else "",
+                resume_session_id=(
+                    review_session.session_id if review_session is not None else None
+                ),
+                resume_binding=(
+                    AgentSessionBinding.from_json(review_session.session_binding)
+                    if review_session is not None and review_session.session_binding
+                    else None
+                ),
+                session_checkpoint=_review_session_checkpoint(ctx, cycle_id),
                 execution_request=ExecutionRequest(
                     AgentRole.PLAN_REVIEWER,
                     AgentOperation.PLAN_REVIEW,
-                    SessionLifecycle.ONE_SHOT,
+                    (
+                        SessionLifecycle.RESUME_REQUIRED
+                        if review_session is not None and review_session.session_id
+                        else SessionLifecycle.START_NEW
+                    ),
                 ),
                 # get_plan_loop_review_prompt takes a 0-based iteration index
                 # (full-sweep suffix on the final iteration). Issue title/body
@@ -460,6 +703,13 @@ class PlanReviewStage(Stage):
                     # and direct prior critique; superseded journal entries
                     # would only duplicate stale feedback.
                     "plan_history": "",
+                    "planning_cycle_id": cycle_id,
+                    "reviewer_session_id": (
+                        review_session.session_id or "pending" if review_session is not None else ""
+                    ),
+                    "plan_revision": int(item.payload.get("plan_revision") or 1),
+                    "plan_fingerprint": plan_fingerprint(str(item.payload.get("plan_text") or "")),
+                    "review_transcript": transcript,
                 },
                 parse=parse_plan_review_verdict,  # verdict parsed in-worker
                 descr="review",
@@ -630,6 +880,7 @@ class PlanReviewStage(Stage):
         )
         cycles = item.attempts.get("plan_cycles", 0) + 1
         item.attempts["plan_cycles"] = cycles
+        _complete_review_cycle(item, ctx)
         if cycles >= ctx.budget("plan_cycles"):
             logger.error(
                 "plan_review:%d: plan_cycles exhausted (%d/%d)",
@@ -706,6 +957,7 @@ class PlanReviewStage(Stage):
             STATE_PLAN_GO,
         ):
             return StageOutcome(Disposition.RETRY, "plan-go label was not confirmed")
+        _complete_review_cycle(item, ctx)
         return StageOutcome(Disposition.ADVANCE, "plan approved")
 
     @staticmethod
@@ -737,6 +989,8 @@ class PlanReviewStage(Stage):
             ctx: Stage context.
 
         """
+        if _checkpoint_review_identity(item, result, ctx):
+            return
         if not result.ok:
             reason = _safe_agent_failure_reason(result.error)
             diagnostic = _safe_agent_failure_diagnostic(result.stderr_tail)
@@ -753,39 +1007,6 @@ class PlanReviewStage(Stage):
 
         if result.value is not None:
             if item.state == "REVIEW_WAIT":
-                verdict = result.value
-                item.payload["review_verdict"] = verdict
-                if getattr(verdict, "verdict", None) == "NOGO":
-                    raw_review = getattr(verdict, "raw", None)
-                    assert isinstance(raw_review, str), (  # noqa: S101 - explicit worker contract
-                        "plan_review REVIEW_WAIT NOGO verdict must expose raw review text"
-                    )
-                    item.payload["prior_review"] = raw_review
-            elif item.state == "AMEND_WAIT":
-                plan_text = result.value
-                if item.issue is not None and isinstance(plan_text, str):
-                    publication = publish_plan_revision(
-                        item.issue,
-                        plan_text,
-                        ctx.github,
-                        require_change=True,
-                    )
-                    item.payload["plan_text"] = publication.plan
-                    item.payload["plan_revision"] = publication.revision
-                    if publication.is_stuck:
-                        item.payload["no_progress_reason"] = publication.no_progress_reason
-                        raw_review = (
-                            "Planning is stuck and needs external feedback. "
-                            f"{publication.no_progress_reason}\n\n{STATE_PLAN_BLOCKED}"
-                        )
-                        _publish_plan_blocked(
-                            item.issue,
-                            ctx,
-                            raw_review=raw_review,
-                            revision=publication.revision,
-                        )
-                        return
-                    add, remove = enter_planning_transition()
-                    ctx.github.edit_labels(item.issue, add=add, remove=remove)
-                    item.payload["needs_plan_transition_pending"] = True
-                    item.payload.pop("no_progress_reason", None)
+                _record_review_value(item, result.value, ctx)
+            elif item.state == "AMEND_WAIT" and isinstance(result.value, str):
+                _record_amendment_value(item, result.value, ctx)

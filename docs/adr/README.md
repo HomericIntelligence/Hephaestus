@@ -38,3 +38,4 @@ numbered, and listed here.
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
 | [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |
+| [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |

@@ -107,6 +107,15 @@ def test_parse_args_accepts_explicit_codex_agent() -> None:
     assert args.agent == "codex"
 
 
+def test_plan_review_reset_requires_and_accepts_explicit_issues() -> None:
+    """A reset can never broaden from an explicit issue scope to discovery."""
+    with pytest.raises(SystemExit):
+        loop_runner._parse_args(["--reset-plan-review-session"])
+    args = loop_runner._parse_args(["--issues", "8,13", "--reset-plan-review-session"])
+    assert args.issues == [8, 13]
+    assert args.reset_plan_review_session is True
+
+
 def test_loop_help_documents_explicit_gh_root_override() -> None:
     """The executable exception is an explicit, discoverable CLI authority."""
     assert "--gh-extra-path-root" in loop_runner._build_parser().format_help()
