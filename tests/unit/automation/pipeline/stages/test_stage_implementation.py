@@ -988,6 +988,8 @@ class TestGate:
                 ok=False,
                 error="rebase semantic validation failed: duplicate ADR number 0027",
                 value={"failure_kind": "semantic_validation"},
+                stdout_tail="duplicate ADR number 0027",
+                stderr_tail="pytest diagnostics",
             ),
             ctx,
         )
@@ -997,6 +999,8 @@ class TestGate:
         assert item.payload["rebase_error_detail"] == (
             "rebase semantic validation failed: duplicate ADR number 0027"
         )
+        assert item.payload["rebase_stdout_tail"] == "duplicate ADR number 0027"
+        assert item.payload["rebase_stderr_tail"] == "pytest diagnostics"
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.FINISH_FAIL,
             "rebase semantic validation failed: duplicate ADR number 0027",

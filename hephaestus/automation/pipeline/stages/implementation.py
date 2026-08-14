@@ -1625,6 +1625,10 @@ class ImplementationStage(Stage):
         item.payload["rebase_error"] = True
         if result.error:
             item.payload["rebase_error_detail"] = result.error[:500]
+        if result.stdout_tail:
+            item.payload["rebase_stdout_tail"] = result.stdout_tail[-4000:]
+        if result.stderr_tail:
+            item.payload["rebase_stderr_tail"] = result.stderr_tail[-4000:]
         value = result.value if isinstance(result.value, dict) else {}
         failure_kind = value.get("failure_kind")
         if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):

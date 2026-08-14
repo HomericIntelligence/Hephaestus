@@ -36,6 +36,7 @@ _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
+_JOB_DIAGNOSTIC_MAX = 4_000
 
 
 class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
@@ -780,6 +781,17 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if result.worker_id:
             fields["worker_id"] = result.worker_id
         value = result.value
+        diagnostics = {}
+        if result.stdout_tail:
+            diagnostics["stdout_tail"] = bounded_git_diagnostic(
+                result.stdout_tail, limit=_JOB_DIAGNOSTIC_MAX
+            )
+        if result.stderr_tail:
+            diagnostics["stderr_tail"] = bounded_git_diagnostic(
+                result.stderr_tail, limit=_JOB_DIAGNOSTIC_MAX
+            )
+        if diagnostics:
+            fields["diagnostics"] = diagnostics
         if (
             isinstance(value, dict)
             and value.get("failure_kind") in {"signing", "continuation"}
@@ -811,8 +823,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             "publish_remote_head_changed",
             "publish_remote_head_unchanged",
             "publish_remote_probe_failed",
+            "publish_lease_drift",
+            "publish_hook_rejected",
+            "publish_timeout",
+            "publish_transport_failed",
             "validation",
+            "validation_runner",
             "runner",
+            "timeout",
         }:
             return failure_kind
         if result.error == "timeout":
