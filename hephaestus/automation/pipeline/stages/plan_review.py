@@ -245,11 +245,7 @@ def _restore_review_conversation(
         reset_issues.discard(item.issue)
     try:
         active = None if reset else store.recover_active(repo=item.repo, issue=item.issue)
-        previous_cycle = item.payload.get("plan_review_cycle_number")
         cycle_number = item.attempts.get("plan_cycles", 0)
-        if active is not None and previous_cycle is not None and previous_cycle != cycle_number:
-            store.complete(active.cycle_id)
-            active = None
         if active is None and has_prior_review and not reset:
             raise PlanReviewSessionLostError(
                 "durable review exists without resumable session state"
@@ -294,7 +290,7 @@ def _restore_review_conversation(
 
 
 def _complete_review_cycle(item: WorkItem, ctx: StageContext) -> None:
-    """Close the active durable cycle when routing leaves plan review."""
+    """Close the active durable cycle when the logical review conversation ends."""
     cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
     if ctx.plan_review_sessions is not None and cycle_id:
         ctx.plan_review_sessions.complete(cycle_id)
@@ -634,8 +630,22 @@ class PlanReviewStage(Stage):
             round_index = item.payload.get("review_round", 0)
             store = ctx.plan_review_sessions
             cycle_id = str(item.payload.get("plan_review_cycle_id") or "")
-            review_session = store.load(cycle_id) if store is not None and cycle_id else None
-            transcript = store.transcript(cycle_id) if review_session is not None else ""
+            try:
+                review_session = store.load(cycle_id) if store is not None and cycle_id else None
+                transcript = store.transcript(cycle_id) if review_session is not None else ""
+            except PlanReviewSessionLostError as exc:
+                logger.error("plan_review:%d: review-session-lost: %s", item.issue, exc)
+                assert store is not None and cycle_id  # noqa: S101 - guarded store access above
+                store.mark_recovery_required(cycle_id)
+                item.payload["review_session_error"] = "review-session-lost"
+                raw_review = f"Reviewer conversation recovery required.\n\n{STATE_PLAN_BLOCKED}"
+                _publish_plan_blocked(
+                    item.issue,
+                    ctx,
+                    raw_review=raw_review,
+                    revision=int(item.payload.get("plan_revision") or 1),
+                )
+                return StageOutcome(Disposition.BLOCKED, "review-session-lost")
             # Clear any stale verdict at submission so a failed later round
             # can never replay an earlier round's verdict in EVAL.
             item.payload.pop("review_verdict", None)
@@ -880,8 +890,8 @@ class PlanReviewStage(Stage):
         )
         cycles = item.attempts.get("plan_cycles", 0) + 1
         item.attempts["plan_cycles"] = cycles
-        _complete_review_cycle(item, ctx)
         if cycles >= ctx.budget("plan_cycles"):
+            _complete_review_cycle(item, ctx)
             logger.error(
                 "plan_review:%d: plan_cycles exhausted (%d/%d)",
                 item.issue,

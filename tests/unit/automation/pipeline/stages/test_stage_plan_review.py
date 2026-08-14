@@ -11,6 +11,7 @@ import pytest
 from hephaestus.agents.execution_policy import SessionLifecycle
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
+from hephaestus.automation.pipeline.plan_journal import publish_plan_revision
 from hephaestus.automation.pipeline.routing import Disposition
 from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome, plan_review
 from hephaestus.automation.pipeline.stages.plan_review import (
@@ -31,6 +32,7 @@ from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     archive_plan_body,
     archive_review_body,
+    plan_fingerprint,
     render_current_plan,
     render_current_review,
 )
@@ -405,6 +407,48 @@ class TestPlanReviewStageStep:
         assert "review text (NOGO)" in second_job.prompt_kwargs["review_transcript"]
         assert "Plan v2 with tests" in second_job.prompt_kwargs["review_transcript"]
 
+    def test_nogo_failback_keeps_reviewer_session_for_replanned_revision(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """A nonterminal NOGO budget failback does not end the review conversation."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[639] = [render_current_plan("Plan v1")]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        item = make_work_item(issue=639, state="ENTER")
+        stage = PlanReviewStage()
+
+        assert stage.on_enter(item, ctx) is None
+        cycle_id = item.payload["plan_review_cycle_id"]
+        store.bind_session(cycle_id, "opaque-reviewer")
+        item.state = "REVIEW_WAIT"
+        item.payload["review_round"] = 2
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value=_verdict("NOGO"), session_id="opaque-reviewer"),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.FAIL_BACK
+        assert outcome.note == "nogo"
+        assert store.recover_active(repo=item.repo, issue=639) is not None
+
+        publish_plan_revision(639, "Plan v2", github, require_change=True)
+        item.state = "ENTER"
+        assert stage.on_enter(item, ctx) is None
+        assert item.payload["plan_review_cycle_id"] == cycle_id
+        item.state = "REVIEW_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.resume_session_id == "opaque-reviewer"
+        assert request.job.execution_request is not None
+        assert request.job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
+
     def test_resume_failure_enters_observable_recovery_required_state(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
     ) -> None:
@@ -425,6 +469,38 @@ class TestPlanReviewStageStep:
             JobResult(ok=False, error="review-session-lost", session_lost=True),
             ctx,
         )
+        outcome = stage.step(item, ctx)
+
+        assert isinstance(outcome, StageOutcome)
+        assert outcome.disposition is Disposition.BLOCKED
+        assert outcome.note == "review-session-lost"
+        assert store.load(cycle_id).state == "recovery-required"
+        assert STATE_PLAN_BLOCKED in github.labels[2766]
+
+    def test_corrupt_review_transcript_enters_observable_recovery_required_state(
+        self, make_ctx: Any, make_work_item: Any, tmp_path: Path
+    ) -> None:
+        """Transcript corruption blocks review instead of escaping the stage."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[2766] = [render_current_plan("Plan v1")]
+        store = PlanReviewSessionStore(lambda: tmp_path)
+        ctx = make_ctx(github=github, plan_review_sessions=store)
+        item = make_work_item(issue=2766, state="ENTER")
+        stage = PlanReviewStage()
+        assert stage.on_enter(item, ctx) is None
+        cycle_id = item.payload["plan_review_cycle_id"]
+        store.bind_session(cycle_id, "opaque-reviewer")
+        store.append_artifact(
+            cycle_id,
+            kind="review",
+            content="durable finding",
+            round_index=0,
+            plan_revision=1,
+            plan_fingerprint=plan_fingerprint("Plan v1"),
+        )
+        store.artifact_path(cycle_id, 0).write_text("tampered", encoding="utf-8")
+        item.state = "REVIEW_WAIT"
+
         outcome = stage.step(item, ctx)
 
         assert isinstance(outcome, StageOutcome)
