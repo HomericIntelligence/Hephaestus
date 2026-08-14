@@ -3448,6 +3448,70 @@ class TestGitOps:
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
 
+    def test_rebase_semantic_validation_rejects_duplicate_adr_numbers(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A resolved README conflict cannot publish duplicate ADR identities."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
+        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        (adr_dir / "README.md").write_text(
+            "- [Durable plan review conversations](0027-durable-plan-review-conversations.md)\n"
+            "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
+        )
+
+        result = pool._validate_rebased_tree(tmp_path)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "semantic_validation"},
+            error=(
+                "rebase semantic validation failed: duplicate ADR number 0027 "
+                "(0027-durable-plan-review-conversations.md, "
+                "0027-host-owned-learning-preparation.md)"
+            ),
+        )
+
+    def test_continue_rebase_does_not_publish_semantically_invalid_tree(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Semantic validation fails closed after Git completes and before push."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
+        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0")
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.value == {"failure_kind": "semantic_validation"}
+        assert result.error == (
+            "rebase semantic validation failed: duplicate ADR number 0027 "
+            "(0027-durable-plan-review-conversations.md, "
+            "0027-host-owned-learning-preparation.md)"
+        )
+        push.assert_not_called()
+
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -4284,6 +4348,52 @@ class TestGitOps:
 
         mock_push.assert_called_once_with(cwd=Path("/tmp/wt"), branch="7-auto", timeout=60)
         assert result.ok is True
+
+    @pytest.mark.parametrize(
+        ("push_error", "failure_kind", "error"),
+        [
+            (
+                git_utils.DetachedHeadPushRemoteHeadChangedError(),
+                "publish_remote_head_changed",
+                "publish failed: remote head changed",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteHeadUnchangedError(),
+                "publish_remote_head_unchanged",
+                "publish failed: remote head unchanged",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteProbeError(),
+                "publish_remote_probe_failed",
+                "publish failed: remote head probe failed",
+            ),
+        ],
+    )
+    def test_push_dispatch_classifies_detached_publish_failures(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        push_error: Exception,
+        failure_kind: str,
+        error: str,
+    ) -> None:
+        """Lease publication failures become durable results instead of worker crashes."""
+        job = GitJob(
+            repo="test/repo",
+            op="push",
+            timeout_s=60,
+            kwargs={"cwd": Path("/tmp/wt"), "branch": "7-auto"},
+        )
+        with patch(
+            "hephaestus.automation.git_utils.push_current_branch_with_lease_on_divergence",
+            side_effect=push_error,
+        ):
+            pool.submit(job, StageName.MERGE_WAIT)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == error
+        assert result.value == {"failure_kind": failure_kind}
 
     def test_release_branch_reservation_dispatches_conditional_delete(
         self,

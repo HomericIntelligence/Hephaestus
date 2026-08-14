@@ -974,6 +974,34 @@ class TestGate:
         assert "rebase_conflict_index_snapshot" not in item.payload
         assert "rebase_paused_head_sha" not in item.payload
 
+    def test_failed_host_rebase_retains_structured_diagnostics(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A semantic rebase failure remains actionable when the stage fails."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase semantic validation failed: duplicate ADR number 0027",
+                value={"failure_kind": "semantic_validation"},
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_error"] is True
+        assert item.payload["rebase_error_kind"] == "semantic_validation"
+        assert item.payload["rebase_error_detail"] == (
+            "rebase semantic validation failed: duplicate ADR number 0027"
+        )
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "rebase semantic validation failed: duplicate ADR number 0027",
+        )
+
 
 class TestImplementationStateSkipGate:
     """GATE checks state:skip before either the existing-PR or plan-go path (#1835)."""
