@@ -151,7 +151,7 @@ _POLICIES: Final[dict[tuple[AgentRole, AgentOperation], ExecutionPolicy]] = {
     (AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW): ExecutionPolicy(
         AgentRole.PLAN_REVIEWER,
         AgentOperation.PLAN_REVIEW,
-        frozenset({SessionLifecycle.ONE_SHOT}),
+        frozenset({SessionLifecycle.START_NEW, SessionLifecycle.RESUME_REQUIRED}),
         FilesystemMode.CHECKOUT_RO,
         _READ,
         frozenset(),

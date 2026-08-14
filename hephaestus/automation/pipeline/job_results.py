@@ -22,6 +22,7 @@ class JobResult:
     worker_id: str = ""
     session_id: str | None = None
     session_binding: Any = None
+    session_lost: bool = False
 
 
 @dataclass(frozen=True, eq=False)

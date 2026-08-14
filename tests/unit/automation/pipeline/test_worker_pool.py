@@ -1671,6 +1671,34 @@ class TestAgentErrorHandling:
         assert "partial stdout" in result.stdout_tail
         assert "nonretryable failure detail" in result.stderr_tail
 
+    def test_resume_process_error_reports_session_lost(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """A provider resume rejection is terminal instead of a fresh review."""
+        job = _agent_job(model="model-agent-cpe", resume_session_id="opaque-session")
+        exc = subprocess.CalledProcessError(
+            returncode=2,
+            cmd=["claude"],
+            output="",
+            stderr="No conversation found for session opaque-session",
+        )
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="claude"),
+            patch(
+                f"{_WP}.claude_invoke.invoke_claude_with_session",
+                side_effect=exc,
+            ),
+        ):
+            pool.submit(job, StageName.PLAN_REVIEW)
+            _, result = completion_q.get(timeout=30)
+
+        assert result.ok is False
+        assert result.error == "review-session-lost"
+        assert result.session_lost is True
+
     def test_codex_event_failure_is_explicit_agent_error(self, pool: WorkerPool) -> None:
         """Structured Codex failures cross the worker boundary as agent errors."""
         job = _agent_job(agent="codex")
@@ -1907,11 +1935,18 @@ class TestParse:
         """Parse callable failures are bounded by the shared cap."""
         small_err_max = 40
         monkeypatch.setattr(f"{_WP}._ERR_MAX", small_err_max)
+        checkpoint = MagicMock()
 
         def bad_parser(text: str) -> object:
+            assert checkpoint.call_count == 1
             raise ValueError("parse failed " + ("y" * 200))
 
-        job = _agent_job(prompt_builder=lambda: "prompt", parse=bad_parser)
+        job = _agent_job(
+            prompt_builder=lambda: "prompt",
+            parse=bad_parser,
+            session_key="plan-reviewer-cycle-01234567-89ab-cdef-0123-456789abcdef",
+            session_checkpoint=checkpoint,
+        )
 
         with (
             patch(f"{_WP}.resolve_agent", return_value="claude"),
@@ -1925,6 +1960,8 @@ class TestParse:
         assert result.error is not None
         assert result.error.startswith("parse failed: ValueError: ")
         assert len(result.error) == small_err_max
+        assert result.session_id == "sid"
+        checkpoint.assert_called_once_with("sid", None)
 
 
 class TestInterruptedPostCheck:

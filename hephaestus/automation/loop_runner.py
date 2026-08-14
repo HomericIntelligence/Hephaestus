@@ -238,6 +238,7 @@ class LoopConfig:
     serialize_file_overlap: bool = True
     agent: str = "claude"
     issues: list[int] = field(default_factory=list)
+    reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
     dry_run: bool = False
     no_advise: bool = False
@@ -307,6 +308,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_positive_int,
         default=5,
         help="Repository discovery reseed passes; does not change review budgets (default: 5)",
+    )
+    p.add_argument(
+        "--reset-plan-review-session",
+        action="store_true",
+        help="Explicitly discard reviewer conversation state for the selected --issues",
     )
     p.add_argument(
         "--review-iterations",
@@ -541,6 +547,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.issue_limit is not None and (args.issues is not None or args.prs is not None):
         parser.error("--issue-limit cannot be combined with --issues or --prs")
+    if args.reset_plan_review_session and not args.issues:
+        parser.error("--reset-plan-review-session requires explicit --issues")
     return args
 
 
@@ -790,6 +798,9 @@ def _build_pipeline_config(
         repos=repos,
         repo_source_factory=repo_source_factory,
         issues=cfg.issues,
+        reset_plan_review_sessions=(
+            frozenset(cfg.issues) if cfg.reset_plan_review_session else frozenset()
+        ),
         prs=cfg.prs,
         issue_limit=cfg.issue_limit,
         loops=cfg.loops,
@@ -970,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
         phases=phases,
         agent=agent,
         issues=args.issues or [],
+        reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],
         issue_limit=args.issue_limit,
         dry_run=args.dry_run,

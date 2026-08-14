@@ -62,6 +62,14 @@ def test_parse_args_default_parallel_uses_shared_worker_default() -> None:
     assert args.parallel == DEFAULT_WORKER_COUNT
 
 
+def test_plan_review_reset_is_scoped_to_explicit_issues() -> None:
+    """Planner rejects discovery-wide resets and forwards selected identities."""
+    with pytest.raises(SystemExit):
+        planner_mod._parse_args(["--reset-plan-review-session"])
+    captured = _run_main_capturing_config(["--issues", "123", "456", "--reset-plan-review-session"])
+    assert captured["config"].reset_plan_review_sessions == frozenset({123, 456})
+
+
 def test_main_builds_planning_scope_and_dispatches() -> None:
     """--issues N builds a (planning, plan_review) scoped config and returns run_pipeline's rc."""
     captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], rc=0)

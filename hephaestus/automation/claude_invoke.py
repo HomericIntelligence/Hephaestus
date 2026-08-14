@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 
 import hephaestus.automation.subprocess_registry as subprocess_registry
+from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation.agent_config import (
     agent_default_timeout,
     fallback_model,
@@ -158,6 +159,7 @@ def invoke_claude_with_session(
     extra_args: list[str] | None = None,
     output_format: str = "text",
     input_via_stdin: bool = False,
+    session_lifecycle: str | None = None,
     recreate_on_resume_failure: bool = True,  # accepted for back-compat; no longer used
 ) -> tuple[str, str]:
     """Invoke Claude with a deterministic per-(repo, issue, agent, model) session.
@@ -250,10 +252,15 @@ def invoke_claude_with_session(
             extra_args=extra_args,
             output_format=output_format,
             input_via_stdin=input_via_stdin,
+            session_lifecycle=session_lifecycle,
         )
 
     fallback = fallback_model()
     effective = model
+    if session_lifecycle == "resume-required":
+        # A fallback model has a different deterministic Claude lineage.
+        # Continuity is stronger than availability for an established review.
+        return _attempt(model)
     if model != fallback and is_model_capped(model):
         logger.info("model %s previously capped; using fallback %s", model, fallback)
         effective = fallback
@@ -287,6 +294,7 @@ def _invoke_claude_once(
     extra_args: list[str] | None,
     output_format: str,
     input_via_stdin: bool,
+    session_lifecycle: str | None,
 ) -> tuple[str, str]:
     """Run one ``claude`` create/resume call for the given model (no fallback).
 
@@ -307,6 +315,10 @@ def _invoke_claude_once(
     # failure now simply propagates.
     transcript = resolve_session_jsonl_path(sid, cwd)
     create = not transcript.is_file()
+    if session_lifecycle == "resume-required" and create:
+        raise AgentSessionLostError("Claude review transcript is missing")
+    if session_lifecycle == "start-new" and not create:
+        raise AgentSessionLostError("new Claude review cycle collided with an existing session")
     mode_args = ["--session-id", sid, "--name", display_name] if create else ["--resume", sid]
     cmd: list[str] = [
         "claude",

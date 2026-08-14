@@ -302,6 +302,7 @@ class Coordinator(
             pre_pr_test_argv=config.pre_pr_test_argv,
             run_pre_pr_tests=config.run_pre_pr_tests,
             issue_limit=config.issue_limit,
+            reset_plan_review_sessions=set(config.reset_plan_review_sessions),
         )
         # A context contains a GitHub accessor and path configuration but no
         # mutable item state.  At most C items can be live, so an LRU of C is

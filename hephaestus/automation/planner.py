@@ -117,6 +117,11 @@ Examples:
         help="Force re-planning even when the issue is already at-or-past state:plan-go",
     )
     parser.add_argument(
+        "--reset-plan-review-session",
+        action="store_true",
+        help="Explicitly discard reviewer conversation state for the selected --issues",
+    )
+    parser.add_argument(
         "--system-prompt",
         type=Path,
         help="(Deprecated, ignored) system prompt file path; kept for CLI compatibility",
@@ -156,7 +161,11 @@ Examples:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments for the planner CLI."""
-    return _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.reset_plan_review_session and not args.issues:
+        parser.error("--reset-plan-review-session requires explicit --issues")
+    return args
 
 
 def _resolve_repo() -> tuple[str, str]:
@@ -265,6 +274,9 @@ def main() -> int:
         # --force re-plans issues already at-or-past state:plan-go (seeding
         # override in the coordinator).
         force=args.force,
+        reset_plan_review_sessions=(
+            frozenset(issues) if args.reset_plan_review_session else frozenset()
+        ),
     )
 
     rc = run_pipeline(config)

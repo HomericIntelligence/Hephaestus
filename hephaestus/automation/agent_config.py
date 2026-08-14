@@ -414,7 +414,15 @@ def _is_valid_agent(agent: str) -> bool:
         return True
     # Accept the reviewer_agent() form: "<base>-r<N>".
     base, sep, suffix = agent.rpartition("-r")
-    return bool(sep and base in _PER_ITERATION_REVIEWERS and suffix.isdigit())
+    if sep and base in _PER_ITERATION_REVIEWERS and suffix.isdigit():
+        return True
+    return bool(
+        re.fullmatch(
+            r"plan-reviewer-cycle-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}",
+            agent,
+        )
+    )
 
 
 def _model_token(model: str | None) -> str:
@@ -463,7 +471,7 @@ def session_name(repo: str, issue: int | str, agent: str, model: str | None = No
     if not _is_valid_agent(agent):
         raise ValueError(
             f"unknown agent {agent!r}; must be one of {sorted(_ALL_AGENTS)} "
-            f"or a per-iteration reviewer token (e.g. 'plan-reviewer-r0')"
+            f"or a scoped reviewer token (e.g. 'plan-reviewer-r0')"
         )
     repo_s = repo.strip()
     if not repo_s:
