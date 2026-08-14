@@ -1237,7 +1237,10 @@ _CODEX_FAILED_TOOL_STATUSES = frozenset({"failed", "declined"})
 _CODEX_APP_SERVER_STREAM_LAG_PREFIX = "in-process app-server event stream lagged; dropped "
 _CODEX_APP_SERVER_STREAM_LAG_SUFFIX = " events"
 _CODEX_SKILLS_BUDGET_PREFIX = "Skill descriptions were shortened to fit the "
-_CODEX_SKILLS_BUDGET_PLAIN_MARKER = "skills context budget."
+_CODEX_SKILLS_BUDGET_PLAIN_NOTICE = (
+    "skills context budget. Codex can still see every skill, but some descriptions are shorter. "
+    "Disable unused skills or plugins to leave more room for the rest."
+)
 _CODEX_SKILLS_BUDGET_MARKER = "% skills context budget."
 
 
@@ -1288,7 +1291,7 @@ def _is_codex_nonfatal_error_item(message: str) -> bool:
     if not message.startswith(_CODEX_SKILLS_BUDGET_PREFIX):
         return False
     remainder = message[len(_CODEX_SKILLS_BUDGET_PREFIX) :]
-    if remainder.startswith(_CODEX_SKILLS_BUDGET_PLAIN_MARKER):
+    if remainder == _CODEX_SKILLS_BUDGET_PLAIN_NOTICE:
         return True
     percentage, marker, _guidance = remainder.partition(_CODEX_SKILLS_BUDGET_MARKER)
     percentage_parts = percentage.split(".", maxsplit=1)

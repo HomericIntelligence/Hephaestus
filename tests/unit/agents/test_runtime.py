@@ -519,6 +519,20 @@ def test_run_codex_session_rejects_nested_sandbox_tool_failure_with_no_edits(
                 "type": "item.completed",
                 "item": {
                     "id": "item_1",
+                    "type": "error",
+                    "message": (
+                        "Skill descriptions were shortened to fit the skills context budget. "
+                        "Skills could not be loaded."
+                    ),
+                },
+            },
+            "Skill descriptions were shortened to fit the skills context budget. Skills could",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
                     "type": "file_change",
                     "status": "failed",
                     "changes": [],
