@@ -28,3 +28,22 @@ def test_publish_lease_failure_has_specific_durable_error_class() -> None:
     fields = CoordinatorRuntime._job_result_event_fields(result)
 
     assert fields["error"] == "publish_remote_head_unchanged"
+
+
+def test_failed_validation_event_keeps_bounded_diagnostics() -> None:
+    """Failed validation events retain bounded tails while success events stay quiet."""
+    result = JobResult(
+        ok=False,
+        error="rebase structural validation failed",
+        value={"failure_kind": "validation"},
+        stdout_tail="duplicate ADR number 0027",
+        stderr_tail="pytest diagnostics",
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    assert fields["error"] == "validation"
+    assert fields["diagnostics"] == {
+        "stdout_tail": "duplicate ADR number 0027",
+        "stderr_tail": "pytest diagnostics",
+    }

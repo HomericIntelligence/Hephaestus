@@ -3426,6 +3426,27 @@ class TestGitOps:
             ),
         )
 
+    def test_rebase_semantic_validation_rejects_malformed_adr_record(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ADR that bypasses the duplicate check still cannot be published."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0001-first-decision.md").write_text(
+            "# ADR-0001: First decision\n- Status: Accepted\n"
+        )
+        (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
+
+        result = pool._validate_rebased_tree(tmp_path)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "semantic_validation"},
+            error=(
+                "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
+            ),
+        )
+
     def test_continue_rebase_does_not_publish_semantically_invalid_tree(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -3464,6 +3485,88 @@ class TestGitOps:
             "0027-host-owned-learning-preparation.md)"
         )
         push.assert_not_called()
+
+    def test_continue_rebase_runs_repository_structural_validation_before_publish(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The repository-owned ADR test runs after continuation and before push."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("# repository-owned structural test\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0")
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="c" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch.object(
+                pool,
+                "_run_rebase_structural_validation",
+                create=True,
+                return_value=None,
+            ) as validate,
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is True
+        validate.assert_called_once_with(tmp_path, timeout=60)
+        push.assert_called_once()
+
+    def test_rebase_structural_validation_preserves_bounded_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A failing repository test returns its bounded output without publishing."""
+        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("# repository-owned structural test\n")
+        failed = JobResult(
+            ok=False,
+            value={"failure_kind": "validation"},
+            error="rc=1",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
+
+        with (
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch.object(pool, "_run_immutable_build_test", return_value=failed) as run_test,
+        ):
+            result = pool._run_rebase_structural_validation(tmp_path, timeout=60)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "validation"},
+            error="rebase structural validation failed",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
+        run_test.assert_called_once()
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path

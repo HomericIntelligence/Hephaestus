@@ -90,6 +90,23 @@ _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
 _ADR_FILENAME_RE = re.compile(r"^(?P<number>[0-9]{4})-[a-z0-9-]+\.md$")
 _ADR_README_LINK_RE = re.compile(r"\(([0-9]{4}-[a-z0-9-]+\.md)\)")
+_ADR_REQUIRED_SECTIONS = (
+    "## Context",
+    "## Decision",
+    "## Alternatives considered",
+    "## Consequences",
+)
+_REBASE_STRUCTURAL_TEST_PATH = "tests/unit/docs/test_adr_records.py"
+_REBASE_STRUCTURAL_TEST_ARGV = (
+    "uv",
+    "run",
+    "pytest",
+    "-o",
+    "addopts=",
+    _REBASE_STRUCTURAL_TEST_PATH,
+    "-q",
+    "--tb=short",
+)
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
@@ -2059,19 +2076,43 @@ class WorkerPool:
                 error=BRANCH_WORKTREE_OWNED,
                 value={"branch": exc.branch, "owner_path": str(exc.owner_path)},
             )
-        except git_utils.DetachedHeadPushRemoteHeadChangedError:
+        except git_utils.DetachedHeadPushRemoteHeadChangedError as exc:
+            if exc.failure_kind == "lease_drift":
+                return JobResult(
+                    ok=False,
+                    error="publish failed: lease drift",
+                    value={"failure_kind": "publish_lease_drift"},
+                )
             return JobResult(
                 ok=False,
                 error="publish failed: remote head changed",
                 value={"failure_kind": "publish_remote_head_changed"},
             )
-        except git_utils.DetachedHeadPushRemoteHeadUnchangedError:
+        except git_utils.DetachedHeadPushRemoteHeadUnchangedError as exc:
+            unchanged_failure = {
+                "hook_rejected": ("publish failed: hook rejected", "publish_hook_rejected"),
+                "timeout": ("publish failed: timeout", "publish_timeout"),
+                "transport": ("publish failed: transport failure", "publish_transport_failed"),
+            }.get(exc.failure_kind)
+            if unchanged_failure is not None:
+                error, failure_kind = unchanged_failure
+                return JobResult(ok=False, error=error, value={"failure_kind": failure_kind})
             return JobResult(
                 ok=False,
                 error="publish failed: remote head unchanged",
                 value={"failure_kind": "publish_remote_head_unchanged"},
             )
-        except git_utils.DetachedHeadPushRemoteProbeError:
+        except git_utils.DetachedHeadPushRemoteProbeError as exc:
+            probe_failure = {
+                "timeout": ("publish failed: remote probe timeout", "publish_timeout"),
+                "transport": (
+                    "publish failed: remote probe transport failure",
+                    "publish_transport_failed",
+                ),
+            }.get(exc.failure_kind)
+            if probe_failure is not None:
+                error, failure_kind = probe_failure
+                return JobResult(ok=False, error=error, value={"failure_kind": failure_kind})
             return JobResult(
                 ok=False,
                 error="publish failed: remote head probe failed",
@@ -2447,6 +2488,22 @@ class WorkerPool:
                             f"({', '.join(names)})"
                         ),
                     )
+            for path in adr_files:
+                text = path.read_text(encoding="utf-8")
+                number = path.name[:4]
+                if (
+                    re.search(rf"^# ADR-{number}:", text, re.MULTILINE) is None
+                    or "- Status:" not in text
+                    or "- Date:" not in text
+                    or any(section not in text for section in _ADR_REQUIRED_SECTIONS)
+                ):
+                    return JobResult(
+                        ok=False,
+                        value={"failure_kind": "semantic_validation"},
+                        error=(
+                            f"rebase semantic validation failed: malformed ADR record {path.name}"
+                        ),
+                    )
 
             readme = adr_dir / "README.md"
             if readme.is_file():
@@ -2470,6 +2527,49 @@ class WorkerPool:
                 error=f"rebase semantic validation failed: cannot inspect ADR records ({exc})",
             )
         return None
+
+    def _run_rebase_structural_validation(self, cwd: Path, *, timeout: int) -> JobResult | None:
+        """Run the repository-owned ADR test against an immutable rebased tree."""
+        test_path = cwd / _REBASE_STRUCTURAL_TEST_PATH
+        if not test_path.is_file():
+            return None
+        source_sha = self._read_publish_head(cwd, timeout=timeout)
+        if isinstance(source_sha, JobResult):
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "validation_runner"},
+                error="rebase structural validation could not bind the rebased head",
+            )
+        result = self._run_immutable_build_test(
+            BuildTestJob(
+                repo="rebase-structural-validation",
+                cwd=cwd,
+                argv=_REBASE_STRUCTURAL_TEST_ARGV,
+                timeout_s=timeout,
+                expected_head_sha=source_sha,
+                immutable_source=True,
+                descr="rebase_structural_validation",
+            )
+        )
+        if result.ok:
+            return None
+        raw_kind = result.value.get("failure_kind") if isinstance(result.value, dict) else None
+        if result.error == "timeout":
+            failure_kind = "timeout"
+            error = "rebase structural validation timed out"
+        elif raw_kind == "validation":
+            failure_kind = "validation"
+            error = "rebase structural validation failed"
+        else:
+            failure_kind = "validation_runner"
+            error = "rebase structural validation runner failed"
+        return JobResult(
+            ok=False,
+            value={"failure_kind": failure_kind},
+            stdout_tail=result.stdout_tail,
+            stderr_tail=result.stderr_tail,
+            error=error,
+        )
 
     def _git_continue_rebase(self, job: GitJob) -> JobResult:
         """Validate edit-only conflict output, finish policy rebase, and lease-publish."""
@@ -2519,6 +2619,9 @@ class WorkerPool:
         )
         if continued is not None:
             return continued
+        structural = self._run_rebase_structural_validation(cwd, timeout=job.timeout_s)
+        if structural is not None:
+            return structural
         semantic = self._validate_rebased_tree(cwd)
         if semantic is not None:
             return semantic

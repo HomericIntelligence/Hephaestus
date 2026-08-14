@@ -35,6 +35,7 @@ _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
+_JOB_DIAGNOSTIC_MAX = 4_000
 
 
 class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
@@ -763,8 +764,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     @staticmethod
     def _job_result_event_fields(result: JobResult) -> dict[str, Any]:
-        """Return bounded, output-free job result fields for durable event logs."""
-        fields = {
+        """Return bounded job result fields for durable event logs."""
+        fields: dict[str, Any] = {
             "ok": result.ok,
             "interrupted": result.interrupted,
             "error": CoordinatorRuntime._job_result_error_class(result),
@@ -772,6 +773,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         }
         if result.worker_id:
             fields["worker_id"] = result.worker_id
+        diagnostics = {}
+        if result.stdout_tail:
+            diagnostics["stdout_tail"] = result.stdout_tail[-_JOB_DIAGNOSTIC_MAX:]
+        if result.stderr_tail:
+            diagnostics["stderr_tail"] = result.stderr_tail[-_JOB_DIAGNOSTIC_MAX:]
+        if diagnostics:
+            fields["diagnostics"] = diagnostics
         return fields
 
     @staticmethod
@@ -790,8 +798,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             "publish_remote_head_changed",
             "publish_remote_head_unchanged",
             "publish_remote_probe_failed",
+            "publish_lease_drift",
+            "publish_hook_rejected",
+            "publish_timeout",
+            "publish_transport_failed",
             "validation",
+            "validation_runner",
             "runner",
+            "timeout",
         }:
             return failure_kind
         if result.error == "timeout":
