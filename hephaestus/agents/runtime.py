@@ -1237,6 +1237,7 @@ _CODEX_FAILED_TOOL_STATUSES = frozenset({"failed", "declined"})
 _CODEX_APP_SERVER_STREAM_LAG_PREFIX = "in-process app-server event stream lagged; dropped "
 _CODEX_APP_SERVER_STREAM_LAG_SUFFIX = " events"
 _CODEX_SKILLS_BUDGET_PREFIX = "Skill descriptions were shortened to fit the "
+_CODEX_SKILLS_BUDGET_PLAIN_MARKER = "skills context budget."
 _CODEX_SKILLS_BUDGET_MARKER = "% skills context budget."
 
 
@@ -1286,9 +1287,10 @@ def _is_codex_nonfatal_error_item(message: str) -> bool:
         return True
     if not message.startswith(_CODEX_SKILLS_BUDGET_PREFIX):
         return False
-    percentage, marker, _guidance = message[len(_CODEX_SKILLS_BUDGET_PREFIX) :].partition(
-        _CODEX_SKILLS_BUDGET_MARKER
-    )
+    remainder = message[len(_CODEX_SKILLS_BUDGET_PREFIX) :]
+    if remainder.startswith(_CODEX_SKILLS_BUDGET_PLAIN_MARKER):
+        return True
+    percentage, marker, _guidance = remainder.partition(_CODEX_SKILLS_BUDGET_MARKER)
     percentage_parts = percentage.split(".", maxsplit=1)
     return bool(
         marker and all(part and part.isascii() and part.isdigit() for part in percentage_parts)

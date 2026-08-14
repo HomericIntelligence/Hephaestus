@@ -505,6 +505,20 @@ def test_run_codex_session_rejects_nested_sandbox_tool_failure_with_no_edits(
                 "type": "item.completed",
                 "item": {
                     "id": "item_1",
+                    "type": "error",
+                    "message": (
+                        "Skill descriptions were shortened to fit the skills context budget "
+                        "but could not be loaded."
+                    ),
+                },
+            },
+            "Skill descriptions were shortened to fit the skills context budget but could not",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
                     "type": "file_change",
                     "status": "failed",
                     "changes": [],
@@ -765,13 +779,18 @@ def test_run_codex_session_allows_app_server_stream_lag_after_successful_edits(
             "Skill descriptions were shortened to fit the 7.5% skills context budget. "
             "Some descriptions use compact summaries."
         ),
+        (
+            "Skill descriptions were shortened to fit the skills context budget. "
+            "Codex can still see every skill, but some descriptions are shorter. "
+            "Disable unused skills or plugins to leave more room for the rest."
+        ),
     ],
 )
 def test_run_codex_session_allows_skills_budget_notice_after_successful_turn(
     tmp_path: Path,
     notice: str,
 ) -> None:
-    """Skills-budget percentage and guidance changes do not discard final output."""
+    """Skills-budget format and guidance changes do not discard final output."""
 
     def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
         stdout = "\n".join(
