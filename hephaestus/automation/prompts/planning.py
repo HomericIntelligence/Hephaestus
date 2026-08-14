@@ -79,6 +79,11 @@ def get_plan_loop_review_prompt(
     prior_review: str | None,
     advise_findings: str = "",
     plan_history: str = "",
+    planning_cycle_id: str = "",
+    reviewer_session_id: str = "",
+    plan_revision: int = 1,
+    plan_fingerprint: str = "",
+    review_transcript: str = "",
 ) -> str:
     """Build the iteration-aware plan-loop review prompt.
 
@@ -117,6 +122,15 @@ def get_plan_loop_review_prompt(
         prior_review_block=_prior_review_block(prior_review, fenced),
         plan_history_block=(
             fenced.fence("PLAN_HISTORY", plan_history) if plan_history else "_(first revision)_"
+        ),
+        planning_cycle_id=planning_cycle_id,
+        reviewer_session_id=reviewer_session_id,
+        plan_revision=plan_revision,
+        plan_fingerprint=plan_fingerprint,
+        review_transcript_block=(
+            fenced.fence("REVIEW_TRANSCRIPT", review_transcript)
+            if review_transcript
+            else "_(no prior review transcript)_"
         ),
         full_sweep_suffix=full_sweep_suffix,
         output_format=get_plan_review_output_format().strip(),

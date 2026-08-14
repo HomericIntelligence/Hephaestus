@@ -343,9 +343,7 @@ class PipelineConfig:
     event_log_capacity: int = _DEFAULT_EVENT_LOG_CAPACITY
     terminal_detail_capacity: int = _DEFAULT_TERMINAL_DETAIL_CAPACITY
     projects_dir: Path = field(default_factory=lambda: Path.home() / "Projects")
-    # Optional exceptions to the normal ``projects_dir / repo`` checkout
-    # layout.  The loop runner only sets an entry for a matching noncanonical
-    # cwd checkout; unlisted repositories retain the conventional fallback.
+    # Explicit exceptions to the normal ``projects_dir / repo`` checkout layout.
     repo_roots: dict[str, Path] = field(default_factory=dict)
     json_out: bool = False
     # Optional contiguous stage subset. When set, the coordinator routes items
@@ -361,6 +359,7 @@ class PipelineConfig:
     # Appended so positional construction keeps ``repo_source_factory`` third.
     issue_limit: int | None = None
     enable_learn: bool = True
+    reset_plan_review_sessions: frozenset[int] = frozenset()
 
 
 def _work_window(config: PipelineConfig) -> int:
@@ -392,6 +391,7 @@ class _StageRunConfig:
     include_all_authors: bool = False
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     issue_limit: int | None = None
+    reset_plan_review_sessions: set[int] = field(default_factory=set)
 
 
 @dataclass

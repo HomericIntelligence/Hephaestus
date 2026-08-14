@@ -527,6 +527,7 @@ class StageContext:
     budget_fn: Callable[[str], int] | None = None  # injected overrides; falls back to ROUTES
     event_fn: Callable[[StageEvent], None] | None = None
     learning_journal: Any = None
+    plan_review_sessions: Any = None
     # A worktree-holder result is only a diagnostic fact from Git.  The
     # coordinator proves that it belongs to a live pipeline sibling before
     # implementation can treat a collision as redundant work.  Leaving this

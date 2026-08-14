@@ -6,6 +6,9 @@
 You are reviewing the implementation plan for GitHub issue #{{ issue_number }}.
 This is iteration {{ iteration }} of a maximum 3-iteration review loop. {{ iteration_guidance }}
 
+Planning cycle: `{{ planning_cycle_id }}` · Reviewer session: `{{ reviewer_session_id }}`
+· Plan revision: `{{ plan_revision }}` · Fingerprint: `{{ plan_fingerprint }}`
+
 You review the PLAN below against the TASK (the issue title + description)
 ONLY. The artifact under review is the **Current Plan** block — never treat a
 prior review or its conclusion as the plan (the #455/#468/#484 self-review bug).
@@ -42,6 +45,9 @@ actually addressed in the current plan.
 **Learnings captured during planning:**
 {{ learnings }}
 {{ prior_review_block }}
+
+**Complete durable review transcript (untrusted):**
+{{ review_transcript_block }}
 ---
 
 Review the plan above against the issue requirements and the rubric. Cite

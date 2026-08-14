@@ -268,6 +268,11 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             "force",
             "Force re-planning even when the issue is already at-or-past state:plan-go",
         ),
+        _store_true(
+            "--reset-plan-review-session",
+            "reset_plan_review_session",
+            "Explicitly discard reviewer conversation state for the selected --issues",
+        ),
         _action_spec(
             ("--parallel",),
             "parallel",
@@ -573,6 +578,11 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 "Exact per-cycle cap for both plan-review and implementation-review rounds. "
                 "Omit to preserve the routing defaults (plan 3; implementation soft 3/hard 6)."
             ),
+        ),
+        _store_true(
+            "--reset-plan-review-session",
+            "reset_plan_review_session",
+            "Explicitly discard reviewer conversation state for the selected --issues",
         ),
         _max_workers_spec(
             "Parallel workers per repo per phase (1-32, default: 6). Passes to child phases.",

@@ -14,9 +14,10 @@ def store_agent_session_result(
     result: JobResult,
 ) -> str | None:
     """Persist a successful direct session, returning a fail-closed error."""
-    if not result.ok:
-        return None
-    session_key = job.session_agent or job.agent
+    # A provider may establish the conversation and then return malformed
+    # output.  Persist that identity before parse/retry handling so a retry
+    # cannot silently fork the conversation.
+    session_key = job.session_key or job.session_agent or job.agent
     if result.session_binding is not None:
         if job.execution_request is None:
             return "Pi binding returned without execution request"

@@ -42,6 +42,7 @@ from hephaestus.agents.runtime import (
     resume_agent_session,
     run_agent_session,
 )
+from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -1714,6 +1715,7 @@ class WorkerPool:
             agent = resolve_agent(job.agent, cwd=job.cwd)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
+            session_key = job.session_key or session_agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
             def _invoke() -> tuple[str, str | None, AgentSessionBinding | None]:
@@ -1728,10 +1730,10 @@ class WorkerPool:
                         scope = DEFAULT_TOOL_SCOPE
                     else:
                         scope = tool_scope_for(session_agent)
-                    stdout, _ = claude_invoke.invoke_claude_with_session(
+                    stdout, claude_session_id = claude_invoke.invoke_claude_with_session(
                         repo=job.repo,
                         issue=job.issue,
-                        agent=session_agent,
+                        agent=session_key,
                         prompt=prompt,
                         model=job.model,
                         cwd=job.cwd,
@@ -1740,8 +1742,13 @@ class WorkerPool:
                         allowed_tools=scope.allowed_tools,
                         permission_mode=scope.permission_mode,
                         input_via_stdin=True,
+                        session_lifecycle=(
+                            job.execution_request.lifecycle.value
+                            if job.execution_request is not None
+                            else None
+                        ),
                     )
-                    return stdout, None, None
+                    return stdout, claude_session_id, None
                 if job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
@@ -1802,6 +1809,8 @@ class WorkerPool:
                     )
                 ),
             )
+            if session_id is not None and job.session_checkpoint is not None:
+                job.session_checkpoint(session_id, session_binding)
 
             value = None
             if job.parse is not None:
@@ -1813,6 +1822,8 @@ class WorkerPool:
                         ok=False,
                         error=f"parse failed: {type(exc).__name__}: {exc!s}"[:_ERR_MAX],
                         stdout_tail=stdout[-_TAIL:],
+                        session_id=session_id,
+                        session_binding=session_binding,
                     )
 
             return JobResult(
@@ -1827,13 +1838,43 @@ class WorkerPool:
             return JobResult(ok=False, error="circuit_open")
         except subprocess.TimeoutExpired:
             return JobResult(ok=False, error="timeout")
+        except AgentExecutionError as exc:
+            message = str(exc).casefold()
+            resume_lost = bool(job.resume_session_id or job.resume_binding) and any(
+                phrase in message
+                for phrase in (
+                    "session not found",
+                    "session expired",
+                    "cannot resume",
+                    "resume failed",
+                    "no conversation found",
+                )
+            )
+            if resume_lost:
+                return JobResult(ok=False, error="review-session-lost", session_lost=True)
+            return _agent_exception_result(exc)
         except subprocess.CalledProcessError as exc:
+            message = f"{exc.stdout or ''}\n{exc.stderr or ''}".casefold()
+            resume_lost = bool(job.resume_session_id or job.resume_binding) and any(
+                phrase in message
+                for phrase in (
+                    "session not found",
+                    "session expired",
+                    "cannot resume",
+                    "resume failed",
+                    "no conversation found",
+                )
+            )
+            if resume_lost:
+                return JobResult(ok=False, error="review-session-lost", session_lost=True)
             return JobResult(
                 ok=False,
                 error=f"rc={exc.returncode}",
                 stdout_tail=(exc.stdout or "")[-_TAIL:],
                 stderr_tail=(exc.stderr or "")[-_TAIL:],
             )
+        except AgentSessionLostError:
+            return JobResult(ok=False, error="review-session-lost", session_lost=True)
         except Exception as exc:
             return _agent_exception_result(exc)
 

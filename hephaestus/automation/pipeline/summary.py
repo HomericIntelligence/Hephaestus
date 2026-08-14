@@ -234,6 +234,15 @@ def print_summary(
     logger.info("  %s", "-" * (len(header) - 2))
     for item in items:
         logger.info("%s", _item_row(item))
+        cycle_id = item.payload.get("plan_review_cycle_id")
+        if cycle_id:
+            logger.info(
+                "    plan-review cycle=%s session=%s round=%s revision=%s",
+                cycle_id,
+                item.payload.get("plan_review_session_id") or "pending",
+                item.payload.get("review_round", 0),
+                item.payload.get("plan_revision", 1),
+            )
 
     if terminal_summary is None:
         dispositions: dict[str, int] = {}
@@ -276,6 +285,18 @@ def print_summary(
         logger.info("%s", line)
 
     if json_out:
+        review_sessions = [
+            {
+                "repo": item.repo,
+                "issue": item.issue,
+                "planning_cycle_id": item.payload["plan_review_cycle_id"],
+                "reviewer_session_id": item.payload.get("plan_review_session_id"),
+                "review_round": item.payload.get("review_round", 0),
+                "plan_revision": item.payload.get("plan_revision", 1),
+            }
+            for item in items
+            if item.payload.get("plan_review_cycle_id")
+        ]
         resumable = [
             f"{item.repo}#{item.issue or item.pr or ''}@{item.stage.value}"
             for item in items
@@ -295,4 +316,5 @@ def print_summary(
             resumable=resumable,
             preserved_worktrees=[[number, path] for _, number, path in preserved],
             recovery_worktrees=[[number, path] for _, number, path in recovery_preserved],
+            plan_review_sessions=review_sessions,
         )
