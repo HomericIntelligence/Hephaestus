@@ -37,8 +37,13 @@ import sys
 from importlib.metadata import PackageNotFoundError, version as _dist_version
 from pathlib import Path
 
-from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
-from hephaestus.version.manager import parse_version
+from hephaestus.cli.utils import (
+    create_validation_parser,
+    emit_json_status,
+    format_output,
+    resolve_repo_root,
+)
+from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
 
 # PyPI distribution name used for installed-artifact verification.
@@ -402,6 +407,43 @@ def _calculate_next_version(repo_root: Path, part: str) -> tuple[str, str]:
     return current_str, ".".join(str(component) for component in new)
 
 
+def _ensure_bump_supported(repo_root: Path) -> None:
+    """Reject static version-file updates for a dynamic-version repository.
+
+    The current CLI is compute-only, but this preflight protects the command's
+    contract if a write-capable implementation is reintroduced. It also runs
+    before resolving the current tag so a dynamic project cannot report a
+    successful file-backed bump.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Raises:
+        OSError: If the version configuration cannot be inspected.
+        ValueError: If the project declares a dynamic version.
+
+    """
+    VersionManager(
+        repo_root=repo_root,
+        version_files=[],
+        init_files=[],
+    ).ensure_update_supported()
+
+
+def _report_bump_refusal(exc: ValueError) -> None:
+    """Report a dynamic-version refusal and the supported release workflow."""
+    print(f"ERROR: version bump refused: {exc}", file=sys.stderr)
+    print(
+        "Hephaestus releases use the signed Auto Tag Release workflow; see docs/RELEASING.md.",
+        file=sys.stderr,
+    )
+
+
+def _report_bump_inspection_error(exc: OSError) -> None:
+    """Report a version-configuration inspection failure."""
+    print(f"ERROR: could not inspect version configuration: {exc}", file=sys.stderr)
+
+
 def preview_version(repo_root: Path, part: str, verbose: bool = False) -> str:
     """Compute the next semantic version without changing repository state.
 
@@ -429,6 +471,8 @@ def bump_version(
     part: str,
     dry_run: bool = False,
     verbose: bool = False,
+    *,
+    emit_human_output: bool = True,
 ) -> int:
     """Preview a version bump while preserving the legacy status-code API.
 
@@ -441,6 +485,7 @@ def bump_version(
         part: Which part to increment — ``major``, ``minor``, or ``patch``.
         dry_run: Retained for compatibility; no writes occur regardless of its value.
         verbose: If True, print the current and proposed versions.
+        emit_human_output: Whether to print the successful human-readable preview.
 
     Returns:
         0 on success, 1 when the requested part or current version is invalid.
@@ -448,12 +493,21 @@ def bump_version(
     """
     del dry_run  # Retained solely for source compatibility; previews never write.
     try:
+        _ensure_bump_supported(repo_root)
+    except ValueError as exc:
+        _report_bump_refusal(exc)
+        return 1
+    except OSError as exc:
+        _report_bump_inspection_error(exc)
+        return 1
+
+    try:
         current_str, requested = _calculate_next_version(repo_root, part)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    if verbose:
+    if verbose and emit_human_output:
         print(f"Computed next version: {current_str} -> {requested}")
     return 0
 
@@ -572,8 +626,11 @@ def bump_version_main() -> int:
 
     """
     parser = create_validation_parser(
-        "Compute the next tag-derived semantic version without changing files or tags",
-        epilog="Example: %(prog)s patch --verbose",
+        "Preview a static-project version bump; dynamic projects fail closed",
+        epilog=(
+            "Hephaestus releases use the signed Auto Tag Release workflow. "
+            "Example: %(prog)s patch --verbose"
+        ),
     )
     parser.add_argument(
         "part",
@@ -583,7 +640,10 @@ def bump_version_main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Deprecated compatibility flag; version previews are always compute-only",
+        help=(
+            "Deprecated compatibility flag; previews are compute-only and dynamic "
+            "version projects are refused"
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -593,6 +653,20 @@ def bump_version_main() -> int:
     )
     args = parser.parse_args()
     root = resolve_repo_root(args)
+
+    try:
+        _ensure_bump_supported(root)
+    except ValueError as exc:
+        _report_bump_refusal(exc)
+        if args.json:
+            emit_json_status(1, message="version bump refused")
+        return 1
+    except OSError as exc:
+        _report_bump_inspection_error(exc)
+        if args.json:
+            emit_json_status(1, message="could not inspect version configuration")
+        return 1
+
     requested = preview_version(root, part=args.part, verbose=args.verbose and not args.json)
     if args.json:
         print(

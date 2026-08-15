@@ -21,6 +21,7 @@ The project version is derived exclusively from Git tags through hatch-vcs.
 """
 
 import re
+import tomllib
 from pathlib import Path
 from typing import cast
 
@@ -38,19 +39,22 @@ class _UnsetType:
 _UNSET = _UnsetType()  # sentinel: use default pyproject_file path
 
 
-_HATCH_VCS_DYNAMIC_RE = re.compile(r'^\s*dynamic\s*=\s*\[\s*[^]]*"version"[^]]*\]', re.MULTILINE)
-
-
 def _is_hatch_vcs_project(pyproject_content: str) -> bool:
-    """Return True if pyproject.toml declares a dynamic version via hatch-vcs.
+    """Return True if pyproject.toml declares a dynamic project version.
 
-    Detection is intentionally lenient: any ``dynamic = [..., "version", ...]``
-    declaration is sufficient. The narrower form
-    ``[tool.hatch.version] source = "vcs"`` is a stronger signal but the dynamic
-    declaration alone is enough to mean ``[project].version`` should not exist
-    and therefore should not be written.
+    Detection is intentionally broad: any valid TOML
+    ``[project].dynamic`` array containing ``"version"`` is enough to mean
+    that a static ``VERSION`` or ``__version__`` update cannot be authoritative.
+    Hephaestus uses this contract with ``[tool.hatch.version] source = "vcs"``;
+    refusing other dynamic providers too keeps the aggregate updater fail
+    closed rather than guessing how their authoritative version is produced.
     """
-    return bool(_HATCH_VCS_DYNAMIC_RE.search(pyproject_content))
+    project = tomllib.loads(pyproject_content).get("project")
+    if not isinstance(project, dict):
+        return False
+
+    dynamic = project.get("dynamic")
+    return isinstance(dynamic, list) and "version" in dynamic
 
 
 def parse_version(version: str) -> tuple[int, int, int]:
@@ -96,7 +100,8 @@ class VersionManager:
             init_files: List of __init__.py files to update.
                 Defaults to [repo_root/<package>/__init__.py].
             pyproject_file: Path to pyproject.toml. Defaults to repo_root/pyproject.toml.
-                Pass ``None`` explicitly to skip pyproject.toml updates entirely.
+                Pass ``None`` explicitly to skip pyproject.toml updates entirely. The
+                repository's pyproject.toml is still inspected before aggregate writes.
 
         """
         self.repo_root = repo_root or get_repo_root()
@@ -132,6 +137,33 @@ class VersionManager:
                         self.init_files.append(init_file)
         else:
             self.init_files = init_files
+
+    def ensure_update_supported(self) -> None:
+        """Reject aggregate updates for projects with a dynamic version.
+
+        The aggregate updater writes secondary static version state. That state
+        cannot be authoritative when ``[project].dynamic`` contains
+        ``"version"`` (including Hephaestus's hatch-vcs/tag-derived contract),
+        so the check runs before version parsing or any file mutation.
+
+        Raises:
+            OSError: If an existing ``pyproject.toml`` cannot be read.
+            ValueError: If the project declares a dynamic version.
+
+        """
+        repository_pyproject = self.repo_root / "pyproject.toml"
+        inspection_files = [repository_pyproject]
+        if self.pyproject_file is not None and self.pyproject_file != repository_pyproject:
+            inspection_files.append(self.pyproject_file)
+
+        for pyproject_file in inspection_files:
+            if not pyproject_file.exists():
+                continue
+            if _is_hatch_vcs_project(pyproject_file.read_text()):
+                raise ValueError(
+                    "static version-file updates are unsupported when "
+                    '[project].dynamic contains "version"'
+                )
 
     def update_pyproject_file(
         self, pyproject_file: Path, version: str, verbose: bool = True
@@ -246,6 +278,11 @@ class VersionManager:
             verbose: Print status messages
 
         """
+        # Fail before parsing or writing any aggregate version state. For a
+        # dynamic project, VERSION and __version__ would be misleading copies
+        # rather than authoritative release state.
+        self.ensure_update_supported()
+
         # Parse and validate version
         major, minor, patch = parse_version(version)
         if verbose:

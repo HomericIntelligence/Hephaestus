@@ -476,7 +476,7 @@ zero totals, and zero requested/processed counts.
 
 | Command | Description |
 |---|---|
-| `hephaestus-bump-version` | Compute the next tag-derived semantic version without changing files or tags |
+| `hephaestus-bump-version` | Preview static-project bumps; refuses hatch-vcs state and directs releases to signed tags |
 | `hephaestus-check-package-versions` | Check optional package and documentation version references against the canonical tag |
 | `hephaestus-check-version-consistency` | Verify an expected version matches the canonical tag and installed distribution |
 
