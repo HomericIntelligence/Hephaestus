@@ -64,6 +64,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.session_errors import AgentSessionLostError
+from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import (
     plan_reviewer_claude_timeout,
     planner_claude_timeout,
@@ -118,6 +119,7 @@ from .base import (
     WorkItem,
     _require_issue_labels,
     agent_provider,
+    source_workspace_binding,
     stage_model,
 )
 from .planning import _publish_plan_blocked, build_plan_prompt
@@ -658,6 +660,7 @@ class PlanReviewStage(Stage):
                 round_index,
                 item.payload.get("plan_revision", 1),
             )
+            workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
@@ -670,8 +673,9 @@ class PlanReviewStage(Stage):
                     else stage_model(ctx, "reviewer", reviewer_model)
                 ),
                 prompt_builder=get_plan_loop_review_prompt,
-                cwd=ctx.paths.worktree,
+                cwd=workspace.cwd if workspace else ctx.paths.worktree,
                 timeout_s=plan_reviewer_claude_timeout(),
+                workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLAN_REVIEWER,
@@ -731,14 +735,16 @@ class PlanReviewStage(Stage):
 
         if item.state == "AMEND_WAIT":
             logger.info("plan_review:%d: requesting amend job", item.issue)
+            workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
             job = AgentJob(
                 repo=item.repo,
                 issue=item.issue,
                 agent=agent_provider(ctx),
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_amend_prompt,
-                cwd=ctx.paths.worktree,
+                cwd=workspace.cwd if workspace else ctx.paths.worktree,
                 timeout_s=planner_claude_timeout(),
+                workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
                 session_agent=AGENT_PLANNER,

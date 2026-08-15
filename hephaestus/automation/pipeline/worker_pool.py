@@ -43,6 +43,7 @@ from hephaestus.agents.runtime import (
     run_agent_session,
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
+from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -61,6 +62,7 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobHandle,
     JobResult,
+    validate_job_workspace,
 )
 from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.routing import StageName
@@ -70,6 +72,7 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -88,6 +91,57 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
+
+
+@contextmanager
+def _agent_workspace_lease(job: AgentJob) -> Iterator[Path]:
+    """Validate a job and hold its source-lane lock for the provider call."""
+    cwd = validate_job_workspace(job)
+    binding = job.workspace
+    if binding is None or binding.kind is not WorkspaceKind.SOURCE:
+        yield cwd
+        return
+    if binding.reusable_root is None or binding.repository is None:
+        raise RuntimeError("source workspace binding is incomplete")
+    manager = SourceWorkspaceManager(
+        binding.reusable_root,
+        repository=binding.repository,
+        base_dir=binding.cwd.parent,
+    )
+    with manager.acquire(binding, allowed_tools=job.allowed_tools or "") as leased:
+        yield leased
+
+
+@contextmanager
+def _athena_workspace_lease(job: AthenaSkillJob) -> Iterator[Path]:
+    """Validate and lease a host-owned skill request workspace."""
+    request = job.request
+    binding = request.workspace
+    if binding is None:
+        canonical = request.cwd.resolve() if request.cwd.exists() else request.cwd.absolute()
+        if (canonical / ".git").is_dir():
+            raise RuntimeError(
+                "source-reading Athena skill cannot use the reusable repository root"
+            )
+        yield request.cwd
+        return
+    cwd = validate_workspace_binding(binding, allowed_tools="Read,Glob,Grep")
+    if cwd != request.cwd.resolve(strict=True):
+        raise RuntimeError("Athena request cwd does not match its workspace binding")
+    if binding.kind is not WorkspaceKind.SOURCE:
+        yield cwd
+        return
+    if binding.reusable_root is None or binding.repository is None:
+        raise RuntimeError("source workspace binding is incomplete")
+    manager = SourceWorkspaceManager(
+        binding.reusable_root,
+        repository=binding.repository,
+        base_dir=binding.cwd.parent,
+    )
+    with manager.acquire(binding, allowed_tools="Read,Glob,Grep") as leased:
+        yield leased
+
+
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
@@ -1684,7 +1738,8 @@ class WorkerPool:
         """Run one host-owned skill without dispatching an agent harness."""
         if self._athena_skill_executor is None:
             raise RuntimeError("AthenaSkillJob submitted without an AthenaSkillExecutor")
-        result = self._athena_skill_executor.execute(job.request)
+        with _athena_workspace_lease(job):
+            result = self._athena_skill_executor.execute(job.request)
         if not result.ok:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
@@ -1712,7 +1767,8 @@ class WorkerPool:
         the executing worker identity.
         """
         try:
-            agent = resolve_agent(job.agent, cwd=job.cwd)
+            cwd = validate_job_workspace(job)
+            agent = resolve_agent(job.agent, cwd=cwd)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
             session_key = job.session_key or session_agent
@@ -1736,7 +1792,7 @@ class WorkerPool:
                         agent=session_key,
                         prompt=prompt,
                         model=job.model,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         output_format=job.output_format,
                         allowed_tools=scope.allowed_tools,
@@ -1754,7 +1810,7 @@ class WorkerPool:
                         agent=agent,
                         session_id=job.resume_binding.session_id,
                         prompt=prompt,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         model=job.model,
                         sandbox=job.sandbox,
@@ -1768,7 +1824,7 @@ class WorkerPool:
                         agent=agent,
                         session_id=job.resume_session_id,
                         prompt=prompt,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         model=job.model,
                         sandbox=job.sandbox,
@@ -1781,7 +1837,7 @@ class WorkerPool:
                     agent_result = run_agent_session(
                         agent=agent,
                         prompt=prompt,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         model=job.model,
                         sandbox=job.sandbox,
@@ -1798,8 +1854,12 @@ class WorkerPool:
                     agent_result.session_binding,
                 )
 
+            def _invoke_leased() -> tuple[str, str | None, AgentSessionBinding | None]:
+                with _agent_workspace_lease(job):
+                    return _invoke()
+
             stdout, session_id, session_binding = resilient_call(
-                _invoke,
+                _invoke_leased,
                 circuit_breaker_name=f"agent:{agent}",
                 retry_predicate=lambda exc: (
                     not self._shutdown.is_set()

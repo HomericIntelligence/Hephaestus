@@ -73,6 +73,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             root = _effective_repo_root(self.config, repo)
             from hephaestus.automation.arming_state import LearningJournalStore
             from hephaestus.automation.plan_review_session import PlanReviewSessionStore
+            from hephaestus.automation.source_worktree import SourceWorkspaceManager
 
             def learning_state_dir() -> Path:
                 return root / "build" / ".automation-state"
@@ -90,6 +91,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     repo_root=root,
                     worktree=root,
                     projects_dir=Path(self.config.projects_dir),
+                    source_workspaces=lambda: (
+                        SourceWorkspaceManager(root, repository=repo)
+                        if (root / ".git").exists()
+                        else None
+                    ),
                 ),
                 now_fn=time.monotonic,
                 budget_fn=self._budget_for,

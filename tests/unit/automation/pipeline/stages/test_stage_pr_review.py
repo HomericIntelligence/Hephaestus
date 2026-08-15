@@ -1054,6 +1054,7 @@ class TestPrReviewStageStep:
             "sync_to_remote": False,
             "pr_number": 1001,
             "repo_root": str(ctx.paths.repo_root),
+            "source_lane": "review",
         }
         assert item.payload["existing_pr"] is True
         assert item.payload["direct_pr_worktree_pending"] is True
