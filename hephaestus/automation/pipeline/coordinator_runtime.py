@@ -4,6 +4,7 @@ from typing import Any, cast
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 
 from .coordinator_contract import _CoordinatorHost
+from .diagnostics import redact_diagnostic_text
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
@@ -775,9 +776,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             fields["worker_id"] = result.worker_id
         diagnostics = {}
         if result.stdout_tail:
-            diagnostics["stdout_tail"] = result.stdout_tail[-_JOB_DIAGNOSTIC_MAX:]
+            diagnostics["stdout_tail"] = redact_diagnostic_text(
+                result.stdout_tail[-_JOB_DIAGNOSTIC_MAX:]
+            )
         if result.stderr_tail:
-            diagnostics["stderr_tail"] = result.stderr_tail[-_JOB_DIAGNOSTIC_MAX:]
+            diagnostics["stderr_tail"] = redact_diagnostic_text(
+                result.stderr_tail[-_JOB_DIAGNOSTIC_MAX:]
+            )
         if diagnostics:
             fields["diagnostics"] = diagnostics
         return fields
@@ -799,7 +804,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             "publish_remote_head_unchanged",
             "publish_remote_probe_failed",
             "publish_lease_drift",
-            "publish_hook_rejected",
+            "publish_unknown",
             "publish_timeout",
             "publish_transport_failed",
             "validation",

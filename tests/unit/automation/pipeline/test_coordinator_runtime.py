@@ -47,3 +47,24 @@ def test_failed_validation_event_keeps_bounded_diagnostics() -> None:
         "stdout_tail": "duplicate ADR number 0027",
         "stderr_tail": "pytest diagnostics",
     }
+
+
+def test_event_diagnostics_redact_secret_like_tails() -> None:
+    """Durable event diagnostics mask secret-like stdout/stderr before JSONL."""
+    bearer = "Bearer " + "abcdef1234567890"
+    gh_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+    result = JobResult(
+        ok=False,
+        error="rebase structural validation failed",
+        value={"failure_kind": "validation"},
+        stdout_tail=f"pytest output\nAuthorization: {bearer}",
+        stderr_tail=f"git clone https://x-access-token:{gh_token}@github.com/o/r.git",
+    )
+
+    fields = CoordinatorRuntime._job_result_event_fields(result)
+
+    diagnostics = fields["diagnostics"]
+    assert "abcdef1234567890" not in diagnostics["stdout_tail"]
+    assert gh_token not in diagnostics["stderr_tail"]
+    assert "<redacted>" in diagnostics["stdout_tail"]
+    assert "<redacted>" in diagnostics["stderr_tail"]

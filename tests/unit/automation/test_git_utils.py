@@ -535,7 +535,9 @@ class TestPushDetachedHead:
     @pytest.mark.parametrize(
         ("push_failure", "failure_kind"),
         [
-            (subprocess.CalledProcessError(1, ["git", "push"]), "hook_rejected"),
+            # returncode 1 is ambiguous (local hook OR remote/publication
+            # rejection) and is never classified as hook evidence.
+            (subprocess.CalledProcessError(1, ["git", "push"]), "unknown"),
             (subprocess.CalledProcessError(128, ["git", "push"]), "transport"),
             (subprocess.TimeoutExpired(["git", "push"], timeout=42), "timeout"),
         ],
@@ -558,6 +560,34 @@ class TestPushDetachedHead:
             push_head_to_branch("123-auto-impl", pin, tmp_path)
 
         assert getattr(exc_info.value, "failure_kind", None) == failure_kind
+
+    def test_unchanged_remote_remote_rejection_is_not_hook_rejected(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A remote rejection returning 1 is never misclassified as hook evidence.
+
+        A server-side rejection can also surface as ``returncode == 1`` while
+        the remote ref remains unchanged.  Without an explicit hook boundary
+        there is no way to tell the two apart, so the classification must stay
+        unknown rather than claiming a local hook rejected the push (#2779).
+        """
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(
+                1,
+                ["git", "push"],
+                stderr=(
+                    "! [remote rejected] 123-auto-impl -> 123-auto-impl "
+                    "(protected branch hook declined)\n"
+                ),
+            ),
+            Mock(stdout=pin + "\trefs/heads/123-auto-impl\n"),
+        ]
+
+        with pytest.raises(DetachedHeadPushRemoteHeadUnchangedError) as exc_info:
+            push_head_to_branch("123-auto-impl", pin, tmp_path)
+
+        assert getattr(exc_info.value, "failure_kind", None) == "unknown"
 
     def test_classifies_remote_drift_as_lease_drift(
         self, git_utils_mocks: Any, tmp_path: Path

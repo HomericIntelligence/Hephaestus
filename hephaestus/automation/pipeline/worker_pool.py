@@ -23,7 +23,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
@@ -88,25 +88,6 @@ logger = logging.getLogger(__name__)
 _TAIL = 4000  # chars of stdout/stderr retained in a JobResult
 _ERR_MAX = 500  # chars of error detail retained in a JobResult
 _GIT_LOCK_WAIT_POLL_S = 0.1
-_ADR_FILENAME_RE = re.compile(r"^(?P<number>[0-9]{4})-[a-z0-9-]+\.md$")
-_ADR_README_LINK_RE = re.compile(r"\(([0-9]{4}-[a-z0-9-]+\.md)\)")
-_ADR_REQUIRED_SECTIONS = (
-    "## Context",
-    "## Decision",
-    "## Alternatives considered",
-    "## Consequences",
-)
-_REBASE_STRUCTURAL_TEST_PATH = "tests/unit/docs/test_adr_records.py"
-_REBASE_STRUCTURAL_TEST_ARGV = (
-    "uv",
-    "run",
-    "pytest",
-    "-o",
-    "addopts=",
-    _REBASE_STRUCTURAL_TEST_PATH,
-    "-q",
-    "--tb=short",
-)
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
@@ -1424,6 +1405,8 @@ class WorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: GitHubJobRunner | None = None,
         athena_skill_executor: AthenaSkillExecutor | None = None,
+        rebase_adr_validator: Callable[[Path], JobResult | None] | None = None,
+        rebase_structural_test_argv: tuple[str, ...] | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1440,6 +1423,13 @@ class WorkerPool:
                 only ``bin/gh`` for checkout synchronization.
             github_job_runner: Closed worker-side GitHub operation runner.
             athena_skill_executor: Closed host-owned Athena skill executor.
+            rebase_adr_validator: Host-trusted, repository-owned ADR semantic
+                validator invoked after a conflict-resolved rebase.  ``None``
+                keeps the shared executor repository-agnostic; the owning
+                repository injects its own policy.
+            rebase_structural_test_argv: Host-trusted, repository-owned pytest
+                argv run against the immutable rebased tree.  ``None`` disables
+                the structural gate for repositories without a matching test.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1456,6 +1446,8 @@ class WorkerPool:
         self._gh_extra_path_root = gh_extra_path_root
         self._github_job_runner = github_job_runner
         self._athena_skill_executor = athena_skill_executor
+        self._rebase_adr_validator = rebase_adr_validator
+        self._rebase_structural_test_argv = rebase_structural_test_argv
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
@@ -2090,7 +2082,7 @@ class WorkerPool:
             )
         except git_utils.DetachedHeadPushRemoteHeadUnchangedError as exc:
             unchanged_failure = {
-                "hook_rejected": ("publish failed: hook rejected", "publish_hook_rejected"),
+                "unknown": ("publish failed: unknown publication failure", "publish_unknown"),
                 "timeout": ("publish failed: timeout", "publish_timeout"),
                 "transport": ("publish failed: transport failure", "publish_transport_failed"),
             }.get(exc.failure_kind)
@@ -2450,87 +2442,35 @@ class WorkerPool:
             return "<absent>"
         return hashlib.sha256(target.read_bytes()).hexdigest()
 
-    @staticmethod
-    def _validate_rebased_tree(cwd: Path) -> JobResult | None:
-        """Reject known repository-structure damage before a rebase publish.
+    def _validate_rebased_tree(self, cwd: Path) -> JobResult | None:
+        """Delegate to the injected repository-owned ADR semantic validator.
 
-        Conflict resolution is intentionally limited to the files Git reports
-        as conflicted.  That prevents an agent from editing unrelated files,
-        but it cannot prove that the resulting tree is semantically valid.  A
-        duplicate ADR number is the concrete failure this guard is designed to
-        catch; the README check catches the corresponding stale/missing index
-        entry.  Repositories without ``docs/adr`` are unaffected.
+        The shared executor carries no repository policy of its own: a
+        host-trusted validator is injected at construction (see
+        ``rebase_adr_validator``).  Repositories without an injected policy
+        are unaffected, so a different valid ``docs/adr`` layout cannot be
+        rejected during rebase.
         """
-        adr_dir = cwd / "docs" / "adr"
-        if not adr_dir.is_dir():
+        if self._rebase_adr_validator is None:
             return None
-        try:
-            adr_files = sorted(path for path in adr_dir.glob("*.md") if path.name != "README.md")
-            numbers: dict[str, list[str]] = {}
-            for path in adr_files:
-                match = _ADR_FILENAME_RE.fullmatch(path.name)
-                if match is None:
-                    return JobResult(
-                        ok=False,
-                        value={"failure_kind": "semantic_validation"},
-                        error=(
-                            f"rebase semantic validation failed: malformed ADR filename {path.name}"
-                        ),
-                    )
-                numbers.setdefault(match.group("number"), []).append(path.name)
-            for number, names in sorted(numbers.items()):
-                if len(names) > 1:
-                    return JobResult(
-                        ok=False,
-                        value={"failure_kind": "semantic_validation"},
-                        error=(
-                            f"rebase semantic validation failed: duplicate ADR number {number} "
-                            f"({', '.join(names)})"
-                        ),
-                    )
-            for path in adr_files:
-                text = path.read_text(encoding="utf-8")
-                number = path.name[:4]
-                if (
-                    re.search(rf"^# ADR-{number}:", text, re.MULTILINE) is None
-                    or "- Status:" not in text
-                    or "- Date:" not in text
-                    or any(section not in text for section in _ADR_REQUIRED_SECTIONS)
-                ):
-                    return JobResult(
-                        ok=False,
-                        value={"failure_kind": "semantic_validation"},
-                        error=(
-                            f"rebase semantic validation failed: malformed ADR record {path.name}"
-                        ),
-                    )
-
-            readme = adr_dir / "README.md"
-            if readme.is_file():
-                linked = set(_ADR_README_LINK_RE.findall(readme.read_text(encoding="utf-8")))
-                on_disk = {path.name for path in adr_files}
-                if linked != on_disk:
-                    missing = sorted(on_disk - linked)
-                    stale = sorted(linked - on_disk)
-                    return JobResult(
-                        ok=False,
-                        value={"failure_kind": "semantic_validation"},
-                        error=(
-                            "rebase semantic validation failed: ADR README index out of sync "
-                            f"(missing={missing}, stale={stale})"
-                        ),
-                    )
-        except (OSError, UnicodeError) as exc:
-            return JobResult(
-                ok=False,
-                value={"failure_kind": "semantic_validation"},
-                error=f"rebase semantic validation failed: cannot inspect ADR records ({exc})",
-            )
-        return None
+        return self._rebase_adr_validator(cwd)
 
     def _run_rebase_structural_validation(self, cwd: Path, *, timeout: int) -> JobResult | None:
-        """Run the repository-owned ADR test against an immutable rebased tree."""
-        test_path = cwd / _REBASE_STRUCTURAL_TEST_PATH
+        """Run the injected repository-owned test against an immutable rebased tree.
+
+        The structural test argv is host-injected (see
+        ``rebase_structural_test_argv``); when no argv is provided the gate is
+        disabled so unrelated repositories remain unaffected.
+        """
+        if self._rebase_structural_test_argv is None:
+            return None
+        relative_test = next(
+            (part for part in self._rebase_structural_test_argv if part.endswith(".py")),
+            None,
+        )
+        if relative_test is None:
+            return None
+        test_path = cwd / relative_test
         if not test_path.is_file():
             return None
         source_sha = self._read_publish_head(cwd, timeout=timeout)
@@ -2544,7 +2484,7 @@ class WorkerPool:
             BuildTestJob(
                 repo="rebase-structural-validation",
                 cwd=cwd,
-                argv=_REBASE_STRUCTURAL_TEST_ARGV,
+                argv=self._rebase_structural_test_argv,
                 timeout_s=timeout,
                 expected_head_sha=source_sha,
                 immutable_source=True,
