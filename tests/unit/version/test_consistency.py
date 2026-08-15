@@ -8,6 +8,7 @@ git tags, not a file. Tests inject a canonical version by monkeypatching
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -251,6 +252,131 @@ def test_bump_version_verbose(tmp_path, set_canonical, capsys):
 
     assert bump_version(tmp_path, "patch", verbose=True) == 0
     assert "Computed next version: 0.1.0 -> 0.1.1" in capsys.readouterr().out
+
+
+def test_bump_version_refuses_dynamic_project_before_tag_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The library wrapper refuses dynamic projects before resolving a tag."""
+    pyproject = tmp_path / "pyproject.toml"
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+    pyproject.write_text(
+        '[project]\ndynamic = ["version"]\n\n[tool.hatch.version]\nsource = "vcs"\n'
+    )
+    version_file.write_text("1.2.3\n")
+    init_file.write_text('__version__ = "1.2.3"\n')
+    before = {path: path.read_bytes() for path in (pyproject, version_file, init_file)}
+    monkeypatch.setattr(
+        consistency,
+        "_get_canonical_version",
+        lambda _root: pytest.fail("dynamic-project preflight must precede tag lookup"),
+    )
+
+    assert consistency.bump_version(tmp_path, "patch", verbose=True) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "signed Auto Tag Release workflow" in captured.err
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_bump_version_refuses_single_quoted_dynamic_project_before_tag_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A valid TOML literal string cannot bypass the dynamic-version preflight."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[project]\ndynamic = ['version']\n\n[tool.hatch.version]\nsource = 'vcs'\n"
+    )
+    monkeypatch.setattr(
+        consistency,
+        "_get_canonical_version",
+        lambda _root: pytest.fail("dynamic-project preflight must precede tag lookup"),
+    )
+
+    assert consistency.bump_version(tmp_path, "patch", verbose=True) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "signed Auto Tag Release workflow" in captured.err
+    assert not (tmp_path / "VERSION").exists()
+
+
+@pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
+def test_bump_version_main_refuses_dynamic_project_without_output(
+    tmp_path: Path,
+    extra_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Human CLI modes fail closed without reading tags or writing static state."""
+    from hephaestus.version.consistency import bump_version_main
+
+    pyproject = tmp_path / "pyproject.toml"
+    version_file = tmp_path / "VERSION"
+    init_file = tmp_path / "__init__.py"
+    pyproject.write_text(
+        '[project]\ndynamic = ["version"]\n\n[tool.hatch.version]\nsource = "vcs"\n'
+    )
+    version_file.write_text("1.2.3\n")
+    init_file.write_text('__version__ = "1.2.3"\n')
+    before = {path: path.read_bytes() for path in (pyproject, version_file, init_file)}
+    monkeypatch.setattr(
+        consistency,
+        "_get_canonical_version",
+        lambda _root: pytest.fail("dynamic-project preflight must precede tag lookup"),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["hephaestus-bump-version", "patch", "--repo-root", str(tmp_path), *extra_args],
+    )
+
+    assert bump_version_main() == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "signed Auto Tag Release workflow" in captured.err
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_bump_version_main_json_refusal_is_single_valid_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """JSON refusal output remains parseable and keeps guidance on stderr."""
+    from hephaestus.version.consistency import bump_version_main
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\ndynamic = ["version"]\n\n[tool.hatch.version]\nsource = "vcs"\n'
+    )
+    monkeypatch.setattr(
+        consistency,
+        "_get_canonical_version",
+        lambda _root: pytest.fail("dynamic-project preflight must precede tag lookup"),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "hephaestus-bump-version",
+            "patch",
+            "--repo-root",
+            str(tmp_path),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert bump_version_main() == 1
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "status": "error",
+        "exit_code": 1,
+        "message": "version bump refused",
+    }
+    assert "signed Auto Tag Release workflow" in captured.err
+    assert not (tmp_path / "VERSION").exists()
 
 
 # ---------------------------------------------------------------------------
