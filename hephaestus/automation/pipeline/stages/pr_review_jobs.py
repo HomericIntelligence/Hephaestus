@@ -9,7 +9,6 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 
-from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -642,16 +641,12 @@ class PrReviewJobs(_PrReviewHost):
             ),
             "error": reason[:HOST_VERIFICATION_DIAGNOSTIC_MAX],
             "stdout_tail": (
-                redact_diagnostic_text(
-                    str(receipt.get("stdout_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
-                )
+                str(receipt.get("stdout_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
                 if isinstance(receipt, dict)
                 else ""
             ),
             "stderr_tail": (
-                redact_diagnostic_text(
-                    str(receipt.get("stderr_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
-                )
+                str(receipt.get("stderr_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
                 if isinstance(receipt, dict)
                 else ""
             ),
@@ -1030,8 +1025,8 @@ class PrReviewJobs(_PrReviewHost):
                 "ok": result.ok,
                 "bypassed": result.error == TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR,
                 "error": result.error or "",
-                "stdout_tail": redact_diagnostic_text(result.stdout_tail),
-                "stderr_tail": redact_diagnostic_text(result.stderr_tail),
+                "stdout_tail": result.stdout_tail,
+                "stderr_tail": result.stderr_tail,
             }
         )
 
