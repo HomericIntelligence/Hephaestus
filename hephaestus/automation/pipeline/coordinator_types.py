@@ -396,11 +396,10 @@ class _StageRunConfig:
 
 @dataclass
 class _Paths:
-    """Coordinator-owned path accessor injected as ``StageContext.paths``."""
-
     repo_root: Path
     worktree: Path
     projects_dir: Path
+    source_workspaces: Any = None
 
 
 @dataclass(frozen=True)

@@ -1395,6 +1395,26 @@ implementation.
 
 ### Job kinds
 
+Every job that can read repository source carries a provider-neutral
+`WorkspaceBinding`. The binding distinguishes `source`, `session-only`, and
+`external` directories. A source binding records repository-qualified
+ownership, item number, lane, exact revision, generation, canonical path, and
+detached state. The worker validates it immediately before provider execution
+and holds the lane's cross-process lock for the whole invocation. A legacy
+source-capable job whose raw `cwd` is the reusable primary checkout is rejected
+before provider resolution.
+
+The reusable default-branch checkout is only the Git synchronization and
+worktree-management control plane. For each issue or linked PR, all writer-side
+source reads reuse `build/.worktrees/auto-<#>-impl`; all reviewer-side source
+reads reuse the detached `build/.worktrees/auto-<#>-review`. Changed revisions
+rebind the same path and increment its receipt generation. Review never creates
+a review branch. The stable `auto-<#>-guard` ref is a CAS-protected ownership
+record only and never owns a third worktree. Dirty lanes and lanes with durable
+learning or cleanup obligations are preserved.
+The exhaustive classification is maintained in the
+[source-agent workspace inventory](source-agent-workspace-inventory.md).
+
 - [`AgentJob`](../hephaestus/automation/pipeline/jobs.py) — Claude or
  Codex (`agent = resolve_agent(job.agent)`) with
  `prompt_builder(**prompt_kwargs)` composed in-worker.

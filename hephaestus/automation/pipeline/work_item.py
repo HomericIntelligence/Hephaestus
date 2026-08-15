@@ -129,6 +129,7 @@ _POST_PROCESSING_PAYLOAD_KEYS = frozenset(
     {
         "_direct_scope_local_branch_cleanup",
         "_direct_scope_reservation",
+        "_impl_source_revision",
         "_learning_primary_reason",
         "_worktree_cleanup_head_sha",
         "_wave_lease",

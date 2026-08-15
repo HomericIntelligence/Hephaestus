@@ -8,6 +8,7 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.workspace import SourceLane
 
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
@@ -17,6 +18,7 @@ from ..github_jobs import (
     ReconcilePrReviewRequest,
     ReplyHandoffAttempted,
 )
+from .base import source_workspace_binding
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
@@ -52,17 +54,12 @@ class PrReviewJobs(_PrReviewHost):
         Its reset keys on ``attempts["implement"]``
         so it fires exactly once per implementation pass: a same-cycle
         re-entry (e.g. the ERROR-path RETRY) keeps its round count and its
-        progress trail. A literal double on_enter is a no-op.
-
         Args:
             item: The work item being processed.
             ctx: The stage context.
 
         """
         if item.pr is not None:
-            # A work item can be restarted or directly seeded with stale
-            # payload. Only the exact checkout barrier below may install a
-            # reviewed-head proof for a new agent job.
             item.payload.pop("reviewed_pr_head_sha", None)
             arm_outcome = self._require_confirmed_unarmed(item.pr, ctx)
             if arm_outcome is not None:
@@ -71,9 +68,6 @@ class PrReviewJobs(_PrReviewHost):
                 thread_outcome = self._route_existing_threads_before_audit(item, ctx)
                 if thread_outcome is not None:
                     return thread_outcome
-            # The implementation worktree is a branch writer. Never review
-            # from it: preserve it for a possible remediation pass and create
-            # a detached, disposable checkout below.
             if item.worktree and not item.payload.get("direct_pr_worktree"):
                 item.payload["writer_worktree"] = item.worktree
                 item.payload["reviewer_checkout_needed"] = True
@@ -82,10 +76,6 @@ class PrReviewJobs(_PrReviewHost):
         if item.payload.get("pr_review_cycle") != cycle:
             item.payload["pr_review_cycle"] = cycle
             item.payload["pr_review_round"] = 0
-            # Fresh implementation cycle: the consecutive reviewer-failure
-            # streak restarts too (M1 — a re-entry after an agent_error
-            # fail-back gets a fresh error budget; the implement budget,
-            # consumed at the GATE, bounds the total number of cycles).
             item.payload.pop("review_error_retries", None)
         return None
 
@@ -229,11 +219,8 @@ class PrReviewJobs(_PrReviewHost):
             "issue_number": _issue_number(item),
             "branch_name": branch,
             "refresh_base": False,
-            # A detached reviewer checkout cannot reuse the writer's branch
-            # checkout.
             "isolated": True,
-            # The checkout barrier below is the sole authority allowed to
-            # materialize remote PR state and bind it to the GitHub snapshot.
+            "source_lane": "review",
             "sync_to_remote": False,
             "pr_number": item.pr,
             "repo_root": str(ctx.paths.repo_root),
@@ -247,8 +234,6 @@ class PrReviewJobs(_PrReviewHost):
             kwargs=kwargs,
             descr="direct_pr_review_worktree",
         )
-        # Coordinator completion callbacks run before on_done_state is
-        # assigned. The marker makes that ordering explicit and fail-closed.
         item.payload["direct_pr_worktree_pending"] = True
         return JobRequest(job, on_done_state=ADOPT_WORKTREE_WAIT)
 
@@ -369,14 +354,21 @@ class PrReviewJobs(_PrReviewHost):
             round_index,
             item.pr,
         )
+        workspace = source_workspace_binding(
+            item,
+            ctx,
+            SourceLane.REVIEW,
+            revision=str(item.payload.get("reviewed_pr_head_sha") or ""),
+        )
         job = AgentJob(
             repo=item.repo,
             issue=issue,
             agent=agent_provider(ctx),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=get_pr_review_analysis_prompt,
-            cwd=_worktree_path(item, ctx),
+            cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
+            workspace=workspace,
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             execution_request=ExecutionRequest(
@@ -538,14 +530,21 @@ class PrReviewJobs(_PrReviewHost):
             validation_threads, ensure_ascii=False, sort_keys=True
         )
         logger.info("pr_review:%d: requesting validation job", issue)
+        workspace = source_workspace_binding(
+            item,
+            ctx,
+            SourceLane.REVIEW,
+            revision=reviewed_head,
+        )
         job = AgentJob(
             repo=item.repo,
             issue=issue,
             agent=agent_provider(ctx),
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=get_review_validation_prompt,
-            cwd=_worktree_path(item, ctx),
+            cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
             timeout_s=pr_reviewer_claude_timeout(),
+            workspace=workspace,
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             execution_request=ExecutionRequest(

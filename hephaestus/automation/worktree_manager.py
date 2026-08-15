@@ -7,8 +7,10 @@ Provides:
 
 Layout note
 -----------
-Implementation worktrees live under ``<repo_root>/build/.worktrees/issue-{N}``.
-Detached review checkouts use separate item-specific paths. Putting them inside
+Queue-pipeline source worktrees use the deterministic
+``auto-{N}-impl`` and ``auto-{N}-review`` paths. Compatibility callers that
+have not opted in with ``source_lane`` retain the historical ``issue-{N}``
+and generation-suffixed review layout. Putting worktrees inside
 the repo (rather than ``~/.tmp``) keeps them visible to the implementer process
 even after a force-kill: an interrupted run leaves the worktree on disk so a
 subsequent invocation can either resume work or surface a ``WorktreeDirtyError``
@@ -18,9 +20,8 @@ show ``build/.worktrees/`` as untracked if it isn't ignored; ensure
 that runs the automation. Recovery procedure for a force-killed loop:
 
     git -C <repo> worktree list
-    # Inspect each build/.worktrees/issue-N for unexpected modifications
-    git -C <repo> worktree remove build/.worktrees/issue-N    # if abandoning
-    rm -rf <repo>/build/.worktrees/issue-N                    # last resort
+    # Inspect each build/.worktrees/auto-N-{impl,review} for modifications
+    git -C <repo> worktree remove build/.worktrees/auto-N-review
 """
 
 import contextlib
@@ -259,7 +260,7 @@ class WorktreeManager:
                 "base_branch= explicitly to WorktreeManager()."
             ) from None
 
-    def create_worktree(
+    def create_worktree(  # noqa: C901 - compatibility and deterministic lanes share validation
         self,
         issue_number: int,
         branch_name: str | None = None,
@@ -270,6 +271,7 @@ class WorktreeManager:
         isolated: bool = False,
         isolated_generation: int = 0,
         direct_worktree_nonce: str | None = None,
+        source_lane: str | None = None,
         timeout: int | None = None,
     ) -> Path:
         """Create a new worktree for an issue.
@@ -300,6 +302,8 @@ class WorktreeManager:
             direct_worktree_nonce: Trusted per-run UUID4 hex token for a
                 direct issue writer.  It creates a new direct path while
                 preserving an interrupted predecessor's checkout.
+            source_lane: Opt in to the deterministic ``impl`` or ``review``
+                source-reading lane. Legacy callers omit this during migration.
             timeout: Optional timeout in seconds for each git command.
 
         Returns:
@@ -322,16 +326,34 @@ class WorktreeManager:
             direct_worktree_nonce=direct_worktree_nonce,
         )
         with self.lock:
-            isolated_key = f"review-pr-{issue_number}"
-            if isolated_generation:
+            if source_lane not in {None, "impl", "review"}:
+                raise RuntimeError("source lane must be 'impl' or 'review'")
+            if source_lane == "impl" and isolated:
+                raise RuntimeError("implementation source lane cannot be isolated")
+            if source_lane == "review" and not isolated:
+                raise RuntimeError("review source lane must be isolated")
+            isolated_key = (
+                f"auto-{issue_number}-review"
+                if source_lane == "review"
+                else f"review-pr-{issue_number}"
+            )
+            if isolated_generation and source_lane != "review":
                 isolated_key = f"{isolated_key}-{isolated_generation}"
             direct_key = (
-                f"{issue_number}-direct-{direct_worktree_nonce}"
+                f"auto-{issue_number}-impl"
+                if source_lane == "impl"
+                else f"{issue_number}-direct-{direct_worktree_nonce}"
                 if direct_worktree_nonce is not None
                 else issue_number
             )
             worktree_key: int | str = isolated_key if isolated else direct_key
-            worktree_path = self.base_dir / (isolated_key if isolated else f"issue-{direct_key}")
+            worktree_path = self.base_dir / (
+                isolated_key
+                if isolated
+                else str(direct_key)
+                if source_lane == "impl"
+                else f"issue-{direct_key}"
+            )
             if base_sha is not None and (
                 refresh_base
                 or isolated
@@ -346,6 +368,13 @@ class WorktreeManager:
                 # entering the lock that serializes holder detection and add.
                 self.refresh_base_branch(timeout=timeout)
             if isolated:
+                if source_lane == "review":
+                    return self._create_deterministic_review_worktree(
+                        issue_number,
+                        branch_name,
+                        refresh_base=refresh_base,
+                        timeout=timeout,
+                    )
                 return self._create_isolated_worktree(
                     issue_number,
                     branch_name,
@@ -367,6 +396,12 @@ class WorktreeManager:
                         )
                     ):
                         return existing
+                    if source_lane == "impl" and base_sha is not None and worktree_path.exists():
+                        if not is_clean_working_tree(worktree_path, timeout=timeout):
+                            raise RuntimeError(
+                                f"deterministic implementation worktree is dirty: {worktree_path}"
+                            )
+                        self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
                     self._validate_direct_scope_worktree_request(
                         base_sha=base_sha,
                         remote_branch_reserved=remote_branch_reserved,
@@ -398,6 +433,31 @@ class WorktreeManager:
                 raise
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e
+
+    def _create_deterministic_review_worktree(
+        self,
+        issue_number: int,
+        branch_name: str,
+        *,
+        refresh_base: bool,
+        timeout: int | None,
+    ) -> Path:
+        """Create or cleanly rebind the single detached review lane."""
+        if refresh_base:
+            self.refresh_base_branch(timeout=timeout)
+        key = f"auto-{issue_number}-review"
+        path = self.base_dir / key
+        try:
+            with file_lock(self._git_metadata_lock_path()):
+                if path.exists():
+                    if not is_clean_working_tree(path):
+                        raise RuntimeError(f"deterministic review worktree is dirty: {path}")
+                    self._remove_worktree_path_forcefully(path, timeout=timeout)
+                self._add_isolated_worktree_for_branch(path, branch_name, timeout=timeout)
+            self.worktrees[key] = path
+            return path
+        except Exception as exc:
+            raise RuntimeError(f"Failed to create worktree: {exc}") from exc
 
     @staticmethod
     def _validate_create_worktree_request(
