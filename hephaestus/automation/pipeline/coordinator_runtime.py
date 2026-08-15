@@ -4,11 +4,12 @@ from typing import Any, cast
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 from hephaestus.diagnostics import bounded_git_diagnostic
 
-from .diagnostics import redact_diagnostic_text
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
+from .diagnostics import redact_diagnostic_text
+from .diagnostics import redact_diagnostic_text
 
 # ruff: noqa: F403, F405
 

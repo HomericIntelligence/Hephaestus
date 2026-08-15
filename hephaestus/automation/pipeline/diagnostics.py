@@ -55,9 +55,7 @@ _PREFIX_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     ),
     # user:password@ URL authorities (keep scheme+user and the trailing @)
     (
-        re.compile(
-            r"(?P<prefix>://[^/\s:@]+:)(?P<value>[^@\s/]+)(?P<suffix>@)"
-        ),
+        re.compile(r"(?P<prefix>://[^/\s:@]+:)(?P<value>[^@\s/]+)(?P<suffix>@)"),
         "prefix",
         "value",
     ),
@@ -75,10 +73,10 @@ def redact_diagnostic_text(text: str) -> str:
     redacted = text
     for pattern in _TOKEN_PATTERNS:
         redacted = pattern.sub(_REDACTION, redacted)
-    for pattern, prefix_group, value_group in _PREFIX_PATTERNS:
+    for pattern, prefix_group, _value_group in _PREFIX_PATTERNS:
         redacted = pattern.sub(
-            lambda match: (
-                f"{match.group(prefix_group)}{_REDACTION}"
+            lambda match, _pg=prefix_group: (
+                f"{match.group(_pg)}{_REDACTION}"
                 f"{match.group('suffix') if 'suffix' in match.groupdict() else ''}"
             ),
             redacted,
