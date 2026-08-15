@@ -10,7 +10,6 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane
 
-from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -641,16 +640,12 @@ class PrReviewJobs(_PrReviewHost):
             ),
             "error": reason[:HOST_VERIFICATION_DIAGNOSTIC_MAX],
             "stdout_tail": (
-                redact_diagnostic_text(
-                    str(receipt.get("stdout_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
-                )
+                str(receipt.get("stdout_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
                 if isinstance(receipt, dict)
                 else ""
             ),
             "stderr_tail": (
-                redact_diagnostic_text(
-                    str(receipt.get("stderr_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
-                )
+                str(receipt.get("stderr_tail") or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
                 if isinstance(receipt, dict)
                 else ""
             ),
