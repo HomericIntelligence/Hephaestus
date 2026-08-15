@@ -445,7 +445,14 @@ def push_head_to_branch(
         if isinstance(exc, subprocess.TimeoutExpired):
             failure_kind = "timeout"
         elif exc.returncode == 1:
-            failure_kind = "hook_rejected"
+            # A local pre-push hook rejection is NOT uniquely identified by
+            # ``returncode == 1``: a remote rejection (or another Git failure)
+            # can also return 1 while the remote ref remains unchanged.  Git's
+            # stderr is deliberately untrusted here, so there is no hook
+            # evidence to classify on.  Report the honest unknown category
+            # rather than misclassifying a remote/publication failure as a
+            # local hook rejection (#2779 keeps these distinct).
+            failure_kind = "unknown"
         else:
             failure_kind = "transport"
         raise DetachedHeadPushRemoteHeadUnchangedError(

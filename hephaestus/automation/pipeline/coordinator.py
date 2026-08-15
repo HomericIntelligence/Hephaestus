@@ -97,6 +97,10 @@ class Coordinator(
             # Imported here, not module-top: WorkerPool is the pipeline's one
             # I/O-capable module and tests never need it.
             from hephaestus.automation.mnemosyne_skill_host import MnemosyneSkillHost
+            from hephaestus.automation.pipeline.rebase_adr_policy import (
+                REBASE_STRUCTURAL_TEST_ARGV,
+                validate_rebased_adr_tree,
+            )
             from hephaestus.automation.pipeline.worker_pool import WorkerPool
             from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
@@ -113,6 +117,11 @@ class Coordinator(
                     dry_run=config.dry_run,
                 ),
                 athena_skill_executor=athena_executor,
+                # The owning repository injects its own ADR policy so the
+                # shared executor never applies it to another repository with
+                # a different valid docs/adr layout.
+                rebase_adr_validator=validate_rebased_adr_tree,
+                rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

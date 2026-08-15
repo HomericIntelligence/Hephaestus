@@ -114,6 +114,7 @@ from hephaestus.automation.state_labels import (
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
+from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -1626,9 +1627,9 @@ class ImplementationStage(Stage):
         if result.error:
             item.payload["rebase_error_detail"] = result.error[:500]
         if result.stdout_tail:
-            item.payload["rebase_stdout_tail"] = result.stdout_tail[-4000:]
+            item.payload["rebase_stdout_tail"] = redact_diagnostic_text(result.stdout_tail[-4000:])
         if result.stderr_tail:
-            item.payload["rebase_stderr_tail"] = result.stderr_tail[-4000:]
+            item.payload["rebase_stderr_tail"] = redact_diagnostic_text(result.stderr_tail[-4000:])
         value = result.value if isinstance(result.value, dict) else {}
         failure_kind = value.get("failure_kind")
         if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):

@@ -1006,6 +1006,34 @@ class TestGate:
             "rebase semantic validation failed: duplicate ADR number 0027",
         )
 
+    def test_failed_host_rebase_redacts_secret_like_tails(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Item payload rebase tails never retain secret-like content."""
+        gh_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase semantic validation failed: duplicate ADR number 0027",
+                value={"failure_kind": "semantic_validation"},
+                stdout_tail=f"git remote add origin https://x-access-token:{gh_token}@github.com/o/r.git",
+                stderr_tail="pytest error\nAuthorization: Basic dXNlcjpwYXNz",
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_error"] is True
+        assert item.payload["rebase_error_kind"] == "semantic_validation"
+        assert gh_token not in item.payload["rebase_stdout_tail"]
+        assert "dXNlcjpwYXNz" not in item.payload["rebase_stderr_tail"]
+        assert "<redacted>" in item.payload["rebase_stdout_tail"]
+        assert "<redacted>" in item.payload["rebase_stderr_tail"]
+
 
 class TestImplementationStateSkipGate:
     """GATE checks state:skip before either the existing-PR or plan-go path (#1835)."""

@@ -177,12 +177,25 @@ def pool(
     completion_q: CompletionQueue,
     tmp_path: Path,
 ) -> Iterator[WorkerPool]:
-    """Worker pool with a single thread and a temp cross-process lock dir."""
+    """Worker pool with a single thread and a temp cross-process lock dir.
+
+    Injects the repository-owned ADR rebase policy so the ADR semantic and
+    structural validation gates behave as they do in the production
+    coordinator wiring.  A deliberately policy-free pool is exercised by the
+    unaffected-layout regression tests below.
+    """
+    from hephaestus.automation.pipeline.rebase_adr_policy import (
+        REBASE_STRUCTURAL_TEST_ARGV,
+        validate_rebased_adr_tree,
+    )
+
     p = WorkerPool(
         size=1,
         shutdown=shutdown_event,
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
+        rebase_adr_validator=validate_rebased_adr_tree,
+        rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
     )
     yield p
     p.shutdown()
@@ -3614,6 +3627,34 @@ class TestGitOps:
             stderr_tail="pytest diagnostics",
         )
         run_test.assert_called_once()
+
+    def test_rebase_semantic_validation_unaffected_without_injected_policy(
+        self, shutdown_event: threading.Event, completion_q: CompletionQueue, tmp_path: Path
+    ) -> None:
+        """A different valid ADR layout passes when no repository policy is injected.
+
+        The shared executor must not apply the owning repository's ADR
+        filename/section/README-index contract to another repository.  A
+        policy-free pool leaves a non-4-digit ADR layout with a custom
+        section structure untouched.
+        """
+        policy_free = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "01-fleet-routing.md").write_text(
+            "# ADR-01: Fleet routing\n- Status: Accepted\n- Date: 2026-01-01\n"
+        )
+        (adr_dir / "README.md").write_text("- [Fleet routing](01-fleet-routing.md)\n")
+
+        assert policy_free._validate_rebased_tree(tmp_path) is None
+        assert policy_free._run_rebase_structural_validation(tmp_path, timeout=60) is None
+
+        policy_free.shutdown()
 
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
