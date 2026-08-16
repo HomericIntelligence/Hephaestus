@@ -72,7 +72,9 @@ remove_worktree() {
   local branch="$2"
 
   git worktree remove "$path"
-  git branch -d "$branch" >/dev/null 2>&1 || true
+  if ! git branch -d "$branch" >/dev/null 2>&1; then
+    echo "cleanup-stale-worktrees.sh: branch '$branch' not deleted (missing or not fully merged)" >&2
+  fi
 }
 
 consider_worktree() {
