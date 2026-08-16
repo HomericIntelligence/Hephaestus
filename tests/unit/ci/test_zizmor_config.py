@@ -57,9 +57,7 @@ def _pyproject() -> dict[str, object]:
 
 def _zizmor_precommit_hook() -> dict[str, object]:
     """Return the local zizmor pre-commit hook configuration."""
-    config = yaml.safe_load(
-        (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
-    )
+    config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     return next(
         hook
         for repo in config["repos"]
@@ -71,9 +69,7 @@ def _zizmor_precommit_hook() -> dict[str, object]:
 def _workflow_zizmor_run(path: Path, job: str) -> str:
     """Return the zizmor run command from one workflow job."""
     config = yaml.safe_load(path.read_text(encoding="utf-8"))
-    step = next(
-        step for step in config["jobs"][job]["steps"] if step.get("id") == "zizmor"
-    )
+    step = next(step for step in config["jobs"][job]["steps"] if step.get("id") == "zizmor")
     return str(step["run"])
 
 
@@ -97,9 +93,7 @@ def _tracked_action_manifests() -> set[str]:
         check=True,
     ).stdout
     return {
-        path
-        for path in output.splitlines()
-        if Path(path).name in {"action.yml", "action.yaml"}
+        path for path in output.splitlines() if Path(path).name in {"action.yml", "action.yaml"}
     }
 
 
@@ -185,13 +179,11 @@ def test_non_production_action_allowlist_is_tracked_and_composite() -> None:
     tracked = _tracked_action_manifests()
     composites = _tracked_composite_actions()
 
-    assert NON_PRODUCTION_ACTION_FIXTURES <= tracked
-    assert NON_PRODUCTION_ACTION_FIXTURES <= composites
+    assert tracked >= NON_PRODUCTION_ACTION_FIXTURES
+    assert composites >= NON_PRODUCTION_ACTION_FIXTURES
 
     fixture_composites = {
-        path
-        for path in composites
-        if path.startswith("tests/unit/ci/fixtures/zizmor/")
+        path for path in composites if path.startswith("tests/unit/ci/fixtures/zizmor/")
     }
     assert fixture_composites == NON_PRODUCTION_ACTION_FIXTURES
 
@@ -202,9 +194,7 @@ def test_every_tracked_composite_action_is_scanned() -> None:
     assert production, "tracked composite-action inventory is unexpectedly empty"
 
     uncovered = {
-        path
-        for path in production
-        if not any(path.startswith(root) for root in SCAN_ROOTS)
+        path for path in production if not any(path.startswith(root) for root in SCAN_ROOTS)
     }
     assert not uncovered, f"tracked composite Actions outside scan scope: {uncovered}"
 
@@ -233,9 +223,7 @@ def test_fixed_fixture_scan_keeps_security_audits_active(
 ) -> None:
     """Pinning and workflow least-privilege audits remain active."""
     observed = _audit_ids(FIXTURES / fixture, tmp_path)
-    assert expected_audits <= observed, (
-        f"missing audits: {expected_audits - observed}"
-    )
+    assert expected_audits <= observed, f"missing audits: {expected_audits - observed}"
 
 
 def test_security_md_documents_static_analysis_coverage() -> None:
