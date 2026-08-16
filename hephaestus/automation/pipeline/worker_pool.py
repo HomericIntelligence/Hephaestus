@@ -141,6 +141,8 @@ def _athena_workspace_lease(job: AthenaSkillJob) -> Iterator[Path]:
     )
     with manager.acquire(binding, allowed_tools="Read,Glob,Grep") as leased:
         yield leased
+
+
 _FETCH_ENV_BLOCKLIST = frozenset(
     {
         "GIT_ASKPASS",
@@ -1850,7 +1852,8 @@ class WorkerPool:
         """Run one host-owned skill without dispatching an agent harness."""
         if self._athena_skill_executor is None:
             raise RuntimeError("AthenaSkillJob submitted without an AthenaSkillExecutor")
-        result = self._athena_skill_executor.execute(job.request)
+        with _athena_workspace_lease(job):
+            result = self._athena_skill_executor.execute(job.request)
         if not result.ok:
             return JobResult(ok=False, value=result, error=result.error)
         return JobResult(ok=True, value=result)
@@ -1878,7 +1881,8 @@ class WorkerPool:
         the executing worker identity.
         """
         try:
-            agent = resolve_agent(job.agent, cwd=job.cwd)
+            cwd = validate_job_workspace(job)
+            agent = resolve_agent(job.agent, cwd=cwd)
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
             session_key = job.session_key or session_agent
@@ -1902,7 +1906,7 @@ class WorkerPool:
                         agent=session_key,
                         prompt=prompt,
                         model=job.model,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         output_format=job.output_format,
                         allowed_tools=scope.allowed_tools,
@@ -1920,7 +1924,7 @@ class WorkerPool:
                         agent=agent,
                         session_id=job.resume_binding.session_id,
                         prompt=prompt,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         model=job.model,
                         sandbox=job.sandbox,
@@ -1934,7 +1938,7 @@ class WorkerPool:
                         agent=agent,
                         session_id=job.resume_session_id,
                         prompt=prompt,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         model=job.model,
                         sandbox=job.sandbox,
@@ -1947,7 +1951,7 @@ class WorkerPool:
                     agent_result = run_agent_session(
                         agent=agent,
                         prompt=prompt,
-                        cwd=job.cwd,
+                        cwd=cwd,
                         timeout=job.timeout_s,
                         model=job.model,
                         sandbox=job.sandbox,
@@ -1964,8 +1968,12 @@ class WorkerPool:
                     agent_result.session_binding,
                 )
 
+            def _invoke_leased() -> tuple[str, str | None, AgentSessionBinding | None]:
+                with _agent_workspace_lease(job):
+                    return _invoke()
+
             stdout, session_id, session_binding = resilient_call(
-                _invoke,
+                _invoke_leased,
                 circuit_breaker_name=f"agent:{agent}",
                 retry_predicate=lambda exc: (
                     not self._shutdown.is_set()

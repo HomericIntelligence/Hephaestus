@@ -84,9 +84,7 @@ def validate_rebased_adr_tree(cwd: Path) -> JobResult | None:
                 return JobResult(
                     ok=False,
                     value={"failure_kind": "semantic_validation"},
-                    error=(
-                        f"rebase semantic validation failed: malformed ADR record {path.name}"
-                    ),
+                    error=(f"rebase semantic validation failed: malformed ADR record {path.name}"),
                 )
 
         readme = adr_dir / "README.md"

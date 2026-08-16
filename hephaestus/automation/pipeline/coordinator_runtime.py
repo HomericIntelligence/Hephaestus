@@ -8,8 +8,7 @@ from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
-from .diagnostics import redact_diagnostic_text
-from .diagnostics import redact_diagnostic_text
+from .diagnostics import redact_bounded_diagnostic_tails
 
 # ruff: noqa: F403, F405
 
@@ -38,7 +37,6 @@ _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
 _ALERT_NAME_LABELS = frozenset({"circuit_breaker_open", "queue_depth_exceeds", "pipeline_stalled"})
-_JOB_DIAGNOSTIC_MAX = 4_000
 
 
 class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
@@ -783,15 +781,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if result.worker_id:
             fields["worker_id"] = result.worker_id
         value = result.value
-        diagnostics = {}
-        if result.stdout_tail:
-            diagnostics["stdout_tail"] = bounded_git_diagnostic(
-                redact_diagnostic_text(result.stdout_tail), limit=_JOB_DIAGNOSTIC_MAX
-            )
-        if result.stderr_tail:
-            diagnostics["stderr_tail"] = bounded_git_diagnostic(
-                redact_diagnostic_text(result.stderr_tail), limit=_JOB_DIAGNOSTIC_MAX
-            )
+        diagnostics = redact_bounded_diagnostic_tails(
+            result.stdout_tail, result.stderr_tail, limit=4000
+        )
         if diagnostics:
             fields["diagnostics"] = diagnostics
         if (

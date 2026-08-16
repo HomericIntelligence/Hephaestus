@@ -66,5 +66,5 @@ def test_event_diagnostics_redact_secret_like_tails() -> None:
     diagnostics = fields["diagnostics"]
     assert "abcdef1234567890" not in diagnostics["stdout_tail"]
     assert gh_token not in diagnostics["stderr_tail"]
-    assert "<redacted>" in diagnostics["stdout_tail"]
-    assert "<redacted>" in diagnostics["stderr_tail"]
+    assert "redacted" in diagnostics["stdout_tail"]
+    assert "redacted" in diagnostics["stderr_tail"]

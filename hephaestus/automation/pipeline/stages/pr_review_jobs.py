@@ -10,6 +10,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane
 
+from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
