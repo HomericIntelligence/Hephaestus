@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.agents.pi_plugins import load_pi_package_catalog, preflight_pi_environment
+from hephaestus.agents.pi_plugins import (
+    inspect_pi_package_inventory,
+    load_pi_package_catalog,
+    preflight_pi_environment,
+)
 
 
 @pytest.mark.nightly
@@ -51,20 +55,18 @@ def test_catalog_pinned_packages_install_and_preflight(
     assert payload["ready"] is True
     assert payload["status"] == "ready"
 
-    # npm-kind packages install into the Pi scoped agent dir, not the system
-    # npm global root: the install plan runs `pi install <spec>` (#2764), which
-    # honors PI_CODING_AGENT_DIR. inspect_pi_package_inventory checks exactly
-    # this layout (scope_root/npm/node_modules), and the install report above
-    # already asserts ready=True. Assert the same canonical placement here so
-    # the smoke test and the inventory check can never drift.
+    # The catalog's npm packages are pi-managed installs: they land in the pi
+    # scope root (pi_dir/npm/node_modules/<identity>), not `npm root -g`.
+    # Verify the exact roots the runtime preflight will rely on, using the
+    # same inventory contract as preflight_pi_environment itself.
     pi_dir = Path(env["PI_CODING_AGENT_DIR"])
-    for package in load_pi_package_catalog().packages:
-        if package.kind == "npm":
-            pkg_manifest = pi_dir / "npm" / "node_modules" / package.identity / "package.json"
-            assert pkg_manifest.is_file(), (
-                f"npm package {package.identity} missing in Pi scoped agent dir {pi_dir}"
-            )
-
+    inventory = inspect_pi_package_inventory(
+        cwd,
+        load_pi_package_catalog(),
+        pi_dir=pi_dir,
+        include_project=False,
+    )
+    assert inventory.ready, inventory.detail
     sentinel = tmp_path / "compatible-sentinel-loaded"
     extension_dir = pi_dir / "extensions"
     extension_dir.mkdir(parents=True)
