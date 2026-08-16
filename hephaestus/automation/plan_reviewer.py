@@ -213,30 +213,9 @@ class PlanReviewer:
                 # One strict admission read controls the standalone path.
                 # BLOCKED is an operator latch, contradictory labels fail
                 # closed, and only exclusive GO short-circuits as approved.
-                labels = self._read_plan_state_labels(issue_number)
-                active_states = set(labels).intersection(ALL_STATE_LABELS)
-                if STATE_PLAN_BLOCKED in active_states:
-                    if not self.options.dry_run:
-                        self._ensure_blocked_audit(issue_number)
-                    logger.info(
-                        "Issue %s: plan is BLOCKED; awaiting external intervention",
-                        issue_ref(issue_number),
-                    )
-                    return WorkerResult(
-                        issue_number=issue_number,
-                        success=True,
-                        already_reviewed=True,
-                    )
-                if len(active_states) > 1:
-                    raise RuntimeError(f"contradictory plan-state labels: {sorted(active_states)}")
-                if is_exclusive_plan_state(labels, STATE_PLAN_GO):
-                    logger.info(
-                        "Issue %s: latest plan review is APPROVED, skipping",
-                        issue_ref(issue_number),
-                    )
-                    return WorkerResult(
-                        issue_number=issue_number, success=True, already_reviewed=True
-                    )
+                admission = self._plan_admission_outcome(issue_number)
+                if admission is not None:
+                    return admission
 
                 plan_lookup = self._get_latest_plan(issue_number)
                 if plan_lookup.status is PlanDiscoveryStatus.READ_ERROR:
@@ -316,6 +295,37 @@ class PlanReviewer:
                     success=False,
                     error=str(e)[:80],
                 )
+
+    def _plan_admission_outcome(self, issue_number: int) -> WorkerResult | None:
+        """Return a terminal outcome from the read-only plan-state admission.
+
+        ``None`` means the issue is reviewable; otherwise the returned result
+        short-circuits :meth:`_review_issue` (BLOCKED / contradictory labels /
+        already-GO). Keeps the worker's complexity below the C901 gate.
+        """
+        labels = self._read_plan_state_labels(issue_number)
+        active_states = set(labels).intersection(ALL_STATE_LABELS)
+        if STATE_PLAN_BLOCKED in active_states:
+            if not self.options.dry_run:
+                self._ensure_blocked_audit(issue_number)
+            logger.info(
+                "Issue %s: plan is BLOCKED; awaiting external intervention",
+                issue_ref(issue_number),
+            )
+            return WorkerResult(
+                issue_number=issue_number,
+                success=True,
+                already_reviewed=True,
+            )
+        if len(active_states) > 1:
+            raise RuntimeError(f"contradictory plan-state labels: {sorted(active_states)}")
+        if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+            logger.info(
+                "Issue %s: latest plan review is APPROVED, skipping",
+                issue_ref(issue_number),
+            )
+            return WorkerResult(issue_number=issue_number, success=True, already_reviewed=True)
+        return None
 
     def _fetch_issue_comments(self, issue_number: int) -> list[IssueComment]:
         """Fetch the complete bounded issue journal, caching it per instance.
