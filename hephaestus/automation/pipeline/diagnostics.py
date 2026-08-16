@@ -10,6 +10,7 @@ persistence.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 _REDACTION = "<redacted>"
 
@@ -29,6 +30,17 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
         flags=re.DOTALL,
     ),
 )
+
+
+def _redact_prefix_pattern(prefix_group: str) -> Callable[[re.Match[str]], str]:
+    """Return the replacement callable for one prefix-preserving pattern."""
+
+    def _replace(match: re.Match[str]) -> str:
+        suffix = match.group("suffix") if "suffix" in match.groupdict() else ""
+        return f"{match.group(prefix_group)}{_REDACTION}{suffix}"
+
+    return _replace
+
 
 # Prefix-preserving patterns: the captured prefix stays, the value is masked.
 _PREFIX_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
@@ -74,11 +86,5 @@ def redact_diagnostic_text(text: str) -> str:
     for pattern in _TOKEN_PATTERNS:
         redacted = pattern.sub(_REDACTION, redacted)
     for pattern, prefix_group, _value_group in _PREFIX_PATTERNS:
-        redacted = pattern.sub(
-            lambda match, _pg=prefix_group: (
-                f"{match.group(_pg)}{_REDACTION}"
-                f"{match.group('suffix') if 'suffix' in match.groupdict() else ''}"
-            ),
-            redacted,
-        )
+        redacted = pattern.sub(_redact_prefix_pattern(prefix_group), redacted)
     return redacted
