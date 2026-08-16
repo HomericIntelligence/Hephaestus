@@ -121,8 +121,7 @@ class TestFetchPlannedFiles:
             {"body": "chatter"},
             {
                 "body": render_current_plan(
-                    "## Files to Modify\n\n"
-                    "- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
+                    "## Files to Modify\n\n- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
                 )
             },
         ]
