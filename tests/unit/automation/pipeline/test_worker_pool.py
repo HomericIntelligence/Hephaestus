@@ -22,7 +22,6 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
-import hephaestus.automation.pipeline.worker_pool as worker_pool_module
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -53,6 +52,7 @@ from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _confirmed_pytest_failure,
+    _controlled_git_signing_env,
     _hdiutil_create_argv,
     _host_validation_failure_kind,
     _host_verification_command,
@@ -146,7 +146,7 @@ def test_controlled_git_signing_env_reinjects_only_validated_identity(
         return_value=signing,
         create=True,
     ):
-        env = worker_pool_module._controlled_git_signing_env(tmp_path, timeout=60)
+        env = _controlled_git_signing_env(tmp_path, timeout=60)
 
     assert isinstance(env, dict)
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
