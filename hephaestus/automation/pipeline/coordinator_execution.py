@@ -57,6 +57,13 @@ class ExecutionCoordinator(_CoordinatorHost):
 
     def _lane_handoff_capacity(self, item: WorkItem, target: StageName) -> bool:
         """Check destination capacity before source ownership is released."""
+        # FINISHED is a terminal sink, not a working lane: it must never reject
+        # a handoff or a burst of terminalizations would wedge the source drain
+        # (its lease stays active and the drain bails). This is the
+        # #2057 duplicate-collapse path — three copies of one issue terminalize
+        # in a single drain round while the first copy dispatches.
+        if target is StageName.FINISHED:
+            return True
         source_auxiliary = self._is_auxiliary_stage(item.stage)
         target_auxiliary = self._is_auxiliary_stage(target)
         if not source_auxiliary and target_auxiliary:
