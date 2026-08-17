@@ -678,6 +678,65 @@ class TestGate:
         stage.on_job_done(item, JobResult(ok=True, value={"rebased": True}), ctx)
         assert stage.step(item, ctx) == Continue(next_state="ADOPTED")
 
+    def test_successful_rebase_persists_published_head_for_remediation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A remediation turn binds to the post-rebase head, not the reviewed head."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_WAIT")
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "reviewed_pr_head_sha": "a" * 40,
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value={"rebased": True, "head_sha": "b" * 40}),
+            make_ctx(),
+        )
+
+        assert item.payload["_impl_source_revision"] == "b" * 40
+
+    def test_remediation_prefers_persisted_rebase_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The source workspace request uses the current writer revision."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="IMPLEMENT_WAIT")
+        item.branch = "1-auto-impl"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [{"id": "thread-1", "body": "fix it"}],
+                "reviewed_pr_head_sha": "a" * 40,
+                "_impl_source_revision": "b" * 40,
+                "_worktree_cleanup_head_sha": "c" * 40,
+            }
+        )
+        prepared: list[str] = []
+
+        def prepare(*args: Any, **_kwargs: Any) -> SimpleNamespace:
+            revision = str(args[2])
+            prepared.append(revision)
+            return SimpleNamespace(cwd=Path("/tmp/current-writer"), revision=revision)
+
+        manager = SimpleNamespace(prepare=prepare)
+        paths = SimpleNamespace(
+            repo_root="/tmp/repo",
+            worktree="/tmp/repo/worktree",
+            source_workspaces=manager,
+        )
+
+        result = stage.step(item, make_ctx(paths=paths))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.cwd == Path("/tmp/current-writer")
+        assert prepared == ["b" * 40]
+        assert item.payload["_impl_source_revision"] == "b" * 40
+
     def test_rebase_conflict_uses_edit_only_agent_and_separate_budget(
         self,
         make_ctx: Any,
