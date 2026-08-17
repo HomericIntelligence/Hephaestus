@@ -1225,11 +1225,11 @@ def _parse_host_git_signing_config(raw: str) -> dict[str, str] | None:
 
 def _validated_signing_key(value: str) -> Path | None:
     """Resolve an absolute, private, regular SSH signing key path."""
-    signing_key = Path(value).expanduser()
     try:
+        signing_key = Path(value).expanduser()
         resolved_key = signing_key.resolve(strict=True)
         mode = resolved_key.stat().st_mode
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return None
     if (
         not signing_key.is_absolute()

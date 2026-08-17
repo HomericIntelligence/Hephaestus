@@ -1274,6 +1274,9 @@ class ImplementationStage(Stage):
                     item.issue,
                     result.error,
                 )
+                diagnostic = _rebase_failure_diagnostic(result)
+                if diagnostic is not None:
+                    item.payload["rebase_failure_diagnostic"] = diagnostic
                 item.payload["rebase_error"] = True
             return
 
@@ -2128,3 +2131,22 @@ class ImplementationStage(Stage):
             GIT_ERROR_RETRY_CAP,
         )
         return StageOutcome(Disposition.RETRY, note)
+
+
+def _rebase_failure_diagnostic(result: JobResult) -> dict[str, object] | None:
+    """Extract bounded rebase-recovery evidence from a host Git result."""
+    value = result.value
+    if not isinstance(value, dict):
+        return None
+    if value.get("failure_kind") not in {"signing", "continuation"}:
+        return None
+    if value.get("phase") not in {"stage_conflicts", "validate_index", "rebase_continue"}:
+        return None
+    return {
+        "failure_kind": value["failure_kind"],
+        "phase": value["phase"],
+        "returncode": value.get("returncode"),
+        "receipt_error": value.get("receipt_error"),
+        "stdout_tail": result.stdout_tail,
+        "stderr_tail": result.stderr_tail,
+    }

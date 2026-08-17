@@ -65,6 +65,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     _trusted_gh_executable,
     _trusted_git_executable,
     _unsafe_local_git_config_key,
+    _validated_signing_key,
     _verifier_owned_runtime_environment,
 )
 from hephaestus.automation.session_naming import (
@@ -156,6 +157,12 @@ def test_controlled_git_signing_env_reinjects_only_validated_identity(
         env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(5)
     }
     assert injected == {**signing, "commit.gpgsign": "true"}
+
+
+@pytest.mark.parametrize("value", ["~no_such_signing_user/key", "key\x00suffix"])
+def test_validated_signing_key_rejects_malformed_paths(value: str) -> None:
+    """Malformed host signing-key configuration fails closed without a crash."""
+    assert _validated_signing_key(value) is None
 
 
 @pytest.fixture

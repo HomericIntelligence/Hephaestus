@@ -2,6 +2,7 @@ import sys
 from typing import Any, cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
+from hephaestus.utils.git import bounded_git_diagnostic
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
@@ -770,7 +771,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     @staticmethod
     def _job_result_event_fields(result: JobResult) -> dict[str, Any]:
         """Return bounded, output-free job result fields for durable event logs."""
-        fields = {
+        fields: dict[str, Any] = {
             "ok": result.ok,
             "interrupted": result.interrupted,
             "error": CoordinatorRuntime._job_result_error_class(result),
@@ -778,6 +779,20 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         }
         if result.worker_id:
             fields["worker_id"] = result.worker_id
+        value = result.value
+        if (
+            isinstance(value, dict)
+            and value.get("failure_kind") in {"signing", "continuation"}
+            and value.get("phase") in {"stage_conflicts", "validate_index", "rebase_continue"}
+        ):
+            fields["rebase_failure_diagnostic"] = {
+                "failure_kind": value["failure_kind"],
+                "phase": value["phase"],
+                "returncode": value.get("returncode"),
+                "receipt_error": bounded_git_diagnostic(value.get("receipt_error"), limit=500),
+                "stdout_tail": bounded_git_diagnostic(result.stdout_tail, limit=4000),
+                "stderr_tail": bounded_git_diagnostic(result.stderr_tail, limit=4000),
+            }
         return fields
 
     @staticmethod

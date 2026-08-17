@@ -3232,6 +3232,32 @@ class TestDurableEventLog:
         complete = next(record for record in records if record["event"] == "complete")
         assert complete["fields"][-1]["worker_id"] == "hephaestus-pipeline-worker_0"
 
+    def test_job_event_retains_bounded_rebase_failure_diagnostic(self) -> None:
+        """Host-owned, redacted rebase evidence survives in the durable event."""
+        fields = Coordinator._job_result_event_fields(
+            JobResult(
+                ok=False,
+                error="host rebase continuation signing failed",
+                value={
+                    "failure_kind": "signing",
+                    "phase": "rebase_continue",
+                    "returncode": 128,
+                    "receipt_error": "receipt unavailable",
+                },
+                stdout_tail="safe stdout",
+                stderr_tail="safe stderr",
+            )
+        )
+
+        assert fields["rebase_failure_diagnostic"] == {
+            "failure_kind": "signing",
+            "phase": "rebase_continue",
+            "returncode": 128,
+            "receipt_error": "receipt unavailable",
+            "stdout_tail": "safe stdout",
+            "stderr_tail": "safe stderr",
+        }
+
     def test_submit_forwards_claim_context_to_worker_pool(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
