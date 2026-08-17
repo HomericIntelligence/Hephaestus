@@ -3805,6 +3805,263 @@ class TestGitOps:
             timeout=60,
         )
 
+    def test_continue_rebase_recovers_two_real_conflicts_and_publishes(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Sequential real conflicts each yield a receipt before exact publication."""
+        origin = tmp_path / "origin.git"
+        checkout = tmp_path / "checkout"
+        signing_key = tmp_path / "signing-key"
+        subprocess.run(
+            ["git", "init", "--bare", "--quiet", str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                _executable_path("ssh-keygen"),
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(signing_key),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (
+            ("user.name", "Test User"),
+            ("user.email", "test@example.invalid"),
+            ("gpg.format", "ssh"),
+            ("user.signingkey", str(signing_key)),
+            ("commit.gpgsign", "false"),
+        ):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(origin)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        (checkout / "a.txt").write_text("base-a\n", encoding="utf-8")
+        (checkout / "b.txt").write_text("base-b\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "a.txt", "b.txt"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "test: add base files"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "push", "-u", "origin", "main"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "switch", "-c", "7-auto-impl"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (checkout / "a.txt").write_text("topic-a\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "fix: change a"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (checkout / "b.txt").write_text("topic-b\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "fix: change b"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "push", "-u", "origin", "7-auto-impl"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        expected_remote_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        subprocess.run(
+            ["git", "switch", "main"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (checkout / "a.txt").write_text("main-a\n", encoding="utf-8")
+        (checkout / "b.txt").write_text("main-b\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "test: change base files"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "switch", "7-auto-impl"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        signing = {
+            "user.name": "Test User",
+            "user.email": "test@example.invalid",
+            "gpg.format": "ssh",
+            "user.signingkey": str(signing_key),
+        }
+        rebase_job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": checkout,
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": expected_remote_sha,
+            },
+        )
+
+        with patch(f"{_WP}._read_host_git_signing_config", return_value=signing):
+            first = pool._git_rebase(rebase_job)
+            assert first.ok is False
+            assert first.error == "mechanical rebase hit conflicts; resolution required"
+            assert isinstance(first.value, dict)
+            assert first.value["conflict_paths"] == ("a.txt",)
+            assert first.value["base_sha"] == base_sha
+
+            (checkout / "a.txt").write_text("resolved-a\n", encoding="utf-8")
+            first_continuation = GitJob(
+                repo="test/repo",
+                op="continue_rebase",
+                timeout_s=60,
+                kwargs={
+                    "cwd": checkout,
+                    "remote": "origin",
+                    "branch": "7-auto-impl",
+                    **{key: value for key, value in first.value.items() if key != "rebased"},
+                },
+            )
+            second = pool._git_continue_rebase(first_continuation)
+            assert second.ok is False
+            assert second.error == (
+                "rebase conflict resolution required: additional conflicts found"
+            )
+            assert isinstance(second.value, dict)
+            assert second.value["conflict_paths"] == ("b.txt",)
+            assert second.value["base_sha"] == base_sha
+
+            (checkout / "b.txt").write_text("resolved-b\n", encoding="utf-8")
+            second_continuation = GitJob(
+                repo="test/repo",
+                op="continue_rebase",
+                timeout_s=60,
+                kwargs={
+                    "cwd": checkout,
+                    "remote": "origin",
+                    "branch": "7-auto-impl",
+                    **{key: value for key, value in second.value.items() if key != "rebased"},
+                },
+            )
+            completed = pool._git_continue_rebase(second_continuation)
+
+        assert completed.ok is True
+        assert isinstance(completed.value, dict)
+        assert completed.value["rebased"] is True
+        assert completed.value["published"] is True
+        published_sha = str(completed.value["head_sha"])
+        remote_sha = subprocess.run(
+            ["git", "ls-remote", "origin", "refs/heads/7-auto-impl"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()[0]
+        assert remote_sha == published_sha
+        subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base_sha, published_sha],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for commit in subprocess.run(
+            ["git", "rev-list", f"{base_sha}..{published_sha}"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split():
+            raw_commit = subprocess.run(
+                ["git", "cat-file", "-p", commit],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            assert "\ngpgsig " in f"\n{raw_commit}"
+            assert "Signed-off-by: Test User <test@example.invalid>" in raw_commit
+
     def test_writer_rebase_keeps_exact_head_when_current_base_is_already_ancestor(
         self,
         pool: WorkerPool,
