@@ -1065,6 +1065,20 @@ def test_fixture_commit_evidence_requires_bound_negative_behavior(
     with pytest.raises(ValueError, match="negative-size rejection"):
         module._fixture_commit_evidence(tmp_path, head)
 
+    outputs["test"] = (
+        "def test_negative():\n"
+        "    with pytest.raises(ValueError):\n"
+        "        human_readable_size(-1)\n"
+    )
+    outputs["helper"] = (
+        "def human_readable_size(size_bytes: int) -> str:\n"
+        "    if 1 < 2:\n"
+        "        raise ValueError('unrelated')\n"
+        "    return str(size_bytes)\n"
+    )
+    with pytest.raises(ValueError, match="negative-size rejection"):
+        module._fixture_commit_evidence(tmp_path, head)
+
 
 def test_evidence_status_requires_full_host_receipt_verification(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
