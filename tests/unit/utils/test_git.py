@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import hephaestus.utils as utils_pkg
 import hephaestus.utils.git as shared_git
+from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 
@@ -17,7 +18,7 @@ def test_bounded_git_diagnostic_redacts_credentials_before_truncation() -> None:
         "earlier output " * 20 + "https://operator:credential-value@example.invalid/repository.git"
     )
 
-    result = shared_git.bounded_git_diagnostic(diagnostic, limit=80)
+    result = bounded_git_diagnostic(diagnostic, limit=80)
 
     assert len(result) <= 80
     assert "credential-value" not in result

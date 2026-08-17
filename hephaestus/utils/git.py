@@ -7,10 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from hephaestus.diagnostics import (
-    bounded_git_diagnostic as bounded_git_diagnostic,
-    redact_git_diagnostic as _redact_git_diagnostics,
-)
+from hephaestus.diagnostics import redact_git_diagnostic as _redact_git_diagnostics
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT, run_subprocess
 from hephaestus.utils.retry import is_network_error, retry_with_backoff
 
