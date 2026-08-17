@@ -13,6 +13,7 @@ from hephaestus.automation.git_utils import (
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.helpers import get_repo_root
+from hephaestus.utils.worktree_identity import is_expected_managed_worktree_path
 
 from .git_jobs import GitJob
 from .job_results import JobResult
@@ -28,29 +29,11 @@ def _is_full_commit_sha(value: object) -> bool:
 
 def _is_expected_worktree_path(path: Path, *, repo_root: Path, issue_number: int) -> bool:
     """Bind destructive cleanup to one managed issue worktree identity."""
-    if issue_number <= 0:
-        return False
-    try:
-        resolved = path.resolve()
-        root = repo_root.resolve()
-    except OSError:
-        return False
-    issue_name = f"issue-{issue_number}"
-    direct_prefix = f"{issue_name}-direct-"
-    review_name = f"review-pr-{issue_number}"
-    review_generation = resolved.name.removeprefix(f"{review_name}-")
-    is_review_path = resolved.name == review_name or (
-        resolved.name.startswith(f"{review_name}-")
-        and review_generation.isdecimal()
-        and int(review_generation) > 0
+    return is_expected_managed_worktree_path(
+        path,
+        repo_root=repo_root,
+        issue_number=issue_number,
     )
-    if (
-        resolved.name != issue_name
-        and not resolved.name.startswith(direct_prefix)
-        and not is_review_path
-    ):
-        return False
-    return resolved.parent in {root, root / "build" / ".worktrees"}
 
 
 def _worktree_record(

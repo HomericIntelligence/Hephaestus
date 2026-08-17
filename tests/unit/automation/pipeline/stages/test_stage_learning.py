@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation.arming_state import LearningJournalStore
@@ -19,7 +20,7 @@ from hephaestus.automation.pipeline.stages import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.base import Disposition
-from hephaestus.automation.pipeline.work_item import LearningIntent
+from hephaestus.automation.pipeline.work_item import ItemResult, LearningIntent
 from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -68,6 +69,71 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     assert request.job.request.kind == "learn"
     record = journal.load(item.learning_intents[0].key)
     assert record is not None and record["status"] == "claimed"
+
+
+def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restored direct item retains enough revision evidence for learning."""
+    revision = "a" * 40
+    prepared: list[str] = []
+
+    class SourceWorkspaces:
+        def prepare(
+            self,
+            _item_number: int,
+            _lane: Any,
+            target: str,
+            *,
+            branch: str | None = None,
+        ) -> Any:
+            del branch
+            prepared.append(target)
+            return SimpleNamespace(cwd=tmp_path, revision=target)
+
+    journal = LearningJournalStore(lambda: tmp_path)
+    paths = SimpleNamespace(
+        repo_root=tmp_path,
+        worktree=tmp_path,
+        source_workspaces=SourceWorkspaces(),
+    )
+    ctx = make_ctx(
+        learning_journal=journal,
+        github=_approved_github(),
+        paths=paths,
+    )
+    original = make_work_item(issue=2705, state="ENTER")
+    original.branch = "2705-auto-impl"
+    original.payload["_direct_scope_base_sha"] = revision
+    intent = LearningIntent.approved_plan(
+        repo=original.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint=_APPROVED_FINGERPRINT,
+    )
+    original.learning_intents.append(intent)
+    original.learning_resume_stage = StageName.IMPLEMENTATION
+    original.compact_for_post_processing(
+        ItemResult(
+            passed=False,
+            reason="restore learning",
+            final_stage=StageName.IMPLEMENTATION,
+        )
+    )
+    record = original.learning_journal_identity(intent)
+    item = make_work_item(issue=2705, state="ENTER")
+    item.branch = original.branch
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.IMPLEMENTATION
+    assert item.restore_post_processing(record)
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    assert prepared == [revision]
 
 
 def _claimed_learning(
