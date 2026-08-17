@@ -162,6 +162,12 @@ class SourceWorkspaceManager:
                 raise SourceWorkspaceError(f"source workspace is dirty and preserved: {path}")
             desired_detached = lane is SourceLane.REVIEW or branch is None
             physical_revision = self._head_revision(path) if path.exists() else None
+            physical_branch = self._head_branch(path) if path.exists() else None
+            physical_checkout_matches = (
+                physical_branch is None
+                if desired_detached
+                else physical_branch == f"refs/heads/{branch}"
+            )
             can_reuse = (
                 old is not None
                 and path.exists()
@@ -170,6 +176,7 @@ class SourceWorkspaceManager:
                 and physical_revision == target
                 and old.detached == desired_detached
                 and old.branch == branch
+                and physical_checkout_matches
             )
             generation = (
                 old.generation
@@ -185,6 +192,7 @@ class SourceWorkspaceManager:
                 and old.path.resolve() == path.resolve()
                 and old.detached == desired_detached
                 and old.branch == branch
+                and physical_checkout_matches
             )
             if not can_reuse and not path_already_at_target:
                 self._replace_worktree(path, target, branch=None if desired_detached else branch)
@@ -323,6 +331,17 @@ class SourceWorkspaceManager:
         if result.returncode:
             raise SourceWorkspaceError(f"cannot inspect source workspace revision: {path}")
         return result.stdout.strip()
+
+    @staticmethod
+    def _head_branch(path: Path) -> str | None:
+        """Return the physical local branch ref, or ``None`` for detached HEAD."""
+        result = _git(path, "symbolic-ref", "-q", "HEAD", check=False)
+        if result.returncode == 1:
+            return None
+        branch = result.stdout.strip()
+        if result.returncode or not branch.startswith("refs/heads/"):
+            raise SourceWorkspaceError(f"cannot inspect source workspace branch: {path}")
+        return branch
 
     def _binding(self, receipt: SourceWorkspaceReceipt) -> WorkspaceBinding:
         return WorkspaceBinding.source(

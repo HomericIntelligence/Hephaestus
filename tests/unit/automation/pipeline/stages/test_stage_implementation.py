@@ -712,13 +712,17 @@ class TestGate:
                 "remediation_threads": [{"id": "thread-1", "body": "fix it"}],
                 "reviewed_pr_head_sha": "a" * 40,
                 "_impl_source_revision": "b" * 40,
+                "_worktree_cleanup_head_sha": "c" * 40,
             }
         )
-        manager = SimpleNamespace()
-        manager.prepare = lambda *_args, **kwargs: SimpleNamespace(
-            cwd=Path("/tmp/current-writer"),
-            revision=kwargs.get("revision", _args[2]),
-        )
+        prepared: list[str] = []
+
+        def prepare(*args: Any, **_kwargs: Any) -> SimpleNamespace:
+            revision = str(args[2])
+            prepared.append(revision)
+            return SimpleNamespace(cwd=Path("/tmp/current-writer"), revision=revision)
+
+        manager = SimpleNamespace(prepare=prepare)
         paths = SimpleNamespace(
             repo_root="/tmp/repo",
             worktree="/tmp/repo/worktree",
@@ -730,6 +734,7 @@ class TestGate:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)
         assert result.job.cwd == Path("/tmp/current-writer")
+        assert prepared == ["b" * 40]
         assert item.payload["_impl_source_revision"] == "b" * 40
 
     def test_rebase_conflict_uses_edit_only_agent_and_separate_budget(

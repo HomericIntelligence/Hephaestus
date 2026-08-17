@@ -787,8 +787,8 @@ class ImplementationStage(Stage):
                 ctx,
                 SourceLane.IMPLEMENTATION,
                 revision=str(
-                    item.payload.get("_worktree_cleanup_head_sha")
-                    or item.payload.get("_impl_source_revision")
+                    item.payload.get("_impl_source_revision")
+                    or item.payload.get("_worktree_cleanup_head_sha")
                     or item.payload.get("reviewed_pr_head_sha")
                     or ""
                 ),

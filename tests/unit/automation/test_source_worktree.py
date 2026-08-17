@@ -90,6 +90,42 @@ def test_review_rebinds_when_receipt_revision_does_not_match_physical_head(
     assert _git(rebound.cwd, "rev-parse", "HEAD") == second
 
 
+def test_review_rebinds_when_physical_checkout_is_attached(tmp_path: Path) -> None:
+    """A review receipt cannot hide an attached physical checkout."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    original = manager.prepare(9, SourceLane.REVIEW, second)
+    _git(original.cwd, "switch", "-c", "wrong-review-branch")
+
+    rebound = manager.prepare(9, SourceLane.REVIEW, second)
+
+    assert rebound.generation == original.generation + 1
+    assert _git(rebound.cwd, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+
+
+def test_implementation_rebinds_when_physical_branch_is_wrong(tmp_path: Path) -> None:
+    """An attached lane is reusable only on its expected physical branch."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    original = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="expected-implementation-branch",
+    )
+    _git(original.cwd, "switch", "-c", "wrong-implementation-branch")
+
+    rebound = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="expected-implementation-branch",
+    )
+
+    assert rebound.generation == original.generation + 1
+    assert _git(rebound.cwd, "symbolic-ref", "HEAD") == "refs/heads/expected-implementation-branch"
+
+
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
     """A review lane created with the current deterministic name is removable."""
     repo, _, second = _repository(tmp_path)

@@ -20,7 +20,7 @@ from hephaestus.automation.pipeline.stages import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.base import Disposition
-from hephaestus.automation.pipeline.work_item import LearningIntent
+from hephaestus.automation.pipeline.work_item import ItemResult, LearningIntent
 from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -102,18 +102,30 @@ def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
         github=_approved_github(),
         paths=paths,
     )
-    item = make_work_item(issue=2705, state="ENTER")
-    item.branch = "2705-auto-impl"
-    item.payload["_direct_scope_base_sha"] = revision
-    item.learning_intents.append(
-        LearningIntent.approved_plan(
-            repo=item.repo,
-            issue=2705,
-            plan_revision=8,
-            plan_fingerprint=_APPROVED_FINGERPRINT,
+    original = make_work_item(issue=2705, state="ENTER")
+    original.branch = "2705-auto-impl"
+    original.payload["_direct_scope_base_sha"] = revision
+    intent = LearningIntent.approved_plan(
+        repo=original.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint=_APPROVED_FINGERPRINT,
+    )
+    original.learning_intents.append(intent)
+    original.learning_resume_stage = StageName.IMPLEMENTATION
+    original.compact_for_post_processing(
+        ItemResult(
+            passed=False,
+            reason="restore learning",
+            final_stage=StageName.IMPLEMENTATION,
         )
     )
+    record = original.learning_journal_identity(intent)
+    item = make_work_item(issue=2705, state="ENTER")
+    item.branch = original.branch
+    item.learning_intents.append(intent)
     item.learning_resume_stage = StageName.IMPLEMENTATION
+    assert item.restore_post_processing(record)
     stage = LearningStage()
     stage.on_enter(item, ctx)
     item.state = "CLAIM"
