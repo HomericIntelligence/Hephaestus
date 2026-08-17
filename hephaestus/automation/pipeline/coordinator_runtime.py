@@ -2,7 +2,7 @@ import sys
 from typing import Any, cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
-from hephaestus.utils.git import bounded_git_diagnostic
+from hephaestus.diagnostics import bounded_git_diagnostic
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator

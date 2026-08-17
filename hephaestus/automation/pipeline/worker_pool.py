@@ -78,13 +78,13 @@ from hephaestus.automation.worktree_manager import (
     BranchWorktreeOwnedError,
     WorktreeManager,
 )
+from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
     resilient_call,
 )
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
-from hephaestus.utils.git import bounded_git_diagnostic
 from hephaestus.utils.helpers import get_repo_root
 
 logger = logging.getLogger(__name__)
