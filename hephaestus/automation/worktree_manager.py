@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.worktree_identity import source_worktree_name
 
 from .git_utils import get_repo_root, is_clean_working_tree, rebase_worktree_onto, run
 
@@ -333,14 +334,14 @@ class WorktreeManager:
             if source_lane == "review" and not isolated:
                 raise RuntimeError("review source lane must be isolated")
             isolated_key = (
-                f"auto-{issue_number}-review"
+                source_worktree_name(issue_number, "review")
                 if source_lane == "review"
                 else f"review-pr-{issue_number}"
             )
             if isolated_generation and source_lane != "review":
                 isolated_key = f"{isolated_key}-{isolated_generation}"
             direct_key = (
-                f"auto-{issue_number}-impl"
+                source_worktree_name(issue_number, "impl")
                 if source_lane == "impl"
                 else f"{issue_number}-direct-{direct_worktree_nonce}"
                 if direct_worktree_nonce is not None
@@ -445,7 +446,7 @@ class WorktreeManager:
         """Create or cleanly rebind the single detached review lane."""
         if refresh_base:
             self.refresh_base_branch(timeout=timeout)
-        key = f"auto-{issue_number}-review"
+        key = source_worktree_name(issue_number, "review")
         path = self.base_dir / key
         try:
             with file_lock(self._git_metadata_lock_path()):

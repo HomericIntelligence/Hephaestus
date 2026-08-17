@@ -20,6 +20,7 @@ from hephaestus.agents.workspace import (
 from hephaestus.automation.worktree_manager import WorktreeManager
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
+from hephaestus.utils.worktree_identity import source_worktree_name
 
 
 class SourceWorkspaceError(RuntimeError):
@@ -132,7 +133,7 @@ class SourceWorkspaceManager:
 
     def path_for(self, item_number: int, lane: SourceLane) -> Path:
         """Return the deterministic physical path for a lane."""
-        return self.base_dir / f"auto-{item_number}-{lane.value}"
+        return self.base_dir / source_worktree_name(item_number, lane.value)
 
     def ownership_key(self, item_number: int, lane: SourceLane) -> str:
         """Return the repository-qualified internal ownership key."""
@@ -160,11 +161,13 @@ class SourceWorkspaceManager:
             if path.exists() and self._is_dirty(path):
                 raise SourceWorkspaceError(f"source workspace is dirty and preserved: {path}")
             desired_detached = lane is SourceLane.REVIEW or branch is None
+            physical_revision = self._head_revision(path) if path.exists() else None
             can_reuse = (
                 old is not None
                 and path.exists()
                 and old.path.resolve() == path.resolve()
                 and old.revision == target
+                and physical_revision == target
                 and old.detached == desired_detached
                 and old.branch == branch
             )
@@ -175,7 +178,15 @@ class SourceWorkspaceManager:
                 if old
                 else 1
             )
-            if not can_reuse:
+            path_already_at_target = (
+                path.exists()
+                and physical_revision == target
+                and old is not None
+                and old.path.resolve() == path.resolve()
+                and old.detached == desired_detached
+                and old.branch == branch
+            )
+            if not can_reuse and not path_already_at_target:
                 self._replace_worktree(path, target, branch=None if desired_detached else branch)
             receipt = SourceWorkspaceReceipt(
                 repository=self.repository,
@@ -304,6 +315,14 @@ class SourceWorkspaceManager:
         if result.returncode:
             raise SourceWorkspaceError(f"cannot inspect source workspace: {path}")
         return bool(result.stdout)
+
+    @staticmethod
+    def _head_revision(path: Path) -> str:
+        """Return the physical worktree HEAD or fail before any replacement."""
+        result = _git(path, "rev-parse", "HEAD", check=False)
+        if result.returncode:
+            raise SourceWorkspaceError(f"cannot inspect source workspace revision: {path}")
+        return result.stdout.strip()
 
     def _binding(self, receipt: SourceWorkspaceReceipt) -> WorkspaceBinding:
         return WorkspaceBinding.source(

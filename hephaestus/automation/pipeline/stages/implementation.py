@@ -787,9 +787,9 @@ class ImplementationStage(Stage):
                 ctx,
                 SourceLane.IMPLEMENTATION,
                 revision=str(
-                    item.payload.get("reviewed_pr_head_sha")
-                    or item.payload.get("_worktree_cleanup_head_sha")
+                    item.payload.get("_worktree_cleanup_head_sha")
                     or item.payload.get("_impl_source_revision")
+                    or item.payload.get("reviewed_pr_head_sha")
                     or ""
                 ),
                 branch=item.branch or None,
@@ -1249,6 +1249,9 @@ class ImplementationStage(Stage):
                 if value.get("head_drift"):
                     item.payload[_REBASE_HEAD_DRIFT] = True
                 else:
+                    head_sha = value.get("head_sha")
+                    if is_full_commit_sha(head_sha):
+                        item.payload["_impl_source_revision"] = head_sha
                     item.payload["rebase_complete"] = True
             elif result.error == "mechanical rebase hit conflicts; resolution required":
                 logger.warning(
@@ -1265,6 +1268,10 @@ class ImplementationStage(Stage):
 
         if item.state == REBASE_CONTINUE_WAIT:
             if result.ok:
+                value = result.value if isinstance(result.value, dict) else {}
+                head_sha = value.get("head_sha")
+                if is_full_commit_sha(head_sha):
+                    item.payload["_impl_source_revision"] = head_sha
                 item.payload["rebase_complete"] = True
             elif (result.error or "").startswith("rebase conflict resolution required"):
                 self._record_rebase_conflict(item, result)

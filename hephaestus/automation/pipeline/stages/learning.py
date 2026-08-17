@@ -84,6 +84,7 @@ class LearningStage:
             item.payload.get("_worktree_cleanup_head_sha")
             or item.payload.get("_impl_source_revision")
             or item.payload.get("_synced_default_branch_sha")
+            or item.payload.get("_direct_scope_base_sha")
             or ""
         )
         workspace = source_workspace_binding(

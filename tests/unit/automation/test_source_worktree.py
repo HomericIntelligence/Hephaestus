@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.pipeline.git_cleanup import run_cleanup_job
+from hephaestus.automation.pipeline.git_jobs import GitJob
 from hephaestus.automation.source_worktree import (
     SourceWorkspaceError,
     SourceWorkspaceManager,
@@ -71,6 +73,46 @@ def test_review_rebinds_same_path_to_exact_revision(tmp_path: Path) -> None:
     assert rebound.generation == original.generation + 1
     assert _git(rebound.cwd, "rev-parse", "HEAD") == second
     assert _git(rebound.cwd, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+
+
+def test_review_rebinds_when_receipt_revision_does_not_match_physical_head(
+    tmp_path: Path,
+) -> None:
+    """A clean detached lane is reusable only after proving its physical HEAD."""
+    repo, first, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    original = manager.prepare(9, SourceLane.REVIEW, second)
+    _git(original.cwd, "reset", "--hard", first)
+
+    rebound = manager.prepare(9, SourceLane.REVIEW, second)
+
+    assert rebound.generation == original.generation + 1
+    assert _git(rebound.cwd, "rev-parse", "HEAD") == second
+
+
+def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
+    """A review lane created with the current deterministic name is removable."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    binding = manager.prepare(7, SourceLane.REVIEW, second)
+
+    result = run_cleanup_job(
+        GitJob(
+            repo="example/project",
+            op="remove_worktree",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(binding.cwd),
+                "repo_root": str(repo),
+                "issue_number": 7,
+                "expected_head": second,
+                "expected_detached": True,
+            },
+        )
+    )
+
+    assert result.ok is True
+    assert not binding.cwd.exists()
 
 
 def test_dirty_lane_is_preserved_and_rejected(tmp_path: Path) -> None:

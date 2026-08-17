@@ -14,6 +14,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
+from hephaestus.utils.worktree_identity import source_worktree_name
+
 
 class WorkspaceBindingError(RuntimeError):
     """Raised when a workspace binding is malformed or no longer valid."""
@@ -228,7 +230,7 @@ def validate_workspace_binding(binding: WorkspaceBinding, *, allowed_tools: str 
         raise WorkspaceBindingError("source workspace binding is incomplete")
     if canonical == reusable_root.resolve(strict=True):
         raise WorkspaceBindingError("source-reading agent cannot use the reusable repository root")
-    expected_name = f"auto-{item_number}-{lane.value}"
+    expected_name = source_worktree_name(item_number, lane.value)
     if canonical.name != expected_name:
         raise WorkspaceBindingError(
             f"source workspace path must end in {expected_name!r}, got {canonical.name!r}"

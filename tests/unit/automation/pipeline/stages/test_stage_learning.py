@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from hephaestus.automation.arming_state import LearningJournalStore
@@ -68,6 +69,59 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     assert request.job.request.kind == "learn"
     record = journal.load(item.learning_intents[0].key)
     assert record is not None and record["status"] == "claimed"
+
+
+def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A restored direct item retains enough revision evidence for learning."""
+    revision = "a" * 40
+    prepared: list[str] = []
+
+    class SourceWorkspaces:
+        def prepare(
+            self,
+            _item_number: int,
+            _lane: Any,
+            target: str,
+            *,
+            branch: str | None = None,
+        ) -> Any:
+            del branch
+            prepared.append(target)
+            return SimpleNamespace(cwd=tmp_path, revision=target)
+
+    journal = LearningJournalStore(lambda: tmp_path)
+    paths = SimpleNamespace(
+        repo_root=tmp_path,
+        worktree=tmp_path,
+        source_workspaces=SourceWorkspaces(),
+    )
+    ctx = make_ctx(
+        learning_journal=journal,
+        github=_approved_github(),
+        paths=paths,
+    )
+    item = make_work_item(issue=2705, state="ENTER")
+    item.branch = "2705-auto-impl"
+    item.payload["_direct_scope_base_sha"] = revision
+    item.learning_intents.append(
+        LearningIntent.approved_plan(
+            repo=item.repo,
+            issue=2705,
+            plan_revision=8,
+            plan_fingerprint=_APPROVED_FINGERPRINT,
+        )
+    )
+    item.learning_resume_stage = StageName.IMPLEMENTATION
+    stage = LearningStage()
+    stage.on_enter(item, ctx)
+    item.state = "CLAIM"
+
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    assert prepared == [revision]
 
 
 def _claimed_learning(
