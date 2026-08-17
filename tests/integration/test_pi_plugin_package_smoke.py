@@ -60,7 +60,8 @@ def test_catalog_pinned_packages_install_and_preflight(
     pi_dir = Path(env["PI_CODING_AGENT_DIR"])
     for package in load_pi_package_catalog().packages:
         if package.kind == "npm":
-            assert (pi_dir / "npm" / "node_modules" / package.identity / "package.json").is_file(), (
+            pkg_manifest = pi_dir / "npm" / "node_modules" / package.identity / "package.json"
+            assert pkg_manifest.is_file(), (
                 f"npm package {package.identity} missing in Pi scoped agent dir {pi_dir}"
             )
 
