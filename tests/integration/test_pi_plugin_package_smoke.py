@@ -21,10 +21,8 @@ def test_catalog_pinned_packages_install_and_preflight(
     if os.environ.get("HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE") != "1":
         pytest.skip("set HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE=1 for live package evidence")
     command = shutil.which("hephaestus-install-pi-plugins")
-    npm = shutil.which("npm")
     assert command is not None, "installed console script is required"
     assert shutil.which("pi") is not None, "catalog-pinned Pi CLI is required"
-    assert npm is not None, "npm is required for global package-layout evidence"
     cwd = tmp_path / "repo"
     cwd.mkdir()
     env = dict(os.environ)
@@ -53,23 +51,20 @@ def test_catalog_pinned_packages_install_and_preflight(
     assert payload["ready"] is True
     assert payload["status"] == "ready"
 
-    npm_root_result = subprocess.run(
-        [npm, "root", "-g"],
-        cwd=cwd,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    assert npm_root_result.returncode == 0, npm_root_result.stderr
-    npm_root = Path(npm_root_result.stdout.strip())
-    assert npm_root.is_absolute(), npm_root_result.stdout
+    # npm-kind packages install into the Pi scoped agent dir, not the system
+    # npm global root: the install plan runs `pi install <spec>` (#2764), which
+    # honors PI_CODING_AGENT_DIR. inspect_pi_package_inventory checks exactly
+    # this layout (scope_root/npm/node_modules), and the install report above
+    # already asserts ready=True. Assert the same canonical placement here so
+    # the smoke test and the inventory check can never drift.
+    pi_dir = Path(env["PI_CODING_AGENT_DIR"])
     for package in load_pi_package_catalog().packages:
         if package.kind == "npm":
-            assert (npm_root / package.identity / "package.json").is_file()
+            pkg_manifest = pi_dir / "npm" / "node_modules" / package.identity / "package.json"
+            assert pkg_manifest.is_file(), (
+                f"npm package {package.identity} missing in Pi scoped agent dir {pi_dir}"
+            )
 
-    pi_dir = Path(env["PI_CODING_AGENT_DIR"])
     sentinel = tmp_path / "compatible-sentinel-loaded"
     extension_dir = pi_dir / "extensions"
     extension_dir.mkdir(parents=True)

@@ -1794,6 +1794,12 @@ class TestImplementationAdmission:
         the whole org-wide run.
         """
         coordinator, _pool, _ = make_coordinator(tmp_path, monkeypatch, max_workers=2)
+        # No real plan comment exists for the fake issue; fail open (None) so
+        # the overlap selector dispatches without a GitHub fetch (#1952).
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            lambda issue, **_kwargs: None,
+        )
         ran: list[int] = []
 
         class RecordingStage(StubStage):
@@ -1842,6 +1848,12 @@ class TestImplementationAdmission:
         coordinator, _pool, _ = make_coordinator(
             tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
         )
+        # No real plan comments exist for the fake issues; fail open (None) so
+        # the overlap selector dispatches without a GitHub fetch (#2057).
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            lambda issue, **_kwargs: None,
+        )
         ran: list[str] = []
 
         class RecordingStage(StubStage):
@@ -1871,6 +1883,12 @@ class TestImplementationAdmission:
         """3+ copies of one issue: first dispatches, ALL later copies terminalize (#2057)."""
         coordinator, _pool, _ = make_coordinator(
             tmp_path, monkeypatch, max_workers=2, parallel_repos=2
+        )
+        # No real plan comment exists for the fake issue; fail open (None) so
+        # the overlap selector dispatches without a GitHub fetch (#2057).
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline.coordinator._admission._fetch_planned_files",
+            lambda issue, **_kwargs: None,
         )
         ran: list[int] = []
 
