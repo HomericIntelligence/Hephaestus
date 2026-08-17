@@ -85,6 +85,7 @@ from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
+_TEST_AGENT_CWD = Path(__file__).resolve().parents[4] / "build" / "worker-pool-tests"
 
 
 def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) -> None:
@@ -281,13 +282,14 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     Failing-path tests pass a unique ``model`` to keep their invocation
     details distinct while the runtime circuit breaker remains shared.
     """
+    _TEST_AGENT_CWD.mkdir(parents=True, exist_ok=True)
     defaults: dict[str, object] = {
         "repo": "test/repo",
         "issue": 123,
         "agent": "claude",
         "model": model,
         "prompt_builder": lambda: "test prompt",
-        "cwd": Path("/tmp"),
+        "cwd": _TEST_AGENT_CWD,
         "timeout_s": 60,
         "descr": "test job",
     }
@@ -6532,6 +6534,7 @@ class TestShutdownReapsSubprocess:
         pool: WorkerPool,
         completion_q: CompletionQueue,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """A registered Pi adapter exposes its child to worker-pool cleanup."""
         sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -6596,7 +6599,7 @@ class TestShutdownReapsSubprocess:
             model="reap-test",
             timeout_s=60,
             session_agent="implementer",
-            cwd=Path.cwd(),
+            cwd=tmp_path,
             execution_request=request,
         )
 
