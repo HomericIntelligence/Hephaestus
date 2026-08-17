@@ -46,6 +46,8 @@ _AUTOMATION_PROMPT_PREFIXES = (
     ".claude-followup-",
 )
 _GIT_METADATA_LOCK_NAME = ".hephaestus-git-metadata.lock"
+_REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
+_MAX_GIT_REF_LENGTH = 1024
 
 
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
@@ -1254,7 +1256,100 @@ class WorktreeManager:
         for wt in worktrees:
             if wt.get("branch") == target_ref:
                 return Path(wt["path"])
+        detached = [wt for wt in worktrees if "branch" not in wt]
+        if not detached:
+            return None
+
+        common_git_dir = self._common_git_dir(timeout=timeout)
+        for wt in detached:
+            path_value = wt.get("path")
+            if not path_value:
+                raise RuntimeError("Detached worktree record has no path")
+            worktree_path = Path(path_value)
+            rebase_ref = self._detached_rebase_head_ref(
+                worktree_path,
+                common_git_dir=common_git_dir,
+                timeout=timeout,
+            )
+            if rebase_ref == target_ref:
+                return worktree_path
         return None
+
+    def _common_git_dir(self, *, timeout: int | None = None) -> Path:
+        """Return the repository's resolved common Git metadata directory."""
+        result = run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=False,
+            log_errors=False,
+            **_timeout_kw(timeout),
+        )
+        raw_path = (result.stdout or "").strip()
+        if result.returncode != 0 or not raw_path or "\n" in raw_path:
+            raise RuntimeError("Cannot safely resolve common Git metadata directory")
+        try:
+            common_git_dir = Path(raw_path).resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError("Cannot safely resolve common Git metadata directory") from exc
+        if not common_git_dir.is_dir():
+            raise RuntimeError("Common Git metadata path is not a directory")
+        return common_git_dir
+
+    def _detached_rebase_head_ref(
+        self,
+        worktree_path: Path,
+        *,
+        common_git_dir: Path,
+        timeout: int | None = None,
+    ) -> str | None:
+        """Return a detached worktree's active rebase branch, if present."""
+        if not worktree_path.is_dir():
+            raise RuntimeError(f"Detached worktree path is unavailable: {worktree_path}")
+        discovered: set[str] = set()
+        for state_dir in _REBASE_STATE_DIRS:
+            result = run(
+                [
+                    "git",
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    f"{state_dir}/head-name",
+                ],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                log_errors=False,
+                **_timeout_kw(timeout),
+            )
+            raw_path = (result.stdout or "").strip()
+            if result.returncode != 0 or not raw_path or "\n" in raw_path:
+                raise RuntimeError(f"Cannot inspect detached worktree metadata: {worktree_path}")
+            metadata_path = Path(raw_path)
+            if metadata_path.is_symlink():
+                raise RuntimeError(f"Rebase metadata path is a symlink: {metadata_path}")
+            resolved_path = metadata_path.resolve(strict=False)
+            if not resolved_path.is_relative_to(common_git_dir):
+                raise RuntimeError(f"Rebase metadata escapes common Git directory: {metadata_path}")
+            if not resolved_path.exists():
+                continue
+            if not resolved_path.is_file() or resolved_path.stat().st_size > _MAX_GIT_REF_LENGTH:
+                raise RuntimeError(f"Rebase branch metadata is invalid: {metadata_path}")
+            raw_ref = resolved_path.read_text(encoding="utf-8")
+            ref = raw_ref.removesuffix("\n")
+            if (
+                not ref.startswith("refs/heads/")
+                or not ref.removeprefix("refs/heads/")
+                or len(ref) > _MAX_GIT_REF_LENGTH
+                or any(ord(character) < 32 or ord(character) == 127 for character in ref)
+            ):
+                raise RuntimeError(f"Rebase branch metadata is invalid: {metadata_path}")
+            discovered.add(ref)
+        if len(discovered) > 1:
+            raise RuntimeError(
+                f"Detached worktree has conflicting rebase metadata: {worktree_path}"
+            )
+        return next(iter(discovered), None)
 
     def list_worktrees(
         self,
