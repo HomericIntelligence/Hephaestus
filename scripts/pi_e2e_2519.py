@@ -1053,7 +1053,14 @@ def _fixture_commit_evidence(repo_root: Path, head_sha: str) -> dict[str, Any]:
     rejects_negative = function is not None and any(
         isinstance(node, ast.If)
         and isinstance(node.test, ast.Compare)
-        and any(isinstance(op, ast.Lt) for op in node.test.ops)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "size_bytes"
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.Lt)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], ast.Constant)
+        and type(node.test.comparators[0].value) is int
+        and node.test.comparators[0].value == 0
         and any(
             isinstance(child, ast.Raise)
             and isinstance(child.exc, ast.Call)
