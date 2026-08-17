@@ -212,7 +212,11 @@ def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
 def fetch_all_issue_comments_graphql(
     issue_numbers: list[int],
 ) -> dict[int, list[dict[str, Any]]]:
-    """Batch-fetch comments for multiple issues in one aliased GraphQL call.
+    """Batch-fetch bounded comment context for legacy review-state consumers.
+
+    This helper may return empty lists after a failed or capped GraphQL lookup.
+    Plan discovery must use ``fetch_issue_comments_metadata`` and the tri-state
+    discovery contract instead.
 
     Mirrors the aliased batching pattern used by
     :func:`hephaestus.automation.github_api._fetch_batch_states` for issue
@@ -222,11 +226,9 @@ def fetch_all_issue_comments_graphql(
     reversed to chronological order so downstream "last match wins" semantics
     (e.g. :func:`latest_verdict`) work correctly.
 
-    This function is the shared implementation backing both:
-
-    - :class:`hephaestus.automation.planner_state.PlannerStateManager.has_existing_plan`
-      (plan-detection during the planning phase), and
-    - :func:`is_plan_review_go` (review-gate during the review phase).
+    This function remains the shared implementation for bounded review-state
+    context such as :func:`is_plan_review_go`; it is not an authoritative plan
+    presence source.
 
     Falls back to an empty list per issue on any failure.
 

@@ -5,6 +5,7 @@ pipeline stage), so it no longer implements ``run()`` and is not asserted here.
 """
 
 from hephaestus.automation.protocol import ReviewerProtocol
+from hephaestus.automation.review_journal import PlanDiscoveryResult
 
 
 class _ConcreteReviewer:
@@ -120,8 +121,8 @@ def test_planner_state_is_not_implementer_state(tmp_path) -> None:
         def get_cached_comments(self, issue_number: int):
             return None
 
-        def has_existing_plan(self, issue_number: int) -> bool:
-            return False
+        def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+            return PlanDiscoveryResult.absent()
 
     assert isinstance(_PlannerOnly(), PlannerStateProtocol)
     assert not isinstance(_PlannerOnly(), ImplementerStateProtocol)

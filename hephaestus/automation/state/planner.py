@@ -4,10 +4,10 @@ Owns the cheap, idempotent state queries the planner runs against GitHub:
 
 - ``filter()`` — drop closed issues from the working set (one batched GraphQL
   call per 100 issues via :func:`prefetch_issue_states`).
-- ``prefetch_comments()`` — batch-fetch all issue comments in one aliased
-  GraphQL call and store them in an internal cache (#616).
-- ``has_existing_plan()`` — return ``True`` when an issue already carries the
-  canonical plan-comment marker (uses the cache when available).
+- ``prefetch_comments()`` — fetch and normalize all issue comments into an
+  internal cache (#616).
+- ``discover_plan()`` — return FOUND, ABSENT, or READ_ERROR using the cache
+  when available and a complete REST lookup otherwise.
 
 Extracted from ``planner.py`` (#598) so the coordinator class stays focused
 on the worker-pool driver. No behavior change.
@@ -15,16 +15,27 @@ on the worker-pool driver. No behavior change.
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from ..git_utils import issue_ref
-from ..github_api import _gh_call, prefetch_issue_states, skip_epics
-from ..review_journal import is_plan_comment, is_plan_review_comment
+from ..github_api import (
+    fetch_issue_comments_metadata,
+    gh_current_login,
+    prefetch_issue_states,
+    skip_epics,
+)
+from ..review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    PlanDiscoveryResult,
+    PlanDiscoveryStatus,
+    discover_plan_from_comments,
+    normalize_issue_comments,
+)
 from ..state_labels import STATE_PLAN_GO, is_epic, is_exclusive_plan_state
 from .review import (
-    fetch_all_issue_comments_graphql,
     fetch_all_issue_labels_graphql,
     fetch_all_issue_titles_graphql,
 )
@@ -35,22 +46,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _comments_contain_plan(comments: list[dict[str, Any]]) -> bool:
-    """Return True if any comment is a plan comment (not a review).
-
-    Matches plan markers only at the START of a comment body, never as a free
-    substring: a ``## 🔍 Plan Review`` comment quotes the plan (so it contains
-    plan headings as substrings) and must NOT count as "has a plan" — that
-    substring confusion caused the reviewer to review its own prior review
-    (#455/#468/#484). Mirrors ``plan_reviewer._get_latest_plan``.
-    """
-    for comment in comments:
-        stripped = comment.get("body", "").lstrip()
-        if is_plan_review_comment(stripped):
-            continue
-        if is_plan_comment(stripped):
-            return True
-    return False
+def _comments_contain_plan(comments: Sequence[IssueComment]) -> bool:
+    """Return whether normalized comments contain an actor-owned plan."""
+    return discover_plan_from_comments(comments).status is PlanDiscoveryStatus.FOUND
 
 
 class PlannerStateManager:
@@ -72,7 +70,8 @@ class PlannerStateManager:
 
         """
         self.options = options
-        self._comments_cache: dict[int, list[dict[str, Any]]] | None = None
+        self._comments_cache: dict[int, list[IssueComment]] | None = None
+        self._comment_read_errors: dict[int, str] = {}
         self._labels_cache: dict[int, list[str]] | None = None
 
     def filter(self) -> list[int]:
@@ -174,38 +173,42 @@ class PlannerStateManager:
             return None
         return self._labels_cache.get(issue_number, [])
 
+    def _read_comments(self, issue_number: int) -> list[IssueComment]:
+        """Read and normalize the complete issue comment journal."""
+        try:
+            return normalize_issue_comments(
+                fetch_issue_comments_metadata(issue_number),
+                viewer_login=gh_current_login() or "",
+            )
+        except CommentJournalReadError:
+            raise
+        except Exception as exc:
+            raise CommentJournalReadError(
+                f"failed to read issue #{issue_number} comments: {exc}"
+            ) from exc
+
     def prefetch_comments(self, issue_numbers: list[int]) -> None:
-        """Batch-fetch comments for all issues in one aliased GraphQL call.
-
-        Stores results in the internal cache so subsequent calls to
-        :meth:`has_existing_plan` and callers of
-        :func:`~hephaestus.automation.review_state.is_plan_review_go`
-        (which accept a pre-fetched ``comments`` list) can avoid per-issue
-        round-trips.
-
-        Calling this method before the worker pool starts converts N
-        sequential ``gh issue view --comments`` calls into a single batched
-        GraphQL request, cutting round-trips from O(N) to O(1) (#616).
+        """Read complete comment journals and retain per-issue failures.
 
         Args:
-            issue_numbers: Issue numbers to pre-fetch.  Typically the list
+            issue_numbers: Issue numbers to prefetch. Typically the list
                 returned by :meth:`filter`.
 
         """
-        if not issue_numbers:
-            self._comments_cache = {}
-            return
-        logger.debug(
-            "Batch-fetching comments for %d issue(s) via aliased GraphQL (#616)",
-            len(issue_numbers),
-        )
-        self._comments_cache = fetch_all_issue_comments_graphql(issue_numbers)
-        logger.debug(
-            "Prefetched comments for %d issue(s)",
-            len(self._comments_cache),
-        )
+        self._comments_cache = {}
+        self._comment_read_errors = {}
+        for issue_number in issue_numbers:
+            try:
+                self._comments_cache[issue_number] = self._read_comments(issue_number)
+            except CommentJournalReadError as exc:
+                self._comment_read_errors[issue_number] = str(exc)
+                logger.warning(
+                    "Failed to prefetch comments for %s: %s",
+                    issue_ref(issue_number),
+                    exc,
+                )
 
-    def get_cached_comments(self, issue_number: int) -> list[dict[str, Any]] | None:
+    def get_cached_comments(self, issue_number: int) -> list[IssueComment] | None:
         """Return cached comments for an issue, or None if cache is unpopulated.
 
         Args:
@@ -218,54 +221,17 @@ class PlannerStateManager:
         """
         if self._comments_cache is None:
             return None
-        return self._comments_cache.get(issue_number, [])
+        return self._comments_cache.get(issue_number)
 
-    def has_existing_plan(self, issue_number: int) -> bool:
-        """Check if an issue already has a plan in comments.
+    def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Return FOUND, ABSENT, or READ_ERROR for an issue plan lookup."""
+        if issue_number in self._comment_read_errors:
+            return PlanDiscoveryResult.read_error(self._comment_read_errors[issue_number])
 
-        Uses the batched comment cache when :meth:`prefetch_comments` has
-        already been called (#616), falling back to an individual
-        ``gh issue view --comments`` call otherwise.
-
-        Args:
-            issue_number: Issue number to check
-
-        Returns:
-            True if plan exists
-
-        """
-        # Fast path: use cached comments when available (#616).
-        cached = self.get_cached_comments(issue_number)
-        if cached is not None:
-            if _comments_contain_plan(cached):
-                logger.debug("Found existing plan for %s (cached)", issue_ref(issue_number))
-                return True
-            return False
-
-        # Slow path: individual fetch (pre-#616 behaviour, kept as fallback).
-        try:
-            result = _gh_call(
-                [
-                    "issue",
-                    "view",
-                    str(issue_number),
-                    "--comments",
-                    "--json",
-                    "comments",
-                ],
-            )
-
-            data = json.loads(result.stdout)
-            comments = data.get("comments", [])
-
-            if _comments_contain_plan(comments):
-                logger.debug("Found existing plan for %s", issue_ref(issue_number))
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.warning(
-                "Failed to check for existing plan on %s: %s", issue_ref(issue_number), e
-            )
-            return False
+        comments = self.get_cached_comments(issue_number)
+        if comments is None:
+            try:
+                comments = self._read_comments(issue_number)
+            except CommentJournalReadError as exc:
+                return PlanDiscoveryResult.read_error(exc)
+        return discover_plan_from_comments(comments)

@@ -1,19 +1,24 @@
 """Unit tests for ``hephaestus.automation.state.planner``.
 
 Covers the batched comment-prefetch path introduced by #616 and the
-``has_existing_plan`` fallback behaviour.
+tri-state plan-discovery fallback behaviour.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    IssueComment,
+    PlanDiscoveryStatus,
+)
 from hephaestus.automation.state.planner import PlannerStateManager
+from hephaestus.github.client import GitHubRateLimitError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,6 +41,7 @@ def _default_title_and_skip_patches() -> Any:
             return_value={},
         ),
         patch("hephaestus.automation.state.planner.skip_epics"),
+        patch("hephaestus.automation.state.planner.gh_current_login", return_value="bot"),
     ):
         yield
 
@@ -97,37 +103,46 @@ class TestPrefetchComments:
 
     def test_prefetch_populates_cache(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[11, 12]))
-        expected = {
-            11: [{"body": _plan_body(), "updatedAt": "2025-01-01", "url": "u1"}],
-            12: [{"body": _other_body(), "updatedAt": "2025-01-01", "url": "u2"}],
-        }
         with patch(
-            "hephaestus.automation.state.planner.fetch_all_issue_comments_graphql",
-            return_value=expected,
+            "hephaestus.automation.state.planner.fetch_issue_comments_metadata",
+            side_effect=lambda issue: [
+                {
+                    "body": _plan_body() if issue == 11 else _other_body(),
+                    "user": {"login": "bot"},
+                }
+            ],
         ):
             mgr.prefetch_comments([11, 12])
-        assert mgr._comments_cache == expected
-        assert mgr.get_cached_comments(11) == expected[11]
-        assert mgr.get_cached_comments(12) == expected[12]
+        assert mgr.discover_plan(11).status is PlanDiscoveryStatus.FOUND
+        assert mgr.discover_plan(12).status is PlanDiscoveryStatus.ABSENT
 
-    def test_get_cached_returns_empty_list_for_missing_key(self) -> None:
+    def test_missing_cache_key_falls_back_instead_of_inventing_absence(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[20]))
-        with patch(
-            "hephaestus.automation.state.planner.fetch_all_issue_comments_graphql",
-            return_value={},
-        ):
-            mgr.prefetch_comments([20])
-        # Issue 20 not in the returned map → get_cached returns []
-        assert mgr.get_cached_comments(20) == []
+        mgr._comments_cache = {}
+        with patch.object(
+            mgr,
+            "_read_comments",
+            return_value=[
+                IssueComment(
+                    body=_plan_body(),
+                    author_login="bot",
+                    viewer_did_author=True,
+                )
+            ],
+        ) as read:
+            result = mgr.discover_plan(20)
+
+        assert result.status is PlanDiscoveryStatus.FOUND
+        read.assert_called_once_with(20)
 
 
 # ---------------------------------------------------------------------------
-# has_existing_plan — cached path
+# discover_plan — cached path
 # ---------------------------------------------------------------------------
 
 
 class TestHasExistingPlanCached:
-    """has_existing_plan uses the cache when prefetch_comments was called."""
+    """discover_plan uses the cache when prefetch_comments was called."""
 
     @pytest.fixture(autouse=True)
     def _patch_repo(self) -> Any:
@@ -143,32 +158,39 @@ class TestHasExistingPlanCached:
         ):
             yield
 
-    def _mgr_with_cache(self, cache: dict[int, list[dict[str, Any]]]) -> PlannerStateManager:
+    def _mgr_with_cache(self, cache: dict[int, list[IssueComment]]) -> PlannerStateManager:
         mgr = PlannerStateManager(_make_options(issues=list(cache.keys())))
-        with patch(
-            "hephaestus.automation.state.planner.fetch_all_issue_comments_graphql",
-            return_value=cache,
-        ):
-            mgr.prefetch_comments(list(cache.keys()))
+        mgr._comments_cache = cache
         return mgr
 
     def test_returns_true_when_plan_marker_in_cache(self) -> None:
-        mgr = self._mgr_with_cache({31: [{"body": _plan_body()}, {"body": _other_body()}]})
-        assert mgr.has_existing_plan(31) is True
+        mgr = self._mgr_with_cache(
+            {
+                31: [
+                    IssueComment(body=_plan_body(), author_login="bot", viewer_did_author=True),
+                    IssueComment(body=_other_body(), author_login="bot", viewer_did_author=True),
+                ]
+            }
+        )
+        assert mgr.discover_plan(31).status is PlanDiscoveryStatus.FOUND
 
     def test_returns_false_when_no_plan_marker_in_cache(self) -> None:
-        mgr = self._mgr_with_cache({32: [{"body": _other_body()}]})
-        assert mgr.has_existing_plan(32) is False
+        mgr = self._mgr_with_cache(
+            {32: [IssueComment(body=_other_body(), author_login="bot", viewer_did_author=True)]}
+        )
+        assert mgr.discover_plan(32).status is PlanDiscoveryStatus.ABSENT
 
     def test_returns_false_when_cache_empty_for_issue(self) -> None:
         mgr = self._mgr_with_cache({33: []})
-        assert mgr.has_existing_plan(33) is False
+        assert mgr.discover_plan(33).status is PlanDiscoveryStatus.ABSENT
 
     def test_does_not_call_gh_cli_when_cache_hit(self) -> None:
-        mgr = self._mgr_with_cache({34: [{"body": _plan_body()}]})
-        with patch("hephaestus.automation.state.planner._gh_call") as mock_gh:
-            mgr.has_existing_plan(34)
-        mock_gh.assert_not_called()
+        mgr = self._mgr_with_cache(
+            {34: [IssueComment(body=_plan_body(), author_login="bot", viewer_did_author=True)]}
+        )
+        with patch.object(mgr, "_read_comments") as read:
+            assert mgr.discover_plan(34).status is PlanDiscoveryStatus.FOUND
+        read.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -201,13 +223,10 @@ class TestFilterDropsPlanGoIssues:
                 "hephaestus.automation.state.planner.fetch_all_issue_labels_graphql",
                 return_value=labels,
             ),
-            patch("hephaestus.automation.state.planner._gh_call") as mock_gh,
         ):
             kept = mgr.filter()
 
         assert kept == [11, 12]
-        # No per-issue gh issue view: only the batched label fetch was used.
-        mock_gh.assert_not_called()
 
     def test_force_replans_even_plan_go_issues(self) -> None:
         from hephaestus.automation.state_labels import STATE_PLAN_GO
@@ -369,34 +388,50 @@ class TestFilterAllFilteredWarning:
 
 
 # ---------------------------------------------------------------------------
-# has_existing_plan — fallback (no cache)
+# discover_plan — fallback (no cache)
 # ---------------------------------------------------------------------------
 
 
 class TestHasExistingPlanFallback:
-    """has_existing_plan falls back to individual gh CLI call when no cache."""
-
-    def _gh_comments_payload(self, bodies: list[str]) -> MagicMock:
-        mock = MagicMock()
-        mock.stdout = json.dumps({"comments": [{"body": b} for b in bodies]})
-        return mock
+    """Plan discovery falls back to a complete REST read when no cache exists."""
 
     def test_returns_true_via_gh_cli_when_plan_present(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[41]))
-        mock_result = self._gh_comments_payload([_other_body(), _plan_body()])
-        with patch("hephaestus.automation.state.planner._gh_call", return_value=mock_result):
-            assert mgr.has_existing_plan(41) is True
+        with patch(
+            "hephaestus.automation.state.planner.fetch_issue_comments_metadata",
+            return_value=[{"body": _plan_body(), "user": {"login": "bot"}}],
+        ):
+            assert mgr.discover_plan(41).status is PlanDiscoveryStatus.FOUND
 
     def test_returns_false_via_gh_cli_when_no_plan(self) -> None:
         mgr = PlannerStateManager(_make_options(issues=[42]))
-        mock_result = self._gh_comments_payload([_other_body()])
-        with patch("hephaestus.automation.state.planner._gh_call", return_value=mock_result):
-            assert mgr.has_existing_plan(42) is False
+        with patch(
+            "hephaestus.automation.state.planner.fetch_issue_comments_metadata",
+            return_value=[{"body": _other_body(), "user": {"login": "bot"}}],
+        ):
+            assert mgr.discover_plan(42).status is PlanDiscoveryStatus.ABSENT
 
-    def test_returns_false_on_gh_call_exception(self) -> None:
+    @pytest.mark.parametrize(
+        "failure",
+        [RuntimeError("network error"), GitHubRateLimitError("rate limited", reset_epoch=123)],
+    )
+    def test_read_failure_is_explicit(self, failure: Exception) -> None:
         mgr = PlannerStateManager(_make_options(issues=[43]))
         with patch(
-            "hephaestus.automation.state.planner._gh_call",
-            side_effect=RuntimeError("network error"),
+            "hephaestus.automation.state.planner.fetch_issue_comments_metadata",
+            side_effect=failure,
         ):
-            assert mgr.has_existing_plan(43) is False
+            result = mgr.discover_plan(43)
+
+        assert result.status is PlanDiscoveryStatus.READ_ERROR
+
+    def test_prefetch_failure_is_read_error(self) -> None:
+        mgr = PlannerStateManager(_make_options(issues=[44]))
+        with patch.object(
+            mgr,
+            "_read_comments",
+            side_effect=CommentJournalReadError("rate limited"),
+        ):
+            mgr.prefetch_comments([44])
+
+        assert mgr.discover_plan(44).status is PlanDiscoveryStatus.READ_ERROR

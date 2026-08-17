@@ -2668,6 +2668,17 @@ class TestFetchCompleteIssueCommentJournal:
                 repo=("HomericIntelligence", "Hephaestus"),
             )
 
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_comment_ingest_rejects_non_object_page_entry(self, mock_gh_call: Any) -> None:
+        """A malformed page cannot be silently converted into an empty journal."""
+        mock_gh_call.return_value = Mock(stdout=json.dumps([None]))
+
+        with pytest.raises(RuntimeError, match="comment 0 was not an object"):
+            _github_api_module.fetch_issue_comments_metadata(
+                42,
+                repo=("HomericIntelligence", "Hephaestus"),
+            )
+
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
     @patch("hephaestus.automation.github_api._gh_call", side_effect=RuntimeError("offline"))
     def test_fetch_failure_is_not_confused_with_empty_journal(

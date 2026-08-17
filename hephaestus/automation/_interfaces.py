@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from .review_journal import IssueComment, PlanDiscoveryResult
+
 
 @runtime_checkable
 class PRDiscoveryProtocol(Protocol):
@@ -115,9 +117,8 @@ class WorktreeManagerProtocol(Protocol):
 class PlannerStateProtocol(Protocol):
     """Structural contract for the planner-side state store.
 
-    Full public surface of PlannerStateManager (planner_state.py): filter:79,
-    get_cached_labels:167, prefetch_comments:178, get_cached_comments:209,
-    has_existing_plan:224.
+    Full public surface of PlannerStateManager (state/planner.py): filter,
+    get_cached_labels, prefetch_comments, get_cached_comments, discover_plan.
     """
 
     def filter(self) -> list[int]:
@@ -129,11 +130,11 @@ class PlannerStateProtocol(Protocol):
     def prefetch_comments(self, issue_numbers: list[int]) -> None:
         """Prefetch comments for multiple issues."""
 
-    def get_cached_comments(self, issue_number: int) -> list[dict[str, Any]] | None:
-        """Get cached comments for an issue or None if not prefetched."""
+    def get_cached_comments(self, issue_number: int) -> list[IssueComment] | None:
+        """Return a successfully read cached journal, or None when unavailable."""
 
-    def has_existing_plan(self, issue_number: int) -> bool:
-        """Check if a plan exists for an issue."""
+    def discover_plan(self, issue_number: int) -> PlanDiscoveryResult:
+        """Return FOUND, ABSENT, or READ_ERROR for an issue plan lookup."""
 
 
 @runtime_checkable
