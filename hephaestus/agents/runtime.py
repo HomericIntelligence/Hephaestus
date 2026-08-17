@@ -33,6 +33,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
+    package_tree_digest,
     preflight_pi_environment,
     prove_athena_skill_command,
 )
@@ -1766,7 +1767,9 @@ def _pi_automation_env(profile_dir: Path) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def _pi_automation_profile(preflight: PiPreflightResult) -> Iterator[Path]:
+def _pi_automation_profile(
+    preflight: PiPreflightResult,
+) -> Iterator[tuple[Path, dict[str, Path]]]:
     """Materialize the exact preflight-proven packages plus private model/auth data."""
     inventory = preflight.inventory
     if inventory is None or not inventory.ready:
@@ -1775,10 +1778,23 @@ def _pi_automation_profile(preflight: PiPreflightResult) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix="pi-automation-") as temporary:
         profile_dir = Path(temporary)
         profile_dir.chmod(0o700)
-        package_roots = [str(root) for _, root in sorted(inventory.roots.items())]
+        snapshot_roots: dict[str, Path] = {}
+        for key, source in sorted(inventory.roots.items()):
+            expected = inventory.content_sha256.get(key)
+            if not expected or package_tree_digest(source) != expected:
+                raise AgentExecutionError(f"Pi package {key!r} content changed after preflight")
+            destination = profile_dir / "packages" / key
+            shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git"))
+            if package_tree_digest(destination) != expected:
+                raise AgentExecutionError(f"Pi package {key!r} snapshot integrity failed")
+            snapshot_roots[key] = destination
         write_secure(
             profile_dir / "settings.json",
-            json.dumps({"packages": package_roots}, sort_keys=True) + "\n",
+            json.dumps(
+                {"packages": [str(root) for _, root in sorted(snapshot_roots.items())]},
+                sort_keys=True,
+            )
+            + "\n",
         )
         for filename in ("models.json", "auth.json"):
             source = source_dir / filename
@@ -1786,7 +1802,7 @@ def _pi_automation_profile(preflight: PiPreflightResult) -> Iterator[Path]:
                 continue
             destination = profile_dir / filename
             write_secure(destination, source.read_text(encoding="utf-8"))
-        yield profile_dir
+        yield profile_dir, snapshot_roots
 
 
 def _pi_json_session_ids(text: str) -> tuple[str, ...]:
@@ -2061,7 +2077,11 @@ def _require_admitted_pi_policy(
     return _require_pi_request(execution_request), preflight
 
 
-def _pi_policy_args(policy: ExecutionPolicy, preflight: PiPreflightResult) -> list[str]:
+def _pi_policy_args(
+    policy: ExecutionPolicy,
+    preflight: PiPreflightResult,
+    package_roots: dict[str, Path],
+) -> list[str]:
     """Translate a reviewed policy to Pi's model-visible capability flags.
 
     These flags are intentionally only a second layer.  The runtime's external
@@ -2071,11 +2091,11 @@ def _pi_policy_args(policy: ExecutionPolicy, preflight: PiPreflightResult) -> li
     if policy.skills:
         for skill in sorted(policy.skills):
             command = f"skill:{skill.split(':', 1)[1]}"
-            receipt = prove_athena_skill_command(command, preflight)
-            skill_path = Path(receipt.package_root) / "skills" / command.removeprefix("skill:")
+            prove_athena_skill_command(command, preflight)
+            skill_path = package_roots["athena"] / "skills" / command.removeprefix("skill:")
             try:
                 resolved = skill_path.resolve(strict=True)
-                package_root = Path(receipt.package_root).resolve(strict=True)
+                package_root = package_roots["athena"].resolve(strict=True)
             except OSError as exc:
                 raise AgentExecutionError(f"Pi skill {command!r} is unavailable") from exc
             if not resolved.is_relative_to(package_root) or not (resolved / "SKILL.md").is_file():
@@ -2120,16 +2140,16 @@ def _run_pi_with_policy(
     fingerprint = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
     if fingerprint != preflight.executable_fingerprint:
         raise AgentExecutionError("Pi preflight-proven executable identity drifted")
-    command = _pi_automation_cmd(
-        executable,
-        model=model,
-        lifecycle=lifecycle,
-        session_id=session_id,
-    )
-    command.extend(_pi_policy_args(policy, preflight))
     tokens = pi_private_redaction_tokens(cwd, model)
     try:
-        with _pi_automation_profile(preflight) as profile_dir:
+        with _pi_automation_profile(preflight) as (profile_dir, package_roots):
+            command = _pi_automation_cmd(
+                executable,
+                model=model,
+                lifecycle=lifecycle,
+                session_id=session_id,
+            )
+            command.extend(_pi_policy_args(policy, preflight, package_roots))
             result = adapter.invoke(
                 policy=policy,
                 command=command,

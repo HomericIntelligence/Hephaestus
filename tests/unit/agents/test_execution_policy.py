@@ -161,7 +161,9 @@ def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool(tmp_path: Pa
         )
     )
 
-    args = agent_runtime._pi_policy_args(policy, _ready_pi_preflight(tmp_path))
+    preflight = _ready_pi_preflight(tmp_path)
+    assert preflight.inventory is not None
+    args = agent_runtime._pi_policy_args(policy, preflight, preflight.inventory.roots)
     assert "subagent" not in args[1].split(",")
     assert "--no-skills" in args
     assert "--commands" not in args
@@ -590,6 +592,26 @@ def test_pi_policy_dispatch_rejects_executable_drift(
         )
 
 
+def test_pi_policy_dispatch_rejects_package_content_drift(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Package files cannot change between admission and the immutable snapshot."""
+    preflight = _ready_pi_preflight(tmp_path)
+    (tmp_path / "athena" / "skills" / "advise" / "SKILL.md").write_text(
+        "tampered\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: preflight)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", object())
+    monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
+    monkeypatch.setenv("HEPH_PI_MODEL", "operator-model")
+    request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="content changed"):
+        agent_runtime.run_agent_session(
+            "pi", "plan", cwd=tmp_path, timeout=30, execution_request=request
+        )
+
+
 def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -628,9 +650,8 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     assert "--no-session" in command
     assert "--no-skills" in command
     assert "--commands" not in command
-    assert command[command.index("--skill") + 1] == str(
-        (tmp_path / "athena" / "skills" / "pr-review").resolve()
-    )
+    skill_path = Path(command[command.index("--skill") + 1])
+    assert skill_path.parts[-4:] == ("packages", "athena", "skills", "pr-review")
 
 
 def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
@@ -701,10 +722,9 @@ def test_pi_policy_dispatch_supplies_a_complete_private_runtime_profile(
     environment = cast(dict[str, str], received["environment"])
     assert environment["PI_CODING_AGENT_DIR"] != str(pi_dir)
     assert received["profile_models"] == '{"models": ["private"]}\n'
-    assert (
-        received["profile_settings"]
-        == json.dumps({"packages": [str(tmp_path / "athena")]}, sort_keys=True) + "\n"
-    )
+    settings = json.loads(cast(str, received["profile_settings"]))
+    assert len(settings["packages"]) == 1
+    assert Path(settings["packages"][0]).parts[-2:] == ("packages", "athena")
     assert environment["PI_OFFLINE"] == "1"
     assert environment["PI_SKIP_VERSION_CHECK"] == "1"
     assert environment["PI_TELEMETRY"] == "0"

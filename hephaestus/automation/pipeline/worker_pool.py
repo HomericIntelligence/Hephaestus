@@ -1537,6 +1537,39 @@ def _interruptible_file_lock(
             return
 
 
+def _evidence_patch_digest(cwd: Path, *revisions: str) -> str:
+    """Hash the exact Git patch tested or committed by the queue."""
+    result = git_utils.run(
+        ["git", "diff", "--binary", "--no-ext-diff", *revisions, "--"],
+        cwd=cwd,
+        timeout=30,
+    )
+    return hashlib.sha256(result.stdout.encode()).hexdigest()
+
+
+def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
+    """Return immutable Git outcome fields for a private queue receipt."""
+    fields: dict[str, object] = {"job_type": "git", "operation": job.op}
+    if not isinstance(result.value, dict):
+        return fields
+    fields.update(
+        head_sha=result.value.get("head_sha"),
+        pushed=result.value.get("pushed"),
+    )
+    head_sha = result.value.get("head_sha")
+    worktree = job.kwargs.get("worktree_path")
+    if (
+        job.op == "commit_push"
+        and result.value.get("pushed") is True
+        and isinstance(head_sha, str)
+        and isinstance(worktree, str)
+    ):
+        fields["committed_patch_sha256"] = _evidence_patch_digest(
+            Path(worktree), f"{head_sha}^", head_sha
+        )
+    return fields
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -1874,6 +1907,7 @@ class WorkerPool:
             "ok": result.ok,
             "interrupted": result.interrupted,
         }
+
         if isinstance(job, AthenaSkillJob):
             payload["job_type"] = "athena"
             if isinstance(result.value, AthenaSkillResult):
@@ -1914,13 +1948,15 @@ class WorkerPool:
                     ).hexdigest(),
                     "expected_head_sha": job.expected_head_sha,
                     "succeeded": result.ok,
+                    "tested_patch_sha256": (
+                        _evidence_patch_digest(job.cwd)
+                        if result.ok and job.descr == "pre_pr_tests"
+                        else None
+                    ),
                 }
             )
         elif isinstance(job, GitJob):
-            payload.update({"job_type": "git", "operation": job.op})
-            if isinstance(result.value, dict):
-                payload["head_sha"] = result.value.get("head_sha")
-                payload["pushed"] = result.value.get("pushed")
+            payload.update(_git_evidence_fields(job, result))
         elif isinstance(job, GitHubJob):
             payload.update(
                 {
