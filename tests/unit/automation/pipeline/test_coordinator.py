@@ -1881,8 +1881,14 @@ class TestImplementationAdmission:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """3+ copies of one issue: first dispatches, ALL later copies terminalize (#2057)."""
+        # serialize_file_overlap=False: the raw admission path must not consult
+        # live plan claims (GitHub) for the injected items.
         coordinator, _pool, _ = make_coordinator(
-            tmp_path, monkeypatch, max_workers=2, parallel_repos=2
+            tmp_path,
+            monkeypatch,
+            max_workers=2,
+            parallel_repos=2,
+            serialize_file_overlap=False,
         )
         # No real plan comment exists for the fake issue; fail open (None) so
         # the overlap selector dispatches without a GitHub fetch (#2057).
@@ -1913,7 +1919,12 @@ class TestImplementationAdmission:
             coordinator.items.append(it)
             coordinator.queues[StageName.IMPLEMENTATION].push(it)
 
-        coordinator._drain_implementation()
+        # Drive the full loop, not one drain shot: FINISHED is an auxiliary
+        # lane (learning_queue_capacity=1), so a single _drain_implementation
+        # round collapses only the first duplicate and pends the rest until
+        # the finished sink releases the auxiliary permit. run() pumps those
+        # rounds + pending handoffs the way the live pipeline does.
+        coordinator.run()
 
         assert ran == [21]  # dispatched exactly once
         for dup in (dup2, dup3):  # every later copy terminalized
