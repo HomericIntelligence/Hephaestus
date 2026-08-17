@@ -56,6 +56,11 @@ arguments. One-shot operations use `--no-session`; resumable operations alone
 may create or reopen durable sessions. Provider output and failures are
 redacted before they cross the shared runtime boundary.
 
+Package admission also rejects dirty Git roots and records a symlink-free
+content digest for every package. Immediately before dispatch, the runtime
+revalidates those digests and copies only the verified content into the
+disposable profile; Pi never executes package code from mutable install roots.
+
 ## Alternatives considered
 
 - **Bundle a Bubblewrap, container, or namespace adapter.** Rejected because

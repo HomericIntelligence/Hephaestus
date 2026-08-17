@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import queue
@@ -24,7 +25,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -864,6 +865,7 @@ class InventoryResult:
     roots: dict[str, Path]
     scopes: dict[str, str]
     detail: str = ""
+    content_sha256: dict[str, str] = field(default_factory=dict)
 
 
 def _settings_packages(path: Path) -> tuple[str, ...]:
@@ -907,12 +909,43 @@ def _default_git_head(root: Path) -> str:
     return result.stdout.strip()
 
 
+def _default_git_status(root: Path) -> str:
+    result = run_bounded_command(
+        ("git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"),
+        timeout=30,
+    )
+    if result.returncode != 0 or result.timed_out or result.output_overflow:
+        return "unavailable"
+    return result.stdout.strip()
+
+
+def package_tree_digest(root: Path) -> str:
+    """Hash one symlink-free package tree, excluding Git metadata."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] == ".git":
+            continue
+        if path.is_symlink():
+            raise ValueError(f"package tree contains symlink: {relative}")
+        if not path.is_file():
+            continue
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(str(path.stat().st_mode & 0o777).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def inspect_pi_package_inventory(
     cwd: Path,
     catalog: PiPackageCatalog,
     *,
     pi_dir: Path | None = None,
     git_head: Callable[[Path], str] = _default_git_head,
+    git_status: Callable[[Path], str] = _default_git_status,
     include_project: bool = True,
     runner: CommandRunner | None = None,
 ) -> InventoryResult:
@@ -937,6 +970,7 @@ def inspect_pi_package_inventory(
         )
     roots: dict[str, Path] = {}
     scopes: dict[str, str] = {}
+    content_sha256: dict[str, str] = {}
     for package in catalog.packages:
         matches_user = [
             source
@@ -974,9 +1008,15 @@ def inspect_pi_package_inventory(
             return InventoryResult(False, "package_identity_mismatch", roots, scopes, package.key)
         if package.kind == "git" and git_head(root) != package.pin:
             return InventoryResult(False, "package_identity_mismatch", roots, scopes, package.key)
+        if package.kind == "git" and git_status(root):
+            return InventoryResult(False, "package_content_mismatch", roots, scopes, package.key)
+        try:
+            content_sha256[package.key] = package_tree_digest(root)
+        except (OSError, ValueError) as exc:
+            return InventoryResult(False, "package_content_mismatch", roots, scopes, str(exc))
         roots[package.key] = root
         scopes[package.key] = scope
-    return InventoryResult(True, "ready", roots, scopes)
+    return InventoryResult(True, "ready", roots, scopes, content_sha256=content_sha256)
 
 
 @dataclass(frozen=True)
@@ -1084,6 +1124,13 @@ class PiPreflightResult:
         """Construct the successful package-preflight result."""
         catalog = load_pi_package_catalog()
         fingerprint = None
+        if inventory is not None and inventory.ready and not inventory.content_sha256:
+            inventory = replace(
+                inventory,
+                content_sha256={
+                    key: package_tree_digest(root) for key, root in inventory.roots.items()
+                },
+            )
         if executable is not None:
             metadata = executable.stat()
             fingerprint = (
@@ -1270,6 +1317,7 @@ def preflight_pi_environment(
     pi_dir: Path | None = None,
     runner: CommandRunner = run_bounded_command,
     git_head: Callable[[Path], str] = _default_git_head,
+    git_status: Callable[[Path], str] = _default_git_status,
     timeout: float = 30.0,
     trust_override: str | None = None,
 ) -> PiPreflightResult:
@@ -1284,6 +1332,7 @@ def preflight_pi_environment(
         catalog,
         pi_dir=pi_dir,
         git_head=git_head,
+        git_status=git_status,
         include_project=trust_override != "--no-approve",
         runner=runner,
     )

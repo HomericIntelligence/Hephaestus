@@ -498,6 +498,31 @@ def test_pi_capture_runs_normal_pipeline_command_without_direct_runtime_calls(
     wrong_nonce_entry["capture_nonce"] = "0" * 32
     with pytest.raises(ValueError, match="not bound"):
         module._verify_capture_artifacts(run_dir, wrong_nonce_entry)
+    proxy_path = run_dir / entry["proxy_log"]["artifact"]
+    proxy_path.write_text(
+        json.dumps(
+            {
+                "event": "proxy-invocation",
+                "capture_nonce": "0" * 32,
+                "tool": "pi",
+                "argv": ["--mode", "json"],
+                "real_binary": "/usr/bin/pi",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    wrong_proxy_entry = dict(entry)
+    wrong_proxy_entry["proxy_log"] = {
+        **entry["proxy_log"],
+        "sha256": module._sha256_bytes(proxy_path.read_bytes()),
+    }
+    wrong_proxy_entry["provider_invocations"] = list(
+        module._proxy_invocations(module._proxy_events(proxy_path))
+    )
+    with pytest.raises(ValueError, match="proxy is not bound"):
+        module._verify_capture_artifacts(run_dir, wrong_proxy_entry)
+    proxy_path.write_text("", encoding="utf-8")
     receipt_path = run_dir / entry["pipeline_receipts"][0]["artifact"]
     receipt_path.write_text(receipt_path.read_text() + " ", encoding="utf-8")
     with pytest.raises(ValueError, match="receipt digest mismatch"):
@@ -728,6 +753,33 @@ def test_comparison_requires_distinct_provider_capture(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="distinct provider"):
         module._verify_comparison(manifest)
 
+
+def test_completion_rejects_an_unpaired_control_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded control cannot disappear behind an empty comparison list."""
+    module = _load_module()
+    manifest = {
+        "commands": [
+            {"kind": "capture", "provider": "pi"},
+            {"kind": "capture", "provider": "codex"},
+        ],
+        "comparisons": [],
+        "pi": {"package_inventory": {"ready": True}},
+    }
+    for name in (
+        "_verify_fixture",
+        "_verify_fixture_commit",
+        "_verify_workflow",
+        "_verify_capture",
+        "_verify_failure_probes",
+        "_verify_mnemosyne",
+    ):
+        monkeypatch.setattr(module, name, lambda *_args: None)
+
+    with pytest.raises(ValueError, match="persisted Pi/control pair"):
+        module._verify_completion(manifest)
+
     manifest["commands"] = [
         {
             "kind": "capture",
@@ -887,6 +939,7 @@ def test_pipeline_receipts_reject_wrong_implementation_operations() -> None:
         }
 
     receipts = [
+        receipt(0, "athena", "implementation", result={"kind": "advise"}),
         receipt(
             1,
             "agent",
@@ -907,6 +960,7 @@ def test_pipeline_receipts_reject_wrong_implementation_operations() -> None:
             argv_sha256=module.PRE_PR_TEST_ARGV_SHA256,
             expected_head_sha=head,
             succeeded=True,
+            tested_patch_sha256="b" * 64,
         ),
         receipt(3, "git", "implementation", operation="rebase", head_sha=head, pushed=True),
         receipt(
@@ -944,14 +998,15 @@ def test_pipeline_receipts_reject_wrong_implementation_operations() -> None:
             receipts, stage="implementation-review-handoff", provider="pi"
         )
 
-    receipts[2]["operation"] = "commit_push"
-    receipts[4].update(
+    receipts[3]["operation"] = "commit_push"
+    receipts[3]["committed_patch_sha256"] = "b" * 64
+    receipts[5].update(
         pr_number=2737,
         request_issue=2519,
         result_type="PrReviewReconciled",
         result_action="apply",
     )
-    receipts[5].update(
+    receipts[6].update(
         pr_number=2737,
         request_issue=2519,
         result_type="MergeWaitCycleCompleted",
@@ -960,6 +1015,55 @@ def test_pipeline_receipts_reject_wrong_implementation_operations() -> None:
     module._validate_pipeline_receipts(
         receipts, stage="implementation-review-handoff", provider="pi"
     )
+
+
+def test_fixture_commit_evidence_requires_bound_negative_behavior(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The fixture proof parses the implementation and its exact regression call."""
+    module = _load_module()
+    head = "a" * 40
+    outputs = {
+        "diff-tree": ("hephaestus/utils/helpers.py\ntests/unit/utils/test_general_utils.py\n"),
+        "helper": (
+            "def human_readable_size(size_bytes: int) -> str:\n"
+            "    if size_bytes < 0:\n"
+            "        raise ValueError('negative')\n"
+            "    return str(size_bytes)\n"
+        ),
+        "test": (
+            "def test_negative():\n"
+            "    with pytest.raises(ValueError):\n"
+            "        human_readable_size(-1)\n"
+        ),
+        "log": (
+            f"U\n{module.FIXTURE_TITLE}\n{module.FIXTURE_TITLE}\n\n"
+            "Signed-off-by: Test <test@example.com>\n"
+        ),
+    }
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "diff-tree" in argv:
+            stdout = outputs["diff-tree"]
+        elif any(str(arg).endswith(":hephaestus/utils/helpers.py") for arg in argv):
+            stdout = outputs["helper"]
+        elif any(str(arg).endswith(":tests/unit/utils/test_general_utils.py") for arg in argv):
+            stdout = outputs["test"]
+        elif "log" in argv:
+            stdout = outputs["log"]
+        else:
+            stdout = "fixture diff"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    evidence = module._fixture_commit_evidence(tmp_path, head)
+    assert evidence["head_sha"] == head
+
+    outputs["test"] = (
+        "def test_unrelated():\n    with pytest.raises(ValueError):\n        another_function(-1)\n"
+    )
+    with pytest.raises(ValueError, match="negative-size rejection"):
+        module._fixture_commit_evidence(tmp_path, head)
 
 
 def test_evidence_status_requires_full_host_receipt_verification(
@@ -1268,6 +1372,8 @@ def test_attestation_rebinds_exact_head_and_review_state_to_live_github(
     monkeypatch.setattr(module, "_verify_completion", lambda *_args: None)
     monkeypatch.setattr(module, "_verify_publication", lambda *_args: None)
     monkeypatch.setattr(module, "_verify_athena_host_receipts", lambda *_args: None)
+    monkeypatch.setattr(module, "_captured_lifecycle_prs", lambda *_args: {2737})
+    monkeypatch.setattr(module, "_verify_committed_publication_documents", lambda *_args: None)
     manifest = module._load_manifest(run_dir)
     manifest["snapshots"] = [{"head": head}]
     module._save_manifest(run_dir, manifest)
@@ -1303,6 +1409,8 @@ def test_render_verify_and_publication_attestation(
     head = "a" * 40
     monkeypatch.setattr(module, "_verify_athena_host_receipts", lambda *_args: None)
     monkeypatch.setattr(module, "_verify_completion", lambda *_args: None)
+    monkeypatch.setattr(module, "_captured_lifecycle_prs", lambda *_args: {2737})
+    monkeypatch.setattr(module, "_verify_committed_publication_documents", lambda *_args: None)
     monkeypatch.setattr(module, "_evidence_status", lambda *_args: "complete")
     monkeypatch.setattr(
         module,

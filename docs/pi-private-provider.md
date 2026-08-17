@@ -123,6 +123,9 @@ disables ambient skills with `--no-skills`, and supplies only allowed,
 preflight-proven Athena directories through repeatable `--skill` arguments.
 One-shot operations use `--no-session`. Successful output and failure
 diagnostics are redacted before queue parsing, logging, or publication.
+Preflight rejects dirty Athena content and hashes every admitted package tree;
+dispatch revalidates each digest and executes only a copied disposable
+snapshot. Modified package content therefore fails before Pi starts.
 See [ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md) for the
 bootstrap decision and rejected automatic-loading alternatives.
 

@@ -11,6 +11,7 @@ owner-only run directory.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -70,6 +71,13 @@ EXPECTED_REPO_NAME = "Hephaestus"
 PRE_PR_TEST_ARGV_SHA256 = hashlib.sha256(
     json.dumps(PRE_PR_TEST_ARGV, separators=(",", ":")).encode()
 ).hexdigest()
+COMPARISON_NOT_APPLICABLE = {
+    "status": "not_applicable",
+    "source": "issue-2519-contract",
+    "reason": (
+        "normal pipeline runs mutate shared GitHub state, so sequential controls are not equivalent"
+    ),
+}
 
 
 def _repo_root() -> Path:
@@ -138,6 +146,7 @@ def _default_manifest(run_id: str, repo_root: Path) -> dict[str, Any]:
         "defects": [],
         "athena_host_receipts": [],
         "comparisons": [],
+        "comparison_disposition": COMPARISON_NOT_APPLICABLE,
         "artifacts": {},
         "publication": {},
     }
@@ -321,6 +330,8 @@ def _validate_pipeline_command(stage: str, command_argv: Sequence[str], provider
         raise ValueError(f"Pi pipeline evidence must target issue #{ISSUE_NUMBER}")
     if stage == "implementation-review-handoff" and "--run-pre-pr-tests" not in argv:
         raise ValueError("implementation evidence requires --run-pre-pr-tests")
+    if stage == "implementation-review-handoff" and "--no-advise" in argv:
+        raise ValueError("implementation evidence requires host-owned Athena advice")
 
 
 def _positive_timeout(value: str) -> int:
@@ -706,6 +717,14 @@ def _validate_pipeline_receipts(
         and isinstance(receipt.get("execution_request"), dict)
         and receipt["execution_request"].get("operation") in {"implement", "address_review"}
     ]
+    implementation_advice = [
+        receipt
+        for receipt in receipts
+        if receipt.get("job_type") == "athena"
+        and receipt.get("claim_stage") == "implementation"
+        and isinstance(receipt.get("result"), dict)
+        and receipt["result"].get("kind") == "advise"
+    ]
     review_agents = [
         receipt
         for receipt in receipts
@@ -722,6 +741,7 @@ def _validate_pipeline_receipts(
         and isinstance(receipt.get("head_sha"), str)
         and FULL_COMMIT_SHA_RE.fullmatch(receipt["head_sha"])
     }
+    committed_patch_digests = {receipt.get("committed_patch_sha256") for receipt in commit_receipts}
     request_heads = {
         receipt.get("request_head_sha") for receipt in (*review_receipts, *merge_receipts)
     }
@@ -730,7 +750,7 @@ def _validate_pipeline_receipts(
         not any(
             receipt.get("argv_sha256") == PRE_PR_TEST_ARGV_SHA256
             and receipt.get("succeeded") is True
-            and receipt.get("expected_head_sha") in heads
+            and receipt.get("tested_patch_sha256") in committed_patch_digests
             for receipt in build_receipts
         )
         or len(heads) != 1
@@ -740,6 +760,7 @@ def _validate_pipeline_receipts(
         or any(receipt.get("request_issue") != ISSUE_NUMBER for receipt in review_receipts)
         or any(receipt.get("request_issue") != ISSUE_NUMBER for receipt in merge_receipts)
         or not implementation_agents
+        or not implementation_advice
         or not review_agents
         or not review_receipts
         or not merge_receipts
@@ -775,6 +796,7 @@ def _validate_pipeline_receipts(
         if value[:2] == ("implementation", "agent") and value[2] in {"implement", "address_review"}
     )
     implementation_order: list[tuple[object, object, object]] = [
+        ("implementation", "athena", None),
         implementation_operation,
         ("implementation", "build_test", None),
         ("implementation", "git", "commit_push"),
@@ -1015,18 +1037,68 @@ def _fixture_commit_evidence(repo_root: Path, head_sha: str) -> dict[str, Any]:
         "hephaestus/utils/helpers.py",
         "tests/unit/utils/test_general_utils.py",
     }
-    if not required_paths.issubset(changed_paths):
-        raise ValueError("fixture commit does not change the required utility and unit test")
+    if set(changed_paths) != required_paths:
+        raise ValueError("fixture commit must change exactly the required utility and unit test")
     diff = git("show", "--format=", "--binary", head_sha, "--", *sorted(required_paths))
-    if (
-        "human_readable_size" not in diff
-        or "size_bytes < 0" not in diff
-        or "pytest.raises(ValueError" not in diff
-    ):
+    helper_tree = ast.parse(git("show", f"{head_sha}:hephaestus/utils/helpers.py"))
+    test_tree = ast.parse(git("show", f"{head_sha}:tests/unit/utils/test_general_utils.py"))
+    function = next(
+        (
+            node
+            for node in ast.walk(helper_tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "human_readable_size"
+        ),
+        None,
+    )
+    rejects_negative = function is not None and any(
+        isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and any(isinstance(op, ast.Lt) for op in node.test.ops)
+        and any(
+            isinstance(child, ast.Raise)
+            and isinstance(child.exc, ast.Call)
+            and isinstance(child.exc.func, ast.Name)
+            and child.exc.func.id == "ValueError"
+            for child in ast.walk(node)
+        )
+        for node in ast.walk(function)
+    )
+    tests_negative = any(
+        isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and isinstance(item.context_expr.func.value, ast.Name)
+            and item.context_expr.func.value.id == "pytest"
+            and item.context_expr.func.attr == "raises"
+            and item.context_expr.args
+            and isinstance(item.context_expr.args[0], ast.Name)
+            and item.context_expr.args[0].id == "ValueError"
+            for item in node.items
+        )
+        and any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "human_readable_size"
+            and child.args
+            and isinstance(child.args[0], ast.UnaryOp)
+            and isinstance(child.args[0].op, ast.USub)
+            and isinstance(child.args[0].operand, ast.Constant)
+            and child.args[0].operand.value == 1
+            for child in ast.walk(node)
+        )
+        for node in ast.walk(test_tree)
+    )
+    if not rejects_negative or not tests_negative:
         raise ValueError("fixture commit does not implement the negative-size rejection")
-    metadata = git("log", "-1", "--format=%G?%n%B", head_sha)
+    metadata = git("log", "-1", "--format=%G?%n%s%n%B", head_sha)
     signature_state, _, message = metadata.partition("\n")
-    if signature_state not in {"G", "U"} or "Signed-off-by:" not in message:
+    subject, _, body = message.partition("\n")
+    if (
+        subject != FIXTURE_TITLE
+        or signature_state not in {"G", "U"}
+        or "Signed-off-by:" not in body
+    ):
         raise ValueError("fixture commit is not signed and DCO-compliant")
     return {
         "head_sha": head_sha,
@@ -1851,6 +1923,11 @@ def _verify_capture_artifacts(run_dir: Path, entry: dict[str, Any]) -> None:
         proxy_path,
         receipts,
     )
+    if any(
+        invocation.get("capture_nonce") != capture_nonce
+        for invocation in recomputed["proxy_invocations"]
+    ):
+        raise ValueError("capture provider proxy is not bound to this run")
     for field in (
         "session_ids",
         "tool_scopes",
@@ -1994,8 +2071,17 @@ def _verify_completion(manifest: dict[str, Any], run_dir: Path | None = None) ->
     _verify_fixture_commit(manifest)
     _verify_workflow(manifest)
     _verify_capture(manifest, run_dir)
-    if manifest.get("comparisons"):
+    control_entries = [
+        entry
+        for entry in manifest.get("commands", [])
+        if isinstance(entry, dict)
+        and entry.get("kind") == "capture"
+        and entry.get("provider") != PI_PROVIDER_NAME
+    ]
+    if control_entries:
         _verify_comparison(manifest, run_dir)
+    elif manifest.get("comparison_disposition") != COMPARISON_NOT_APPLICABLE:
+        raise ValueError("comparison disposition is missing or unreviewed")
     _verify_failure_probes(manifest)
     _verify_mnemosyne(manifest)
     pi = cast(dict[str, Any], manifest.get("pi", {}))
@@ -2089,6 +2175,51 @@ def _verify_run(
     raise ValueError(f"unsupported verification criterion: {criterion}")
 
 
+def _captured_lifecycle_prs(run_dir: Path, manifest: dict[str, Any]) -> set[int]:
+    """Reload the PR identities from canonical implementation receipts."""
+    lifecycle_prs: set[int] = set()
+    for entry in manifest.get("commands", []):
+        if not isinstance(entry, dict) or entry.get("stage") != "implementation-review-handoff":
+            continue
+        for descriptor in entry.get("pipeline_receipts", []):
+            if not isinstance(descriptor, dict):
+                continue
+            path = _contained_capture_artifact(
+                run_dir, descriptor.get("artifact"), "pipeline receipt"
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            number = payload.get("pr_number")
+            if (
+                payload.get("job_type") == "github"
+                and isinstance(number, int)
+                and not isinstance(number, bool)
+            ):
+                lifecycle_prs.add(number)
+    return lifecycle_prs
+
+
+def _verify_committed_publication_documents(
+    repo_root: Path, ref: str, paths: Sequence[Path]
+) -> None:
+    """Require rendered publication bytes to be blobs at the attested commit."""
+    resolved_root = repo_root.resolve()
+    for path in paths:
+        resolved = (resolved_root / path).resolve() if not path.is_absolute() else path.resolve()
+        if not resolved.is_relative_to(resolved_root) or not resolved.is_file():
+            raise ValueError("publication document is outside the repository")
+        relative = resolved.relative_to(resolved_root).as_posix()
+        committed = subprocess.run(
+            ["git", "show", f"{ref}:{relative}"],
+            cwd=resolved_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=DEFAULT_INVENTORY_TIMEOUT_SECONDS,
+        )
+        if committed.returncode != 0 or committed.stdout != resolved.read_text(encoding="utf-8"):
+            raise ValueError("publication document is not committed at the attested ref")
+
+
 def _attest_publication(
     run_dir: Path,
     *,
@@ -2112,9 +2243,14 @@ def _attest_publication(
     }
     if ref not in snapshot_heads:
         raise ValueError("publication ref must match a recorded repository snapshot")
+    if _captured_lifecycle_prs(run_dir, manifest) != {pr_number}:
+        raise ValueError("publication pull request does not match the captured lifecycle")
     live_pr = _stable_live_pull_request(Path(manifest["repo_root"]), pr_number)
     if live_pr["head_sha"] != ref:
         raise ValueError("publication ref does not match the live pull-request head")
+    _verify_committed_publication_documents(
+        Path(manifest["repo_root"]), ref, (report_path, runbook_path)
+    )
     if verify_defects:
         defects = cast(list[dict[str, Any]], manifest.get("defects", []))
         seen: set[int] = set()
