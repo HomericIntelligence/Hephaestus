@@ -149,10 +149,10 @@ class TestOnEnterAndCloneStates:
         assert isinstance(sync.job, GitJob)
         assert sync.job.op == "sync_checkout"
 
-        stage.on_job_done(repo_item, JobResult(ok=True), repo_ctx)
+        stage.on_job_done(repo_item, JobResult(ok=True, value="a" * 40), repo_ctx)
         ready = stage.step(repo_item, repo_ctx)
         assert isinstance(ready, Continue)
-        assert ready.next_state == "LABELS"
+        assert ready.next_state == "WAVE_ADMIT"
 
     def test_explicit_existing_repo_root_submits_sync_job(
         self, repo_item: WorkItem, tmp_path: Path, make_ctx: Callable[..., Any]
@@ -184,7 +184,7 @@ class TestOnEnterAndCloneStates:
         result = RepoStage().step(repo_item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "LABELS"
+        assert result.next_state == "WAVE_ADMIT"
 
     def test_existing_checkout_is_not_synchronized_in_dry_run(
         self,
@@ -202,7 +202,7 @@ class TestOnEnterAndCloneStates:
         result = RepoStage().step(repo_item, ctx)
 
         assert isinstance(result, Continue)
-        assert result.next_state == "LABELS"
+        assert result.next_state == "WAVE_ADMIT"
         assert "[dry-run] would synchronize test-org/repo-a" in caplog.text
 
     def test_clone_failure_retries_within_budget(self, repo_item: WorkItem, repo_ctx: Any) -> None:
@@ -235,7 +235,7 @@ class TestOnEnterAndCloneStates:
         repo_item.state = "CLONE_WAIT"
         repo_item.payload["checkout_op"] = "sync_checkout"
 
-        stage.on_job_done(repo_item, JobResult(ok=True), repo_ctx)
+        stage.on_job_done(repo_item, JobResult(ok=True, value="a" * 40), repo_ctx)
 
         assert repo_item.attempts["clone"] == 0
         assert "clone_failed" not in repo_item.payload
