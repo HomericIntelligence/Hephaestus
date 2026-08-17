@@ -84,6 +84,7 @@ from hephaestus.resilience import (
     resilient_call,
 )
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
+from hephaestus.utils.git import bounded_git_diagnostic
 from hephaestus.utils.helpers import get_repo_root
 
 logger = logging.getLogger(__name__)
@@ -1198,6 +1199,108 @@ def _controlled_git_env() -> dict[str, str]:
     env["PATH"] = os.pathsep.join(path_entries)
     env["GIT_PAGER"] = "cat"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+_HOST_SIGNING_CONFIG_KEYS = (
+    "user.name",
+    "user.email",
+    "gpg.format",
+    "user.signingkey",
+)
+
+
+def _parse_host_git_signing_config(raw: str) -> dict[str, str] | None:
+    """Parse the exact allowlisted signing keys from Git's NUL output."""
+    parsed: dict[str, str] = {}
+    for entry in raw.split("\0"):
+        if not entry:
+            continue
+        key, separator, value = entry.partition("\n")
+        if not separator or key not in _HOST_SIGNING_CONFIG_KEYS or key in parsed:
+            return None
+        parsed[key] = value
+    return parsed if set(parsed) == set(_HOST_SIGNING_CONFIG_KEYS) else None
+
+
+def _validated_signing_key(value: str) -> Path | None:
+    """Resolve an absolute, private, regular SSH signing key path."""
+    signing_key = Path(value).expanduser()
+    try:
+        resolved_key = signing_key.resolve(strict=True)
+        mode = resolved_key.stat().st_mode
+    except OSError:
+        return None
+    if (
+        not signing_key.is_absolute()
+        or signing_key.is_symlink()
+        or not resolved_key.is_file()
+        or mode & 0o022
+    ):
+        return None
+    return resolved_key
+
+
+def _read_host_git_signing_config(cwd: Path, *, timeout: int) -> dict[str, str] | None:
+    """Read and validate the minimum host identity needed for policy signing."""
+    trusted_git = _trusted_git_executable()
+    if trusted_git is None:
+        return None
+    env = os.environ.copy()
+    for key in _FETCH_ENV_BLOCKLIST:
+        env.pop(key, None)
+    for key in tuple(env):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            env.pop(key)
+    env.pop("GIT_CONFIG_GLOBAL", None)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    expression = "^(user\\.name|user\\.email|gpg\\.format|user\\.signingkey)$"
+    try:
+        result = subprocess.run(
+            [trusted_git, "config", "--global", "--null", "--get-regexp", expression],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    parsed = _parse_host_git_signing_config(result.stdout)
+    if parsed is None:
+        return None
+    if parsed["gpg.format"] != "ssh":
+        return None
+    if any(
+        not value or len(value) > 4096 or any(ord(character) < 32 for character in value)
+        for value in parsed.values()
+    ):
+        return None
+    resolved_key = _validated_signing_key(parsed["user.signingkey"])
+    if resolved_key is None:
+        return None
+    parsed["user.signingkey"] = str(resolved_key)
+    return parsed
+
+
+def _controlled_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str] | JobResult:
+    """Return the controlled Git environment with an allowlisted signing identity."""
+    signing = _read_host_git_signing_config(cwd, timeout=timeout)
+    if signing is None:
+        return JobResult(
+            ok=False,
+            value={"failure_kind": "signing_configuration"},
+            error="host signing configuration unavailable",
+        )
+    env = _controlled_git_env()
+    injected = {**signing, "commit.gpgsign": "true"}
+    env["GIT_CONFIG_COUNT"] = str(len(injected))
+    for index, (key, value) in enumerate(injected.items()):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
     return env
 
 
@@ -2666,37 +2769,73 @@ class WorkerPool:
         timeout: int,
     ) -> JobResult | None:
         """Stage only validated conflicts and let Git continue the policy rebase."""
+        env = _controlled_git_signing_env(cwd, timeout=timeout)
+        if isinstance(env, JobResult):
+            return env
+        env["GIT_EDITOR"] = "true"
+        phase = "stage_conflicts"
         try:
             git_utils.run(["git", "add", "--", *paths], cwd=cwd, timeout=timeout)
+            phase = "validate_index"
             git_utils.run(
                 ["git", "diff", "--cached", "--check"],
                 cwd=cwd,
                 timeout=timeout,
             )
-            env = _controlled_git_env()
-            env["GIT_EDITOR"] = "true"
+            phase = "rebase_continue"
             git_utils.run(
                 ["git", "rebase", "--continue"],
                 cwd=cwd,
                 env=env,
                 timeout=timeout,
             )
-        except subprocess.CalledProcessError:
-            next_receipt = self._conflict_receipt(
-                cwd,
-                remote=remote,
-                base_branch="main",
-                expected_remote_sha=expected_remote_sha,
-                timeout=timeout,
-            )
-            if isinstance(next_receipt, dict):
-                next_receipt["base_sha"] = base_sha
-                return JobResult(
-                    ok=False,
-                    value=next_receipt,
-                    error="rebase conflict resolution required: additional conflicts found",
+        except subprocess.CalledProcessError as exc:
+            next_receipt: dict[str, object] | JobResult | None = None
+            if phase == "rebase_continue":
+                next_receipt = self._conflict_receipt(
+                    cwd,
+                    remote=remote,
+                    base_branch="main",
+                    expected_remote_sha=expected_remote_sha,
+                    timeout=timeout,
                 )
-            return JobResult(ok=False, error="host could not continue rebase")
+                if isinstance(next_receipt, dict):
+                    next_receipt["base_sha"] = base_sha
+                    return JobResult(
+                        ok=False,
+                        value=next_receipt,
+                        error="rebase conflict resolution required: additional conflicts found",
+                    )
+            stdout_tail = bounded_git_diagnostic(exc.stdout, limit=_TAIL)
+            stderr_tail = bounded_git_diagnostic(exc.stderr, limit=_TAIL)
+            diagnostic = f"{stdout_tail}\n{stderr_tail}".lower()
+            signing_failure = any(
+                marker in diagnostic
+                for marker in (
+                    "cannot run gpg",
+                    "failed to sign",
+                    "gpg failed",
+                    "failed to write commit object",
+                )
+            )
+            failure_kind = "signing" if signing_failure else "continuation"
+            receipt_error = next_receipt.error if isinstance(next_receipt, JobResult) else None
+            return JobResult(
+                ok=False,
+                value={
+                    "failure_kind": failure_kind,
+                    "phase": phase,
+                    "returncode": exc.returncode,
+                    "receipt_error": receipt_error,
+                },
+                error=(
+                    "host rebase continuation signing failed"
+                    if signing_failure
+                    else f"host rebase {phase} failed"
+                ),
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
         return None
 
     @staticmethod

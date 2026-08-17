@@ -137,6 +137,13 @@ def _redact_git_diagnostics(value: str) -> str:
     return redacted
 
 
+def bounded_git_diagnostic(value: object, *, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
+    """Return a credential-redacted, bounded Git diagnostic tail."""
+    if limit <= 0:
+        raise ValueError("Git diagnostic limit must be positive")
+    return _redact_git_diagnostics(_as_text(value))[-limit:]
+
+
 def _format_git_cmd_for_log(cmd: list[str]) -> str:
     """Return a redacted Git command string for logs."""
     return " ".join(_redact_git_diagnostics(part) for part in cmd)

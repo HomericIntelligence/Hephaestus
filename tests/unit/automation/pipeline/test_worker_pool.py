@@ -22,6 +22,7 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+import hephaestus.automation.pipeline.worker_pool as worker_pool_module
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
@@ -128,6 +129,33 @@ def test_trusted_git_executable_rejects_discovered_binary_outside_fixed_roots(
     monkeypatch.setattr(f"{_WP}._TRUSTED_GIT_CANDIDATES", ())
 
     assert _trusted_git_executable() is None
+
+
+def test_controlled_git_signing_env_reinjects_only_validated_identity(
+    tmp_path: Path,
+) -> None:
+    """A policy rebase keeps signing identity without restoring ambient config."""
+    signing = {
+        "user.name": "Test User",
+        "user.email": "test@example.invalid",
+        "gpg.format": "ssh",
+        "user.signingkey": str(tmp_path / "signing-key"),
+    }
+    with patch(
+        f"{_WP}._read_host_git_signing_config",
+        return_value=signing,
+        create=True,
+    ):
+        env = worker_pool_module._controlled_git_signing_env(tmp_path, timeout=60)
+
+    assert isinstance(env, dict)
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_COUNT"] == "5"
+    injected = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(5)
+    }
+    assert injected == {**signing, "commit.gpgsign": "true"}
 
 
 @pytest.fixture
@@ -3605,6 +3633,51 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "remote writer head changed during conflict resolution"
 
+    def test_continue_rebase_reports_signing_failure_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A signing failure is distinct from a follow-up content conflict."""
+        failure = subprocess.CalledProcessError(
+            128,
+            ["git", "rebase", "--continue"],
+            output="rebase output",
+            stderr="error: cannot run gpg: No such file or directory",
+        )
+        with (
+            patch(f"{_WP}._controlled_git_signing_env", return_value={"GIT_EDITOR": "true"}),
+            patch(
+                f"{_WP}.git_utils.run",
+                side_effect=[MagicMock(), MagicMock(), failure],
+            ),
+            patch.object(
+                pool,
+                "_conflict_receipt",
+                return_value=JobResult(
+                    ok=False,
+                    error="paused rebase conflict paths invalid",
+                ),
+            ),
+        ):
+            result = pool._continue_rebase_process(
+                tmp_path,
+                remote="origin",
+                base_sha="b" * 40,
+                expected_remote_sha="a" * 40,
+                paths=("x.py",),
+                timeout=60,
+            )
+
+        assert result is not None and result.ok is False
+        assert result.error == "host rebase continuation signing failed"
+        assert result.value == {
+            "failure_kind": "signing",
+            "phase": "rebase_continue",
+            "returncode": 128,
+            "receipt_error": "paused rebase conflict paths invalid",
+        }
+        assert result.stdout_tail == "rebase output"
+        assert "cannot run gpg" in result.stderr_tail
+
     def test_continue_rebase_rejects_missing_captured_base_ancestry(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -3620,6 +3693,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
@@ -3657,6 +3731,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.run") as run,
         ):
             run.side_effect = [
@@ -3694,6 +3769,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run") as run,
