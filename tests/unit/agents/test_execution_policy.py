@@ -276,6 +276,41 @@ def test_installed_host_adapter_bootstraps_in_a_fresh_python_process(tmp_path) -
     assert completed.stdout.strip() == "loaded"
 
 
+def test_named_host_adapter_bootstraps_before_direct_policy_dispatch(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct library callers load the selected adapter before provider dispatch."""
+    received: dict[str, object] = {}
+
+    class Adapter:
+        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
+            received.update(kwargs)
+            return agent_runtime.AgentRunResult(stdout="reviewed", stderr="")
+
+    class EntryPoint:
+        def load(self) -> object:
+            return Adapter
+
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+    monkeypatch.setattr(
+        agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
+    )
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    request = ExecutionRequest(
+        AgentRole.PR_REVIEWER,
+        AgentOperation.PR_REVIEW,
+        SessionLifecycle.ONE_SHOT,
+    )
+
+    result = agent_runtime.run_agent_text(
+        "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
+    )
+
+    assert result.stdout == "reviewed"
+    assert received["prompt"] == "review"
+
+
 @pytest.mark.parametrize("match_count", [0, 2])
 def test_named_host_adapter_requires_one_exact_entry_point(
     tmp_path, monkeypatch: pytest.MonkeyPatch, match_count: int

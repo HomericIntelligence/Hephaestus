@@ -1938,6 +1938,8 @@ def _run_pi_with_policy(
     """
     command = _pi_base_cmd(session_id=session_id)
     command.extend(_pi_policy_args(policy))
+    if _PI_ISOLATION_ADAPTER is None:
+        _load_configured_pi_isolation_adapter()
     adapter = _PI_ISOLATION_ADAPTER
     if adapter is None:
         raise PiIsolationUnavailableError(
