@@ -263,11 +263,12 @@ def _load_configured_pi_isolation_adapter() -> None:
     try:
         factory = matches[0].load()
         adapter = factory()
+        invoke = getattr(adapter, "invoke", None)
     except Exception:
         raise PiIsolationUnavailableError(
             f"Pi isolation adapter {adapter_name!r} could not be initialized"
         ) from None
-    if not callable(getattr(adapter, "invoke", None)):
+    if not callable(invoke):
         raise PiIsolationUnavailableError(
             f"Pi isolation adapter {adapter_name!r} does not implement invoke()"
         )

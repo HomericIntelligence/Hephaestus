@@ -408,6 +408,40 @@ def test_named_host_adapter_rejects_an_invalid_protocol(
         agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
 
+def test_named_host_adapter_sanitizes_protocol_attribute_failures(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """External attribute diagnostics never escape protocol validation."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    class Adapter:
+        @property
+        def invoke(self) -> object:
+            raise RuntimeError("private validation diagnostic")
+
+    class EntryPoint:
+        def load(self) -> object:
+            return Adapter
+
+    monkeypatch.setattr(
+        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+    )
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+    monkeypatch.setattr(
+        agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
+    )
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+
+    with pytest.raises(
+        agent_runtime.PiIsolationUnavailableError,
+        match="could not be initialized",
+    ) as exc_info:
+        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+
+    assert "private" not in str(exc_info.value)
+
+
 def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
