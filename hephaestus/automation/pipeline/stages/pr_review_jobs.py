@@ -1013,6 +1013,17 @@ class PrReviewJobs(_PrReviewHost):
         platform = result_value.get("platform")
         if not isinstance(platform, str) or not platform:
             platform = "darwin" if result.ok else ""
+        valid_skip = bool(
+            status == "skipped"
+            and result.ok is False
+            and result.error == UNSUPPORTED_HOST_VERIFICATION_ERROR
+            and result_value.get("head_sha") == reviewed_head
+            and result_value.get("immutable_source") is False
+            and platform
+            and platform != "darwin"
+        )
+        if status == "skipped" and not valid_skip:
+            status = "failed"
         receipts.append(
             {
                 "argv": list(spec.argv),

@@ -2437,6 +2437,49 @@ class TestPrReviewStageStep:
         assert receipt["status"] == "skipped"
         assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
 
+    def test_unsupported_host_skip_with_mismatched_head_fails_closed(
+        self, tmp_path: Path, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A worker cannot normalize a forged skip onto the reviewed head."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = _make_hephaestus_checkout(tmp_path)
+        item.payload.update(
+            {
+                "review_checkout_expected_head": "a" * 40,
+                "review_checkout_ready": True,
+                "pr_diff": (
+                    "diff --git a/tests/performance/test_worker_pool_load.py "
+                    "b/tests/performance/test_worker_pool_load.py\n"
+                ),
+            }
+        )
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        item.state = request.on_done_state
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="unsupported_host_verification_boundary",
+                value={
+                    "failure_kind": "runner",
+                    "head_sha": "b" * 40,
+                    "immutable_source": False,
+                    "platform": "linux",
+                    "status": "skipped",
+                },
+            ),
+            ctx,
+        )
+
+        stage.step(item, ctx)
+
+        receipt = item.payload["host_verification_receipts"][0]
+        assert receipt["status"] == "failed"
+        assert ("mark_pr_implementation_no_go", (1001,)) in ctx.github.mutation_log
+
     def test_host_failure_comment_error_preserves_no_go_and_fails_closed(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
