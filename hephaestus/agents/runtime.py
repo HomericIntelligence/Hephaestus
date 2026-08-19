@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -75,6 +76,8 @@ CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
 PI_MODEL_ENV = "HEPH_PI_MODEL"
+PI_ISOLATION_ADAPTER_ENV = "HEPH_PI_ISOLATION_ADAPTER"
+PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
 PI_PROJECT_DENYLIST_FILENAME = ".heph-project-denylist"
@@ -236,8 +239,45 @@ def register_pi_isolation_adapter(adapter: PiIsolationAdapter) -> None:
     _PI_ISOLATION_ADAPTER = adapter
 
 
+def _load_configured_pi_isolation_adapter() -> None:
+    """Load the explicitly selected host adapter for a fresh CLI process."""
+    adapter_name = os.environ.get(PI_ISOLATION_ADAPTER_ENV, "").strip()
+    if not adapter_name:
+        return
+    try:
+        matches = tuple(
+            entry_points(
+                group=PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP,
+                name=adapter_name,
+            )
+        )
+    except Exception:
+        raise PiIsolationUnavailableError(
+            f"Pi isolation adapter {adapter_name!r} could not be discovered"
+        ) from None
+    if len(matches) != 1:
+        raise PiIsolationUnavailableError(
+            f"Pi isolation adapter {adapter_name!r} is not installed exactly once in "
+            f"entry-point group {PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP!r}"
+        )
+    try:
+        factory = matches[0].load()
+        adapter = factory()
+    except Exception:
+        raise PiIsolationUnavailableError(
+            f"Pi isolation adapter {adapter_name!r} could not be initialized"
+        ) from None
+    if not callable(getattr(adapter, "invoke", None)):
+        raise PiIsolationUnavailableError(
+            f"Pi isolation adapter {adapter_name!r} does not implement invoke()"
+        )
+    register_pi_isolation_adapter(adapter)
+
+
 def _require_pi_isolation_adapter() -> None:
     """Fail at provider selection when this installation has no Pi broker."""
+    if _PI_ISOLATION_ADAPTER is None:
+        _load_configured_pi_isolation_adapter()
     if _PI_ISOLATION_ADAPTER is None:
         raise PiIsolationUnavailableError(
             "Pi automation is N/A: this installation has no registered host "

@@ -345,9 +345,10 @@ plan and `hephaestus-install-pi-plugins --global --yes --no-approve` to install
 the safe global defaults. Passing package preflight does not admit normal Pi
 automation: in a standard installation, `--agent pi` fails before stage or
 wrapper dispatch because no OS-isolation adapter is bundled. A trusted host
-integration must explicitly register an adapter that enforces the resolved
-filesystem and network policy; the local setup otherwise supports only the
-explicit adapter-smoke seam.
+integration must provide a named `hephaestus.pi_isolation_adapters` entry point,
+and the operator must select it with `HEPH_PI_ISOLATION_ADAPTER`. That adapter
+enforces the resolved filesystem and network policy; the local setup otherwise
+supports only the explicit adapter-smoke seam.
 
 #### Running the automation loop from a source checkout (macOS / Codex)
 
