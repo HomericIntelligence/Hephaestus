@@ -877,6 +877,40 @@ class TestGate:
         assert item.attempts["implement"] == ctx.budget("implement")
         assert item.attempts["rebase_conflict"] == 1
 
+    def test_rebase_continuation_failure_retains_safe_diagnostic(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Terminal rebase failures preserve host-redacted recovery evidence."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="host rebase continuation signing failed",
+                value={
+                    "failure_kind": "signing",
+                    "phase": "rebase_continue",
+                    "returncode": 128,
+                    "receipt_error": "receipt unavailable",
+                },
+                stdout_tail="safe stdout",
+                stderr_tail="safe stderr",
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_failure_diagnostic"] == {
+            "failure_kind": "signing",
+            "phase": "rebase_continue",
+            "returncode": 128,
+            "receipt_error": "receipt unavailable",
+            "stdout_tail": "safe stdout",
+            "stderr_tail": "safe stderr",
+        }
+
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
