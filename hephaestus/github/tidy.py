@@ -546,6 +546,7 @@ class TidyExecutionError(RuntimeError):
     """
 
     def __init__(self, exit_code: int) -> None:
+        """Record the failed command's exit code for the caller."""
         super().__init__(f"gh tidy exited with code {exit_code}")
         self.exit_code = exit_code
 
