@@ -266,13 +266,24 @@ def test_dispatch_swarm_runs_codex_agents_in_threads(
 class TestTidyHandlers:
     """Tests for extracted tidy workflow handlers."""
 
-    def test_run_tidy_and_find_problem_branches_parses_even_after_gh_tidy_failure(
+    def test_run_tidy_and_find_problem_branches_fails_closed_on_gh_tidy_failure(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """gh-tidy failures still return parseable problem branches."""
-        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry_run: (2, ONE_PROBLEM))
+        """A non-zero gh tidy exit must raise, never fabricate a clean result.
 
-        assert tidy_module._run_tidy_and_find_problem_branches("main", False) == [
+        Athena #103: parsing partial output after gh tidy exited non-zero and
+        then claiming "All branches rebased cleanly" produced a false success.
+        The function now fails closed so callers cannot lie about cleanup state.
+        """
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry_run: (128, ONE_PROBLEM))
+
+        with pytest.raises(tidy_module.TidyExecutionError) as excinfo:
+            tidy_module._run_tidy_and_find_problem_branches("main", False)
+        assert excinfo.value.exit_code == 128
+
+        # dry-run never mutates state, so it may still parse output for preview.
+        monkeypatch.setattr(tidy_module, "_run_gh_tidy", lambda trunk, dry_run: (128, ONE_PROBLEM))
+        assert tidy_module._run_tidy_and_find_problem_branches("main", True) == [
             "feature/my-branch"
         ]
 
