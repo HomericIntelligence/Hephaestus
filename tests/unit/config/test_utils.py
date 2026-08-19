@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for configuration utilities."""
 
+import os
 import sys
 
 import pytest
@@ -250,6 +251,13 @@ class TestMergeConfigs:
 
 class TestMergeWithEnv:
     """Tests for merge_with_env."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_ambient_hephaestus_environment(self, monkeypatch):
+        """Ensure each merge test controls every variable under its prefix."""
+        for key in tuple(os.environ):
+            if key.startswith("HEPHAESTUS_"):
+                monkeypatch.delenv(key)
 
     def test_env_variable_overrides(self, monkeypatch):
         """Environment variable overrides config value using __ as nesting delimiter."""
