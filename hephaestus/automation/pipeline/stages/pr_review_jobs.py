@@ -1007,23 +1007,9 @@ class PrReviewJobs(_PrReviewHost):
             return
         spec = specs[len(receipts)]
         result_value = result.value if isinstance(result.value, dict) else {}
-        status = result_value.get("status")
-        if status not in {"passed", "failed", "skipped"}:
-            status = "passed" if result.ok else "failed"
-        platform = result_value.get("platform")
-        if not isinstance(platform, str) or not platform:
-            platform = "darwin" if result.ok else ""
-        valid_skip = bool(
-            status == "skipped"
-            and result.ok is False
-            and result.error == UNSUPPORTED_HOST_VERIFICATION_ERROR
-            and result_value.get("head_sha") == reviewed_head
-            and result_value.get("immutable_source") is False
-            and platform
-            and platform != "darwin"
+        status, platform = _host_verification_result_status(
+            result.value, result.ok, result.error, reviewed_head
         )
-        if status == "skipped" and not valid_skip:
-            status = "failed"
         receipts.append(
             {
                 "argv": list(spec.argv),
@@ -1033,11 +1019,7 @@ class PrReviewJobs(_PrReviewHost):
                     and result.value.get("head_sha") == reviewed_head
                     and result.value.get("immutable_source") is True
                 ),
-                "failure_kind": (
-                    result_value.get("failure_kind", "runner")
-                    if result_value.get("failure_kind") in {"none", "runner", "test", "validation"}
-                    else "runner"
-                ),
+                "failure_kind": _host_verification_failure_kind(result_value),
                 "ok": result.ok,
                 "error": result.error or "",
                 "platform": platform,

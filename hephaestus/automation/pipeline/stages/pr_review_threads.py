@@ -162,6 +162,12 @@ from .base import (
     stage_model,
     write_skip_label,
 )
+from .pr_review_receipts import (
+    UNSUPPORTED_HOST_VERIFICATION_ERROR,
+    _host_verification_failure_kind,
+    _host_verification_receipt_matches,
+    _host_verification_result_status,
+)
 from .pr_review_repository import (
     _payload_host_verification_specs,
     _prepare_host_checks,
@@ -175,40 +181,6 @@ from .pr_review_verification import (
 from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
-
-UNSUPPORTED_HOST_VERIFICATION_ERROR = "unsupported_host_verification_boundary"
-
-
-def _host_verification_receipt_matches(
-    receipt: object, spec: _HostVerificationSpec, reviewed_head: str
-) -> bool:
-    """Return whether *receipt* proves this immutable head and command passed."""
-    if isinstance(receipt, dict) and receipt.get("status") == "skipped":
-        platform = receipt.get("platform")
-        return bool(
-            receipt.get("head_sha") == reviewed_head
-            and receipt.get("argv") == list(spec.argv)
-            and receipt.get("immutable_source") is False
-            and receipt.get("ok") is False
-            and receipt.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR
-            and receipt.get("status") == "skipped"
-            and isinstance(platform, str)
-            and bool(platform)
-            and platform != "darwin"
-            and isinstance(receipt.get("stdout_tail"), str)
-            and isinstance(receipt.get("stderr_tail"), str)
-        )
-    return bool(
-        isinstance(receipt, dict)
-        and receipt.get("head_sha") == reviewed_head
-        and receipt.get("argv") == list(spec.argv)
-        and receipt.get("immutable_source") is True
-        and receipt.get("ok") is True
-        and receipt.get("status") in {None, "passed"}
-        and receipt.get("platform") in {None, "darwin"}
-        and isinstance(receipt.get("stdout_tail"), str)
-        and isinstance(receipt.get("stderr_tail"), str)
-    )
 
 
 def _host_verification_receipts_match(
@@ -837,8 +809,10 @@ __all__ = [
     '_ParsedReviewResponse', '_PrReviewHost', '_StageReference', '_address_replies',
     '_address_review_feedback',
     '_clear_round_review_state', '_durable_thread_id', '_finding_key',
-    '_host_verification_receipt_matches', '_host_verification_receipts_match',
-    '_host_verification_specs', '_implementation_reply_handoff', '_is_confirmed_open_unarmed',
+    '_host_verification_failure_kind', '_host_verification_receipt_matches',
+    '_host_verification_receipts_match',
+    '_host_verification_result_status', '_host_verification_specs',
+    '_implementation_reply_handoff', '_is_confirmed_open_unarmed',
     '_is_postable_finding', '_issue_number', '_normalize_remediation_threads',
     '_parse_review_response', '_parse_validation_result', '_payload_host_verification_specs',
     '_pr_is_current_open_head', '_prepare_host_checks', '_review_context_kind',
