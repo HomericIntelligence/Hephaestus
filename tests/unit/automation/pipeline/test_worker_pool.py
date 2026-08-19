@@ -1168,6 +1168,7 @@ class TestWorkerPoolSubmitComplete:
             return nullcontext(logs)
 
         with (
+            patch(f"{_WP}.sys.platform", "darwin"),
             patch(
                 f"{_WP}._verifier_owned_runtime_environment",
                 return_value=Path(sys.prefix),
@@ -1189,13 +1190,15 @@ class TestWorkerPoolSubmitComplete:
             "head_sha": head,
             "immutable_source": True,
             "failure_kind": "none",
+            "platform": "darwin",
+            "status": "passed",
         }
         assert (checkout / "tracked.txt").read_text(encoding="utf-8") == "original\n"
 
-    def test_immutable_build_test_fails_closed_without_host_boundary(
+    def test_immutable_build_test_skips_unsupported_platform_before_execution(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
-        """A missing OS boundary never falls back to the reviewer checkout."""
+        """An unsupported host records a bound skip without executing PR code."""
         job = BuildTestJob(
             repo="test/repo",
             cwd=tmp_path,
@@ -1205,6 +1208,7 @@ class TestWorkerPoolSubmitComplete:
             immutable_source=True,
         )
 
+        archive = MagicMock(return_value=(b"", ""))
         with (
             patch(f"{_WP}._checkout_matches_immutable_head", return_value=None),
             patch(f"{_WP}._trusted_executable", return_value=sys.executable),
@@ -1212,7 +1216,7 @@ class TestWorkerPoolSubmitComplete:
                 f"{_WP}._verifier_owned_runtime_environment",
                 return_value=Path(sys.prefix),
             ),
-            patch(f"{_WP}._bounded_git_archive", return_value=(b"", "")),
+            patch(f"{_WP}._bounded_git_archive", archive),
             patch(f"{_WP}._extract_immutable_archive"),
             patch(f"{_WP}._prepare_immutable_git_metadata", return_value=tmp_path / "metadata.git"),
             patch(f"{_WP}._quota_backed_scratch", side_effect=nullcontext),
@@ -1226,6 +1230,14 @@ class TestWorkerPoolSubmitComplete:
 
         assert result.ok is False
         assert result.error == "unsupported_host_verification_boundary"
+        assert result.value == {
+            "failure_kind": "runner",
+            "head_sha": "a" * 40,
+            "immutable_source": False,
+            "platform": "linux",
+            "status": "skipped",
+        }
+        archive.assert_not_called()
 
     def test_host_verification_profile_keeps_source_outside_writable_root(
         self, tmp_path: Path

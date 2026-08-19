@@ -1522,12 +1522,13 @@ class TestPrReviewStageStep:
             assert request.job.immutable_source is True
             receipt = {
                 "argv": list(argv),
-                "bypassed": False,
                 "error": "",
                 "failure_kind": "none",
                 "head_sha": "a" * 40,
                 "immutable_source": True,
                 "ok": True,
+                "platform": "darwin",
+                "status": "passed",
                 "stderr_tail": "",
                 "stdout_tail": f"{index + 1} passed in 0.32s",
             }
@@ -1926,6 +1927,7 @@ class TestPrReviewStageStep:
         )
         try:
             with (
+                patch(f"{module}.sys.platform", "darwin"),
                 patch(
                     f"{module}._checkout_matches_immutable_head",
                     side_effect=checkout_matches_immutable_head,
@@ -1963,6 +1965,8 @@ class TestPrReviewStageStep:
             "head_sha": expected_head,
             "immutable_source": True,
             "failure_kind": "none",
+            "platform": "darwin",
+            "status": "passed",
         }
         assert checkout_checks == [(checkout, expected_head), (checkout, expected_head)]
         assert "passed" in result.stdout_tail
@@ -1981,6 +1985,29 @@ class TestPrReviewStageStep:
             {**receipt, "ok": False}, spec, expected_head
         )
         assert not stage_module._host_verification_receipt_matches(receipt, spec, "c" * 40)
+
+        skipped = {
+            "argv": list(spec.argv),
+            "error": "unsupported_host_verification_boundary",
+            "failure_kind": "runner",
+            "head_sha": expected_head,
+            "immutable_source": False,
+            "ok": False,
+            "platform": "linux",
+            "status": "skipped",
+            "stderr_tail": "",
+            "stdout_tail": "",
+        }
+        assert stage_module._host_verification_receipt_matches(skipped, spec, expected_head)
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "platform": "darwin"}, spec, expected_head
+        )
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "status": "failed"}, spec, expected_head
+        )
+        assert not stage_module._host_verification_receipt_matches(
+            {**skipped, "platform": ""}, spec, expected_head
+        )
 
     def test_python_changes_run_complete_host_validation_before_primary_reviewer(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
@@ -2362,10 +2389,10 @@ class TestPrReviewStageStep:
         assert item.payload["host_verification_failure"]["error"] == "timeout"
         assert "review_audit_failure" not in item.payload
 
-    def test_unsupported_host_boundary_is_explicitly_bypassed(
+    def test_unsupported_host_boundary_is_explicitly_skipped(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Only the temporary unsupported-platform condition may bypass review checks."""
+        """Only an attested unsupported platform may skip review checks."""
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2385,7 +2412,17 @@ class TestPrReviewStageStep:
         item.state = request.on_done_state
         stage.on_job_done(
             item,
-            JobResult(ok=False, error="unsupported_host_verification_boundary"),
+            JobResult(
+                ok=False,
+                error="unsupported_host_verification_boundary",
+                value={
+                    "failure_kind": "runner",
+                    "head_sha": "a" * 40,
+                    "immutable_source": False,
+                    "platform": "linux",
+                    "status": "skipped",
+                },
+            ),
             ctx,
         )
 
@@ -2394,8 +2431,10 @@ class TestPrReviewStageStep:
         assert isinstance(next_request, JobRequest)
         assert next_request.on_done_state == HOST_VERIFICATION_WAIT
         receipt = item.payload["host_verification_receipts"][0]
-        assert receipt["bypassed"] is True
+        assert "bypassed" not in receipt
         assert receipt["error"] == "unsupported_host_verification_boundary"
+        assert receipt["platform"] == "linux"
+        assert receipt["status"] == "skipped"
         assert ("mark_pr_implementation_no_go", (1001,)) not in ctx.github.mutation_log
 
     def test_host_failure_comment_error_preserves_no_go_and_fails_closed(

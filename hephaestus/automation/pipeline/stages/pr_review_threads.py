@@ -176,19 +176,25 @@ from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
 
-TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR = "unsupported_host_verification_boundary"
+UNSUPPORTED_HOST_VERIFICATION_ERROR = "unsupported_host_verification_boundary"
 
 
 def _host_verification_receipt_matches(
     receipt: object, spec: _HostVerificationSpec, reviewed_head: str
 ) -> bool:
     """Return whether *receipt* proves this immutable head and command passed."""
-    if isinstance(receipt, dict) and receipt.get("bypassed") is True:
+    if isinstance(receipt, dict) and receipt.get("status") == "skipped":
+        platform = receipt.get("platform")
         return bool(
             receipt.get("head_sha") == reviewed_head
             and receipt.get("argv") == list(spec.argv)
+            and receipt.get("immutable_source") is False
             and receipt.get("ok") is False
-            and receipt.get("error") == TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR
+            and receipt.get("error") == UNSUPPORTED_HOST_VERIFICATION_ERROR
+            and receipt.get("status") == "skipped"
+            and isinstance(platform, str)
+            and bool(platform)
+            and platform != "darwin"
             and isinstance(receipt.get("stdout_tail"), str)
             and isinstance(receipt.get("stderr_tail"), str)
         )
@@ -198,6 +204,8 @@ def _host_verification_receipt_matches(
         and receipt.get("argv") == list(spec.argv)
         and receipt.get("immutable_source") is True
         and receipt.get("ok") is True
+        and receipt.get("status") in {None, "passed"}
+        and receipt.get("platform") in {None, "darwin"}
         and isinstance(receipt.get("stdout_tail"), str)
         and isinstance(receipt.get("stderr_tail"), str)
     )
@@ -817,7 +825,7 @@ __all__ = [
     'IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP', 'POST', 'PUSH_WAIT', 'RECOVERY_REPLY_WAIT',
     'REVIEW_CHECKOUT_RETRY_CAP',
     'REVIEW_CHECKOUT_WAIT', 'REVIEW_ERROR_RETRY_CAP', 'REVIEW_WAIT', 'STATE_SKIP',
-    'TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR', 'VALIDATE_WAIT',
+    'UNSUPPORTED_HOST_VERIFICATION_ERROR', 'VALIDATE_WAIT',
     'VALID_SEVERITIES', '_COMMENT_VALIDATION_ONLY', '_HOST_VERIFICATION_PENDING',
     '_JSON_RESPONSE_BLOCK_RE', '_PENDING_IMPLEMENTATION_REPLY_HANDOFF',
     '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',
