@@ -536,13 +536,25 @@ def _emit_tidy_environment_failure(json_output: bool) -> int:
     return 1
 
 
+class TidyExecutionError(RuntimeError):
+    """The underlying `gh tidy` command failed (non-zero exit).
+
+    Raised instead of parsing output that cannot be trusted. A failed rebase
+    with a branch checked out in another worktree is the canonical case
+    (Athena #103): parsing the partial output and claiming a clean result
+    fabricates a successful cleanup.
+    """
+
+    def __init__(self, exit_code: int) -> None:
+        """Record the failed command's exit code for the caller."""
+        super().__init__(f"gh tidy exited with code {exit_code}")
+        self.exit_code = exit_code
+
+
 def _run_tidy_and_find_problem_branches(trunk: str, dry_run: bool) -> list[str]:
     exit_code, output = _run_gh_tidy(trunk, dry_run)
     if exit_code != 0 and not dry_run:
-        logger.warning(
-            "gh tidy exited with code %d — proceeding to parse output anyway",
-            exit_code,
-        )
+        raise TidyExecutionError(exit_code)
     return parse_problem_branches(output)
 
 
@@ -654,7 +666,18 @@ def main() -> int:
     if args.cleanup_stale_worktrees:
         return _cleanup_stale_worktrees(repo_path, trunk, args.dry_run)
 
-    problem_branches = _run_tidy_and_find_problem_branches(trunk, args.dry_run)
+    try:
+        problem_branches = _run_tidy_and_find_problem_branches(trunk, args.dry_run)
+    except TidyExecutionError as error:
+        logger.error(
+            "gh tidy failed with exit code %d — cleanup state is unknown; "
+            "fix the underlying failures before claiming a clean result",
+            error.exit_code,
+        )
+        if args.json:
+            emit_json_status(1, message="gh tidy failed; cleanup state unknown")
+        return 1
+
     if not problem_branches:
         return _handle_no_problem_branches(args.json)
 
