@@ -1319,6 +1319,168 @@ class TestCreateWorktreeBranchCollision:
             assert manager._worktree_holding_branch("708-auto-impl") == p
             assert manager._worktree_holding_branch("999-auto-impl") is None
 
+    @pytest.mark.parametrize("backend", ["rebase-merge", "rebase-apply"])
+    def test_worktree_holding_branch_detects_detached_rebase_owner(
+        self, tmp_path: Path, backend: str
+    ) -> None:
+        """An interrupted detached rebase still owns its original branch."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "init", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (
+            ("user.name", "Test User"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+        ):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "topic", str(linked)],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "switch", "--detach"],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        metadata = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", backend],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rebase_dir = Path(metadata.stdout.strip())
+        rebase_dir.mkdir()
+        head_name = rebase_dir / "head-name"
+        head_name.write_text("refs/heads/topic\n", encoding="utf-8")
+
+        manager = WorktreeManager(
+            repo_root=checkout,
+            base_dir=tmp_path / "managed-worktrees",
+        )
+
+        assert manager._worktree_holding_branch("topic") == linked
+        with pytest.raises(BranchWorktreeOwnedError) as raised:
+            manager.create_worktree(999, "topic")
+        assert raised.value.owner_path == linked
+        assert head_name.read_text(encoding="utf-8") == "refs/heads/topic\n"
+
+    @pytest.mark.parametrize("backend", ["rebase-merge", "rebase-apply"])
+    def test_worktree_holding_branch_ignores_detached_worktree_without_rebase_metadata(
+        self, tmp_path: Path, backend: str
+    ) -> None:
+        """An ordinary detached worktree does not claim a branch it no longer checks out."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(["git", "init", "--initial-branch", "main", str(checkout)], check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"], cwd=checkout, check=True
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "topic", str(linked)], cwd=checkout, check=True
+        )
+        subprocess.run(["git", "switch", "--detach"], cwd=linked, check=True)
+        metadata = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", backend],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        Path(metadata.stdout.strip()).mkdir()
+        before = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=linked, check=True, capture_output=True, text=True
+        ).stdout
+        manager = WorktreeManager(repo_root=checkout, base_dir=tmp_path / "managed-worktrees")
+
+        assert manager._worktree_holding_branch("topic") is None
+        assert (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=linked, check=True, capture_output=True, text=True
+            ).stdout
+            == before
+        )
+
+    @pytest.mark.parametrize("metadata_kind", ["malformed", "symlink"])
+    def test_worktree_holding_branch_rejects_hostile_rebase_metadata_without_mutation(
+        self, tmp_path: Path, metadata_kind: str
+    ) -> None:
+        """Malformed rebase metadata fails closed and preserves the detached checkout."""
+        checkout = tmp_path / "checkout"
+        linked = tmp_path / "linked"
+        subprocess.run(["git", "init", "--initial-branch", "main", str(checkout)], check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "initial"], cwd=checkout, check=True
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "topic", str(linked)], cwd=checkout, check=True
+        )
+        subprocess.run(["git", "switch", "--detach"], cwd=linked, check=True)
+        metadata = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge"],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rebase_dir = Path(metadata.stdout.strip())
+        rebase_dir.mkdir()
+        head_name = rebase_dir / "head-name"
+        if metadata_kind == "malformed":
+            head_name.write_text("refs/heads/topic\x01\n", encoding="utf-8")
+        else:
+            target = tmp_path / "outside-head-name"
+            target.write_text("refs/heads/topic\n", encoding="utf-8")
+            head_name.symlink_to(target)
+        before = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=linked, check=True, capture_output=True, text=True
+        ).stdout
+        manager = WorktreeManager(repo_root=checkout, base_dir=tmp_path / "managed-worktrees")
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"Rebase branch metadata is invalid|Rebase metadata (path|escapes)",
+        ):
+            manager._worktree_holding_branch("topic")
+
+        assert (
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=linked, check=True, capture_output=True, text=True
+            ).stdout
+            == before
+        )
+
     def test_refresh_base_branch_refetches_and_redetects(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:
