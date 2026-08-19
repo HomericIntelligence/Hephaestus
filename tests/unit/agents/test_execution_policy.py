@@ -254,13 +254,16 @@ def test_installed_host_adapter_bootstraps_in_a_fresh_python_process(tmp_path) -
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(fixture_root), env.get("PYTHONPATH", "")) if part
     )
+    process_code = (
+        "from hephaestus.agents import runtime; "
+        + "runtime._require_pi_isolation_adapter(); print('loaded')"
+    )
 
     completed = subprocess.run(
         [
             sys.executable,
             "-c",
-            "from hephaestus.agents import runtime; "
-            "runtime._require_pi_isolation_adapter(); print('loaded')",
+            process_code,
         ],
         check=False,
         capture_output=True,
