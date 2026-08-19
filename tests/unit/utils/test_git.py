@@ -8,7 +8,21 @@ from unittest.mock import patch
 
 import hephaestus.utils as utils_pkg
 import hephaestus.utils.git as shared_git
+from hephaestus.diagnostics import bounded_git_diagnostic
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
+
+
+def test_bounded_git_diagnostic_redacts_credentials_before_truncation() -> None:
+    """Durable Git failure evidence is bounded and excludes credential values."""
+    diagnostic = (
+        "earlier output " * 20 + "https://operator:credential-value@example.invalid/repository.git"
+    )
+
+    result = bounded_git_diagnostic(diagnostic, limit=80)
+
+    assert len(result) <= 80
+    assert "credential-value" not in result
+    assert "<redacted-git-url>" in result
 
 
 def test_run_git_routes_through_standard_subprocess_helper() -> None:

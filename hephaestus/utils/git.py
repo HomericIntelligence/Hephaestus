@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from hephaestus.diagnostics import redact_git_diagnostic as _redact_git_diagnostics
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT, run_subprocess
 from hephaestus.utils.retry import is_network_error, retry_with_backoff
 
@@ -45,21 +45,6 @@ _GIT_GLOBAL_FLAGS = frozenset(
     }
 )
 _LOG_STREAM_TAIL_MAX = 2000
-
-
-_REDACTED_GIT_URL = "<redacted-git-url>"
-_REDACTED_VALUE = "<redacted-value>"
-_GIT_URL_RE = re.compile(r"\b(?:https?|ssh|git)://\S+", re.IGNORECASE)
-_GIT_SCP_REMOTE_RE = re.compile(r"(?<![\w./-])(?:[\w.-]+@)?[\w.-]+:\S+(?:\.git)?")
-_GIT_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(access_token|auth_token|oauth_token|token|password|passwd|secret|credential)="
-    r"([^&\s]+)"
-)
-_GIT_AUTH_HEADER_RE = re.compile(r"(?i)\b(authorization:\s*(?:basic|bearer)\s+)\S+")
-_GITHUB_TOKEN_RE = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github"
-    r"_pat_[A-Za-z0-9_]{20,})\b"
-)
 
 
 def _cwd_arg(cwd: Path | str | None) -> str | None:
@@ -123,18 +108,6 @@ def _tail_for_log(value: str, limit: int = _LOG_STREAM_TAIL_MAX) -> str:
         return value
     omitted = len(value) - limit
     return f"...({omitted} earlier chars){value[-limit:]}"
-
-
-def _redact_git_diagnostics(value: str) -> str:
-    """Return Git diagnostics with credential-bearing values redacted."""
-    redacted = _GIT_AUTH_HEADER_RE.sub(r"\1" + _REDACTED_VALUE, value)
-    redacted = _GIT_SECRET_ASSIGNMENT_RE.sub(
-        lambda match: f"{match.group(1)}={_REDACTED_VALUE}", redacted
-    )
-    redacted = _GITHUB_TOKEN_RE.sub(_REDACTED_VALUE, redacted)
-    redacted = _GIT_URL_RE.sub(_REDACTED_GIT_URL, redacted)
-    redacted = _GIT_SCP_REMOTE_RE.sub(_REDACTED_GIT_URL, redacted)
-    return redacted
 
 
 def _format_git_cmd_for_log(cmd: list[str]) -> str:
