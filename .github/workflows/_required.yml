@@ -271,7 +271,10 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    # The package-install step is external to this repository and can exceed
+    # three minutes during an Ubuntu mirror slowdown.  Keep the job bounded,
+    # while allowing the lint command itself to run.
+    timeout-minutes: 10
     needs: [lint, changes-gate]
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
@@ -657,7 +660,9 @@ jobs:
   shell-tests:
     name: shell-tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Bats is installed from the Ubuntu archive; retain a finite guard but do
+    # not cancel the test suite solely because a mirror is slow.
+    timeout-minutes: 20
     needs: changes-gate
     if: needs.changes-gate.outputs.code_event == 'true'
 
