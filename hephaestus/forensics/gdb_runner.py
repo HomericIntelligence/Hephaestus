@@ -19,6 +19,8 @@ Execution is bounded to 7,200 seconds by default. ``--timeout`` must appear
 before ``<core-dir>`` and accepts values from 1 through 86,400 seconds. A
 timeout terminates the dedicated POSIX process group, or the direct child when
 process groups are unavailable, and returns exit code 124 after bounded cleanup.
+If the bounded reap also times out, the runner makes one final nonblocking reap
+attempt before returning the original timeout outcome.
 
 Environment variables:
 
@@ -128,6 +130,10 @@ def _run_bounded(command: list[str], timeout: int) -> int:
             process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             _terminate_process(process)
+            # A final zero-wait reap records an exit which raced the bounded
+            # cleanup without extending timeout handling or masking the cause.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0)
         raise exc
 
 
