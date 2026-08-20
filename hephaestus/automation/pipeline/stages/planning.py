@@ -211,7 +211,7 @@ def _load_planning_journal(
     is_replan_entry = _is_replan_entry(
         labels,
         revision_already_published=revision_already_published,
-    ) or (forced_from_plan_go and bool(snapshot.current_plan) and not revision_already_published)
+    ) or (forced_from_plan_go and bool(snapshot.current_plan))
     return (
         comments,
         snapshot,

@@ -332,6 +332,33 @@ class TestPlanningStageEnter:
         assert final_snapshot.history == ()
         assert final_snapshot.prior_plan_fingerprints == immutable_fingerprints
 
+    def test_force_plan_go_without_canonical_review_requires_new_revision(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Force cannot treat a reconciliation-created pending review as a revision."""
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], has_plan=True)
+        github.comments[44] = [render_current_plan("Plan v1", revision=1)]
+        ctx = make_ctx(github=github)
+        ctx.config.force = True
+        ctx.config.enable_advise = False
+        item = make_work_item(issue=44, state="ENTER")
+        stage = PlanningStage()
+
+        assert stage.on_enter(item, ctx) is None
+        assert github.labels[44] == {STATE_PLAN_NO_GO}
+        assert item.payload["requires_plan_revision"] is True
+        assert item.state == "ENTER"
+
+        transition = stage.step(item, ctx)
+        assert isinstance(transition, Continue)
+        item.state = transition.next_state
+
+        planner_request = stage.step(item, ctx)
+        assert isinstance(planner_request, JobRequest)
+        assert planner_request.job.descr == "plan"
+
     def test_force_plan_go_without_canonical_plan_starts_initial_plan(
         self,
         make_ctx: Any,
