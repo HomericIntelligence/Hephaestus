@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,12 +37,14 @@ from hephaestus.automation.requirements_recovery import (
     RecoveryDisposition,
     RecoveryReview,
     RecoveryVerdict,
+    parse_recovery_provenance,
     render_recovered_requirements,
 )
 from hephaestus.automation.review_journal import (
     FORCED_PLANNING_EPOCH_MARKER,
     IssueComment,
     PlanDiscoveryResult,
+    plan_fingerprint,
     render_current_plan,
     render_current_review,
 )
@@ -1099,6 +1102,81 @@ class TestPlanningStageStep:
         assert item.payload["issue_body"] == "New requirements"
         assert "plan_text" not in item.payload
         assert "plan_revision" not in item.payload
+
+    def test_recovered_successor_restart_resumes_pending_review_without_replan_entry(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A linked recovered successor survives a fresh planning work item."""
+        stage = PlanningStage()
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        requirements = "New requirements"
+        plan = "Recovered successor plan"
+        source_digest = hashlib.sha256(source.encode()).hexdigest()
+        requirements_digest = hashlib.sha256(requirements.encode()).hexdigest()
+        plan_digest = hashlib.sha256(plan.encode()).hexdigest()
+        recovered = (
+            f"{RECOVERY_PROVENANCE_PREFIX}v=2:source={source_digest}:"
+            f"requirements={requirements_digest}:evidence={'b' * 64}:"
+            f"successor_revision=2:successor_plan={plan_digest} -->\n\n{requirements}"
+        )
+        github = FakeStageGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            issue_title="Tracking issue for retry work",
+            issue_body=source,
+            has_plan=True,
+        )
+        github.comments[72] = [
+            render_current_plan(plan, revision=2),
+            render_current_review("Review pending for implementation plan revision 2.", revision=2),
+            recovered,
+        ]
+        item = make_work_item(issue=72, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.state == "VERIFY"
+        assert item.payload["plan_text"] == plan
+        assert item.payload["plan_revision"] == 2
+        assert "requires_plan_revision" not in item.payload
+        assert not github.mutation_log
+
+    def test_recovered_plan_publication_binds_its_successor_provenance(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """The fresh recovery epoch records the exact plan it publishes."""
+        stage = PlanningStage()
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        recovered = render_recovered_requirements(source, "New requirements", "b" * 64)
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_NO_GO],
+            issue_body=source,
+        )
+        github.comments[73] = [recovered]
+        item = make_work_item(issue=73, state="VERIFY")
+        item.payload.update(
+            {
+                "issue_source_body": source,
+                "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
+                "requirements_recovered_comment": True,
+                "requires_plan_revision": True,
+                "plan_text": "Recovered successor plan",
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.ADVANCE
+        provenance_comment = next(
+            comment
+            for comment in github.comments[73]
+            if comment.startswith(RECOVERY_PROVENANCE_PREFIX)
+        )
+        provenance = parse_recovery_provenance(provenance_comment)
+        assert provenance is not None
+        assert provenance.successor_revision == 1
+        assert provenance.successor_plan_digest == plan_fingerprint("Recovered successor plan")
 
     def test_recovery_with_force_starts_durable_forced_epoch(
         self, make_ctx: Any, make_work_item: Any

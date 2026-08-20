@@ -18,7 +18,7 @@ from hephaestus.automation.review_journal import HISTORY_RE
 from hephaestus.automation.state_labels import is_epic
 from hephaestus.prompts import PromptCatalog
 
-RECOVERY_PROVENANCE_VERSION: Final[int] = 1
+RECOVERY_PROVENANCE_VERSION: Final[int] = 2
 RECOVERY_PROVENANCE_PREFIX: Final[str] = "<!-- hephaestus-recovered-requirements:"
 OBSOLETE_EXPLANATION_MARKER: Final[str] = "<!-- hephaestus-obsolete-explanation:v=1 -->"
 
@@ -26,7 +26,9 @@ _DIGEST_RE = r"[0-9a-f]{64}"
 _PROVENANCE_RE = re.compile(
     rf"^<!-- hephaestus-recovered-requirements:v=(?P<version>\d+):"
     rf"source=(?P<source>{_DIGEST_RE}):requirements=(?P<requirements>{_DIGEST_RE}):"
-    rf"evidence=(?P<evidence>{_DIGEST_RE}) -->$"
+    rf"evidence=(?P<evidence>{_DIGEST_RE})"
+    rf"(?::successor_revision=(?P<successor_revision>\d+):"
+    rf"successor_plan=(?P<successor_plan>{_DIGEST_RE}))? -->$"
 )
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
 _OBSOLETE_BODY_RE = re.compile(
@@ -78,6 +80,8 @@ class RecoveryProvenance:
     source_digest: str
     requirements_digest: str
     evidence_digest: str
+    successor_revision: int | None = None
+    successor_plan_digest: str | None = None
 
 
 def _sha256(text: str) -> str:
@@ -204,6 +208,8 @@ def render_recovered_requirements(
     evidence_binding: str,
     *,
     source_digest: str | None = None,
+    successor_revision: int | None = None,
+    successor_plan_digest: str | None = None,
 ) -> str:
     """Render requirements with a versioned, digest-bound hidden marker."""
     normalized = requirements.strip()
@@ -214,10 +220,25 @@ def render_recovered_requirements(
     bound_source_digest = source_digest or _sha256(source_body)
     if re.fullmatch(_DIGEST_RE, bound_source_digest) is None:
         raise ValueError("source_digest must be a lowercase SHA-256 digest")
+    if (successor_revision is None) != (successor_plan_digest is None):
+        raise ValueError("recovery successor revision and plan digest must be supplied together")
+    if successor_revision is not None and successor_revision < 1:
+        raise ValueError("recovery successor revision must be positive")
+    if (
+        successor_plan_digest is not None
+        and re.fullmatch(_DIGEST_RE, successor_plan_digest) is None
+    ):
+        raise ValueError("recovery successor plan digest must be a lowercase SHA-256 digest")
     marker = (
         f"{RECOVERY_PROVENANCE_PREFIX}v={RECOVERY_PROVENANCE_VERSION}:"
         f"source={bound_source_digest}:requirements={_sha256(normalized)}:"
-        f"evidence={evidence_binding} -->"
+        f"evidence={evidence_binding}"
+        + (
+            f":successor_revision={successor_revision}:successor_plan={successor_plan_digest}"
+            if successor_revision is not None
+            else ""
+        )
+        + " -->"
     )
     return f"{marker}\n\n{normalized}"
 
@@ -231,7 +252,11 @@ def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
         return None
     version = int(match.group("version"))
     requirements = remainder.lstrip("\n")
-    if version != RECOVERY_PROVENANCE_VERSION:
+    successor_revision = match.group("successor_revision")
+    successor_plan = match.group("successor_plan")
+    if version not in {1, RECOVERY_PROVENANCE_VERSION}:
+        return None
+    if (successor_revision is None) != (successor_plan is None):
         return None
     if _sha256(requirements) != match.group("requirements"):
         return None
@@ -240,6 +265,8 @@ def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
         source_digest=match.group("source"),
         requirements_digest=match.group("requirements"),
         evidence_digest=match.group("evidence"),
+        successor_revision=int(successor_revision) if successor_revision is not None else None,
+        successor_plan_digest=successor_plan,
     )
 
 

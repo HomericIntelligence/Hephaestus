@@ -62,6 +62,7 @@ from hephaestus.automation.requirements_recovery import (
     has_contaminated_issue_body,
     is_semantic_disposition_candidate,
     parse_recovered_requirements,
+    parse_recovery_provenance,
     parse_recovery_review,
     recovered_requirements_for_source,
     recovered_requirements_json,
@@ -76,6 +77,7 @@ from hephaestus.automation.review_journal import (
     current_revision_context,
     is_pending_review,
     journal_snapshot,
+    plan_fingerprint,
     render_current_plan,
     render_current_review,
 )
@@ -653,6 +655,77 @@ def _load_planning_journal(
     )
 
 
+def _recovered_successor_is_current(
+    comments: Sequence[IssueComment],
+    snapshot: JournalSnapshot,
+    *,
+    source_digest: str,
+) -> bool:
+    """Return whether recovery provenance binds this exact canonical successor.
+
+    A recovery marker starts a fresh planning epoch.  It stops doing so only
+    after its durable successor plan and paired pending review have both been
+    recorded.  This lets a newly seeded work item resume review without
+    trusting an unrelated canonical plan left by the contaminated epoch.
+    """
+    if not (
+        snapshot.current_plan
+        and snapshot.current_review_revision == snapshot.revision
+        and is_pending_review(snapshot.current_review, revision=snapshot.revision)
+    ):
+        return False
+    current_digest = plan_fingerprint(snapshot.current_plan)
+    for comment in reversed(comments):
+        if not comment.viewer_did_author:
+            continue
+        provenance = parse_recovery_provenance(comment.body)
+        if provenance is None or provenance.source_digest != source_digest:
+            continue
+        return (
+            provenance.successor_revision == snapshot.revision
+            and provenance.successor_plan_digest == current_digest
+        )
+    return False
+
+
+def _bind_recovered_successor(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    plan: str,
+    revision: int,
+) -> bool:
+    """Bind a published plan to its recovered-requirements provenance."""
+    assert item.issue is not None  # noqa: S101 - caller validates the work item
+    if not item.payload.get("requirements_recovered_comment"):
+        return True
+    source_digest = item.payload.get("issue_body_digest")
+    source_body = item.payload.get("issue_source_body")
+    if not isinstance(source_digest, str) or not isinstance(source_body, str):
+        return False
+    for comment in reversed(ctx.github.issue_comments(item.issue)):
+        if not comment.viewer_did_author:
+            continue
+        provenance = parse_recovery_provenance(comment.body)
+        requirements = recovered_requirements_for_source(comment.body, source_digest)
+        if provenance is None or requirements is None:
+            continue
+        ctx.github.upsert_issue_comment(
+            item.issue,
+            RECOVERY_PROVENANCE_PREFIX,
+            render_recovered_requirements(
+                source_body,
+                requirements,
+                provenance.evidence_digest,
+                source_digest=source_digest,
+                successor_revision=revision,
+                successor_plan_digest=plan_fingerprint(plan),
+            ),
+        )
+        return True
+    return False
+
+
 def _plan_is_ready_for_verify(
     snapshot: JournalSnapshot,
     *,
@@ -831,6 +904,16 @@ def _publish_candidate_plan(
             ctx,
             reason=publication.no_progress_reason,
             revision=publication.revision,
+        )
+    if not _bind_recovered_successor(
+        item,
+        ctx,
+        plan=publication.plan,
+        revision=publication.revision,
+    ):
+        return StageOutcome(
+            Disposition.RETRY,
+            "recovered plan successor provenance was not confirmed",
         )
     if not _mark_published_plan_pending_review(
         item.issue,
@@ -1049,15 +1132,24 @@ class PlanningStage(Stage):
             )
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         recovered_restart = bool(item.payload.get("requirements_recovered_comment"))
-        if recovered_restart:
+        recovered_successor = recovered_restart and _recovered_successor_is_current(
+            comments,
+            snapshot,
+            source_digest=str(item.payload.get("issue_body_digest") or ""),
+        )
+        if recovered_restart and not recovered_successor:
             # The source-bound recovery artifact authorizes a new planning
-            # epoch, never reuse of the plan that was derived from the
-            # contaminated issue body.
+            # epoch until it binds a successor plan to the recovered source.
             item.payload.pop("plan_text", None)
             item.payload.pop("plan_revision", None)
             item.payload.pop("issue_history", None)
             is_replan_entry = True
             revision_already_published = False
+        elif recovered_successor:
+            # The recovered successor and its pending review are both exact
+            # durable artifacts.  A fresh item must resume that review rather
+            # than reopening a replan epoch or rewriting state:needs-plan.
+            item.payload.pop("requires_plan_revision", None)
         if force_replan:
             if revision_already_published and snapshot.forced_planning_epoch:
                 force_replan = False
@@ -1093,7 +1185,7 @@ class PlanningStage(Stage):
         # Restart fast-forward: journal reconciliation already found a current
         # plan, so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if not recovered_restart and _plan_is_ready_for_verify(
+        if (not recovered_restart or recovered_successor) and _plan_is_ready_for_verify(
             snapshot, is_replan_entry=is_replan_entry
         ):
             logger.info(
