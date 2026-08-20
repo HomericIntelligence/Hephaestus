@@ -104,6 +104,24 @@ def test_forced_publication_persists_restart_provenance() -> None:
     assert snapshot.forced_planning_epoch is True
 
 
+def test_recovery_publication_persists_source_epoch() -> None:
+    """A canonical plan records which recovered source authorized its epoch."""
+    github = FakeStageGitHub()
+    source_digest = "a" * 64
+
+    publish_plan_revision(
+        11,
+        "Fresh recovered plan",
+        github,
+        require_change=False,
+        recovery_source_digest=source_digest,
+    )
+
+    snapshot = journal_snapshot(github.issue_comments(11))
+    assert snapshot.current_plan == "Fresh recovered plan"
+    assert snapshot.recovery_source_digest == source_digest
+
+
 def test_failed_canonical_plan_write_preserves_the_previous_revision_for_retry() -> None:
     """A failed first write loses no public artifact and a clean retry can publish."""
     github = _CrashOnceJournalGitHub("canonical_plan")

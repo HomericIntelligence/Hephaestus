@@ -92,6 +92,27 @@ def test_compaction_preserves_forced_planning_epoch_marker() -> None:
     assert FORCED_PLANNING_EPOCH_MARKER in result.plan_body
 
 
+def test_compaction_preserves_recovery_source_epoch_marker() -> None:
+    """Compaction cannot make a recovered plan look older than its source."""
+    source_digest = "c" * 64
+    comments = [
+        _comment(
+            1,
+            render_current_plan(
+                "Recovered plan",
+                revision=2,
+                recovery_source_digest=source_digest,
+            ),
+        ),
+        _comment(2, render_current_review("Pending", revision=2)),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.plan_body is not None
+    assert source_digest in result.plan_body
+
+
 def test_compaction_never_claims_or_deletes_foreign_marker_comments() -> None:
     """Marker text alone cannot authorize mutation of another actor's comment."""
     comments = [

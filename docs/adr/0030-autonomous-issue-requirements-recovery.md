@@ -36,9 +36,12 @@ so a read-then-write body update could overwrite a concurrent human edit.
 Restart reads only an authenticated actor-owned artifact whose source digest
 matches the live body; a changed body therefore fails closed into fresh
 recovery. Successful comment publication starts a fresh plan and plan-review
-epoch rather than reusing old comments or sessions. Independently confirmed
-obsolete issues likewise upsert exactly one actor-owned explanation before
-receiving `state:skip`.
+epoch rather than reusing old comments or sessions. The replacement canonical
+plan carries the matching recovery-source digest as hidden epoch metadata, so
+a restart discards only a plan that predates the recovery artifact while a
+pending or rejected post-recovery plan resumes normally. Independently
+confirmed obsolete issues likewise upsert exactly one actor-owned explanation
+before receiving `state:skip`.
 
 ADR-0031 defines how these recovery roles coexist with the canonical plan and
 review roles, including their ownership and compaction rules.

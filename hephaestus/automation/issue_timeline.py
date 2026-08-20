@@ -279,6 +279,7 @@ def plan_issue_timeline_compaction(
             revision=snapshot.revision,
             prior_fingerprints=tuple(dict.fromkeys(prior_fingerprints)),
             forced_planning_epoch=snapshot.forced_planning_epoch,
+            recovery_source_digest=snapshot.recovery_source_digest,
         )
         if target_plan is not None
         else None

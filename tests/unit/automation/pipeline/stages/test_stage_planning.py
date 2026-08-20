@@ -300,6 +300,31 @@ class TestPlanningStageEnter:
         assert "requires_plan_revision" not in item.payload
         assert github.mutation_log == []
 
+    def test_force_restart_after_nogo_preserves_amendment_epoch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A rejected forced plan resumes amendment instead of restarting force."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], has_plan=True)
+        github.comments[45] = [
+            render_current_plan("Forced plan", revision=4, forced_planning_epoch=True),
+            render_current_review("Add rollback.\n\nstate:plan-no-go", revision=4),
+        ]
+        item = make_work_item(issue=45, state="ENTER")
+
+        outcome = stage.on_enter(
+            item,
+            make_ctx(github=github, config=SimpleNamespace(force=True)),
+        )
+
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert item.payload["plan_text"] == "Forced plan"
+        assert item.payload["forced_planning_epoch_started"] is True
+        assert item.payload["requires_plan_revision"] is True
+        assert "Add rollback." in item.payload["issue_history"]
+        assert github.mutation_log == []
+
     def test_force_does_not_reuse_an_ordinary_pending_revision(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -861,6 +886,76 @@ class TestPlanningStageStep:
         assert result.disposition == Disposition.SKIP
         assert github.labels[2] == {STATE_SKIP, "epic"}
 
+    def test_tracker_skip_requires_epic_label_readback(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A partial tracker label write is not reported as success."""
+
+        class DropsEpicGitHub(FakeStageGitHub):
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                super().edit_labels(
+                    issue_number,
+                    add=[label for label in add if label != "epic"],
+                    remove=remove,
+                )
+
+        github = DropsEpicGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=73, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.TRACKER, "", "Tracks children.", "Checklist"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.TRACKER, "Confirmed tracker."
+                ),
+            }
+        )
+
+        result = PlanningStage().step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+
+    @pytest.mark.parametrize(
+        ("github", "expected_disposition"),
+        [
+            (FakeStageGitHub(labels=[STATE_SKIP]), Disposition.SKIP),
+            (FakeStageGitHub(issue_state="CLOSED", merged_pr=88), Disposition.FINISH_PASS),
+        ],
+    )
+    def test_recovery_apply_honors_terminal_live_issue_state(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        github: FakeStageGitHub,
+        expected_disposition: Disposition,
+    ) -> None:
+        """Recovery cannot mutate an issue that became skipped or closed."""
+        item = make_work_item(issue=74, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS, "", "Recovered.", "Evidence"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.REQUIREMENTS, "Confirmed."
+                ),
+            }
+        )
+
+        result = PlanningStage().step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == expected_disposition
+        assert github.mutation_log == []
+
     def test_obsolete_skip_records_reason_in_one_actor_owned_comment(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1140,6 +1235,57 @@ class TestPlanningStageStep:
         assert item.payload["plan_revision"] == 2
         assert "requires_plan_revision" not in item.payload
         assert not github.mutation_log
+
+    @pytest.mark.parametrize(
+        ("labels", "review", "expected_state"),
+        [
+            (
+                [STATE_NEEDS_PLAN],
+                "Review pending for implementation plan revision 2.",
+                "VERIFY",
+            ),
+            ([STATE_PLAN_NO_GO], "Add rollback.\n\nstate:plan-no-go", "ENTER"),
+        ],
+    )
+    def test_recovered_plan_restart_reuses_matching_source_epoch(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        labels: list[str],
+        review: str,
+        expected_state: str,
+    ) -> None:
+        """Only a plan predating recovery is discarded on restart."""
+        stage = PlanningStage()
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        source_digest = github_api_mod.issue_body_digest(source)
+        recovered = render_recovered_requirements(
+            source,
+            "Recovered requirements",
+            "b" * 64,
+            source_digest=source_digest,
+        )
+        github = FakeStageGitHub(labels=labels, issue_body=source, has_plan=True)
+        github.comments[72] = [
+            render_current_plan(
+                "Fresh recovered plan",
+                revision=2,
+                recovery_source_digest=source_digest,
+            ),
+            render_current_review(review, revision=2),
+            recovered,
+        ]
+        item = make_work_item(issue=72, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.state == expected_state
+        assert item.payload["plan_text"] == "Fresh recovered plan"
+        assert item.payload["requirements_recovery_source_digest"] == source_digest
+        if labels == [STATE_PLAN_NO_GO]:
+            assert item.payload["requires_plan_revision"] is True
+            assert "Add rollback." in item.payload["issue_history"]
 
     def test_recovered_plan_publication_binds_its_successor_provenance(
         self, make_ctx: Any, make_work_item: Any
@@ -1514,26 +1660,51 @@ class TestPlanningStageStep:
         assert item.attempts["plan"] == 2
         assert github.labels[11] == {STATE_PLAN_NO_GO}
 
-    def test_verify_read_error_does_not_publish_or_spend_absence_budget(
+    def test_verify_read_error_is_bounded_to_plan_no_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An uncertain plan lookup stays in VERIFY without side effects."""
+        """An uncertain plan lookup cannot requeue VERIFY forever."""
         github = FakeStageGitHub(
             labels=[STATE_NEEDS_PLAN],
             plan_read_error="malformed comment body",
         )
         item = make_work_item(issue=12, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nCandidate"
+        ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
 
-        outcome = PlanningStage().step(item, make_ctx(github=github))
+        first = PlanningStage().step(item, ctx)
+        item.state = "VERIFY"
+        second = PlanningStage().step(item, ctx)
 
-        assert outcome == StageOutcome(
-            Disposition.RETRY,
-            "plan discovery failed: malformed comment body",
+        assert isinstance(first, StageOutcome)
+        assert first.disposition == Disposition.RETRY
+        assert isinstance(second, StageOutcome)
+        assert second.disposition == Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 2
+        assert github.labels[12] == {STATE_PLAN_NO_GO}
+
+    def test_verify_publication_journal_error_is_bounded_to_plan_no_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A persistent publication journal failure consumes the same plan budget."""
+        github = FakeStageGitHub(
+            labels=[STATE_NEEDS_PLAN],
+            journal_read_error="timeline unavailable",
         )
-        assert item.state == "VERIFY"
-        assert item.attempts.get("plan", 0) == 0
-        assert github.mutation_log == []
+        item = make_work_item(issue=13, state="VERIFY")
+        item.payload["plan_text"] = "# Implementation Plan\n\nCandidate"
+        ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
+
+        first = PlanningStage().step(item, ctx)
+        item.state = "VERIFY"
+        second = PlanningStage().step(item, ctx)
+
+        assert isinstance(first, StageOutcome)
+        assert first.disposition == Disposition.RETRY
+        assert isinstance(second, StageOutcome)
+        assert second.disposition == Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 2
+        assert github.labels[13] == {STATE_PLAN_NO_GO}
 
     def test_production_adapter_malformed_comment_retries_without_mutation(
         self,
@@ -1549,6 +1720,18 @@ class TestPlanningStageStep:
             "_repo_issue_comments",
             lambda issue: [{"body": None, "user": {"login": "bot"}}],
         )
+        monkeypatch.setattr(
+            adapter,
+            "gh_issue_json",
+            lambda issue: {
+                "number": issue,
+                "title": "Task",
+                "body": "Requirements",
+                "bodyDigest": github_api_mod.issue_body_digest("Requirements"),
+                "state": "OPEN",
+                "labels": [{"name": STATE_NEEDS_PLAN}],
+            },
+        )
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
         item = make_work_item(issue=14, state="VERIFY")
         item.payload["plan_text"] = "# Implementation Plan\n\nCandidate"
@@ -1557,8 +1740,8 @@ class TestPlanningStageStep:
 
         assert isinstance(outcome, StageOutcome)
         assert outcome.disposition == Disposition.RETRY
-        assert item.state == "VERIFY"
-        assert item.attempts.get("plan", 0) == 0
+        assert item.state == "ENTER"
+        assert item.attempts["plan"] == 1
 
     def test_verify_posts_plan_comment_then_advances(
         self, make_ctx: Any, make_work_item: Any

@@ -30,6 +30,10 @@ matches the current issue body; otherwise it starts fresh recovery. Timeline
 compaction verifies the provenance marker and requirements digest before
 retaining the latest copy, but cannot establish a live body match from comment
 metadata alone, so it never promotes that artifact to recovery authority.
+The canonical plan separately retains the matching source digest as hidden
+epoch metadata. This binds restart routing without folding recovered
+requirements into the plan: a matching plan is post-recovery work, while a
+missing or mismatched marker identifies a stale pre-recovery plan.
 
 An obsolete explanation is permitted only after matching planner and reviewer
 GO dispositions and accompanies `state:skip`. It is an audit explanation, not

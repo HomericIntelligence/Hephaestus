@@ -33,6 +33,9 @@ PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
     r"<!-- prior-plan-fingerprints: (?P<fingerprints>[0-9a-f,]*) -->"
 )
 FORCED_PLANNING_EPOCH_MARKER: Final[str] = "<!-- hephaestus-forced-planning-epoch -->"
+RECOVERY_SOURCE_EPOCH_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!-- hephaestus-recovery-source-epoch: (?P<source>[0-9a-f]{64}) -->"
+)
 RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
@@ -131,6 +134,7 @@ class JournalSnapshot:
     history: tuple[HistoryArtifact, ...]
     prior_plan_fingerprints: tuple[str, ...] = ()
     forced_planning_epoch: bool = False
+    recovery_source_digest: str | None = None
 
 
 def as_issue_comment(comment: IssueComment | str) -> IssueComment:
@@ -286,7 +290,8 @@ def extract_current_plan(body: str) -> str:
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
     text = _without_fingerprint_line(text)
-    return text.replace(FORCED_PLANNING_EPOCH_MARKER, "", 1).strip()
+    text = text.replace(FORCED_PLANNING_EPOCH_MARKER, "", 1)
+    return RECOVERY_SOURCE_EPOCH_RE.sub("", text, count=1).strip()
 
 
 def extract_current_review(body: str) -> str:
@@ -302,6 +307,7 @@ def render_current_plan(
     revision: int = 1,
     prior_fingerprints: Sequence[str] = (),
     forced_planning_epoch: bool = False,
+    recovery_source_digest: str | None = None,
 ) -> str:
     """Render the editable current plan with an opaque canonical marker."""
     payload = extract_current_plan(plan)
@@ -311,6 +317,10 @@ def render_current_plan(
         metadata = f"\n<!-- prior-plan-fingerprints: {','.join(fingerprints)} -->"
     if forced_planning_epoch:
         metadata += f"\n{FORCED_PLANNING_EPOCH_MARKER}"
+    if recovery_source_digest is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", recovery_source_digest) is None:
+            raise ValueError("recovery source digest must be a lowercase SHA-256 digest")
+        metadata += f"\n<!-- hephaestus-recovery-source-epoch: {recovery_source_digest} -->"
     return (
         f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
         f"<!-- revision: {revision} -->{metadata}\n\n{payload}"
@@ -511,6 +521,7 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     revision = explicit_revision or max(1, archived_max + 1)
     review_revision = comment_revision(current_review_body) if current_review_body else None
     fingerprint_match = PLAN_FINGERPRINTS_RE.search(current_plan_body)
+    recovery_source_match = RECOVERY_SOURCE_EPOCH_RE.search(current_plan_body)
     prior_fingerprints = (
         tuple(value for value in fingerprint_match.group("fingerprints").split(",") if value)
         if fingerprint_match
@@ -526,6 +537,9 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
         history=tuple(sorted(history, key=lambda item: (item.revision, item.kind != "plan"))),
         prior_plan_fingerprints=prior_fingerprints,
         forced_planning_epoch=FORCED_PLANNING_EPOCH_MARKER in current_plan_body,
+        recovery_source_digest=(
+            recovery_source_match.group("source") if recovery_source_match else None
+        ),
     )
 
 
@@ -560,7 +574,12 @@ def current_plan_context(
     snapshot = journal_snapshot(comments)
     if not snapshot.current_plan:
         return ""
-    plan = render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+    plan = render_current_plan(
+        snapshot.current_plan,
+        revision=snapshot.revision,
+        forced_planning_epoch=snapshot.forced_planning_epoch,
+        recovery_source_digest=snapshot.recovery_source_digest,
+    )
     return _bounded_excerpt(plan, max_chars)
 
 
@@ -580,7 +599,12 @@ def current_revision_context(
         return ""
     snapshot = journal_snapshot(comments)
     plan = (
-        render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+        render_current_plan(
+            snapshot.current_plan,
+            revision=snapshot.revision,
+            forced_planning_epoch=snapshot.forced_planning_epoch,
+            recovery_source_digest=snapshot.recovery_source_digest,
+        )
         if snapshot.current_plan
         else ""
     )

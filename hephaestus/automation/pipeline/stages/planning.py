@@ -126,11 +126,14 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-def _closed_issue_entry_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+def _closed_issue_snapshot_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    issue_snapshot: object,
+) -> StageOutcome | None:
     """Fail closed on malformed state and terminalize a fresh close/merge race."""
-    if item.issue is None:  # Defensive; on_enter rejects this before calling.
+    if item.issue is None:  # Defensive; callers validate this first.
         return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
-    issue_snapshot = ctx.github.gh_issue_json(item.issue)
     if not isinstance(issue_snapshot, dict) or issue_snapshot.get("number") != item.issue:
         logger.error("planning:%d: malformed issue snapshot", item.issue)
         return StageOutcome(Disposition.FINISH_FAIL, "malformed issue snapshot")
@@ -149,6 +152,13 @@ def _closed_issue_entry_outcome(item: WorkItem, ctx: StageContext) -> StageOutco
         )
     logger.info("planning:%d: closed by merged PR #%d; finishing", item.issue, merged_pr)
     return StageOutcome(Disposition.FINISH_PASS, f"closed by merged PR #{merged_pr}")
+
+
+def _closed_issue_entry_outcome(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    """Read current issue state and classify a close/merge race."""
+    if item.issue is None:  # Defensive; on_enter rejects this before calling.
+        return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+    return _closed_issue_snapshot_outcome(item, ctx, ctx.github.gh_issue_json(item.issue))
 
 
 def build_plan_prompt(
@@ -230,10 +240,12 @@ def _refresh_requirements_recovery_context(
     if recovered is not None:
         item.payload["issue_body"] = recovered
         item.payload["requirements_recovered_comment"] = True
+        item.payload["requirements_recovery_source_digest"] = body_digest
         item.payload["requires_plan_revision"] = True
         contaminated = False
     else:
         item.payload.pop("requirements_recovered_comment", None)
+        item.payload.pop("requirements_recovery_source_digest", None)
     semantic_candidate = recovered is None and is_semantic_disposition_candidate(title, body)
     semantic_already_cleared = item.payload.get("requirements_semantic_clear_digest") == body_digest
     required = contaminated or (semantic_candidate and not semantic_already_cleared)
@@ -349,7 +361,11 @@ def _apply_recovery_state_label(
     )
     live_labels = _require_issue_labels_for_transition(item.issue, ctx)
     if target == STATE_SKIP:
-        return STATE_SKIP in live_labels and not set(live_labels).intersection(ALL_STATE_LABELS)
+        return (
+            STATE_SKIP in live_labels
+            and set(extra).issubset(live_labels)
+            and not set(live_labels).intersection(ALL_STATE_LABELS)
+        )
     return is_exclusive_plan_state(live_labels, target) and not set(live_labels).intersection(
         ALL_IMPLEMENTATION_STATE_LABELS
     )
@@ -468,6 +484,7 @@ def _apply_confirmed_requirements(
     ctx.github.upsert_issue_comment(item.issue, RECOVERY_PROVENANCE_PREFIX, recovered_body)
     item.payload["issue_body"] = proposal.requirements
     item.payload["requirements_recovered_comment"] = True
+    item.payload["requirements_recovery_source_digest"] = source_digest
     item.payload["requires_plan_revision"] = True
     if bool(getattr(ctx.config, "force", False)):
         item.payload["forced_planning_epoch_started"] = True
@@ -487,30 +504,36 @@ def _apply_requirements_recovery(
     assert item.issue is not None  # noqa: S101 - caller validates this
     proposal = item.payload.get("recovered_requirements")
     review = item.payload.get("requirements_recovery_review")
+    live = ctx.github.gh_issue_json(item.issue)
+    if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+        return issue_outcome
+    live_labels = _issue_snapshot_labels(live)
+    if is_skipped(live_labels):
+        return StageOutcome(Disposition.SKIP, "state:skip")
+    if STATE_PLAN_BLOCKED in live_labels:
+        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     if not isinstance(proposal, RecoveredRequirements) or not isinstance(review, RecoveryReview):
         return _retry_requirements_recovery(item, ctx, "missing typed recovery result")
-    if STATE_PLAN_BLOCKED in _require_issue_labels_for_transition(item.issue, ctx):
-        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     expected_title = item.payload.get("issue_title")
     expected_body = item.payload.get("issue_source_body", item.payload.get("issue_body"))
     expected_digest = item.payload.get("issue_body_digest")
-    if all(isinstance(value, str) for value in (expected_title, expected_body, expected_digest)):
-        live = ctx.github.gh_issue_json(item.issue)
-        if (
-            live.get("title") != expected_title
-            or live.get("body") != expected_body
-            or live.get("bodyDigest") != expected_digest
-        ):
-            _clear_recovery_results(item)
-            try:
-                _refresh_requirements_recovery_context(item, ctx)
-            except RuntimeError as exc:
-                return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-            _reenter_planning(item)
-            return StageOutcome(
-                Disposition.RETRY,
-                "issue requirements changed after recovery review; refreshed evidence",
-            )
+    if all(
+        isinstance(value, str) for value in (expected_title, expected_body, expected_digest)
+    ) and (
+        live.get("title") != expected_title
+        or live.get("body") != expected_body
+        or live.get("bodyDigest") != expected_digest
+    ):
+        _clear_recovery_results(item)
+        try:
+            _refresh_requirements_recovery_context(item, ctx)
+        except RuntimeError as exc:
+            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
+        _reenter_planning(item)
+        return StageOutcome(
+            Disposition.RETRY,
+            "issue requirements changed after recovery review; refreshed evidence",
+        )
     if review.verdict is not RecoveryVerdict.GO or review.disposition is not proposal.disposition:
         return _retry_requirements_recovery(item, ctx, review.reason)
     if skip_outcome := _apply_confirmed_semantic_skip(item, ctx, proposal, review):
@@ -794,14 +817,20 @@ def _write_planning_entry_labels(
     )
 
 
-def _require_issue_labels_for_transition(issue_number: int, ctx: StageContext) -> list[str]:
-    """Read fresh label names when confirming a durable state transition."""
-    data = ctx.github.gh_issue_json(issue_number)
+def _issue_snapshot_labels(data: object) -> list[str]:
+    """Return normalized label names from one validated-enough issue snapshot."""
+    if not isinstance(data, dict):
+        return []
     return [
         str(label.get("name")) if isinstance(label, dict) else str(label)
         for label in data.get("labels", [])
         if isinstance(label, (dict, str))
     ]
+
+
+def _require_issue_labels_for_transition(issue_number: int, ctx: StageContext) -> list[str]:
+    """Read fresh label names when confirming a durable state transition."""
+    return _issue_snapshot_labels(ctx.github.gh_issue_json(issue_number))
 
 
 def _mark_published_plan_pending_review(
@@ -891,6 +920,11 @@ def _publish_candidate_plan(
             ctx.github,
             require_change=requires_revision,
             forced_planning_epoch=bool(item.payload.get("forced_planning_epoch_started")),
+            recovery_source_digest=(
+                str(item.payload["requirements_recovery_source_digest"])
+                if item.payload.get("requirements_recovery_source_digest")
+                else None
+            ),
         )
     except PlanRevisionOwnershipError:
         note = "plan is being worked by another pipeline item; ejected from queue"
@@ -933,8 +967,9 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     assert item.issue is not None  # noqa: S101 - stage validates the issue
     lookup = ctx.github.discover_plan(item.issue)
     if lookup.status is PlanDiscoveryStatus.READ_ERROR:
-        return StageOutcome(
-            Disposition.RETRY,
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
             f"plan discovery failed: {lookup.error}",
         )
 
@@ -955,8 +990,9 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
                     requires_revision=requires_revision,
                 )
             except CommentJournalReadError as exc:
-                return StageOutcome(
-                    Disposition.RETRY,
+                return _retry_incomplete_requirements_snapshot(
+                    item,
+                    ctx,
                     f"plan journal read failed: {exc}",
                 )
             if publication_outcome is not None:
@@ -1131,13 +1167,19 @@ class PlanningStage(Stage):
                 exc,
             )
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        recovered_restart = bool(item.payload.get("requirements_recovered_comment"))
-        recovered_successor = recovered_restart and _recovered_successor_is_current(
+        recovered_artifact = bool(item.payload.get("requirements_recovered_comment"))
+        recovered_source_digest = item.payload.get("requirements_recovery_source_digest")
+        recovered_successor = recovered_artifact and _recovered_successor_is_current(
             comments,
             snapshot,
             source_digest=str(item.payload.get("issue_body_digest") or ""),
         )
-        if recovered_restart and not recovered_successor:
+        recovered_restart = bool(
+            recovered_artifact
+            and snapshot.recovery_source_digest != recovered_source_digest
+            and not recovered_successor
+        )
+        if recovered_restart:
             # The source-bound recovery artifact authorizes a new planning
             # epoch until it binds a successor plan to the recovered source.
             item.payload.pop("plan_text", None)
@@ -1151,8 +1193,11 @@ class PlanningStage(Stage):
             # than reopening a replan epoch or rewriting state:needs-plan.
             item.payload.pop("requires_plan_revision", None)
         if force_replan:
-            if revision_already_published and snapshot.forced_planning_epoch:
+            if snapshot.forced_planning_epoch and not is_exclusive_plan_state(
+                labels, STATE_PLAN_GO
+            ):
                 force_replan = False
+                item.payload["forced_planning_epoch_started"] = True
             else:
                 # The journal remains durable history, but none of its current
                 # epoch may fast-forward or seed the forced planner invocation.
