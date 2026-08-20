@@ -170,7 +170,6 @@ def test_workspace_preserves_existing_path_when_remote_branch_makes_outcome_ambi
     root = tmp_path / "mnemosyne"
     root.mkdir()
     branch = "learn/" + "a" * 16
-    digest = "3af83e7e7e9b9d3c"
     # The product derives this exact value from the branch; keep the fixture coupled to it.
     from hashlib import sha256
 

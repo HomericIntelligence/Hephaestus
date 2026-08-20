@@ -248,6 +248,30 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
             side_effect=AssertionError("learning must not run an agent session"),
         ) as agent_session,
         patch(
+            "hephaestus.agents.runtime.run_claude_text",
+            side_effect=AssertionError("learning must not run Claude text"),
+        ) as claude_text,
+        patch(
+            "hephaestus.agents.runtime.run_codex_text",
+            side_effect=AssertionError("learning must not run Codex text"),
+        ) as codex_text,
+        patch(
+            "hephaestus.agents.runtime.run_codex_session",
+            side_effect=AssertionError("learning must not run a Codex session"),
+        ) as codex_session,
+        patch(
+            "hephaestus.agents.runtime.run_pi_text",
+            side_effect=AssertionError("learning must not run Pi text"),
+        ) as pi_text,
+        patch(
+            "hephaestus.agents.runtime.run_pi_session",
+            side_effect=AssertionError("learning must not run a Pi session"),
+        ) as pi_session,
+        patch(
+            "hephaestus.agents.runtime.run_pi_smoke_session",
+            side_effect=AssertionError("learning must not run Pi smoke"),
+        ) as pi_smoke,
+        patch(
             "hephaestus.automation.claude_invoke.invoke_claude_with_session",
             side_effect=AssertionError("learning must not invoke Claude"),
         ) as claude,
@@ -264,6 +288,12 @@ def test_successful_pr_backed_learn_fixture(tmp_path: Path) -> None:
     pi_preflight.assert_not_called()
     agent_text.assert_not_called()
     agent_session.assert_not_called()
+    claude_text.assert_not_called()
+    codex_text.assert_not_called()
+    codex_session.assert_not_called()
+    pi_text.assert_not_called()
+    pi_session.assert_not_called()
+    pi_smoke.assert_not_called()
     claude.assert_not_called()
     agent_job.assert_not_called()
 
