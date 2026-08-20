@@ -91,6 +91,28 @@ its model-visible tool flags cannot enforce the resolved filesystem or network
 policy. Do not treat a local model configuration, package readiness, or a
 successful smoke command as automation admission evidence.
 
+An external adapter package exposes its zero-argument factory through the
+`hephaestus.pi_isolation_adapters` Python entry-point group. A fresh console
+process loads it only when the operator explicitly selects its public name:
+
+```toml
+[project.entry-points."hephaestus.pi_isolation_adapters"]
+operator-broker = "operator_package.pi_broker:create_adapter"
+```
+
+```bash
+export HEPH_PI_ISOLATION_ADAPTER=operator-broker
+hephaestus-plan-issues --agent pi --parallel 1 --json
+```
+
+The factory must return an object implementing
+`hephaestus.agents.runtime.PiIsolationAdapter`. Installing a package does not
+activate it, and Hephaestus never auto-selects among installed adapters. A
+missing, duplicate, unloadable, or invalid selected entry point fails before a
+Pi provider process starts. The external package remains responsible for
+reviewed enforcement of every filesystem and network grant it receives. See
+[ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md).
+
 ## Athena package acceptance
 
 The accepted Pi CLI and package set are recorded in the packaged catalog. Inspect

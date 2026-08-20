@@ -40,3 +40,4 @@ numbered, and listed here.
 | [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |
 | [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |
 | [0028](0028-source-reading-agent-workspace-isolation.md) | Deterministic source-reading agent workspace isolation | Accepted |
+| [0029](0029-explicit-pi-isolation-adapter-bootstrap.md) | Explicit Pi isolation-adapter bootstrap | Accepted |
