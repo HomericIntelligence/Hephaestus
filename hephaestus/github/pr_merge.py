@@ -264,57 +264,58 @@ def _list_open_prs(repo_name: str) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-_CHECK_BAD_BUCKETS = {"fail", "cancel"}
+_CHECK_SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
 
 
-def _checks_pass_and_log(repo_name: str, pr_number: int) -> bool:
-    """Return whether current GitHub check-run evidence permits a merge."""
+def _checks_pass_and_log(repo_name: str, head_sha: str) -> bool:
+    """Return whether Check Runs for ``head_sha`` permit a merge.
+
+    Commit Status API records and PR check rollups can describe different
+    commits or evidence formats. Merge eligibility therefore accepts only the
+    current Check Runs response for the exact PR head.
+    """
     try:
-        checks = _gh_json(
+        payload = _gh_json(
             [
-                "pr",
-                "checks",
-                str(pr_number),
-                "--repo",
-                repo_name,
-                "--json",
-                "name,state,bucket,workflow",
+                "api",
+                f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page=100",
             ]
         )
     except subprocess.CalledProcessError as exc:
         blob = (exc.stderr or "") + (exc.stdout or "")
-        if "no checks reported" in blob.lower():
-            logger.error("No check runs reported for PR #%d; refusing merge", pr_number)
-        else:
-            logger.error(
-                "Error getting check runs for PR #%d: %s",
-                pr_number,
-                blob.strip() or exc,
-            )
+        logger.error(
+            "Error getting check runs for head %s; refusing merge: %s",
+            head_sha,
+            blob.strip() or exc,
+        )
         return False
     except (RuntimeError, json.JSONDecodeError) as exc:
-        logger.error("Error getting check runs for PR #%d: %s", pr_number, exc)
+        logger.error("Error getting check runs for head %s; refusing merge: %s", head_sha, exc)
         return False
 
+    if not isinstance(payload, dict):
+        logger.error("Invalid check-run response for head %s; refusing merge", head_sha)
+        return False
+    checks = payload.get("check_runs")
     if not isinstance(checks, list):
-        logger.error("Invalid check-run response for PR #%d; refusing merge", pr_number)
+        logger.error("Invalid check-run evidence for head %s; refusing merge", head_sha)
         return False
     if not checks:
-        logger.error("No check runs reported for PR #%d; refusing merge", pr_number)
+        logger.error("No check runs reported for head %s; refusing merge", head_sha)
         return False
 
     any_success = False
     for check in checks:
         if not isinstance(check, dict):
-            logger.error("Invalid check-run entry for PR #%d; refusing merge", pr_number)
+            logger.error("Invalid check-run entry for head %s; refusing merge", head_sha)
             return False
         name = check.get("name", "")
-        state = check.get("state", "")
-        bucket = str(check.get("bucket", "")).lower()
-        logger.info("    - %s: state=%s, bucket=%s", name, state, bucket)
-        if bucket in _CHECK_BAD_BUCKETS or bucket == "pending":
+        status = str(check.get("status", "")).lower()
+        conclusion = str(check.get("conclusion", "")).lower()
+        logger.info("    - %s: status=%s, conclusion=%s", name, status, conclusion)
+        if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
             return False
-        if bucket == "pass":
+        if conclusion == "success":
             any_success = True
     return any_success
 
@@ -487,7 +488,7 @@ def _process_pr(
 
     logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
     logger.info("  Checks API results:")
-    success = _checks_pass_and_log(repo_name, pr_number)
+    success = _checks_pass_and_log(repo_name, head_sha)
 
     if push_all:
         logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)

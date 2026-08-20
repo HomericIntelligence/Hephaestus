@@ -436,9 +436,68 @@ class TestMain:
                     }
                 ]
             ),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": bucket, "workflow": "CI"}]),
+            _gh_result(
+                {
+                    "total_count": 1,
+                    "check_runs": [
+                        {
+                            "name": "ci",
+                            "status": "completed",
+                            "conclusion": "success" if bucket == "pass" else "failure",
+                        }
+                    ],
+                }
+            ),
             _gh_result({"merged": True, "sha": "def456", "message": "ok"}),
         ]
+
+    def test_uses_check_runs_for_the_exact_pr_head(self, monkeypatch) -> None:
+        """Only commit-scoped Check Runs can authorize the displayed PR head."""
+        calls: list[list[str]] = []
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            calls.append(args)
+            if args[:2] == ["repo", "view"]:
+                return _gh_result({"nameWithOwner": "owner/repo"})
+            if args[:2] == ["pr", "list"]:
+                return _gh_result(
+                    [
+                        {
+                            "number": 1,
+                            "headRefName": "feature",
+                            "headRefOid": "abc123",
+                            "baseRefName": "main",
+                        }
+                    ]
+                )
+            if args == [
+                "api",
+                "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
+            ]:
+                return _gh_result(
+                    {
+                        "total_count": 1,
+                        "check_runs": [
+                            {"name": "ci", "status": "completed", "conclusion": "success"}
+                        ],
+                    }
+                )
+            if args[:3] == ["api", "-X", "PUT"]:
+                return _gh_result({"merged": True, "sha": "def456", "message": "ok"})
+            raise AssertionError(f"Unexpected gh call: {args}")
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+        monkeypatch.setattr(pr_merge_module, "run_git_cmd", MagicMock())
+        monkeypatch.setattr(pr_merge_module, "try_push_head_branch", MagicMock())
+        monkeypatch.setattr(pr_merge_module, "detect_repo_from_remote", lambda: "owner/repo")
+        monkeypatch.setattr("sys.argv", ["prog"])
+
+        assert pr_merge_module.main() == 0
+        assert [
+            "api",
+            "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
+        ] in calls
+        assert not any(args[-1].endswith("/status") for args in calls)
 
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     def test_returns_1_when_no_repo_detected(self, _mock_git) -> None:
@@ -531,12 +590,11 @@ class TestMain:
                         }
                     ]
                 )
-            if args[:2] == ["pr", "checks"]:
-                raise subprocess.CalledProcessError(
-                    1,
-                    args,
-                    stderr="no checks reported on branch",
-                )
+            if args == [
+                "api",
+                "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
+            ]:
+                return _gh_result({"check_runs": []})
             if args == ["api", "/repos/owner/repo/commits/abc123/status"]:
                 return _gh_result({"state": "success", "statuses": []})
             if args[:3] == ["api", "-X", "PUT"]:
@@ -552,7 +610,20 @@ class TestMain:
         assert pr_merge_module.main() == 1
         assert ["api", "/repos/owner/repo/commits/abc123/status"] not in calls
         assert not any(args[:3] == ["api", "-X", "PUT"] for args in calls)
-        assert "No check runs reported for PR #1; refusing merge" in caplog.text
+        assert "No check runs reported for head abc123; refusing merge" in caplog.text
+
+    def test_non_check_run_evidence_blocks_merge(self, monkeypatch) -> None:
+        """A payload without a Check Runs list cannot authorize a merge."""
+        observed: list[list[str]] = []
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            observed.append(args)
+            return _gh_result({"state": "success", "statuses": []})
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+
+        assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
+        assert observed == [["api", "/repos/owner/repo/commits/abc123/check-runs?per_page=100"]]
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
@@ -589,7 +660,10 @@ class TestMain:
 
         assert mock_gh_call.call_count == 3
         mock_push.assert_not_called()
-        assert "Error getting check runs for PR #1: checks unavailable" in caplog.text
+        assert (
+            "Error getting check runs for head abc123; refusing merge: checks unavailable"
+            in caplog.text
+        )
 
     @patch("hephaestus.github.pr_merge.try_push_head_branch")
     @patch("hephaestus.github.pr_merge.run_git_cmd")
@@ -623,7 +697,9 @@ class TestMain:
                     },
                 ]
             ),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result(
+                {"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}
+            ),
             _gh_result({"merged": True, "sha": "merged", "message": "ok"}),
         ]
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
@@ -656,9 +732,13 @@ class TestMain:
                     },
                 ]
             ),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result(
+                {"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}
+            ),
             subprocess.CalledProcessError(1, ["gh"], stderr="merge conflict"),
-            _gh_result([{"name": "ci", "state": "SUCCESS", "bucket": "pass", "workflow": "CI"}]),
+            _gh_result(
+                {"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}
+            ),
             _gh_result({"merged": True, "sha": "merged-two", "message": "ok"}),
         ]
         with patch("hephaestus.github.pr_merge.detect_repo_from_remote", return_value="owner/repo"):
