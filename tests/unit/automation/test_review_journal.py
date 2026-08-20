@@ -113,6 +113,17 @@ def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
     assert snapshot.history == ()
 
 
+def test_history_marker_requires_an_exact_first_line_boundary() -> None:
+    """A same-line suffix cannot turn actor-owned prose into legacy state."""
+    lookalike = archive_plan_body(7, "old", "new").replace(" -->\n", " -->suffix\n", 1)
+
+    snapshot = journal_snapshot([_owned(lookalike)])
+
+    assert is_journal_comment(lookalike) is False
+    assert snapshot.revision == 1
+    assert snapshot.history == ()
+
+
 @pytest.mark.parametrize(
     "body",
     [

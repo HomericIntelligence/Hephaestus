@@ -75,6 +75,17 @@ def test_compaction_never_claims_or_deletes_foreign_marker_comments() -> None:
     assert plan_issue_timeline_compaction(comments).delete_comment_ids == ()
 
 
+def test_compaction_keeps_same_line_history_marker_lookalikes() -> None:
+    """A valid marker with a same-line suffix is actor-owned prose, not history."""
+    lookalike = archive_plan_body(1, "old", "new").replace(" -->\n", " -->suffix\n", 1)
+    comments = [
+        _comment(1, render_current_plan("Plan", revision=1)),
+        _comment(2, lookalike),
+    ]
+
+    assert 2 not in plan_issue_timeline_compaction(comments).delete_comment_ids
+
+
 def test_metadata_ownership_requires_viewer_proof_or_exact_login() -> None:
     """REST metadata cannot turn a foreign marker into an owned deletion."""
     metadata = [

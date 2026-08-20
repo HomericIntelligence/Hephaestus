@@ -26,7 +26,7 @@ HISTORY_MARKER: Final[str] = "<!-- hephaestus-plan-history:revision={revision}:k
 HISTORY_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-history:"
 HISTORY_RE: Final[re.Pattern[str]] = re.compile(
     r"^<!-- hephaestus-plan-history:revision=(?P<revision>\d+):"
-    r"kind=(?P<kind>plan|review) -->"
+    r"kind=(?P<kind>plan|review) -->(?=\n|\Z)"
 )
 REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\d+) -->")
 PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
@@ -246,9 +246,7 @@ def discover_plan_from_comments(
 def is_journal_comment(body: str) -> bool:
     """Return whether the body is an automation-owned plan journal artifact."""
     return (
-        is_plan_comment(body)
-        or is_plan_review_comment(body)
-        or body.startswith(HISTORY_MARKER_PREFIX)
+        is_plan_comment(body) or is_plan_review_comment(body) or HISTORY_RE.match(body) is not None
     )
 
 

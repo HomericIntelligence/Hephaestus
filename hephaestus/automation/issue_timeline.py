@@ -90,7 +90,9 @@ def _validate_legacy_markers(comments: Sequence[IssueComment]) -> None:
             first_line.startswith(HISTORY_MARKER_PREFIX)
             and HISTORY_RE.fullmatch(first_line) is None
         ):
-            raise RuntimeError("malformed legacy automation marker; manual review is required")
+            marker, terminator, _suffix = first_line.partition(" -->")
+            if not terminator or HISTORY_RE.fullmatch(f"{marker}{terminator}") is None:
+                raise RuntimeError("malformed legacy automation marker; manual review is required")
         if (
             first_line.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
             and _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE.fullmatch(first_line) is None
@@ -103,7 +105,7 @@ def _is_obsolete_automation_comment(body: str) -> bool:
     return bool(
         is_plan_comment(body)
         or is_plan_review_comment(body)
-        or body.startswith(HISTORY_MARKER_PREFIX)
+        or HISTORY_RE.match(body) is not None
         or body.startswith(SKIP_REASON_MARKER)
         or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
     )
