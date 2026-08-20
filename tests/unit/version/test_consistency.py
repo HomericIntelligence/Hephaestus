@@ -72,9 +72,7 @@ def test_version_from_git_tag_timeout_warns_and_returns_none(
 
     assert consistency._version_from_git_tag(tmp_path) is None
     captured = capsys.readouterr()
-    assert captured.err == (
-        "[hephaestus-version] WARNING: git tag lookup timed out; using installed package metadata\n"
-    )
+    assert captured.err == "[hephaestus-version] WARNING: git tag lookup timed out\n"
     assert hostile not in captured.err
 
 
