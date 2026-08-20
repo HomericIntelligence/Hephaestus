@@ -194,7 +194,7 @@ set pagination off
 set confirm off
 set logging file {gdb_log}
 set logging overwrite on
-set logging enabled on
+set logging on
 
 python
 import gdb
@@ -245,7 +245,7 @@ handle SIGFPE  stop nopass print
 
 run
 
-set logging enabled off
+set logging off
 quit
 """
 
