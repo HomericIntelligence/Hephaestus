@@ -242,7 +242,7 @@ def _write_planning_entry_labels(
     forced_initial_plan: bool,
 ) -> bool:
     """Durably establish and confirm the exclusive planning-entry label."""
-    if revision_already_published or forced_initial_plan:
+    if (STATE_PLAN_NO_GO in labels and revision_already_published) or forced_initial_plan:
         if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
             add_labels, remove_labels = enter_planning_transition()
             logger.info(
@@ -422,23 +422,22 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     requires_revision = bool(item.payload.get("requires_plan_revision"))
     awaiting_revision_candidate = requires_revision and plan_text is None
     posted_plan = False
-    if plan_text is not None:
-        if requires_revision or lookup.status is PlanDiscoveryStatus.ABSENT:
-            logger.info("planning:%d: publishing plan revision", item.issue)
-            try:
-                publication_outcome = _publish_candidate_plan(
-                    item,
-                    ctx,
-                    requires_revision=requires_revision,
-                )
-            except CommentJournalReadError as exc:
-                return StageOutcome(
-                    Disposition.RETRY,
-                    f"plan journal read failed: {exc}",
-                )
-            if publication_outcome is not None:
-                return publication_outcome
-            posted_plan = True
+    if plan_text is not None and (requires_revision or lookup.status is PlanDiscoveryStatus.ABSENT):
+        logger.info("planning:%d: publishing plan revision", item.issue)
+        try:
+            publication_outcome = _publish_candidate_plan(
+                item,
+                ctx,
+                requires_revision=requires_revision,
+            )
+        except CommentJournalReadError as exc:
+            return StageOutcome(
+                Disposition.RETRY,
+                f"plan journal read failed: {exc}",
+            )
+        if publication_outcome is not None:
+            return publication_outcome
+        posted_plan = True
 
     if not awaiting_revision_candidate and (
         posted_plan or lookup.status is PlanDiscoveryStatus.FOUND
