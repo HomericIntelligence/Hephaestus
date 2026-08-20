@@ -27,6 +27,7 @@ only issue-planning implementation:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 
 from hephaestus.agents.execution_policy import (
@@ -39,12 +40,32 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
+    plan_reviewer_claude_timeout,
     planner_claude_timeout,
     planner_model,
+    reviewer_model,
 )
+from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.requirements_recovery import (
+    OBSOLETE_REASON_MARKER,
+    RecoveredRequirements,
+    RecoveryDisposition,
+    RecoveryReview,
+    RecoveryVerdict,
+    build_recovery_prompt,
+    build_recovery_review_prompt,
+    evidence_digest,
+    has_contaminated_issue_body,
+    is_semantic_disposition_candidate,
+    obsolete_reason_comment,
+    parse_recovered_requirements,
+    parse_recovery_review,
+    recovered_requirements_json,
+    render_recovered_requirements,
+)
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -56,12 +77,14 @@ from hephaestus.automation.review_journal import (
     render_current_plan,
     render_current_review,
 )
-from hephaestus.automation.session_naming import AGENT_PLANNER
+from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
 from hephaestus.automation.state_labels import (
+    ALL_STATE_LABELS,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
+    STATE_SKIP,
     enter_planning_transition,
     is_exclusive_plan_state,
     is_plan_go,
@@ -167,6 +190,321 @@ def build_plan_prompt(
 def _planning_history(comments: Sequence[IssueComment | str]) -> str:
     """Return only current rejected-revision context for a resumed planner."""
     return current_revision_context(comments)
+
+
+def _refresh_requirements_recovery_context(
+    item: WorkItem,
+    ctx: StageContext,
+) -> bool:
+    """Refresh exact issue evidence and return whether semantic recovery is needed."""
+    assert item.issue is not None  # noqa: S101 - planning entry validates this
+    snapshot = ctx.github.gh_issue_json(item.issue)
+    title = snapshot.get("title")
+    body = snapshot.get("body")
+    body_digest = snapshot.get("bodyDigest")
+    if not (
+        isinstance(title, str)
+        and isinstance(body, str)
+        and isinstance(body_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", body_digest)
+    ):
+        raise RuntimeError("issue requirements snapshot is incomplete")
+    contaminated = has_contaminated_issue_body(body)
+    required = contaminated or is_semantic_disposition_candidate(title, body)
+    item.payload["issue_title"] = title
+    item.payload["issue_body"] = body
+    item.payload["issue_body_digest"] = body_digest
+    if required:
+        item.payload["requirements_recovery_required"] = True
+        item.payload["requirements_recovery_contaminated"] = contaminated
+    else:
+        item.payload.pop("requirements_recovery_required", None)
+        item.payload.pop("requirements_recovery_contaminated", None)
+    return required
+
+
+def _recovery_revision(item: WorkItem, workspace_revision: str | None) -> str:
+    """Return the captured source revision used to bind recovery evidence."""
+    candidates = (
+        workspace_revision,
+        item.payload.get("_impl_source_revision"),
+        item.payload.get("_synced_default_branch_sha"),
+        item.payload.get("_direct_scope_base_sha"),
+    )
+    return next(
+        (value for value in candidates if isinstance(value, str) and len(value) == 40),
+        "0" * 40,
+    )
+
+
+def _clear_recovery_results(item: WorkItem) -> None:
+    """Discard one model/reviewer attempt without dropping refreshed evidence."""
+    item.payload.pop("recovered_requirements", None)
+    item.payload.pop("requirements_recovery_review", None)
+    item.payload.pop("requirements_evidence_digest", None)
+
+
+def _finish_recovery(item: WorkItem) -> None:
+    """Clear transient recovery state after a durable disposition."""
+    _clear_recovery_results(item)
+    item.payload.pop("requirements_recovery_required", None)
+    item.payload.pop("requirements_recovery_contaminated", None)
+    item.payload.pop("requirements_compact_retry", None)
+    item.payload.pop("requirements_publication_rejections", None)
+
+
+def _apply_recovery_state_label(
+    item: WorkItem,
+    ctx: StageContext,
+    target: str,
+    *,
+    extra: Sequence[str] = (),
+) -> bool:
+    """Atomically write and confirm one recovery-owned issue state."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    ctx.github.edit_labels(
+        item.issue,
+        add=[target, *extra],
+        remove=[label for label in ALL_STATE_LABELS if label != target],
+    )
+    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    if target == STATE_SKIP:
+        return STATE_SKIP in live_labels and not set(live_labels).intersection(ALL_STATE_LABELS)
+    return is_exclusive_plan_state(
+        live_labels,
+        target,
+    )
+
+
+def _retry_requirements_recovery(
+    item: WorkItem,
+    ctx: StageContext,
+    reason: str,
+) -> StageOutcome:
+    """Retry a correctable recovery once, then preserve plan-no-go."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    attempt = item.attempts.get("plan", 0) + 1
+    item.attempts["plan"] = attempt
+    if attempt < ctx.budget("plan"):
+        _clear_recovery_results(item)
+        item.state = "REQUIREMENTS_RECOVERY_WAIT"
+        return StageOutcome(
+            Disposition.RETRY,
+            f"requirements recovery retry {attempt}/{ctx.budget('plan')}: {reason}",
+        )
+    if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
+        return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
+    return StageOutcome(
+        Disposition.FINISH_FAIL,
+        f"requirements recovery exhausted with plan-no-go: {reason}",
+    )
+
+
+def _apply_confirmed_semantic_skip(
+    item: WorkItem,
+    ctx: StageContext,
+    proposal: RecoveredRequirements,
+    review: RecoveryReview,
+) -> StageOutcome | None:
+    """Apply a tracker/obsolete skip only after matching independent GO."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    if proposal.disposition is RecoveryDisposition.TRACKER:
+        if not _apply_recovery_state_label(item, ctx, STATE_SKIP, extra=("epic",)):
+            return StageOutcome(Disposition.RETRY, "tracker skip label was not confirmed")
+        record_summary_action(item, "tracker-skipped")
+        _finish_recovery(item)
+        return StageOutcome(Disposition.SKIP, "skip: independently confirmed tracker")
+    if proposal.disposition is RecoveryDisposition.OBSOLETE:
+        if not _apply_recovery_state_label(item, ctx, STATE_SKIP):
+            return StageOutcome(Disposition.RETRY, "obsolete skip label was not confirmed")
+        ctx.github.upsert_issue_comment(
+            item.issue,
+            OBSOLETE_REASON_MARKER,
+            obsolete_reason_comment(review.reason),
+        )
+        record_summary_action(item, "obsolete-skipped")
+        _finish_recovery(item)
+        return StageOutcome(Disposition.SKIP, "skip: independently confirmed obsolete")
+    return None
+
+
+def _apply_confirmed_requirements(
+    item: WorkItem,
+    ctx: StageContext,
+    proposal: RecoveredRequirements,
+) -> StepResult:
+    """Publish confirmed requirements or resume normal planning for a false candidate."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    contaminated = bool(item.payload.get("requirements_recovery_contaminated"))
+    if not contaminated:
+        _finish_recovery(item)
+        labels = _require_issue_labels_for_transition(item.issue, ctx)
+        if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+            return StageOutcome(Disposition.ADVANCE, "existing plan remains approved")
+        return Continue(next_state="ADVISE_WAIT" if ctx.config.enable_advise else "PLAN_WAIT")
+
+    # Durable NOGO precedes body replacement. A crash before or after the edit
+    # therefore re-enters recovery/replanning instead of trusting the stale GO.
+    if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
+        return StageOutcome(Disposition.RETRY, "recovery plan-no-go was not confirmed")
+    source_body = str(item.payload.get("issue_body") or "")
+    source_digest = str(item.payload.get("issue_body_digest") or "")
+    recovered_body = render_recovered_requirements(
+        source_body,
+        proposal.requirements,
+        str(item.payload.get("requirements_evidence_digest") or ""),
+        source_digest=source_digest,
+    )
+    replacement = ctx.github.replace_issue_body_if_unchanged(
+        item.issue,
+        source_digest,
+        recovered_body,
+    )
+    if replacement.conflict:
+        _clear_recovery_results(item)
+        _refresh_requirements_recovery_context(item, ctx)
+        item.state = "ENTER"
+        record_summary_action(item, "requirements-body-conflict")
+        return StageOutcome(Disposition.RETRY, "issue body changed during recovery")
+    if replacement.rejected:
+        rejections = int(item.payload.get("requirements_publication_rejections", 0)) + 1
+        item.payload["requirements_publication_rejections"] = rejections
+        if rejections == 1:
+            _clear_recovery_results(item)
+            item.payload["requirements_compact_retry"] = True
+            item.state = "REQUIREMENTS_RECOVERY_WAIT"
+            return StageOutcome(Disposition.RETRY, "compact requirements retry requested")
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            "GitHub rejected both original and compact requirements; plan-no-go retained",
+        )
+    if replacement.retryable:
+        return _retry_requirements_recovery(
+            item,
+            ctx,
+            "issue body replacement is unconfirmed",
+        )
+    if not replacement.replaced and not replacement.dry_run:
+        return StageOutcome(Disposition.RETRY, "issue body replacement was not proven")
+
+    item.payload["issue_body"] = recovered_body
+    if replacement.body_digest:
+        item.payload["issue_body_digest"] = replacement.body_digest
+    item.payload["requires_plan_revision"] = True
+    item.payload.pop("plan_text", None)
+    item.payload.pop("issue_history", None)
+    record_summary_action(item, "requirements-recovered")
+    _finish_recovery(item)
+    return Continue(next_state="ADVISE_WAIT" if ctx.config.enable_advise else "PLAN_WAIT")
+
+
+def _apply_requirements_recovery(
+    item: WorkItem,
+    ctx: StageContext,
+) -> StepResult:
+    """Apply only an independently confirmed recovery proposal."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    proposal = item.payload.get("recovered_requirements")
+    review = item.payload.get("requirements_recovery_review")
+    if not isinstance(proposal, RecoveredRequirements) or not isinstance(review, RecoveryReview):
+        return _retry_requirements_recovery(item, ctx, "missing typed recovery result")
+    if review.verdict is not RecoveryVerdict.GO or review.disposition is not proposal.disposition:
+        return _retry_requirements_recovery(item, ctx, review.reason)
+    if skip_outcome := _apply_confirmed_semantic_skip(item, ctx, proposal, review):
+        return skip_outcome
+    return _apply_confirmed_requirements(item, ctx, proposal)
+
+
+def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult | None:
+    """Build or apply one requirements-recovery substate action."""
+    assert item.issue is not None  # noqa: S101 - PlanningStage.step validates this
+    if item.state == "REQUIREMENTS_RECOVERY_WAIT":
+        workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
+        revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
+        binding = evidence_digest(
+            item.repo,
+            item.issue,
+            revision,
+            str(item.payload.get("issue_title") or ""),
+            str(item.payload.get("issue_body") or ""),
+        )
+        item.payload["requirements_evidence_digest"] = binding
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "planner", planner_model),
+            prompt_builder=build_recovery_prompt,
+            cwd=workspace.cwd if workspace else ctx.paths.worktree,
+            timeout_s=planner_claude_timeout(),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLANNER,
+            session_key=f"requirements-recovery:{item.issue}:{binding}",
+            execution_request=ExecutionRequest(
+                AgentRole.PLANNER,
+                AgentOperation.PLAN,
+                SessionLifecycle.START_NEW,
+            ),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "repository": item.repo,
+                "repository_revision": revision,
+                "evidence_binding": binding,
+                "compact_retry": bool(item.payload.get("requirements_compact_retry")),
+            },
+            parse=parse_recovered_requirements,
+            descr="recover_requirements",
+        )
+        return JobRequest(job, on_done_state="REQUIREMENTS_RECOVERY_REVIEW_WAIT")
+
+    if item.state == "REQUIREMENTS_RECOVERY_REVIEW_WAIT":
+        proposal = item.payload.get("recovered_requirements")
+        if not isinstance(proposal, RecoveredRequirements):
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                "requirements planner returned no valid proposal",
+            )
+        workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
+        binding = str(item.payload.get("requirements_evidence_digest") or "")
+        job = AgentJob(
+            repo=item.repo,
+            issue=item.issue,
+            agent=agent_provider(ctx),
+            model=stage_model(ctx, "reviewer", reviewer_model),
+            prompt_builder=build_recovery_review_prompt,
+            cwd=workspace.cwd if workspace else ctx.paths.worktree,
+            timeout_s=plan_reviewer_claude_timeout(),
+            workspace=workspace,
+            sandbox="read-only",
+            allowed_tools="Read,Glob,Grep",
+            session_agent=AGENT_PLAN_REVIEWER,
+            session_key=f"requirements-recovery-review:{item.issue}:{binding}",
+            execution_request=ExecutionRequest(
+                AgentRole.PLAN_REVIEWER,
+                AgentOperation.PLAN_REVIEW,
+                SessionLifecycle.START_NEW,
+            ),
+            prompt_kwargs={
+                "issue_number": item.issue,
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "source_body_digest": item.payload.get("issue_body_digest", ""),
+                "evidence_binding": binding,
+                "proposal_json": recovered_requirements_json(proposal),
+            },
+            parse=parse_recovery_review,
+            descr="review_recovered_requirements",
+        )
+        return JobRequest(job, on_done_state="REQUIREMENTS_RECOVERY_APPLY")
+
+    if item.state == "REQUIREMENTS_RECOVERY_APPLY":
+        return _apply_requirements_recovery(item, ctx)
+    return None
 
 
 def _normalize_plan_comment(plan: str, *, revision: int | None = None) -> str:
@@ -537,6 +875,14 @@ class PlanningStage(Stage):
             ctx.github.ensure_blocked_audit(item.issue)
             return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
 
+        # Derived automation artifacts in the issue body are not requirements.
+        # Semantic tracker/obsolete candidates use the same two-model gate.
+        # This check precedes plan-GO so stale approval cannot authorize a body
+        # that is itself a copied plan or review.
+        if _refresh_requirements_recovery_context(item, ctx):
+            logger.info("planning:%d: requirements recovery required", item.issue)
+            return None
+
         # Fast-forward only from the sole confirmed plan state. A stale sibling
         # makes the label set contradictory and must never authorize work.
         if is_exclusive_plan_state(labels, STATE_PLAN_GO) and not force_replan:
@@ -622,10 +968,16 @@ class PlanningStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
 
         if item.state == "ENTER":
+            if item.payload.get("requirements_recovery_required"):
+                return Continue(next_state="REQUIREMENTS_RECOVERY_WAIT")
             if ctx.config.enable_advise:
                 return Continue(next_state="ADVISE_WAIT")
             logger.info("planning:%d: advise disabled; skipping to plan", item.issue)
             return Continue(next_state="PLAN_WAIT")
+
+        recovery_step = _requirements_recovery_step(item, ctx)
+        if recovery_step is not None:
+            return recovery_step
 
         if item.state == "ADVISE_WAIT":
             logger.info("planning:%d: requesting advise job", item.issue)
@@ -718,3 +1070,11 @@ class PlanningStage(Stage):
                 item.payload["athena_advise_receipt"] = result.value.receipt
             elif item.state == "PLAN_WAIT":
                 item.payload["plan_text"] = result.value
+            elif item.state == "REQUIREMENTS_RECOVERY_WAIT" and isinstance(
+                result.value, RecoveredRequirements
+            ):
+                item.payload["recovered_requirements"] = result.value
+            elif item.state == "REQUIREMENTS_RECOVERY_REVIEW_WAIT" and isinstance(
+                result.value, RecoveryReview
+            ):
+                item.payload["requirements_recovery_review"] = result.value

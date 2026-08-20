@@ -770,18 +770,27 @@ Architectural contract:
 
 ### 5.2 Planning
 
-Planning produces one canonical implementation plan from the issue, latest
-canonical plan, and latest canonical review. Superseded revisions are replaced,
-not appended. Bounded hidden fingerprints preserve oscillation detection
-without exposing old plans or raw patches. A blocked plan is an automation stop: only
-an external actor may resolve the dependency and replace `state:plan-blocked`
-with exactly one next plan-state label.
+Planning first establishes that the issue body contains requirements rather
+than a copied canonical plan, review, or history artifact. Exact derived
+markers at the start of the body trigger an evidence-bound reconstruction by
+the planner model and an independent reviewer-model decision. A successful
+digest-guarded replacement immediately begins a fresh plan/review epoch.
+Planning then produces one canonical implementation plan from the issue,
+latest canonical plan, and latest canonical review. Superseded revisions are
+replaced, not appended. Bounded hidden fingerprints preserve oscillation
+detection without exposing old plans or raw patches. A blocked plan is an
+automation stop: only an external actor may resolve the dependency and replace
+`state:plan-blocked` with exactly one next plan-state label.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Issue["Issue text"] --> Context
+    Issue["Issue text"] --> RecoveryGate
+    RecoveryGate -->|"canonical derived marker"| Recover["Requirements reconstruction"]
+    Recover --> IndependentReview["Independent recovery review"]
+    IndependentReview -->|"GO + digest match"| Issue
+    RecoveryGate -->|"requirements"| Context
     History["Current rejected plan/review"] --> Context
     Context --> Planner --> Canonical["Canonical plan comment"]
     Canonical --> PlanReview["Plan review"]
@@ -792,7 +801,14 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> Eligibility
-    Eligibility --> Skipped: excluded or already implemented
+    Eligibility --> RecoverRequirements: derived body or semantic skip candidate
+    RecoverRequirements --> ReviewRecovery: typed proposal
+    ReviewRecovery --> RecoverRequirements: NOGO; retry remains
+    ReviewRecovery --> Failed: NOGO exhausted; state:plan-no-go retained
+    ReviewRecovery --> AwaitOperator: genuinely unavailable external evidence
+    ReviewRecovery --> Skipped: independently confirmed tracker or obsolete issue
+    ReviewRecovery --> BuildContext: requirements GO; digest/readback confirmed
+    Eligibility --> Skipped: state:skip or explicit tracker label
     Eligibility --> Ready: approved plan exists
     Eligibility --> AwaitOperator: state:plan-blocked present
     Eligibility --> BuildContext: eligible plan-state label
@@ -827,6 +843,18 @@ Architectural contract:
   instead of silently dropping old plan/review revisions.
 - Raw patches (`diff --git`, unified hunks, or fenced `diff` blocks) are
   rejected before publication.
+- Requirements recovery is a planning substate, not a separate queue. The
+  hidden provenance marker records the source-body, reconstructed-requirements,
+  and evidence-binding SHA-256 digests. Replacement freshly compares the exact
+  body digest and confirms exact readback; concurrent edits are never
+  overwritten.
+- Tracker and obsolete dispositions require matching planner and independent
+  reviewer decisions. Both apply `state:skip`; tracker confirmation also adds
+  `epic`, while obsolete confirmation upserts one canonical reason comment and
+  leaves the issue open.
+- Ordinary recovery-review or plan-review exhaustion leaves
+  `state:plan-no-go`; `state:plan-blocked` remains exceptional rather than a
+  third ordinary review outcome.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
 - `state:plan-blocked` is never removed or replaced by automation. Comments do
@@ -1355,12 +1383,15 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 
 | GitHub state | Entry stage |
 |-------------------------------------------------------|----------------------------------|
-| `state:skip`/`epic` | excluded (`stage = None`) |
+| `state:skip` or explicit `epic`/`roadmap` label | excluded (`stage = None`) |
 | Closed issue with a merged PR carrying exact `Closes #N` | `FINISHED` (pass, idempotent) |
 | Open/reopened issue with a historic merged PR | Treat as no open PR; route by current state label |
 | Direct PR already closed | excluded |
-| Open PR carries PR-level `state:implementation-go` | `MERGE_WAIT` |
-| Any other open PR, including one carrying only issue-level `state:implementation-go` | `PR_REVIEW` |
+| Exact derived marker at issue-body start | `PLANNING` requirements recovery, regardless of plan/PR state |
+| Title-inferred tracker or narrow obsolete candidate | `PLANNING` independent semantic review |
+| Open PR without exclusive issue-level `state:plan-go` | `PLANNING` |
+| Open PR with plan-GO and PR-level `state:implementation-go` | `MERGE_WAIT` |
+| Any other open PR with plan-GO | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
 | No PR, `state:plan-blocked` | excluded until an external actor resolves the block and replaces the label; comments alone are inert |

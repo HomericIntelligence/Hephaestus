@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Literal
 
 from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
@@ -48,7 +49,12 @@ from hephaestus.automation.github_api import (
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.requirements_recovery import (
+    has_contaminated_issue_body,
+    is_semantic_disposition_candidate,
+)
 from hephaestus.automation.state_labels import (
+    EPIC_LABELS,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -62,6 +68,8 @@ from hephaestus.automation.state_labels import (
 )
 
 LOG = logging.getLogger(__name__)
+_WARNED_UNKNOWN_STATE_LABELS: set[str] = set()
+_UNKNOWN_LABEL_WARNING_LOCK = Lock()
 
 # Ordered label rank for at-or-past comparisons.
 # Lower rank = earlier stage; higher rank = later stage.
@@ -205,8 +213,11 @@ def _get_state_label(labels: set[str]) -> str | None:
 
     known_state_labels = [lbl for lbl in state_labels if lbl in _LABEL_RANK]
     unknown_state_labels = [lbl for lbl in state_labels if lbl not in _LABEL_RANK]
-    if unknown_state_labels:
-        LOG.warning("Issue has unknown state labels ignored: %s", unknown_state_labels)
+    with _UNKNOWN_LABEL_WARNING_LOCK:
+        newly_seen = sorted(set(unknown_state_labels) - _WARNED_UNKNOWN_STATE_LABELS)
+        _WARNED_UNKNOWN_STATE_LABELS.update(newly_seen)
+    if newly_seen:
+        LOG.warning("Issue has unknown state labels ignored: %s", newly_seen)
 
     if not known_state_labels:
         return None
@@ -247,6 +258,34 @@ def _label_at_or_past(label: str | None, target: str) -> bool:
     return label_rank >= target_rank
 
 
+def _requirements_recovery_reason(
+    facts: IssueFacts,
+    *,
+    explicit_tracker: bool,
+) -> str | None:
+    """Return the planning-admission reason for semantic recovery, if any."""
+    issue_body = facts.body if isinstance(facts.body, str) else ""
+    issue_title = facts.title if isinstance(facts.title, str) else ""
+    if has_contaminated_issue_body(issue_body):
+        return f"#{facts.number} requires autonomous requirements recovery"
+    if (facts.is_epic and not explicit_tracker) or is_semantic_disposition_candidate(
+        issue_title, issue_body
+    ):
+        return f"#{facts.number} requires semantic disposition review"
+    return None
+
+
+def _issue_exclusion_reason(facts: IssueFacts, *, explicit_tracker: bool) -> str | None:
+    """Return an operator/external exclusion reason before state routing."""
+    if STATE_SKIP in facts.labels:
+        return f"#{facts.number} tagged {STATE_SKIP}"
+    if STATE_PLAN_BLOCKED in facts.labels:
+        return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
+    if facts.is_epic and explicit_tracker:
+        return f"#{facts.number} is an epic tracking issue"
+    return None
+
+
 def classify_issue(facts: IssueFacts) -> Classification:
     """Classify an issue into a single entry stage based on GitHub state.
 
@@ -264,16 +303,8 @@ def classify_issue(facts: IssueFacts) -> Classification:
     """
     # Exclusions: skip wins over everything (operator-only, absolute — it
     # carries no rank and never enters the rank comparison).
-    if STATE_SKIP in facts.labels:
-        reason = f"#{facts.number} tagged {STATE_SKIP}"
-        LOG.info("issue excluded: %s", reason)
-        return None, reason
-    if STATE_PLAN_BLOCKED in facts.labels:
-        reason = f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
-        LOG.info("issue excluded: %s", reason)
-        return None, reason
-    if facts.is_epic:
-        reason = f"#{facts.number} is an epic tracking issue"
+    explicit_tracker = bool({label.lower() for label in facts.labels}.intersection(EPIC_LABELS))
+    if reason := _issue_exclusion_reason(facts, explicit_tracker=explicit_tracker):
         LOG.info("issue excluded: %s", reason)
         return None, reason
 
@@ -288,6 +319,12 @@ def classify_issue(facts: IssueFacts) -> Classification:
     # historical PR relationship, but it is actionable again.
     if facts.issue_is_closed and facts.pr_is_merged:
         return StageName.FINISHED, f"#{facts.number} PR merged (idempotent)"
+
+    if recovery_reason := _requirements_recovery_reason(
+        facts,
+        explicit_tracker=explicit_tracker,
+    ):
+        return StageName.PLANNING, recovery_reason
 
     # Extract the active state label
     state_label = _get_state_label(facts.labels)
@@ -494,7 +531,9 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
     stage, reason = classify_issue(facts)
     obligation = (
         EpicSkipTagObligation(issue=facts.number)
-        if facts.is_epic and STATE_SKIP not in facts.labels
+        if facts.is_epic
+        and bool({label.lower() for label in facts.labels}.intersection(EPIC_LABELS))
+        and STATE_SKIP not in facts.labels
         else None
     )
     return SeedEntry(

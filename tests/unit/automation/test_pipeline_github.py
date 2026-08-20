@@ -7,7 +7,9 @@ place the ``StageGitHub`` protocol's dry-run contract is honored.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from multiprocessing import get_context
@@ -2678,6 +2680,224 @@ def test_mismatched_authorization_is_rejected_before_transport(
     call_mock.assert_not_called()
 
 
+class TestIssueBodyReplacement:
+    """Issue body replacement is digest-guarded and proven by readback."""
+
+    @pytest.mark.parametrize(
+        ("issue_number", "digest", "message"),
+        [
+            (0, hashlib.sha256(b"old").hexdigest(), "issue_number"),
+            (7, "not-a-digest", "expected_body_digest"),
+        ],
+    )
+    def test_rejects_invalid_comparison_inputs(
+        self,
+        adapter: pg.PipelineGitHub,
+        issue_number: int,
+        digest: str,
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            adapter.replace_issue_body_if_unchanged(issue_number, digest, "new")
+
+    def test_fresh_read_failure_is_retryable_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        monkeypatch.setattr(
+            adapter, "gh_issue_json", MagicMock(side_effect=RuntimeError("unavailable"))
+        )
+        call_mock = MagicMock()
+        monkeypatch.setattr(adapter, "_gh", call_mock)
+
+        result = adapter.replace_issue_body_if_unchanged(
+            7, hashlib.sha256(b"old").hexdigest(), "new"
+        )
+
+        assert result.retryable is True
+        call_mock.assert_not_called()
+
+    def test_malformed_fresh_read_is_retryable_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "gh_issue_json", lambda _issue: {"body": "old"})
+        call_mock = MagicMock()
+        monkeypatch.setattr(adapter, "_gh", call_mock)
+
+        result = adapter.replace_issue_body_if_unchanged(
+            7, hashlib.sha256(b"old").hexdigest(), "new"
+        )
+
+        assert result.retryable is True
+        call_mock.assert_not_called()
+
+    def test_replaces_only_after_fresh_digest_match_and_exact_readback(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        old_body = "old requirements"
+        new_body = "new requirements"
+        old_digest = hashlib.sha256(old_body.encode()).hexdigest()
+        new_digest = hashlib.sha256(new_body.encode()).hexdigest()
+        reads: Iterator[dict[str, Any] | Exception] = iter(
+            [
+                {"number": 7, "body": old_body, "bodyDigest": old_digest},
+                {"number": 7, "body": new_body, "bodyDigest": new_digest},
+            ]
+        )
+        monkeypatch.setattr(adapter, "gh_issue_json", lambda _issue: next(reads))
+        calls: list[list[str]] = []
+
+        def fake_gh(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+            calls.append(argv)
+            assert Path(argv[4]).read_text() == new_body
+            return SimpleNamespace(stdout="", returncode=0)
+
+        monkeypatch.setattr(adapter, "_gh", fake_gh)
+
+        result = adapter.replace_issue_body_if_unchanged(7, old_digest, new_body)
+
+        assert result.replaced is True
+        assert result.body_digest == new_digest
+        assert result.conflict is False
+        assert result.retryable is False
+        assert len(calls) == 1
+        argv = calls[0]
+        assert argv[:3] == ["issue", "edit", "7"]
+        assert argv[3] == "--body-file"
+
+    def test_refuses_to_overwrite_when_fresh_body_digest_changed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        expected_digest = hashlib.sha256(b"expected").hexdigest()
+        current_digest = hashlib.sha256(b"human edit").hexdigest()
+        monkeypatch.setattr(
+            adapter,
+            "gh_issue_json",
+            lambda _issue: {"number": 7, "body": "human edit", "bodyDigest": current_digest},
+        )
+        call_mock = MagicMock()
+        monkeypatch.setattr(adapter, "_gh", call_mock)
+
+        result = adapter.replace_issue_body_if_unchanged(7, expected_digest, "replacement")
+
+        assert result.conflict is True
+        assert result.body_digest == current_digest
+        assert result.replaced is False
+        assert result.retryable is False
+        call_mock.assert_not_called()
+
+    def test_transport_failure_is_retryable_and_never_claims_replacement(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        monkeypatch.setattr(
+            adapter,
+            "gh_issue_json",
+            lambda _issue: {"number": 7, "body": "old", "bodyDigest": old_digest},
+        )
+        monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=OSError("connection reset")))
+
+        result = adapter.replace_issue_body_if_unchanged(7, old_digest, "new")
+
+        assert result.retryable is True
+        assert result.replaced is False
+        assert result.conflict is False
+
+    def test_server_size_rejection_is_distinguished_from_transport_retry(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        monkeypatch.setattr(
+            adapter,
+            "gh_issue_json",
+            lambda _issue: {"number": 7, "body": "old", "bodyDigest": old_digest},
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_gh",
+            MagicMock(side_effect=RuntimeError("HTTP 422: body is too long")),
+        )
+
+        result = adapter.replace_issue_body_if_unchanged(7, old_digest, "new")
+
+        assert result.rejected is True
+        assert result.retryable is False
+
+    def test_inexact_readback_is_retryable_and_fails_closed(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        raced_digest = hashlib.sha256(b"raced").hexdigest()
+        reads = iter(
+            [
+                {"number": 7, "body": "old", "bodyDigest": old_digest},
+                {"number": 7, "body": "raced", "bodyDigest": raced_digest},
+            ]
+        )
+        monkeypatch.setattr(adapter, "gh_issue_json", lambda _issue: next(reads))
+        monkeypatch.setattr(
+            adapter, "_gh", MagicMock(return_value=SimpleNamespace(stdout="", returncode=0))
+        )
+
+        result = adapter.replace_issue_body_if_unchanged(7, old_digest, "new")
+
+        assert result.retryable is True
+        assert result.replaced is False
+        assert result.body_digest == raced_digest
+
+    def test_readback_failure_is_retryable_and_never_claims_replacement(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        reads: Iterator[dict[str, Any] | Exception] = iter(
+            [
+                {"number": 7, "body": "old", "bodyDigest": old_digest},
+                RuntimeError("readback unavailable"),
+            ]
+        )
+
+        def read(_issue: int) -> dict[str, Any]:
+            result = next(reads)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(adapter, "gh_issue_json", read)
+        monkeypatch.setattr(
+            adapter, "_gh", MagicMock(return_value=SimpleNamespace(stdout="", returncode=0))
+        )
+
+        result = adapter.replace_issue_body_if_unchanged(7, old_digest, "new")
+
+        assert result.retryable is True
+        assert result.replaced is False
+
+    def test_dry_run_reports_intent_without_reading_or_mutating(
+        self, dry_adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dry_adapter.repo = "repo"
+        read_mock = MagicMock()
+        call_mock = MagicMock()
+        monkeypatch.setattr(dry_adapter, "gh_issue_json", read_mock)
+        monkeypatch.setattr(dry_adapter, "_gh", call_mock)
+
+        result = dry_adapter.replace_issue_body_if_unchanged(
+            7, hashlib.sha256(b"old").hexdigest(), "new"
+        )
+
+        assert result.dry_run is True
+        assert result.replaced is False
+        read_mock.assert_not_called()
+        call_mock.assert_not_called()
+
+
 class TestConversationResolutionAdmission:
     """The base-branch protection read is narrow, repo-scoped, and fail closed."""
 
@@ -5224,6 +5444,34 @@ class TestCreatePr:
 
 class TestReadSurface:
     """Reads delegate verbatim (and stay LIVE even under dry-run)."""
+
+    def test_repo_scoped_issue_read_exposes_exact_body_digest(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw_body = "raw\x00body"
+        adapter.repo = "repo-a"
+        monkeypatch.setattr(
+            adapter,
+            "_gh",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "number": 4,
+                            "title": "title",
+                            "state": "OPEN",
+                            "labels": [],
+                            "body": raw_body,
+                        }
+                    )
+                )
+            ),
+        )
+
+        result = adapter.gh_issue_json(4)
+
+        assert result["body"] == "rawbody"
+        assert result["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
 
     def test_gh_issue_json(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

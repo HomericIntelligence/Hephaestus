@@ -562,7 +562,15 @@ class TestCrashMatrixJournal:
             ),
             ("closed issue with merged PR", [], None, 79, True, False, StageName.FINISHED),
             ("state:skip", [STATE_SKIP], None, None, False, False, None),
-            ("untagged epic", [], None, None, False, True, None),
+            (
+                "title-inferred tracker needs independent review",
+                [],
+                None,
+                None,
+                False,
+                True,
+                StageName.PLANNING,
+            ),
         ],
     )
     def test_reconstruction_table_covers_every_github_journal_row(

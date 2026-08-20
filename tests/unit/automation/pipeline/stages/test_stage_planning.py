@@ -14,7 +14,12 @@ import hephaestus.automation.pipeline_github as pg
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
-from hephaestus.automation.pipeline.stages import Continue, JobRequest, StageOutcome
+from hephaestus.automation.pipeline.stages import (
+    Continue,
+    IssueBodyReplacementResult,
+    JobRequest,
+    StageOutcome,
+)
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
     build_plan_prompt,
@@ -25,6 +30,14 @@ from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
+)
+from hephaestus.automation.requirements_recovery import (
+    OBSOLETE_REASON_MARKER,
+    RecoveredRequirements,
+    RecoveryDisposition,
+    RecoveryReview,
+    RecoveryVerdict,
+    render_recovered_requirements,
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
@@ -106,6 +119,25 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.ADVANCE
         assert github.mutation_log == []  # no mutations on fast-forward
 
+    def test_contaminated_body_recovers_before_plan_go_fast_forward(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO],
+            issue_body=f"{PLAN_CANONICAL_MARKER}\nStale derived plan",
+            has_plan=True,
+        )
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=101)
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert item.payload["requirements_recovery_required"] is True
+        assert item.payload["requirements_recovery_contaminated"] is True
+        assert github.mutation_log == []
+
     def test_skip_label_skips(self, make_ctx: Any, make_work_item: Any) -> None:
         """state:skip routes the item away without any writes."""
         stage = PlanningStage()
@@ -180,9 +212,7 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert github.mutation_log == []
 
-    def test_open_pr_without_plan_go_still_plans(
-        self, make_ctx: Any, make_work_item: Any
-    ) -> None:
+    def test_open_pr_without_plan_go_still_plans(self, make_ctx: Any, make_work_item: Any) -> None:
         """An open PR cannot bypass the issue's missing plan approval."""
         stage = PlanningStage()
         github = FakeStageGitHub(open_pr=456)
@@ -560,6 +590,327 @@ class TestPlanningStageStep:
 
         assert isinstance(result, Continue)
         assert result.next_state == "ADVISE_WAIT"
+
+    def test_enter_routes_to_requirements_recovery_first(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        item = make_work_item(issue=1, state="ENTER")
+        item.payload["requirements_recovery_required"] = True
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "REQUIREMENTS_RECOVERY_WAIT"
+
+    def test_requirements_recovery_submits_typed_planner_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        item = make_work_item(issue=1, state="REQUIREMENTS_RECOVERY_WAIT")
+        item.payload.update(
+            {
+                "issue_title": "Retry bug",
+                "issue_body": f"{PLAN_CANONICAL_MARKER}\nDerived",
+                "issue_body_digest": "a" * 64,
+                "requirements_recovery_required": True,
+            }
+        )
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "recover_requirements"
+        assert result.job.parse is not None
+        assert result.on_done_state == "REQUIREMENTS_RECOVERY_REVIEW_WAIT"
+
+    def test_requirements_recovery_review_is_independent_reviewer_job(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        item = make_work_item(issue=1, state="REQUIREMENTS_RECOVERY_REVIEW_WAIT")
+        item.payload.update(
+            {
+                "issue_title": "Retry bug",
+                "issue_body_digest": "a" * 64,
+                "requirements_evidence_digest": "b" * 64,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Keep retries bounded.",
+                    "Recovered from tests.",
+                    "test_retry.py",
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx())
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+        assert result.job.descr == "review_recovered_requirements"
+        assert result.job.parse is not None
+        assert result.on_done_state == "REQUIREMENTS_RECOVERY_APPLY"
+
+    def test_requirements_recovery_go_replaces_body_and_starts_fresh_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        old_body = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], issue_body=old_body, has_plan=True)
+        item = make_work_item(issue=1, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "issue_body": old_body,
+                "issue_body_digest": github.gh_issue_json(1)["bodyDigest"],
+                "requirements_evidence_digest": "b" * 64,
+                "requirements_recovery_contaminated": True,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "## Required behavior\n\n- Keep retries bounded.",
+                    "Recovered from tests.",
+                    "test_retry.py",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Faithful to repository evidence.",
+                ),
+            }
+        )
+        ctx = make_ctx(github=github)
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "ADVISE_WAIT"
+        assert github.labels[1] == {STATE_PLAN_NO_GO}
+        assert item.payload["requires_plan_revision"] is True
+        assert github.gh_issue_json(1)["body"].startswith("<!-- hephaestus-recovered-requirements:")
+        assert "requirements_recovery_required" not in item.payload
+
+    def test_tracker_skip_requires_matching_independent_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=2, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.TRACKER, "", "Tracks children.", "Checklist"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.TRACKER, "Confirmed tracker."
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.SKIP
+        assert github.labels[2] == {STATE_SKIP, "epic"}
+
+    def test_obsolete_skip_upserts_one_canonical_reason(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=3, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.OBSOLETE, "", "Already supplied by PR #9.", "PR #9"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.OBSOLETE, "PR #9 is merged."
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.SKIP
+        assert github.labels[3] == {STATE_SKIP}
+        assert ("gh_issue_upsert_comment", (3, OBSOLETE_REASON_MARKER)) in github.mutation_log
+
+    def test_recovery_nogo_uses_plan_no_go_not_blocked(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=4, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.attempts["plan"] = 1
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS, "Guess.", "Weak.", "None"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.NOGO, RecoveryDisposition.REQUIREMENTS, "Unsupported."
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FINISH_FAIL
+        assert github.labels[4] == {STATE_PLAN_NO_GO}
+        assert STATE_PLAN_BLOCKED not in github.labels[4]
+
+    def test_mismatched_tracker_review_never_applies_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=5, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.TRACKER, "", "Tracks children.", "Checklist"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "This is an implementation task.",
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert STATE_SKIP not in {label["name"] for label in github.gh_issue_json(5)["labels"]}
+
+    def test_body_digest_conflict_never_overwrites_concurrent_human_edit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        original = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], issue_body="Human edit")
+        item = make_work_item(issue=6, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "issue_title": "Retry bug",
+                "issue_body": original,
+                "issue_body_digest": "a" * 64,
+                "requirements_evidence_digest": "b" * 64,
+                "requirements_recovery_contaminated": True,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Keep retries bounded.",
+                    "Recovered.",
+                    "Tests.",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Confirmed.",
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.gh_issue_json(6)["body"] == "Human edit"
+        assert item.state == "ENTER"
+
+    def test_first_github_size_rejection_requests_one_compact_recovery_retry(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stage = PlanningStage()
+        old_body = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], issue_body=old_body)
+        monkeypatch.setattr(
+            github,
+            "replace_issue_body_if_unchanged",
+            lambda *_args: IssueBodyReplacementResult(rejected=True),
+        )
+        item = make_work_item(issue=8, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "issue_body": old_body,
+                "issue_body_digest": github.gh_issue_json(8)["bodyDigest"],
+                "requirements_evidence_digest": "b" * 64,
+                "requirements_recovery_contaminated": True,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS, "Requirements", "Reason", "Evidence"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.REQUIREMENTS, "Confirmed"
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert item.state == "REQUIREMENTS_RECOVERY_WAIT"
+        assert item.payload["requirements_compact_retry"] is True
+
+    def test_second_github_size_rejection_finishes_with_plan_no_go(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stage = PlanningStage()
+        old_body = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], issue_body=old_body)
+        monkeypatch.setattr(
+            github,
+            "replace_issue_body_if_unchanged",
+            lambda *_args: IssueBodyReplacementResult(rejected=True),
+        )
+        item = make_work_item(issue=9, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "issue_body": old_body,
+                "issue_body_digest": github.gh_issue_json(9)["bodyDigest"],
+                "requirements_evidence_digest": "b" * 64,
+                "requirements_recovery_contaminated": True,
+                "requirements_publication_rejections": 1,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS, "Requirements", "Reason", "Evidence"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.REQUIREMENTS, "Confirmed"
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FINISH_FAIL
+        assert github.labels[9] == {STATE_PLAN_NO_GO}
+        assert STATE_PLAN_BLOCKED not in github.labels[9]
+
+    def test_recovered_body_with_no_go_restarts_as_fresh_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        recovered = render_recovered_requirements("old", "New requirements", "b" * 64)
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_NO_GO],
+            issue_body=recovered,
+            has_plan=True,
+        )
+        github.comments[7] = [
+            render_current_plan("Stale plan", revision=1),
+            render_current_review("Old review\n\nstate:plan-go", revision=1),
+        ]
+        item = make_work_item(issue=7, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert item.payload["requires_plan_revision"] is True
 
     def test_enter_skips_advise_when_disabled(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances straight to PLAN_WAIT when advise is disabled."""

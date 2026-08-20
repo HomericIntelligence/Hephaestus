@@ -1,5 +1,6 @@
 """Tests for GitHub API utilities."""
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -70,6 +71,28 @@ class TestGhIssueJson:
         assert data["number"] == 123
         assert data["title"] == "Test issue"
         assert data["state"] == "OPEN"
+        assert data["bodyDigest"] == hashlib.sha256(b"Test body").hexdigest()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_body_digest_is_bound_to_the_exact_fetched_body(self, mock_gh_call: Any) -> None:
+        """The optimistic-concurrency token covers bytes before prompt sanitization."""
+        raw_body = "bad\x00body"
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps(
+                {
+                    "number": 123,
+                    "title": "Test issue",
+                    "state": "OPEN",
+                    "labels": [],
+                    "body": raw_body,
+                }
+            )
+        )
+
+        data = gh_issue_json(123)
+
+        assert data["body"] == "badbody"
+        assert data["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_failed_fetch(self, mock_gh_call: Any) -> None:

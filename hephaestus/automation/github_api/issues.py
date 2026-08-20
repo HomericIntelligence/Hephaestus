@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,11 @@ from ..review_journal import has_exact_leading_marker
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
 _ISSUE_COMMENT_PAGE_SIZE = 100
+
+
+def issue_body_digest(body: str) -> str:
+    """Return the SHA-256 token for the exact UTF-8 issue body text."""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 @contextlib.contextmanager
@@ -104,6 +110,9 @@ def gh_issue_json(
             ],
         )
         data = cast(dict[str, Any], json.loads(result.stdout))
+        raw_body = data.get("body")
+        if isinstance(raw_body, str):
+            data["bodyDigest"] = issue_body_digest(raw_body)
         # Strip stray NUL bytes at the source so downstream prompt assembly never
         # feeds an embedded null into a subprocess argv (#1661). Title/body are the
         # free-text fields consumed by the planner/implementer prompts; warn on a

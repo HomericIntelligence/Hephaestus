@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.automation.github_api import issue_body_digest
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER, MergeAuthorization
 from hephaestus.automation.pipeline.events import StageEvent
@@ -22,6 +23,7 @@ from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
     ConditionalMergeResult,
     ImplementationThreadReplyResult,
+    IssueBodyReplacementResult,
     ReviewerThreadReconciliationResult,
     StageContext,
     StageGitHub,
@@ -227,9 +229,27 @@ class FakeStageGitHub(FakeGitHub):
             "number": issue_number,
             "title": self._issue_title,
             "body": self._issue_body,
+            "bodyDigest": issue_body_digest(self._issue_body),
             "state": self._issue_state,
             "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
         }
+
+    def replace_issue_body_if_unchanged(
+        self,
+        issue_number: int,
+        expected_body_digest: str,
+        new_body: str,
+    ) -> IssueBodyReplacementResult:
+        """Mirror the digest-guarded issue-body mutation."""
+        current_digest = issue_body_digest(self._issue_body)
+        if current_digest != expected_body_digest:
+            return IssueBodyReplacementResult(conflict=True, body_digest=current_digest)
+        self._issue_body = new_body
+        self._log("replace_issue_body_if_unchanged", issue_number, expected_body_digest)
+        return IssueBodyReplacementResult(
+            replaced=True,
+            body_digest=issue_body_digest(new_body),
+        )
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_merged_closing_pr."""

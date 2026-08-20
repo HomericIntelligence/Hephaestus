@@ -23,6 +23,28 @@ from hephaestus.cli.utils import emit_json_status
 
 logger = logging.getLogger(__name__)
 
+_SUMMARY_ACTIONS_KEY = "_planning_summary_actions"
+
+
+def record_summary_action(item: WorkItem, action: str) -> None:
+    """Record one idempotent, bounded planning action on a work item."""
+    normalized = action.strip()
+    if not normalized:
+        raise ValueError("summary action must not be empty")
+    actions = item.payload.setdefault(_SUMMARY_ACTIONS_KEY, [])
+    if not isinstance(actions, list):
+        raise TypeError("planning summary actions payload must be a list")
+    if normalized not in actions:
+        actions.append(normalized)
+
+
+def _summary_actions(item: WorkItem) -> tuple[str, ...]:
+    """Return validated action names attached to one item."""
+    raw = item.payload.get(_SUMMARY_ACTIONS_KEY, [])
+    if not isinstance(raw, list):
+        return ()
+    return tuple(action for action in raw if isinstance(action, str) and action)
+
 
 @dataclass(frozen=True)
 class RunStats:
@@ -152,18 +174,21 @@ class TerminalSummary:
     total: int = 0
     _dispositions: Counter[str] = field(default_factory=Counter)
     _per_stage: Counter[str] = field(default_factory=Counter)
+    _planning_actions: Counter[str] = field(default_factory=Counter)
 
     def record(self, item: WorkItem) -> None:
         """Add one terminal or resumable item outcome to the aggregate."""
         self.total += 1
         self._dispositions[_disposition_bucket(item)] += 1
         self._per_stage[item.stage.value] += 1
+        self._planning_actions.update(_summary_actions(item))
 
     def reset(self) -> None:
         """Start a fresh reseed-pass aggregate without retaining item identities."""
         self.total = 0
         self._dispositions.clear()
         self._per_stage.clear()
+        self._planning_actions.clear()
 
     @property
     def dispositions(self) -> dict[str, int]:
@@ -174,6 +199,11 @@ class TerminalSummary:
     def per_stage(self) -> dict[str, int]:
         """Return a stable copy of counts grouped by final stage."""
         return dict(sorted(self._per_stage.items()))
+
+    @property
+    def planning_actions(self) -> dict[str, int]:
+        """Return counts of autonomous planning actions taken by the run."""
+        return dict(sorted(self._planning_actions.items()))
 
 
 def _json_message(exit_code: int) -> str:
@@ -247,21 +277,27 @@ def print_summary(
     if terminal_summary is None:
         dispositions: dict[str, int] = {}
         per_stage: dict[str, int] = {}
+        planning_action_counter: Counter[str] = Counter()
         for item in items:
             dispositions[_disposition_bucket(item)] = (
                 dispositions.get(_disposition_bucket(item), 0) + 1
             )
             per_stage[item.stage.value] = per_stage.get(item.stage.value, 0) + 1
+            planning_action_counter.update(_summary_actions(item))
         total_items = len(items)
+        planning_actions = dict(sorted(planning_action_counter.items()))
     else:
         dispositions = terminal_summary.dispositions
         per_stage = terminal_summary.per_stage
         total_items = terminal_summary.total
+        planning_actions = terminal_summary.planning_actions
 
     logger.info("")
     logger.info("=== Aggregates ===")
     logger.info("  items: %d  dispositions: %s", total_items, dict(sorted(dispositions.items())))
     logger.info("  per-stage: %s", dict(sorted(per_stage.items())))
+    if planning_actions:
+        logger.info("  planning-actions: %s", planning_actions)
     if terminal_summary is not None and total_items > len(items):
         logger.info("  detailed terminal rows retained: %d of %d", len(items), total_items)
     logger.info(
@@ -306,6 +342,7 @@ def print_summary(
             stats.exit_code,
             message=_json_message(stats.exit_code),
             dispositions=dict(sorted(dispositions.items())),
+            planning_actions=planning_actions,
             loops_run=stats.loops_run,
             agent_jobs=stats.agent_job_count,
             agent_job_time_s=round(stats.agent_job_time_s, 1),

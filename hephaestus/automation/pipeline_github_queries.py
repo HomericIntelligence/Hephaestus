@@ -310,6 +310,9 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             data = json.loads(result.stdout or "{}")
             if not isinstance(data, dict):
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
+            raw_body = data.get("body")
+            if isinstance(raw_body, str):
+                data["bodyDigest"] = github_api.issue_body_digest(raw_body)
             for field in ("title", "body"):
                 value = data.get(field)
                 if isinstance(value, str):
