@@ -142,12 +142,12 @@ class TestClassifyIssue:
         assert stage is StageName.IMPLEMENTATION
         assert reason == f"#1 at-or-past {STATE_PLAN_GO}, no PR yet"
 
-    def test_open_pr_with_issue_impl_go_uses_generic_pr_review_route(self) -> None:
-        """An issue label alone cannot route an open PR to merge wait."""
+    def test_open_pr_with_issue_impl_go_without_plan_go_routes_to_planning(self) -> None:
+        """A downstream issue label cannot replace exact plan approval."""
         stage, _reason = classify_issue(
             _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_open=True)
         )
-        assert stage is StageName.PR_REVIEW
+        assert stage is StageName.PLANNING
 
     def test_open_pr_with_pr_impl_go_routes_to_merge_wait(self) -> None:
         """Only the PR-level loop approval routes directly to merge wait."""
@@ -169,16 +169,36 @@ class TestClassifyIssue:
         assert stage is StageName.PR_REVIEW
         assert "review" in reason
 
-    def test_open_pr_with_impl_no_go_routes_to_pr_review(self) -> None:
-        """Open PR + issue-level state:implementation-no-go re-enters the review cycle."""
+    @pytest.mark.parametrize(
+        "labels",
+        [set(), {STATE_NEEDS_PLAN}, {STATE_PLAN_NO_GO}, {STATE_IMPLEMENTATION_NO_GO}],
+    )
+    def test_open_pr_without_exclusive_plan_go_routes_to_planning(
+        self, labels: set[str]
+    ) -> None:
+        """An implementation PR cannot substitute for an approved issue plan."""
+        stage, reason = classify_issue(
+            _facts(
+                labels=labels,
+                pr_number=42,
+                pr_is_open=True,
+                pr_has_implementation_go=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "plan" in reason
+
+    def test_open_pr_with_impl_no_go_without_plan_go_routes_to_planning(self) -> None:
+        """Issue implementation rejection cannot replace exact plan approval."""
         stage, reason = classify_issue(
             _facts(labels={STATE_IMPLEMENTATION_NO_GO}, pr_number=42, pr_is_open=True)
         )
-        assert stage is StageName.PR_REVIEW
-        assert "review" in reason
+        assert stage is StageName.PLANNING
+        assert "plan" in reason
 
-    def test_pr_impl_no_go_with_issue_impl_go_routes_to_pr_review(self) -> None:
-        """A PR-level no-GO remains an ordinary open-PR review route."""
+    def test_pr_impl_no_go_without_issue_plan_go_routes_to_planning(self) -> None:
+        """A PR rejection cannot bypass the missing issue-plan approval."""
         stage, _reason = classify_issue(
             _facts(
                 labels={STATE_IMPLEMENTATION_GO},
@@ -188,7 +208,7 @@ class TestClassifyIssue:
             )
         )
 
-        assert stage is StageName.PR_REVIEW
+        assert stage is StageName.PLANNING
 
     def test_no_pr_at_plan_go_routes_to_implementation(self) -> None:
         """No PR, at-or-past state:plan-go → ready for implementation."""

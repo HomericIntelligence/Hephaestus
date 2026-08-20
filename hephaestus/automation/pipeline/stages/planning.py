@@ -230,9 +230,14 @@ def _write_planning_entry_labels(
     *,
     is_replan_entry: bool,
     revision_already_published: bool,
+    force_replan: bool = False,
 ) -> bool:
     """Durably establish the mutually-exclusive planning entry label."""
-    if STATE_PLAN_NO_GO in labels and revision_already_published:
+    if force_replan:
+        add, remove = enter_planning_transition()
+        logger.info("planning:%d: forced entry swap; add %s, remove %s", issue_number, add, remove)
+        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    elif STATE_PLAN_NO_GO in labels and revision_already_published:
         add, remove = enter_planning_transition()
         logger.info("planning:%d: entry swap; add %s, remove %s", issue_number, add, remove)
         ctx.github.edit_labels(issue_number, add=add, remove=remove)
@@ -474,7 +479,7 @@ class PlanningStage(Stage):
     - already at-or-past ``state:plan-go`` -> ADVANCE (zero jobs)
     - freshly closed issue + exact merged closing PR -> FINISH_PASS
     - open issue + historic merged closing PR -> continue planning
-    - open PR -> SKIP (PR already covers implementation)
+    - open PR without plan-GO -> continue planning; the PR is not plan approval
     - unlabeled entry -> idempotent bare add of ``state:needs-plan``; entry
       carrying ``state:plan-no-go`` (or a stale ``state:plan-go``) after a
       plan_review fail-back -> ONE atomic ``edit_labels`` swap adding
@@ -506,6 +511,9 @@ class PlanningStage(Stage):
             return issue_outcome
 
         labels = _require_issue_labels(item, ctx)
+        force_replan = bool(getattr(ctx.config, "force", False)) and not bool(
+            item.payload.get("forced_planning_epoch_started")
+        )
 
         # Operator override: state:skip -> SKIP. Checked BEFORE the
         # plan-go fast-forward — skip wins over everything (#1835), matching
@@ -531,17 +539,9 @@ class PlanningStage(Stage):
 
         # Fast-forward only from the sole confirmed plan state. A stale sibling
         # makes the label set contradictory and must never authorize work.
-        if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+        if is_exclusive_plan_state(labels, STATE_PLAN_GO) and not force_replan:
             logger.info("planning:%d: already plan-go; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan already approved")
-
-        # An open PR already in flight makes planning redundant. A historic
-        # merged PR is deliberately not a completion shortcut: only GitHub's
-        # current closed issue state may terminalize work at seeding.
-        open_pr = ctx.github.find_pr_for_issue(item.issue)
-        if open_pr:
-            logger.info("planning:%d: open PR #%d exists; skipping", item.issue, open_pr)
-            return StageOutcome(Disposition.SKIP, f"open PR #{open_pr} exists")
 
         # Entry label normalization. On the plan_review "nogo" fail-back the
         # issue carries state:plan-no-go and NEITHER sibling (apply_plan_verdict
@@ -568,6 +568,13 @@ class PlanningStage(Stage):
                 Disposition.RETRY,
                 f"plan journal read failed: {exc}",
             )
+        if force_replan:
+            # The journal remains durable history, but none of its current
+            # epoch may fast-forward or seed the forced planner invocation.
+            item.payload.pop("plan_text", None)
+            item.payload.pop("plan_revision", None)
+            item.payload.pop("issue_history", None)
+            is_replan_entry = bool(snapshot.current_plan)
         if is_replan_entry:
             item.payload["requires_plan_revision"] = True
         if not _write_planning_entry_labels(
@@ -576,14 +583,17 @@ class PlanningStage(Stage):
             labels,
             is_replan_entry=is_replan_entry,
             revision_already_published=revision_already_published,
+            force_replan=force_replan,
         ):
             return StageOutcome(
                 Disposition.RETRY,
                 "exclusive planning entry label was not confirmed",
             )
+        if force_replan:
+            item.payload["forced_planning_epoch_started"] = True
 
         history = _planning_history(comments)
-        if history:
+        if history and not force_replan:
             item.payload["issue_history"] = history
 
         # Restart fast-forward: journal reconciliation already found a current

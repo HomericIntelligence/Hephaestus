@@ -3681,6 +3681,16 @@ class TestPipelineScopeWiring:
         assert entries[0].stage is StageName.PLANNING
         assert "force re-plan" in entries[0].reason
 
+    def test_force_is_propagated_to_stage_context(self, tmp_path: Path) -> None:
+        """The stage sees the same force value that changed seed routing."""
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._stage_config.force is True
+
     def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
         """--force must NOT pull a PRE-scope stage forward into the scope.
 

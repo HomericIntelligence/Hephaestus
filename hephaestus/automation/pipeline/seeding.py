@@ -13,8 +13,9 @@ Entry routing (the binding contract is the classification table in
 - ``state:skip`` or epic → excluded (stage ``None``, logged)
 - Closed issue + merged PR carrying an exact ``Closes #N`` line → finished
   (pass, idempotent)
-- Open PR + PR-level ``state:implementation-go`` → merge_wait
-- Any other open PR → pr_review (including an issue-level implementation-GO)
+- Open PR without an exclusive issue-level ``state:plan-go`` → planning
+- Open PR + issue plan-GO + PR-level ``state:implementation-go`` → merge_wait
+- Any other open PR with issue plan-GO → pr_review
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
 - No PR, ``state:plan-blocked`` → excluded until an external operator resolves
@@ -293,6 +294,11 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
+        # An implementation artifact cannot substitute for an approved issue
+        # plan.  Keep planning authoritative even when a PR already exists or
+        # carries a downstream implementation verdict.
+        if state_label != STATE_PLAN_GO:
+            return StageName.PLANNING, f"#{facts.number} open PR missing {STATE_PLAN_GO}"
         # The loop-owned approval label records review eligibility, not durable
         # merge authority.  A restart sends it to merge_wait, which confirms an
         # unarmed PR before returning to review; a matching current-process

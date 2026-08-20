@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -179,8 +180,10 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert github.mutation_log == []
 
-    def test_open_pr_skips(self, make_ctx: Any, make_work_item: Any) -> None:
-        """An open PR for the issue skips planning with zero writes (gate B)."""
+    def test_open_pr_without_plan_go_still_plans(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An open PR cannot bypass the issue's missing plan approval."""
         stage = PlanningStage()
         github = FakeStageGitHub(open_pr=456)
         ctx = make_ctx(github=github)
@@ -188,9 +191,35 @@ class TestPlanningStageEnter:
 
         outcome = stage.on_enter(item, ctx)
 
-        assert outcome is not None
-        assert outcome.disposition == Disposition.SKIP
-        assert github.mutation_log == []
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert github.labels[4] == {STATE_NEEDS_PLAN}
+
+    def test_force_starts_new_epoch_without_reusing_approved_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Forced planning replaces plan-GO and ignores the stale journal epoch."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], has_plan=True, open_pr=456)
+        github.comments[40] = [
+            render_current_plan("Stale approved plan", revision=3),
+            render_current_review("GO\n\nstate:plan-go", revision=3),
+        ]
+        ctx = make_ctx(github=github, config=SimpleNamespace(force=True))
+        item = make_work_item(
+            issue=40,
+            state="ENTER",
+            payload={"plan_text": "cached stale plan", "issue_history": "cached stale review"},
+        )
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert github.labels[40] == {STATE_NEEDS_PLAN}
+        assert item.payload["requires_plan_revision"] is True
+        assert "plan_text" not in item.payload
+        assert "issue_history" not in item.payload
 
     def test_unlabeled_entry_adds_needs_plan(self, make_ctx: Any, make_work_item: Any) -> None:
         """Unlabeled entry durably writes state:needs-plan before proceeding."""
