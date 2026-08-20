@@ -15,6 +15,7 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.review_journal import HISTORY_RE
+from hephaestus.automation.state_labels import is_epic
 from hephaestus.prompts import PromptCatalog
 
 RECOVERY_PROVENANCE_VERSION: Final[int] = 1
@@ -27,7 +28,6 @@ _PROVENANCE_RE = re.compile(
     rf"source=(?P<source>{_DIGEST_RE}):requirements=(?P<requirements>{_DIGEST_RE}):"
     rf"evidence=(?P<evidence>{_DIGEST_RE}) -->$"
 )
-_TRACKER_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*\]\s*)?(?:epic|roadmap)\b", re.IGNORECASE)
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
 _OBSOLETE_BODY_RE = re.compile(
     r"\b(?:already (?:resolved|implemented|fixed)|no longer (?:needed|applicable)|"
@@ -96,9 +96,7 @@ def has_contaminated_issue_body(body: str) -> bool:
 def is_semantic_disposition_candidate(title: str, body: str) -> bool:
     """Select narrow tracker/obsolete candidates for independent model review."""
     return bool(
-        _TRACKER_TITLE_RE.search(title)
-        or _OBSOLETE_TITLE_RE.search(title)
-        or _OBSOLETE_BODY_RE.search(body)
+        is_epic((), title) or _OBSOLETE_TITLE_RE.search(title) or _OBSOLETE_BODY_RE.search(body)
     )
 
 
@@ -295,6 +293,8 @@ def build_recovery_review_prompt(
     source_body_digest: str,
     evidence_binding: str,
     proposal_json: str,
+    repository: str,
+    repository_revision: str,
 ) -> str:
     """Build the independent semantic review prompt."""
     fenced = fence_content()
@@ -302,6 +302,8 @@ def build_recovery_review_prompt(
         "planning/requirements_recovery_review.j2",
         untrusted_notice=fenced.untrusted_notice,
         issue_number=issue_number,
+        repository=repository,
+        repository_revision=repository_revision,
         issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         source_body_digest=source_body_digest,

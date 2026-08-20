@@ -87,6 +87,23 @@ def test_restart_repairs_a_plan_written_before_pending_review() -> None:
     assert github.mutation_log == mutations_after_recovery
 
 
+def test_forced_publication_persists_restart_provenance() -> None:
+    """The canonical plan records that its pending review belongs to force."""
+    github = FakeStageGitHub()
+
+    publish_plan_revision(
+        10,
+        "Fresh forced plan",
+        github,
+        require_change=False,
+        forced_planning_epoch=True,
+    )
+
+    snapshot = journal_snapshot(github.issue_comments(10))
+    assert snapshot.current_plan == "Fresh forced plan"
+    assert snapshot.forced_planning_epoch is True
+
+
 def test_failed_canonical_plan_write_preserves_the_previous_revision_for_retry() -> None:
     """A failed first write loses no public artifact and a clean retry can publish."""
     github = _CrashOnceJournalGitHub("canonical_plan")

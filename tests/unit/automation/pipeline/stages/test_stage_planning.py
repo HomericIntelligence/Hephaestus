@@ -46,6 +46,8 @@ from hephaestus.automation.review_journal import (
     render_current_review,
 )
 from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
@@ -180,7 +182,7 @@ class TestPlanningStageEnter:
         outcome = stage.on_enter(item, ctx)
 
         assert outcome is None
-        assert github.mutation_log == [("gh_issue_add_labels", (3, (STATE_NEEDS_PLAN,)))]
+        assert github.labels[3] == {STATE_NEEDS_PLAN}
 
     def test_issue_closed_after_seeding_with_merged_pr_finishes_at_entry(
         self, make_ctx: Any, make_work_item: Any
@@ -251,6 +253,26 @@ class TestPlanningStageEnter:
         assert "plan_text" not in item.payload
         assert "issue_history" not in item.payload
 
+    @pytest.mark.parametrize(
+        "legacy_label",
+        [STATE_IMPLEMENTATION_GO, STATE_IMPLEMENTATION_NO_GO],
+    )
+    def test_planning_entry_removes_legacy_issue_implementation_state(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        legacy_label: str,
+    ) -> None:
+        """Planning normalizes legacy issue-scoped implementation state for restart."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN, legacy_label])
+        item = make_work_item(issue=42, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert github.labels[42] == {STATE_NEEDS_PLAN}
+
     def test_force_restart_resumes_published_revision_without_new_planner_epoch(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -258,7 +280,7 @@ class TestPlanningStageEnter:
         stage = PlanningStage()
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=True)
         github.comments[41] = [
-            render_current_plan("Fresh forced plan", revision=4),
+            render_current_plan("Fresh forced plan", revision=4, forced_planning_epoch=True),
             render_current_review(
                 "Review pending for implementation plan revision 4.",
                 revision=4,
@@ -275,6 +297,74 @@ class TestPlanningStageEnter:
         assert "requires_plan_revision" not in item.payload
         assert github.mutation_log == []
 
+    def test_force_does_not_reuse_an_ordinary_pending_revision(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only a forced-epoch journal marker can satisfy a forced restart."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], has_plan=True)
+        github.comments[43] = [
+            render_current_plan("Ordinary pending plan", revision=2),
+            render_current_review("Review pending for implementation plan revision 2.", revision=2),
+        ]
+        item = make_work_item(issue=43, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github, config=SimpleNamespace(force=True)))
+
+        assert outcome is None
+        assert item.state == "ENTER"
+        assert item.payload["requires_plan_revision"] is True
+        assert item.payload["forced_planning_epoch_started"] is True
+        assert "plan_text" not in item.payload
+
+    def test_force_dry_run_does_not_retry_label_readback_forever(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry-run previews force entry without requiring impossible mutation readback."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], has_plan=True)
+        monkeypatch.setattr(github, "edit_labels", lambda *_args, **_kwargs: None)
+        item = make_work_item(issue=44, state="ENTER")
+
+        outcome = stage.on_enter(
+            item,
+            make_ctx(
+                github=github,
+                dry_run=True,
+                config=SimpleNamespace(force=True, enable_advise=False),
+            ),
+        )
+
+        assert outcome is None
+        assert item.payload["forced_planning_epoch_started"] is True
+
+    def test_incomplete_requirements_snapshot_is_bounded_and_sets_no_go(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        monkeypatch.setattr(
+            github,
+            "gh_issue_json",
+            lambda issue: {
+                "number": issue,
+                "state": "OPEN",
+                "labels": [{"name": name} for name in sorted(github._issue_labels(issue))],
+            },
+        )
+        ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
+        item = make_work_item(issue=45, state="ENTER")
+
+        first = stage.on_enter(item, ctx)
+        second = stage.on_enter(item, ctx)
+
+        assert isinstance(first, StageOutcome)
+        assert first.disposition == Disposition.RETRY
+        assert item.payload["_enter_pending"] is True
+        assert isinstance(second, StageOutcome)
+        assert second.disposition == Disposition.FINISH_FAIL
+        assert github.labels[45] == {STATE_PLAN_NO_GO}
+
     def test_unlabeled_entry_adds_needs_plan(self, make_ctx: Any, make_work_item: Any) -> None:
         """Unlabeled entry durably writes state:needs-plan before proceeding."""
         stage = PlanningStage()
@@ -285,7 +375,7 @@ class TestPlanningStageEnter:
         outcome = stage.on_enter(item, ctx)
 
         assert outcome is None  # proceed to step()
-        assert github.mutation_log == [("gh_issue_add_labels", (5, (STATE_NEEDS_PLAN,)))]
+        assert github.labels[5] == {STATE_NEEDS_PLAN}
         assert STATE_NEEDS_PLAN in github.labels[5]
 
     def test_reentry_with_needs_plan_is_idempotent(
@@ -441,7 +531,8 @@ class TestPlanningStageEnter:
         assert stage.on_enter(item, ctx) is None
         assert item.state == "VERIFY"
         log_after_first = list(github.mutation_log)
-        assert log_after_first == [("gh_issue_add_labels", (10, (STATE_NEEDS_PLAN,)))]
+        assert len(log_after_first) == 1
+        assert github.labels[10] == {STATE_NEEDS_PLAN}
 
         assert stage.on_enter(item, ctx) is None  # second literal call
 
@@ -702,7 +793,8 @@ class TestPlanningStageStep:
                 ),
             }
         )
-        ctx = make_ctx(github=github)
+        config = SimpleNamespace(enable_advise=True, reset_plan_review_sessions=set())
+        ctx = make_ctx(github=github, config=config)
 
         result = stage.step(item, ctx)
 
@@ -713,6 +805,35 @@ class TestPlanningStageStep:
         assert github.gh_issue_json(1)["body"] == old_body
         assert any(comment.startswith(RECOVERY_PROVENANCE_PREFIX) for comment in github.comments[1])
         assert "requirements_recovery_required" not in item.payload
+        assert config.reset_plan_review_sessions == {1}
+
+    def test_recovery_results_are_rejected_when_issue_evidence_changed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], issue_body="New human body")
+        item = make_work_item(issue=46, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "issue_title": "A task",
+                "issue_body": "Old body",
+                "issue_body_digest": "a" * 64,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.TRACKER, "", "Old evidence.", "Old body."
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.TRACKER, "Confirmed old body."
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert item.state == "ENTER"
+        assert item.payload["_enter_pending"] is True
+        assert STATE_SKIP not in github.labels[46]
 
     def test_tracker_skip_requires_matching_independent_go(
         self, make_ctx: Any, make_work_item: Any
@@ -789,7 +910,7 @@ class TestPlanningStageStep:
         result = stage.step(item, make_ctx(github=github, budget_fn=lambda _name: 2))
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.RETRY
+        assert result.disposition == Disposition.BLOCKED
         assert STATE_PLAN_BLOCKED in github.labels[33]
 
     def test_recovery_nogo_uses_plan_no_go_not_blocked(
@@ -872,11 +993,14 @@ class TestPlanningStageStep:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert isinstance(result, Continue)
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
         assert github.gh_issue_json(6)["body"] == "Human edit"
         assert not any(
             name == "replace_issue_body_if_unchanged" for name, _args in github.mutation_log
         )
+        assert item.state == "ENTER"
+        assert item.payload["_enter_pending"] is True
 
     def test_recovery_publication_never_writes_the_human_owned_issue_body(
         self, make_ctx: Any, make_work_item: Any
@@ -1827,10 +1951,10 @@ class TestPlanningFlowWithFakePool:
         assert plan_job.prompt_kwargs["advise_findings"] == "advise findings"
         # Durable writes, pinned in journal order: entry label first, then
         # the plan-comment artifact — both before the ADVANCE outcome.
-        assert github.mutation_log == [
-            ("gh_issue_add_labels", (40, (STATE_NEEDS_PLAN,))),
+        assert github.mutation_log[1:] == [
             ("gh_issue_upsert_comment", (40, PLAN_CANONICAL_MARKER)),
             ("gh_issue_upsert_comment", (40, PLAN_REVIEW_CANONICAL_MARKER)),
         ]
+        assert github.labels[40] == {STATE_NEEDS_PLAN}
         assert PLAN_COMMENT_MARKER in github.comments[40][0]
         assert github.comments[40][0].endswith("Steps.")

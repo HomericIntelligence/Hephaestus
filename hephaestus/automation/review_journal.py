@@ -32,6 +32,7 @@ REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\
 PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
     r"<!-- prior-plan-fingerprints: (?P<fingerprints>[0-9a-f,]*) -->"
 )
+FORCED_PLANNING_EPOCH_MARKER: Final[str] = "<!-- hephaestus-forced-planning-epoch -->"
 RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
@@ -129,6 +130,7 @@ class JournalSnapshot:
     current_review_revision: int | None
     history: tuple[HistoryArtifact, ...]
     prior_plan_fingerprints: tuple[str, ...] = ()
+    forced_planning_epoch: bool = False
 
 
 def as_issue_comment(comment: IssueComment | str) -> IssueComment:
@@ -283,7 +285,8 @@ def extract_current_plan(body: str) -> str:
     text = _without_leading_line(body, PLAN_CANONICAL_MARKER)
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
-    return _without_fingerprint_line(text).strip()
+    text = _without_fingerprint_line(text)
+    return text.replace(FORCED_PLANNING_EPOCH_MARKER, "", 1).strip()
 
 
 def extract_current_review(body: str) -> str:
@@ -298,6 +301,7 @@ def render_current_plan(
     *,
     revision: int = 1,
     prior_fingerprints: Sequence[str] = (),
+    forced_planning_epoch: bool = False,
 ) -> str:
     """Render the editable current plan with an opaque canonical marker."""
     payload = extract_current_plan(plan)
@@ -305,6 +309,8 @@ def render_current_plan(
     metadata = ""
     if fingerprints:
         metadata = f"\n<!-- prior-plan-fingerprints: {','.join(fingerprints)} -->"
+    if forced_planning_epoch:
+        metadata += f"\n{FORCED_PLANNING_EPOCH_MARKER}"
     return (
         f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
         f"<!-- revision: {revision} -->{metadata}\n\n{payload}"
@@ -519,6 +525,7 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
         current_review_revision=review_revision,
         history=tuple(sorted(history, key=lambda item: (item.revision, item.kind != "plan"))),
         prior_plan_fingerprints=prior_fingerprints,
+        forced_planning_epoch=FORCED_PLANNING_EPOCH_MARKER in current_plan_body,
     )
 
 

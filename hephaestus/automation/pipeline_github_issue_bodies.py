@@ -74,9 +74,15 @@ class PipelineGitHubIssueBodies(_PipelineGitHubHost):
 
         # Accepted race: GitHub cannot atomically bind the following write to
         # the digest fetched above. Do not describe this as server-enforced CAS.
+        # Keep this to one transport attempt: a later stage retry must repeat
+        # the fresh digest read instead of widening the accepted race window.
         try:
             with github_api._body_file(new_body) as path:
-                self._gh(["issue", "edit", str(issue_number), "--body-file", path])
+                self._gh(
+                    ["issue", "edit", str(issue_number), "--body-file", path],
+                    max_retries=1,
+                    retry_on_rate_limit=False,
+                )
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             if _is_publication_rejection(exc):
                 return IssueBodyReplacementResult(rejected=True)

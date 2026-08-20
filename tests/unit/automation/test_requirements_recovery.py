@@ -135,12 +135,16 @@ def test_prompts_bind_evidence_and_minimize_repeated_code() -> None:
             '{"disposition":"REQUIREMENTS","requirements":"Keep retry bounded.",'
             '"reason":"Repository evidence","evidence":"Tests"}'
         ),
+        repository="acme/repo",
+        repository_revision="a" * 40,
     )
 
     assert "b" * 64 in recovery and "a" * 40 in recovery
     assert "Do not include diffs" in recovery
     assert "minimal" in recovery.lower()
     assert "independent" in review.lower()
+    assert "acme/repo" in review and "a" * 40 in review
+    assert "bound checkout" in review
     assert "GO or NOGO" in review
     assert "BLOCKED" not in review
 
@@ -150,6 +154,7 @@ def test_prompts_bind_evidence_and_minimize_repeated_code() -> None:
     [
         ("Epic: automation reliability", "Child issue checklist"),
         ("Roadmap Q4", "Milestones"),
+        ("Q3 Roadmap tracking", "Milestones"),
         ("A normal bug", "This request is already resolved by merged PR #9."),
         ("Obsolete: old migration", "Superseded by the new migration."),
     ],

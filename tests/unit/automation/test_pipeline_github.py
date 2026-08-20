@@ -2748,10 +2748,10 @@ class TestIssueBodyReplacement:
             ]
         )
         monkeypatch.setattr(adapter, "gh_issue_json", lambda _issue: next(reads))
-        calls: list[list[str]] = []
+        calls: list[tuple[list[str], dict[str, object]]] = []
 
-        def fake_gh(argv: list[str], **_kwargs: object) -> SimpleNamespace:
-            calls.append(argv)
+        def fake_gh(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append((argv, kwargs))
             assert Path(argv[4]).read_text() == new_body
             return SimpleNamespace(stdout="", returncode=0)
 
@@ -2764,9 +2764,10 @@ class TestIssueBodyReplacement:
         assert result.conflict is False
         assert result.retryable is False
         assert len(calls) == 1
-        argv = calls[0]
+        argv, kwargs = calls[0]
         assert argv[:3] == ["issue", "edit", "7"]
         assert argv[3] == "--body-file"
+        assert kwargs == {"max_retries": 1, "retry_on_rate_limit": False}
 
     def test_refuses_to_overwrite_when_fresh_body_digest_changed(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

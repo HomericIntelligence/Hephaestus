@@ -163,6 +163,7 @@ def publish_plan_revision(
     github: PlanJournalGitHub,
     *,
     require_change: bool,
+    forced_planning_epoch: bool = False,
 ) -> PlanPublication:
     """Publish a candidate using the append-pair-then-pointer transaction.
 
@@ -247,7 +248,11 @@ def publish_plan_revision(
     if not snapshot.current_plan:
         github.upsert_plan_comment(
             issue_number,
-            render_current_plan(candidate_plan, revision=snapshot.revision),
+            render_current_plan(
+                candidate_plan,
+                revision=snapshot.revision,
+                forced_planning_epoch=forced_planning_epoch,
+            ),
         )
         _upsert_pending_review(issue_number, snapshot.revision, github)
         _confirm_publication(
@@ -288,6 +293,7 @@ def publish_plan_revision(
             candidate_plan,
             revision=next_revision,
             prior_fingerprints=prior_fingerprints,
+            forced_planning_epoch=forced_planning_epoch,
         ),
     )
     _upsert_pending_review(issue_number, next_revision, github)

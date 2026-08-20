@@ -354,4 +354,8 @@ def enter_planning_transition() -> tuple[list[str], list[str]]:
         the two sibling labels to clear.
 
     """
-    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO]
+    return [STATE_NEEDS_PLAN], [
+        STATE_PLAN_NO_GO,
+        STATE_PLAN_GO,
+        *ALL_IMPLEMENTATION_STATE_LABELS,
+    ]

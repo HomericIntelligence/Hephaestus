@@ -607,7 +607,7 @@ absolute operator state:
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — automated implementation eligibility |
-| `state:skip` | absolute | operator / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
+| `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
 
 Every **stage-issued** `state:skip` write uses the label as its durable
 authority and emits the reason to structured run logs. It does not add an

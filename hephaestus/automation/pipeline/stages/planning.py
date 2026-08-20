@@ -81,6 +81,7 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLANNER
 from hephaestus.automation.state_labels import (
+    ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
@@ -244,6 +245,38 @@ def _refresh_requirements_recovery_context(
     return required
 
 
+def _reenter_planning(item: WorkItem) -> None:
+    """Request a real stage re-entry on the coordinator's next retry."""
+    item.state = "ENTER"
+    item.payload["_enter_pending"] = True
+
+
+def _retry_incomplete_requirements_snapshot(
+    item: WorkItem,
+    ctx: StageContext,
+    reason: str,
+) -> StageOutcome:
+    """Bound incomplete entry reads and fail closed with plan-no-go."""
+    assert item.issue is not None  # noqa: S101 - caller validates this
+    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    if STATE_PLAN_BLOCKED in live_labels:
+        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
+    attempt = item.attempts.get("plan", 0) + 1
+    item.attempts["plan"] = attempt
+    if attempt < ctx.budget("plan"):
+        _reenter_planning(item)
+        return StageOutcome(
+            Disposition.RETRY,
+            f"requirements snapshot retry {attempt}/{ctx.budget('plan')}: {reason}",
+        )
+    if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
+        return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
+    return StageOutcome(
+        Disposition.FINISH_FAIL,
+        f"requirements snapshot exhausted with plan-no-go: {reason}",
+    )
+
+
 def _recovery_revision(item: WorkItem, workspace_revision: str | None) -> str:
     """Return the captured source revision used to bind recovery evidence."""
     candidates = (
@@ -274,6 +307,13 @@ def _finish_recovery(item: WorkItem) -> None:
     item.payload.pop("requirements_publication_rejections", None)
 
 
+def _reset_plan_review_session(item: WorkItem, ctx: StageContext) -> None:
+    """Prevent recovered requirements from resuming an obsolete review cycle."""
+    reset_issues = getattr(ctx.config, "reset_plan_review_sessions", None)
+    if isinstance(reset_issues, set) and item.issue is not None:
+        reset_issues.add(item.issue)
+
+
 def _apply_recovery_state_label(
     item: WorkItem,
     ctx: StageContext,
@@ -281,10 +321,21 @@ def _apply_recovery_state_label(
     *,
     extra: Sequence[str] = (),
 ) -> bool:
-    """Atomically write and confirm one recovery-owned issue state."""
+    """Atomically write and confirm one recovery-owned issue state.
+
+    The caller checks fresh labels immediately before this mutation. A human
+    can still change labels between that read and GitHub's atomic edit; that
+    unavoidable external race is accepted and the post-write readback fails
+    closed when the resulting state is not exclusive.
+    """
     assert item.issue is not None  # noqa: S101 - caller validates this
     if target == STATE_SKIP:
-        removals = [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO]
+        removals = [
+            STATE_NEEDS_PLAN,
+            STATE_PLAN_NO_GO,
+            STATE_PLAN_GO,
+            *ALL_IMPLEMENTATION_STATE_LABELS,
+        ]
     else:
         _add, removals = apply_plan_state(target)
     ctx.github.edit_labels(
@@ -308,6 +359,9 @@ def _retry_requirements_recovery(
 ) -> StageOutcome:
     """Retry a correctable recovery once, then preserve plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
+    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    if STATE_PLAN_BLOCKED in live_labels:
+        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
     if attempt < ctx.budget("plan"):
@@ -371,7 +425,7 @@ def _pending_force_after_semantic_clear(
         return None
     if isinstance(source_digest, str):
         item.payload["requirements_semantic_clear_digest"] = source_digest
-    item.state = "ENTER"
+    _reenter_planning(item)
     return StageOutcome(
         Disposition.RETRY,
         "semantic recovery cleared; forced planning remains pending",
@@ -415,6 +469,7 @@ def _apply_confirmed_requirements(
     item.payload.pop("plan_text", None)
     item.payload.pop("issue_history", None)
     record_summary_action(item, "requirements-recovered")
+    _reset_plan_review_session(item, ctx)
     _finish_recovery(item)
     return Continue(next_state="ADVISE_WAIT" if ctx.config.enable_advise else "PLAN_WAIT")
 
@@ -429,6 +484,28 @@ def _apply_requirements_recovery(
     review = item.payload.get("requirements_recovery_review")
     if not isinstance(proposal, RecoveredRequirements) or not isinstance(review, RecoveryReview):
         return _retry_requirements_recovery(item, ctx, "missing typed recovery result")
+    if STATE_PLAN_BLOCKED in _require_issue_labels_for_transition(item.issue, ctx):
+        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
+    expected_title = item.payload.get("issue_title")
+    expected_body = item.payload.get("issue_body")
+    expected_digest = item.payload.get("issue_body_digest")
+    if all(isinstance(value, str) for value in (expected_title, expected_body, expected_digest)):
+        live = ctx.github.gh_issue_json(item.issue)
+        if (
+            live.get("title") != expected_title
+            or live.get("body") != expected_body
+            or live.get("bodyDigest") != expected_digest
+        ):
+            _clear_recovery_results(item)
+            try:
+                _refresh_requirements_recovery_context(item, ctx)
+            except RuntimeError as exc:
+                return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
+            _reenter_planning(item)
+            return StageOutcome(
+                Disposition.RETRY,
+                "issue requirements changed after recovery review; refreshed evidence",
+            )
     if review.verdict is not RecoveryVerdict.GO or review.disposition is not proposal.disposition:
         return _retry_requirements_recovery(item, ctx, review.reason)
     if skip_outcome := _apply_confirmed_semantic_skip(item, ctx, proposal, review):
@@ -491,6 +568,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 "requirements planner returned no valid proposal",
             )
         workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
+        revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
         binding = str(item.payload.get("requirements_evidence_digest") or "")
         job = AgentJob(
             repo=item.repo,
@@ -517,6 +595,8 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 "source_body_digest": item.payload.get("issue_body_digest", ""),
                 "evidence_binding": binding,
                 "proposal_json": recovered_requirements_json(proposal),
+                "repository": item.repo,
+                "repository_revision": revision,
             },
             parse=parse_recovery_review,
             descr="review_recovered_requirements",
@@ -620,9 +700,19 @@ def _write_planning_entry_labels(
         return is_exclusive_plan_state(
             _require_issue_labels_for_transition(issue_number, ctx), STATE_PLAN_NO_GO
         )
-    elif STATE_NEEDS_PLAN not in labels:
-        logger.info("planning:%d: adding %s label", issue_number, STATE_NEEDS_PLAN)
-        ctx.github.add_labels(issue_number, [STATE_NEEDS_PLAN])
+    elif STATE_NEEDS_PLAN not in labels or set(labels).intersection(
+        ALL_IMPLEMENTATION_STATE_LABELS
+    ):
+        add, remove = enter_planning_transition()
+        logger.info(
+            "planning:%d: entering initial planning; add %s, remove legacy states %s",
+            issue_number,
+            add,
+            remove,
+        )
+        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    if ctx.dry_run:
+        return True
     return is_exclusive_plan_state(
         _require_issue_labels_for_transition(issue_number, ctx),
         expected_state,
@@ -725,6 +815,7 @@ def _publish_candidate_plan(
             str(item.payload["plan_text"]),
             ctx.github,
             require_change=requires_revision,
+            forced_planning_epoch=bool(item.payload.get("forced_planning_epoch_started")),
         )
     except PlanRevisionOwnershipError:
         note = "plan is being worked by another pipeline item; ejected from queue"
@@ -921,6 +1012,8 @@ class PlanningStage(Stage):
             recovery_required = _refresh_requirements_recovery_context(item, ctx)
         except CommentJournalReadError as exc:
             return StageOutcome(Disposition.RETRY, f"plan journal read failed: {exc}")
+        except RuntimeError as exc:
+            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         if recovery_required:
             logger.info("planning:%d: requirements recovery required", item.issue)
             return None
@@ -957,7 +1050,7 @@ class PlanningStage(Stage):
                 f"plan journal read failed: {exc}",
             )
         if force_replan:
-            if revision_already_published:
+            if revision_already_published and snapshot.forced_planning_epoch:
                 force_replan = False
             else:
                 # The journal remains durable history, but none of its current

@@ -45,8 +45,10 @@ An open pull request is not proof of a valid plan. Issues without an exclusive
 propagates into the stage configuration and explicitly starts a fresh planning
 epoch.
 
-Requirements-recovery and plan-review outcomes remain binary:
-`state:plan-go` or `state:plan-no-go`. Bounded NOGO exhaustion, unavailable
+Requirements-recovery outcomes and ordinary plan-review verdicts remain binary:
+`state:plan-go` or `state:plan-no-go`. Exceptional plan-review session loss or
+no-progress conditions may retain the pre-existing `state:plan-blocked` latch.
+Bounded NOGO exhaustion, unavailable
 evidence, and repeated provider or GitHub publication rejection end the issue
 for the current run with `state:plan-no-go` intact. Recovery never applies the
 legacy `state:plan-blocked` latch. Prompt guidance asks for concise plans and

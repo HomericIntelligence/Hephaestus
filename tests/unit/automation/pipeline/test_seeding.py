@@ -20,7 +20,6 @@ from hephaestus.automation.implementation_go_audit_receipt import PendingImpleme
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
-    _LABEL_RANK,
     EpicSkipTagObligation,
     IssueFacts,
     SeedEntry,
@@ -232,9 +231,9 @@ class TestClassifyIssue:
         assert "at-or-past" in reason
 
     def test_no_pr_past_plan_go_routes_to_implementation(self) -> None:
-        """No PR, past state:plan-go (e.g., impl-no-go) → implementation (at-or-past)."""
+        """A legacy issue-level implementation label cannot substitute for plan-go."""
         stage, _reason = classify_issue(_facts(labels={STATE_IMPLEMENTATION_NO_GO}))
-        assert stage is StageName.IMPLEMENTATION
+        assert stage is StageName.PLANNING
 
     def test_no_pr_plan_no_go_routes_to_planning(self) -> None:
         """No PR, state:plan-no-go → planning (amend path)."""
@@ -335,7 +334,11 @@ class TestClassificationIsStageNameSSOT:
         for labels in _STATE_LABEL_SETS:
             for pr_state in _PR_STATES:
                 stage, _ = classify_issue(_facts(labels=set(labels), **pr_state))
-                known = {label for label in labels if label in _LABEL_RANK}
+                known = {
+                    label
+                    for label in labels
+                    if label in {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}
+                }
                 if STATE_SKIP in labels or len(known) > 1:
                     assert stage is None
                 else:
@@ -895,11 +898,9 @@ class TestLabelRank:
             _label_at_or_past(STATE_PLAN_GO, "state:typo")
 
     def test_issue_already_past_plan_go_not_requeued_to_planning(self) -> None:
-        """AC: issue with state:implementation-go is NOT re-routed to planning."""
-        # This is the critical AC from the plan: "`==` strands items already past the target".
-        # Our fix: use at-or-past (>=) not equality (==).
+        """A legacy issue implementation-go label is ignored during seeding."""
         stage, _ = classify_issue(_facts(labels={STATE_IMPLEMENTATION_GO}))
-        assert stage is StageName.IMPLEMENTATION
+        assert stage is StageName.PLANNING
 
     def test_reconstruction_is_idempotent(self) -> None:
         """Classifying the same facts twice yields the same result (restart safety)."""

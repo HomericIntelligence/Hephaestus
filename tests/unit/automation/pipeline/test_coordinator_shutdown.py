@@ -663,7 +663,10 @@ class TestCrashMatrixJournal:
         entry = _classify_from_fake(gh, 1)
 
         assert entry is StageName.PLANNING  # same stage — never lost
-        assert ("gh_issue_add_labels", (1, ("state:needs-plan",))) in gh.mutation_log
+        assert any(
+            operation == "edit_labels" and args[1] == (STATE_NEEDS_PLAN,)
+            for operation, args in gh.mutation_log
+        )
 
     def test_crash_after_plan_comment_upsert_stays_at_or_before_plan_review(self) -> None:
         """S2: crash after the durable plan-comment upsert -> same-or-earlier."""

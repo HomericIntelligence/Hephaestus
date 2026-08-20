@@ -80,6 +80,7 @@ _LABEL_RANK = {
     STATE_IMPLEMENTATION_NO_GO: 3,
     STATE_IMPLEMENTATION_GO: 4,
 }
+_ISSUE_PLAN_STATE_LABELS = frozenset({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO})
 
 
 def read_pending_implementation_go_audit(
@@ -194,11 +195,12 @@ class SeedEntry:
 
 
 def _get_state_label(labels: set[str]) -> str | None:
-    """Extract the single active known ``state:*`` label, or None when absent.
+    """Extract the single active issue plan-state label, or None when absent.
 
-    Contradictory combinations are rejected by :func:`classify_issue` before
-    this helper is called. Unknown ``state:*`` labels are ignored after warning
-    because they have no rank in the automation state machine.
+    Contradictory plan-state combinations are rejected by
+    :func:`classify_issue` before this helper is called. Legacy issue-scoped
+    implementation labels are ignored because implementation authority lives
+    on pull requests. Unknown ``state:*`` labels are ignored after warning.
 
     Args:
         labels: Set of label names on an issue.
@@ -211,8 +213,12 @@ def _get_state_label(labels: set[str]) -> str | None:
     if not state_labels:
         return None
 
-    known_state_labels = [lbl for lbl in state_labels if lbl in _LABEL_RANK]
-    unknown_state_labels = [lbl for lbl in state_labels if lbl not in _LABEL_RANK]
+    known_state_labels = [lbl for lbl in state_labels if lbl in _ISSUE_PLAN_STATE_LABELS]
+    unknown_state_labels = [
+        lbl
+        for lbl in state_labels
+        if lbl not in _LABEL_RANK and lbl not in _ISSUE_PLAN_STATE_LABELS
+    ]
     with _UNKNOWN_LABEL_WARNING_LOCK:
         newly_seen = sorted(set(unknown_state_labels) - _WARNED_UNKNOWN_STATE_LABELS)
         _WARNED_UNKNOWN_STATE_LABELS.update(newly_seen)
@@ -308,7 +314,7 @@ def classify_issue(facts: IssueFacts) -> Classification:
         LOG.info("issue excluded: %s", reason)
         return None, reason
 
-    active_states = sorted(label for label in facts.labels if label in _LABEL_RANK)
+    active_states = sorted(label for label in facts.labels if label in _ISSUE_PLAN_STATE_LABELS)
     if len(active_states) > 1:
         reason = f"#{facts.number} has contradictory state labels: {active_states}"
         LOG.warning("issue excluded: %s", reason)
