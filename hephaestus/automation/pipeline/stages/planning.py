@@ -50,7 +50,6 @@ from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.requirements_recovery import (
-    OBSOLETE_REASON_MARKER,
     RecoveredRequirements,
     RecoveryDisposition,
     RecoveryReview,
@@ -60,7 +59,6 @@ from hephaestus.automation.requirements_recovery import (
     evidence_digest,
     has_contaminated_issue_body,
     is_semantic_disposition_candidate,
-    obsolete_reason_comment,
     parse_recovered_requirements,
     parse_recovery_review,
     recovered_requirements_json,
@@ -85,6 +83,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
     STATE_SKIP,
+    apply_plan_state,
     enter_planning_transition,
     is_exclusive_plan_state,
     is_plan_go,
@@ -210,7 +209,9 @@ def _refresh_requirements_recovery_context(
     ):
         raise RuntimeError("issue requirements snapshot is incomplete")
     contaminated = has_contaminated_issue_body(body)
-    required = contaminated or is_semantic_disposition_candidate(title, body)
+    semantic_candidate = is_semantic_disposition_candidate(title, body)
+    semantic_already_cleared = item.payload.get("requirements_semantic_clear_digest") == body_digest
+    required = contaminated or (semantic_candidate and not semantic_already_cleared)
     item.payload["issue_title"] = title
     item.payload["issue_body"] = body
     item.payload["issue_body_digest"] = body_digest
@@ -262,10 +263,14 @@ def _apply_recovery_state_label(
 ) -> bool:
     """Atomically write and confirm one recovery-owned issue state."""
     assert item.issue is not None  # noqa: S101 - caller validates this
+    if target == STATE_SKIP:
+        removals = [STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO]
+    else:
+        _add, removals = apply_plan_state(target)
     ctx.github.edit_labels(
         item.issue,
         add=[target, *extra],
-        remove=[label for label in ALL_STATE_LABELS if label != target],
+        remove=removals,
     )
     live_labels = _require_issue_labels_for_transition(item.issue, ctx)
     if target == STATE_SKIP:
@@ -315,17 +320,37 @@ def _apply_confirmed_semantic_skip(
         _finish_recovery(item)
         return StageOutcome(Disposition.SKIP, "skip: independently confirmed tracker")
     if proposal.disposition is RecoveryDisposition.OBSOLETE:
+        logger.info(
+            "planning:%d: independently confirmed obsolete issue; applying state:skip: %s",
+            item.issue,
+            review.reason,
+        )
         if not _apply_recovery_state_label(item, ctx, STATE_SKIP):
             return StageOutcome(Disposition.RETRY, "obsolete skip label was not confirmed")
-        ctx.github.upsert_issue_comment(
-            item.issue,
-            OBSOLETE_REASON_MARKER,
-            obsolete_reason_comment(review.reason),
-        )
         record_summary_action(item, "obsolete-skipped")
         _finish_recovery(item)
         return StageOutcome(Disposition.SKIP, "skip: independently confirmed obsolete")
     return None
+
+
+def _pending_force_after_semantic_clear(
+    item: WorkItem,
+    ctx: StageContext,
+    source_digest: object,
+) -> StageOutcome | None:
+    """Return through entry when a false semantic candidate preceded force."""
+    force_pending = bool(getattr(ctx.config, "force", False)) and not bool(
+        item.payload.get("forced_planning_epoch_started")
+    )
+    if not force_pending:
+        return None
+    if isinstance(source_digest, str):
+        item.payload["requirements_semantic_clear_digest"] = source_digest
+    item.state = "ENTER"
+    return StageOutcome(
+        Disposition.RETRY,
+        "semantic recovery cleared; forced planning remains pending",
+    )
 
 
 def _apply_confirmed_requirements(
@@ -337,7 +362,10 @@ def _apply_confirmed_requirements(
     assert item.issue is not None  # noqa: S101 - caller validates this
     contaminated = bool(item.payload.get("requirements_recovery_contaminated"))
     if not contaminated:
+        source_digest = item.payload.get("issue_body_digest")
         _finish_recovery(item)
+        if force_outcome := _pending_force_after_semantic_clear(item, ctx, source_digest):
+            return force_outcome
         labels = _require_issue_labels_for_transition(item.issue, ctx)
         if is_exclusive_plan_state(labels, STATE_PLAN_GO):
             return StageOutcome(Disposition.ADVANCE, "existing plan remains approved")
@@ -383,6 +411,12 @@ def _apply_confirmed_requirements(
             item,
             ctx,
             "issue body replacement is unconfirmed",
+        )
+    if replacement.dry_run:
+        _finish_recovery(item)
+        return StageOutcome(
+            Disposition.FINISH_PASS,
+            "dry-run: would replace recovered requirements and start fresh planning",
         )
     if not replacement.replaced and not replacement.dry_run:
         return StageOutcome(Disposition.RETRY, "issue body replacement was not proven")
@@ -571,7 +605,19 @@ def _write_planning_entry_labels(
     force_replan: bool = False,
 ) -> bool:
     """Durably establish the mutually-exclusive planning entry label."""
-    if force_replan:
+    expected_state = STATE_NEEDS_PLAN
+    if force_replan and is_replan_entry:
+        target, remove = apply_plan_state(STATE_PLAN_NO_GO)
+        add = [target]
+        expected_state = STATE_PLAN_NO_GO
+        logger.info(
+            "planning:%d: forced revision entry; add %s, remove %s",
+            issue_number,
+            add,
+            remove,
+        )
+        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+    elif force_replan:
         add, remove = enter_planning_transition()
         logger.info("planning:%d: forced entry swap; add %s, remove %s", issue_number, add, remove)
         ctx.github.edit_labels(issue_number, add=add, remove=remove)
@@ -592,7 +638,7 @@ def _write_planning_entry_labels(
         ctx.github.add_labels(issue_number, [STATE_NEEDS_PLAN])
     return is_exclusive_plan_state(
         _require_issue_labels_for_transition(issue_number, ctx),
-        STATE_NEEDS_PLAN,
+        expected_state,
     )
 
 
@@ -731,6 +777,9 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
 
     initial_plan_found = lookup.status is PlanDiscoveryStatus.FOUND
     plan_text = item.payload.get("plan_text")
+    awaiting_revision_candidate = bool(item.payload.get("requires_plan_revision")) and (
+        plan_text is None
+    )
     posted_plan = False
     if plan_text is not None:
         requires_revision = bool(item.payload.get("requires_plan_revision"))
@@ -761,7 +810,9 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
             f"plan discovery failed: {verified_lookup.error}",
         )
 
-    if verified_lookup.status is PlanDiscoveryStatus.FOUND:
+    if not awaiting_revision_candidate and (
+        posted_plan or verified_lookup.status is PlanDiscoveryStatus.FOUND
+    ):
         labels = _require_issue_labels_for_transition(item.issue, ctx)
         if STATE_PLAN_BLOCKED in labels:
             return StageOutcome(
@@ -915,12 +966,15 @@ class PlanningStage(Stage):
                 f"plan journal read failed: {exc}",
             )
         if force_replan:
-            # The journal remains durable history, but none of its current
-            # epoch may fast-forward or seed the forced planner invocation.
-            item.payload.pop("plan_text", None)
-            item.payload.pop("plan_revision", None)
-            item.payload.pop("issue_history", None)
-            is_replan_entry = bool(snapshot.current_plan)
+            if revision_already_published:
+                force_replan = False
+            else:
+                # The journal remains durable history, but none of its current
+                # epoch may fast-forward or seed the forced planner invocation.
+                item.payload.pop("plan_text", None)
+                item.payload.pop("plan_revision", None)
+                item.payload.pop("issue_history", None)
+                is_replan_entry = bool(snapshot.current_plan)
         if is_replan_entry:
             item.payload["requires_plan_revision"] = True
         if not _write_planning_entry_labels(
@@ -937,6 +991,7 @@ class PlanningStage(Stage):
             )
         if force_replan:
             item.payload["forced_planning_epoch_started"] = True
+            item.payload.pop("requirements_semantic_clear_digest", None)
 
         history = _planning_history(comments)
         if history and not force_replan:

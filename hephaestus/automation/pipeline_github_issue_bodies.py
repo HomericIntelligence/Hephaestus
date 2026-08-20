@@ -21,7 +21,12 @@ _PUBLICATION_REJECTION_MARKERS = (
 
 def _is_publication_rejection(error: BaseException) -> bool:
     """Return whether GitHub explicitly rejected the submitted body."""
-    detail = str(error).casefold()
+    details = [str(error)]
+    if isinstance(error, subprocess.CalledProcessError):
+        details.extend(
+            value for value in (error.stderr, error.stdout) if isinstance(value, str) and value
+        )
+    detail = "\n".join(details).casefold()
     return any(marker in detail for marker in _PUBLICATION_REJECTION_MARKERS)
 
 
@@ -34,7 +39,15 @@ class PipelineGitHubIssueBodies(_PipelineGitHubHost):
         expected_body_digest: str,
         new_body: str,
     ) -> IssueBodyReplacementResult:
-        """Replace an issue body after a fresh digest check and exact readback."""
+        """Replace an issue body after a best-effort digest check and exact readback.
+
+        GitHub's issue-edit API does not expose compare-and-swap semantics. A
+        human edit made after the fresh read and before the edit command can be
+        overwritten. The automation loop is expected to be the sole body
+        writer while recovery runs, and maintainers explicitly accept this
+        narrow race. Exact readback still prevents claiming success when a
+        later write wins. See ADR-0030.
+        """
         if issue_number <= 0:
             raise ValueError("issue_number must be positive")
         if not re.fullmatch(r"[0-9a-f]{64}", expected_body_digest):
@@ -59,6 +72,8 @@ class PipelineGitHubIssueBodies(_PipelineGitHubHost):
         if current_digest != expected_body_digest:
             return IssueBodyReplacementResult(conflict=True, body_digest=current_digest)
 
+        # Accepted race: GitHub cannot atomically bind the following write to
+        # the digest fetched above. Do not describe this as server-enforced CAS.
         try:
             with github_api._body_file(new_body) as path:
                 self._gh(["issue", "edit", str(issue_number), "--body-file", path])

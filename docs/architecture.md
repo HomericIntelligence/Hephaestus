@@ -805,7 +805,7 @@ stateDiagram-v2
     RecoverRequirements --> ReviewRecovery: typed proposal
     ReviewRecovery --> RecoverRequirements: NOGO; retry remains
     ReviewRecovery --> Failed: NOGO exhausted; state:plan-no-go retained
-    ReviewRecovery --> AwaitOperator: genuinely unavailable external evidence
+    ReviewRecovery --> Failed: unavailable evidence; state:plan-no-go retained
     ReviewRecovery --> Skipped: independently confirmed tracker or obsolete issue
     ReviewRecovery --> BuildContext: requirements GO; digest/readback confirmed
     Eligibility --> Skipped: state:skip or explicit tracker label
@@ -846,12 +846,13 @@ Architectural contract:
 - Requirements recovery is a planning substate, not a separate queue. The
   hidden provenance marker records the source-body, reconstructed-requirements,
   and evidence-binding SHA-256 digests. Replacement freshly compares the exact
-  body digest and confirms exact readback; concurrent edits are never
-  overwritten.
+  body digest and confirms exact readback. GitHub exposes no atomic issue-body
+  compare-and-swap, so maintainers accept the documented race where a human
+  edit between the read and write can be overwritten.
 - Tracker and obsolete dispositions require matching planner and independent
   reviewer decisions. Both apply `state:skip`; tracker confirmation also adds
-  `epic`, while obsolete confirmation upserts one canonical reason comment and
-  leaves the issue open.
+  `epic`; obsolete reasons remain label-plus-log facts under ADR-0022, and the
+  issue remains open.
 - Ordinary recovery-review or plan-review exhaustion leaves
   `state:plan-no-go`; `state:plan-blocked` remains exceptional rather than a
   third ordinary review outcome.

@@ -19,7 +19,6 @@ from hephaestus.prompts import PromptCatalog
 
 RECOVERY_PROVENANCE_VERSION: Final[int] = 1
 RECOVERY_PROVENANCE_PREFIX: Final[str] = "<!-- hephaestus-recovered-requirements:"
-OBSOLETE_REASON_MARKER: Final[str] = "<!-- hephaestus-obsolete-reason -->"
 
 _DIGEST_RE = r"[0-9a-f]{64}"
 _PROVENANCE_RE = re.compile(
@@ -290,12 +289,4 @@ def build_recovery_review_prompt(
         source_body_digest=source_body_digest,
         evidence_binding=evidence_binding,
         proposal_block=fenced.fence("RECOVERY_PROPOSAL", proposal_json),
-    )
-
-
-def obsolete_reason_comment(reason: str) -> str:
-    """Render the canonical explanation for an independently confirmed obsolete issue."""
-    return (
-        f"{OBSOLETE_REASON_MARKER}\n"
-        f"**Automation classified this issue as obsolete.**\n\n{reason.strip()}"
     )

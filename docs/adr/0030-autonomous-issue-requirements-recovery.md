@@ -30,12 +30,16 @@ both decisions before automation applies `state:skip`.
 
 A recovered requirements body carries a hidden versioned provenance marker
 containing SHA-256 digests of its source, evidence binding, and reconstructed
-requirements. Publication uses optimistic concurrency: the GitHub adapter
-freshly reads the body, compares the expected digest, writes only on an exact
-match, and confirms exact readback. A conflict retries from fresh evidence;
-automation never blind-overwrites a concurrent edit. Successful publication
-starts a fresh plan and plan-review epoch rather than reusing old comments or
-sessions.
+requirements. Publication uses best-effort optimistic concurrency: the GitHub
+adapter freshly reads the body, compares the expected digest, writes only on
+an exact match, and confirms exact readback. GitHub's issue-edit API has no
+server-enforced compare-and-swap operation, so a human edit in the narrow
+interval between the fresh read and write can be overwritten. Maintainers
+explicitly accept this race because automation is expected to be the sole
+issue-body writer during a recovery run. Conflicts visible before the write
+retry from fresh evidence, and exact readback prevents false success claims
+when a later write wins. Successful publication starts a fresh plan and
+plan-review epoch rather than reusing old comments or sessions.
 
 An open pull request is not proof of a valid plan. Issues without an exclusive
 `state:plan-go` state enter planning even when a PR already exists. `--force`
@@ -59,9 +63,9 @@ introduced.
   admission and does not need an independently schedulable lifecycle.
 - Trust a single reconstruction model. Rejected because destructive body and
   skip mutations need an independent semantic check.
-- Use `updatedAt` or an unconditional issue edit as the concurrency guard.
-  Rejected because only comparison against the exact fetched body prevents a
-  lost update.
+- Require atomic issue-body compare-and-swap. Rejected because GitHub does not
+  expose that primitive for issue edits; the documented read/write race is an
+  accepted operational risk.
 - Introduce a third ordinary plan state such as `plan-blocked`. Rejected;
   ordinary review remains the binary GO/NOGO contract.
 
@@ -72,4 +76,5 @@ replacement is attributable and replay-safe. Planning may spend two additional
 read-only agent calls when recovery or semantic disposition review is needed.
 Open-PR issues can return to planning, so implementations that predate an
 approved plan may be redone. Operators receive bounded summary counters for
-recovery and skip actions rather than repeated warning noise.
+recovery and skip actions rather than repeated warning noise. Obsolete reasons
+remain label-plus-log facts under ADR-0022; recovery adds no third issue comment.

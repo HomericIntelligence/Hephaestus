@@ -217,7 +217,7 @@ class StageGitHub(Protocol):
         expected_body_digest: str,
         new_body: str,
     ) -> IssueBodyReplacementResult:
-        """Replace an issue body only when a fresh digest still matches."""
+        """Best-effort replace after a fresh digest match; see ADR-0030's accepted race."""
         ...
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:

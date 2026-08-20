@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from threading import Event
 from unittest.mock import patch
 
 import pytest
@@ -35,7 +36,7 @@ UPSTREAM_METADATA = RepositoryMetadata(
 def _clear_owner_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(OWNER_ENV_VAR, raising=False)
     monkeypatch.delenv(LEGACY_OWNER_ENV_VAR, raising=False)
-    monkeypatch.setattr(mnemosyne_repo, "_legacy_owner_warning_emitted", False)
+    monkeypatch.setattr(mnemosyne_repo, "_legacy_owner_warning_emitted", Event())
 
 
 def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:

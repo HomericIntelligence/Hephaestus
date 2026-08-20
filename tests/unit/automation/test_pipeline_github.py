@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -2822,6 +2823,28 @@ class TestIssueBodyReplacement:
             "_gh",
             MagicMock(side_effect=RuntimeError("HTTP 422: body is too long")),
         )
+
+        result = adapter.replace_issue_body_if_unchanged(7, old_digest, "new")
+
+        assert result.rejected is True
+        assert result.retryable is False
+
+    def test_called_process_validation_stderr_is_classified_as_rejection(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter.repo = "repo"
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        monkeypatch.setattr(
+            adapter,
+            "gh_issue_json",
+            lambda _issue: {"number": 7, "body": "old", "bodyDigest": old_digest},
+        )
+        rejection = subprocess.CalledProcessError(
+            1,
+            ["gh", "issue", "edit", "7"],
+            stderr="HTTP 422: body is too long",
+        )
+        monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=rejection))
 
         result = adapter.replace_issue_body_if_unchanged(7, old_digest, "new")
 
