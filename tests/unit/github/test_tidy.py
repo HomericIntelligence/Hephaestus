@@ -20,25 +20,55 @@ from hephaestus.github.tidy import (
 
 tidy_module = importlib.import_module("hephaestus.github.tidy")
 
-WORKTREE_PORCELAIN = """\
-worktree /repo
-HEAD abcdef
-branch refs/heads/main
+WORKTREE_PORCELAIN = "\0".join(
+    (
+        "worktree /repo",
+        "HEAD abcdef",
+        "branch refs/heads/main",
+        "",
+        "worktree /repo/.worktrees/123-finished",
+        "HEAD 123456",
+        "branch refs/heads/123-finished",
+        "",
+        "worktree /repo/.worktrees/topic",
+        "HEAD 789abc",
+        "branch refs/heads/topic",
+        "",
+        "worktree /repo/.worktrees/detached",
+        "HEAD deadbeef",
+        "detached",
+        "",
+        "bare",
+        "",
+    )
+)
 
-worktree /repo/.worktrees/123-finished
-HEAD 123456
-branch refs/heads/123-finished
+SPACED_WORKTREE_PORCELAIN = "\0".join(
+    (
+        "worktree /repo",
+        "HEAD abcdef",
+        "branch refs/heads/main",
+        "",
+        "worktree /repo/.worktrees/123 finished",
+        "HEAD 123456",
+        "branch refs/heads/123-finished",
+        "",
+    )
+)
 
-worktree /repo/.worktrees/topic
-HEAD 789abc
-branch refs/heads/topic
-
-worktree /repo/.worktrees/detached
-HEAD deadbeef
-detached
-
-bare
-"""
+LOCKED_SPACED_WORKTREE_PORCELAIN = "\0".join(
+    (
+        "worktree /repo",
+        "HEAD abcdef",
+        "branch refs/heads/main",
+        "",
+        "worktree /repo/.worktrees/123 finished",
+        "HEAD 123456",
+        "branch refs/heads/123-finished",
+        "locked",
+        "",
+    )
+)
 
 
 def test_tidy_swarm_model_matches_canonical_sonnet() -> None:
@@ -190,6 +220,34 @@ def test_parse_worktree_porcelain_skips_main_and_detached_worktrees() -> None:
     ]
 
 
+def test_parse_worktree_porcelain_skips_primary_from_linked_worktree() -> None:
+    """The primary worktree is never a cleanup candidate from a linked worktree."""
+    assert tidy_module._parse_worktree_porcelain(
+        WORKTREE_PORCELAIN,
+        Path("/repo/.worktrees/topic"),
+    ) == [(Path("/repo/.worktrees/123-finished"), "123-finished")]
+
+
+def test_worktree_porcelain_requests_nul_terminated_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worktree discovery requests Git's delimiter-safe porcelain format."""
+    result = subprocess.CompletedProcess([], 0, stdout="inventory", stderr="")
+    run_git = MagicMock(return_value=result)
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+
+    assert tidy_module._worktree_porcelain() == "inventory"
+    run_git.assert_called_once_with(["worktree", "list", "--porcelain", "-z"])
+
+
+def test_parse_worktree_porcelain_preserves_space_in_path() -> None:
+    """A worktree path containing spaces remains paired with its branch."""
+    assert tidy_module._parse_worktree_porcelain(
+        SPACED_WORKTREE_PORCELAIN,
+        Path("/repo"),
+    ) == [(Path("/repo/.worktrees/123 finished"), "123-finished")]
+
+
 def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -209,6 +267,55 @@ def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
     assert hasattr(tidy_module, "_cleanup_stale_worktrees")
     assert tidy_module._cleanup_stale_worktrees(tmp_path, "main", dry_run=True) == 0
     assert "Would remove stale worktree" in caplog.text
+    remove.assert_not_called()
+
+
+def test_cleanup_stale_worktree_with_space_path(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Dry-run evaluates and reports the complete space-containing path."""
+    spaced_path = Path("/repo/.worktrees/123 finished")
+    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: SPACED_WORKTREE_PORCELAIN,
+    )
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    is_dirty = MagicMock(return_value=False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", is_dirty)
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=True) == 0
+    is_dirty.assert_called_once_with(spaced_path)
+    assert str(spaced_path) in caplog.text
+    assert "123-finished" in caplog.text
+    remove.assert_not_called()
+
+
+def test_cleanup_skips_locked_worktree_with_space_path(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A locked spaced-path worktree is skipped without removal."""
+    spaced_path = Path("/repo/.worktrees/123 finished")
+    caplog.set_level("INFO", logger="hephaestus.github.tidy")
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: LOCKED_SPACED_WORKTREE_PORCELAIN,
+    )
+    monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda issue: issue == 123)
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", lambda branch, trunk: False)
+    monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda path: False)
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=False) == 0
+    assert f"Skipping locked worktree {spaced_path}" in caplog.text
     remove.assert_not_called()
 
 
