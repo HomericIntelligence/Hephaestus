@@ -308,6 +308,7 @@ def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
     """Return complete exact-head Check Runs evidence, rejecting partial results."""
     endpoint = f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page={_CHECK_RUNS_PAGE_SIZE}"
     checks: list[Any] = []
+    check_run_ids: set[int] | None = None
     expected_count: int | None = None
     page = 1
 
@@ -322,9 +323,32 @@ def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
         total_count, page_checks = parsed_page
         if expected_count is None:
             expected_count = total_count
+            # A multi-page read cannot trust its aggregate count alone: a
+            # replayed page can replace a failing run while preserving it.
+            # GitHub's Check Run IDs are stable positive integers, so require
+            # them as a complete, unique traversal proof whenever another
+            # page is needed.
+            if expected_count > len(page_checks):
+                check_run_ids = set()
         elif total_count != expected_count:
             logger.error("Inconsistent check-run count for head %s; refusing merge", head_sha)
             return None
+
+        if check_run_ids is not None:
+            for check in page_checks:
+                check_run_id = check.get("id") if isinstance(check, dict) else None
+                if (
+                    not isinstance(check_run_id, int)
+                    or isinstance(check_run_id, bool)
+                    or check_run_id <= 0
+                    or check_run_id in check_run_ids
+                ):
+                    logger.error(
+                        "Invalid or duplicate check-run ID for head %s; refusing merge",
+                        head_sha,
+                    )
+                    return None
+                check_run_ids.add(check_run_id)
 
         checks.extend(page_checks)
         if len(checks) > expected_count or (not page_checks and len(checks) < expected_count):

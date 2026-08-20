@@ -513,7 +513,12 @@ class TestMain:
         """A non-successful run beyond GitHub's first page blocks a merge."""
         calls: list[list[str]] = []
         first_page = [
-            {"name": f"success-{index}", "status": "completed", "conclusion": "success"}
+            {
+                "id": index + 1,
+                "name": f"success-{index}",
+                "status": "completed",
+                "conclusion": "success",
+            }
             for index in range(100)
         ]
 
@@ -553,13 +558,83 @@ class TestMain:
     def test_incomplete_check_run_total_count_blocks_merge(self, monkeypatch) -> None:
         """A truncated page sequence cannot authorize a merge."""
         first_page = [
-            {"name": f"success-{index}", "status": "completed", "conclusion": "success"}
+            {
+                "id": index + 1,
+                "name": f"success-{index}",
+                "status": "completed",
+                "conclusion": "success",
+            }
             for index in range(100)
         ]
         responses = iter(
             [
                 _gh_result({"total_count": 101, "check_runs": first_page}),
                 _gh_result({"total_count": 101, "check_runs": []}),
+            ]
+        )
+        monkeypatch.setattr(pr_merge_module, "gh_call", lambda _args: next(responses))
+
+        assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
+
+    def test_duplicate_check_run_id_across_pages_blocks_merge(self, monkeypatch) -> None:
+        """A replayed page cannot hide an omitted failing exact-head check."""
+        first_page = [
+            {
+                "id": index + 1,
+                "name": f"success-{index}",
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index in range(100)
+        ]
+        responses = iter(
+            [
+                _gh_result({"total_count": 101, "check_runs": first_page}),
+                _gh_result(
+                    {
+                        "total_count": 101,
+                        "check_runs": [
+                            {
+                                "id": 1,
+                                "name": "replayed-success",
+                                "status": "completed",
+                                "conclusion": "success",
+                            }
+                        ],
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(pr_merge_module, "gh_call", lambda _args: next(responses))
+
+        assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
+
+    def test_missing_check_run_id_on_later_page_blocks_merge(self, monkeypatch) -> None:
+        """A count-complete page sequence still needs stable Check Run identities."""
+        first_page = [
+            {
+                "id": index + 1,
+                "name": f"success-{index}",
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index in range(100)
+        ]
+        responses = iter(
+            [
+                _gh_result({"total_count": 101, "check_runs": first_page}),
+                _gh_result(
+                    {
+                        "total_count": 101,
+                        "check_runs": [
+                            {
+                                "name": "unidentified-success",
+                                "status": "completed",
+                                "conclusion": "success",
+                            }
+                        ],
+                    }
+                ),
             ]
         )
         monkeypatch.setattr(pr_merge_module, "gh_call", lambda _args: next(responses))
