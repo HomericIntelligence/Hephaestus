@@ -36,13 +36,22 @@ actor and submit the exact marked approval for that head:
 
 ```bash
 gh pr view <N> --json state,headRefOid,baseRefName,autoMergeRequest
-gh pr review <N> \
-  --approve \
-  --body '<!-- hephaestus-merge-authorization:v1 -->'
+H1="$(gh pr view <N> --json headRefOid --jq '.headRefOid')"
+REPOSITORY="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+APPROVAL="$(gh api --method POST "repos/${REPOSITORY}/pulls/<N>/reviews" \
+  -f event=APPROVE \
+  -f body='<!-- hephaestus-merge-authorization:v1 -->' \
+  -f commit_id="$H1")"
+test "$(jq --raw-output '.commit_id' <<<"$APPROVAL")" = "$H1"
 uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1
 ```
 
-For every marked approval, merge wait independently reads GitHub's native
+`H1` is the immutable head captured before the review is created. The REST
+request explicitly binds the native approval to that SHA, and the command
+fails unless the returned review record reports the same `commit_id`. Do not
+read a later `H2` and substitute it into this flow: a concurrent push makes
+the just-created approval stale rather than transferable. For every marked
+approval, merge wait independently reads GitHub's native
 `GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}` record and
 requires its `commit_id` to equal the reviewed head (and to agree with the
 review snapshot). A review cannot be transferred across a pushed head.
