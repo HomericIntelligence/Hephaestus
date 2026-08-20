@@ -40,6 +40,9 @@ epoch rather than reusing old comments or sessions. Independently confirmed
 obsolete issues likewise upsert exactly one actor-owned explanation before
 receiving `state:skip`.
 
+ADR-0031 defines how these recovery roles coexist with the canonical plan and
+review roles, including their ownership and compaction rules.
+
 An open pull request is not proof of a valid plan. Issues without an exclusive
 `state:plan-go` state enter planning even when a PR already exists. `--force`
 propagates into the stage configuration and explicitly starts a fresh planning

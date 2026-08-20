@@ -1,6 +1,6 @@
 # ADR-0022: Canonical two-comment issue timeline
 
-- Status: Accepted
+- Status: Superseded by [ADR-0031](0031-bounded-recovery-artifact-roles.md)
 - Date: 2026-08-08
 - Tracks: #2719
 
@@ -43,3 +43,7 @@ rounds. Detailed implementation evidence lives in commits and PR-native review
 threads. Public comment history is no longer the crash-recovery mechanism;
 canonical pointer readback and bounded fingerprints provide restart safety.
 Legacy history remains readable until the compaction migration has converged.
+
+This decision predated autonomous requirements recovery. ADR-0031 preserves
+the two ordinary planning roles while defining the bounded recovery roles that
+must coexist with them.

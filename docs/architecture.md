@@ -774,7 +774,8 @@ Planning first establishes that the issue body contains requirements rather
 than a copied canonical plan, review, or history artifact. Exact derived
 markers at the start of the body trigger an evidence-bound reconstruction by
 the planner model and an independent reviewer-model decision. A successful
-digest-guarded replacement immediately begins a fresh plan/review epoch.
+recovery writes an actor-owned provenance comment and immediately begins a
+fresh plan/review epoch; it never replaces the issue body.
 Planning then produces one canonical implementation plan from the issue,
 latest canonical plan, and latest canonical review. Superseded revisions are
 replaced, not appended. Bounded hidden fingerprints preserve oscillation
@@ -789,7 +790,8 @@ flowchart LR
     Issue["Issue text"] --> RecoveryGate
     RecoveryGate -->|"canonical derived marker"| Recover["Requirements reconstruction"]
     Recover --> IndependentReview["Independent recovery review"]
-    IndependentReview -->|"GO + digest match"| Issue
+    IndependentReview -->|"GO + provenance upsert"| Provenance["Recovered requirements comment"]
+    Provenance --> Context
     RecoveryGate -->|"requirements"| Context
     History["Current rejected plan/review"] --> Context
     Context --> Planner --> Canonical["Canonical plan comment"]
@@ -845,14 +847,16 @@ Architectural contract:
   rejected before publication.
 - Requirements recovery is a planning substate, not a separate queue. The
   hidden provenance marker records the source-body, reconstructed-requirements,
-  and evidence-binding SHA-256 digests. Replacement freshly compares the exact
-  body digest and confirms exact readback. GitHub exposes no atomic issue-body
-  compare-and-swap, so maintainers accept the documented race where a human
-  edit between the read and write can be overwritten.
+  and evidence-binding SHA-256 digests in one actor-owned comment. Publication
+  is read back by the role upsert; restart accepts it only when GitHub proves
+  its ownership and its source digest matches the current issue body. GitHub
+  exposes no atomic issue-body compare-and-swap, so automation never replaces
+  the body and cannot overwrite a concurrent human edit.
 - Tracker and obsolete dispositions require matching planner and independent
   reviewer decisions. Both apply `state:skip`; tracker confirmation also adds
-  `epic`; obsolete reasons remain label-plus-log facts under ADR-0022, and the
-  issue remains open.
+  `epic`. An obsolete outcome retains exactly one actor-owned explanation
+  comment beside the label; it is audit context only, and labels remain the
+  restart-routing authority. The issue remains open.
 - Ordinary recovery-review or plan-review exhaustion leaves
   `state:plan-no-go`; `state:plan-blocked` remains exceptional rather than a
   third ordinary review outcome.
@@ -1886,6 +1890,7 @@ Exit-code priority is:
  short-circuit through earlier stages when it carries a later-stage
  label. Never equality.
 - **Head-bound** — an artifact or check whose correctness depends on
+- **Head-bound** — an artifact or check whose correctness depends on
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
@@ -1893,7 +1898,7 @@ Exit-code priority is:
   `commit.oid` matches that SHA, then compares the complete proof set with the
   confirmed-unarmed live PR and issues a normal SHA-conditional merge rather
   than arming or polling auto-merge.
-- **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New skip reasons are recorded in run logs.
+- **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).
