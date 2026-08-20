@@ -43,6 +43,7 @@ def restore_terminal() -> None:
         with contextlib.suppress(Exception):
             print(_TERMINAL_TIMEOUT_WARNING, file=sys.stderr)
     except Exception:
+        # Cleanup must not mask the caller's failure or process exit.
         pass
     # Best effort — never raise during cleanup
 
