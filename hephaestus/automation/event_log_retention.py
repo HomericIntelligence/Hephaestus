@@ -18,6 +18,8 @@ from pathlib import Path
 
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
+__all__ = ["LockUnavailableError", "event_log_lifecycle", "file_lock"]
+
 LOG = logging.getLogger(__name__)
 
 DEFAULT_EVENT_LOG_RETENTION_DAYS = 30
@@ -110,11 +112,7 @@ def _age_candidates(
     """Return inactive logs older than ``cutoff`` in oldest-first order."""
     if cutoff is None:
         return []
-    return [
-        log
-        for log in logs
-        if log.timestamp < cutoff and log.path.name != current_name
-    ]
+    return [log for log in logs if log.timestamp < cutoff and log.path.name != current_name]
 
 
 def _count_candidates(
@@ -128,9 +126,7 @@ def _count_candidates(
     return [
         log
         for log in logs
-        if log.path not in removed
-        and log.path not in attempted
-        and log.path.name != current_name
+        if log.path not in removed and log.path not in attempted and log.path.name != current_name
     ]
 
 
@@ -157,9 +153,7 @@ def _cleanup_event_logs(
             removed: set[Path] = set()
             attempted: set[Path] = set()
 
-            cutoff = (
-                now - timedelta(days=retention_days) if retention_days > 0 else None
-            )
+            cutoff = now - timedelta(days=retention_days) if retention_days > 0 else None
             for log in _age_candidates(logs, cutoff, current_name):
                 attempted.add(log.path)
                 if _remove_event_log(log, dry_run=dry_run):
@@ -203,9 +197,7 @@ def event_log_lifecycle(
 
     active_lock = ExitStack()
     try:
-        active_lock.enter_context(
-            file_lock(path, blocking=False, require_exclusive=True)
-        )
+        active_lock.enter_context(file_lock(path, blocking=False, require_exclusive=True))
     except (LockUnavailableError, OSError, RuntimeError) as exc:
         LOG.warning("pipeline event-log cleanup skipped: %s", exc)
         yield

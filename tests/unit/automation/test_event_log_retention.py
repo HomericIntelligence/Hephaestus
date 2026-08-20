@@ -214,10 +214,10 @@ def test_unlink_failure_is_logged_and_lifecycle_continues(
     current = _event_log(tmp_path, now, 103)
     original_unlink = Path.unlink
 
-    def unlink(path: Path, *args: object, **kwargs: object) -> None:
+    def unlink(path: Path, *, missing_ok: bool = False) -> None:
         if path == first:
             raise OSError("simulated unlink failure")
-        original_unlink(path, *args, **kwargs)
+        original_unlink(path, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", unlink)
     with caplog.at_level("WARNING", logger=event_log_retention.LOG.name):
@@ -242,7 +242,8 @@ def test_current_lock_failure_is_nonfatal(
 ) -> None:
     """Failure to acquire the current lock only warns and yields."""
 
-    def unavailable(*args: object, **kwargs: object) -> None:
+    def unavailable(path: Path, *, blocking: bool = True, require_exclusive: bool = False) -> None:
+        del path, blocking, require_exclusive
         raise LockUnavailableError("simulated lock failure")
 
     monkeypatch.setattr(event_log_retention, "file_lock", unavailable)
@@ -268,10 +269,12 @@ def test_cleanup_lock_failure_is_nonfatal(
     real_file_lock = event_log_retention.file_lock
 
     @contextmanager
-    def fail_cleanup_lock(path: Path, **kwargs: object) -> Iterator[None]:
+    def fail_cleanup_lock(
+        path: Path, *, blocking: bool = True, require_exclusive: bool = False
+    ) -> Iterator[None]:
         if path.name == event_log_retention._RETENTION_LOCK_NAME:
             raise LockUnavailableError("simulated cleanup lock failure")
-        with real_file_lock(path, **kwargs):
+        with real_file_lock(path, blocking=blocking, require_exclusive=require_exclusive):
             yield
 
     monkeypatch.setattr(event_log_retention, "file_lock", fail_cleanup_lock)
