@@ -2,13 +2,12 @@ import sys
 from typing import Any, cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
-from hephaestus.diagnostics import bounded_git_diagnostic
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
-from .diagnostics import redact_bounded_diagnostic_tails
+from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 
 # ruff: noqa: F403, F405
 
@@ -795,9 +794,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 "failure_kind": value["failure_kind"],
                 "phase": value["phase"],
                 "returncode": value.get("returncode"),
-                "receipt_error": bounded_git_diagnostic(value.get("receipt_error"), limit=500),
-                "stdout_tail": bounded_git_diagnostic(result.stdout_tail, limit=4000),
-                "stderr_tail": bounded_git_diagnostic(result.stderr_tail, limit=4000),
+                "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[
+                    -500:
+                ],
+                "stdout_tail": diagnostics.get("stdout_tail", ""),
+                "stderr_tail": diagnostics.get("stderr_tail", ""),
             }
         return fields
 
