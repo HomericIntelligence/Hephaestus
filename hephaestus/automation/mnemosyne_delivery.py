@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
@@ -114,13 +115,22 @@ def _validate_delivery_text(text: str, field: str) -> None:
 
 
 def _origin_matches_repository(origin: str, repository: str) -> bool:
-    """Return whether a Git remote URL identifies an expected repository slug."""
-    normalized = origin.strip().removesuffix(".git")
-    return (
-        normalized == repository
-        or normalized.endswith(f"/{repository}")
-        or normalized.endswith(f":{repository}")
-    )
+    """Return whether ``origin`` is the exact repository on GitHub's endpoint."""
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        return False
+    value = origin.strip()
+    scp_style = re.fullmatch(r"(?:[^@:/]+@)?github\.com:([^/]+)/([^/]+?)(?:\.git)?/?", value)
+    if scp_style is not None:
+        return scp_style.group(1) == owner and scp_style.group(2) == name
+    parsed = urlparse(value)
+    if parsed.scheme not in {"https", "ssh"} or parsed.hostname != "github.com":
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 2:
+        return False
+    remote_owner, remote_name = parts
+    return remote_owner == owner and remote_name.removesuffix(".git") == name
 
 
 class LearnDeliveryService:

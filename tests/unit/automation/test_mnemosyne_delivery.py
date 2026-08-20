@@ -152,6 +152,32 @@ def test_delivery_rejects_wrong_origin_before_staging(tmp_path: Path) -> None:
     assert not any(call[0] in {"add", "commit", "push"} for call in git.calls)
 
 
+def test_delivery_rejects_same_suffix_non_github_origin_before_staging(tmp_path: Path) -> None:
+    """An attacker-controlled host cannot satisfy a repository suffix check."""
+
+    class SameSuffixOriginGit(FakeGit):
+        def __call__(
+            self,
+            cwd: Path,
+            argv: tuple[str, ...],
+            timeout_s: int,
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(cwd, argv, timeout_s)
+            if argv == ("remote", "get-url", "origin"):
+                return _completed(
+                    stdout="ssh://git@github.example/HomericIntelligence/Mnemosyne.git\n"
+                )
+            return result
+
+    git = SameSuffixOriginGit()
+    service = LearnDeliveryService(git=git, github=FakeGitHub())
+
+    with pytest.raises(LearnDeliveryError, match="repository does not match worktree origin"):
+        service.deliver(_request(tmp_path, repository="HomericIntelligence/Mnemosyne"))
+
+    assert not any(call[0] in {"add", "commit", "push"} for call in git.calls)
+
+
 def test_delivery_rejects_paths_outside_allowlist(tmp_path: Path) -> None:
     service = LearnDeliveryService(
         git=FakeGit(diff="skills/example.md\ndocs/extra.md\n"), github=FakeGitHub()

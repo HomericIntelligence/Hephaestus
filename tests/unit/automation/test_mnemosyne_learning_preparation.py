@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,11 @@ from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError
 from hephaestus.automation.mnemosyne_learning_preparation import (
     ApprovedPlanLearningSource,
+    BoundLearningWorkspace,
     GitHubLearningSourceReader,
     MnemosyneLearningBuilder,
     MnemosyneLearningPreparationService,
+    MnemosynePluginValidator,
     PostMergeLearningSource,
     PreparedLearningWorkspace,
 )
@@ -142,6 +145,76 @@ def test_preparation_rejects_oversized_generated_artifact(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="65536"):
         service.prepare(_intent().to_payload(), _binding(tmp_path))
+
+
+def test_workspace_rejects_symlinked_ancestor_before_creating_directories(tmp_path: Path) -> None:
+    """The bound checkout's build ancestors cannot redirect a worktree outside it."""
+    root = tmp_path / "mnemosyne"
+    root.mkdir()
+    escaped = tmp_path / "escaped"
+    escaped.mkdir()
+    (root / "build").symlink_to(escaped, target_is_directory=True)
+
+    workspace = BoundLearningWorkspace()
+
+    with pytest.raises(LearnDeliveryError, match="symlinked workspace ancestor"):
+        workspace.prepare(_binding(tmp_path), "learn/" + "a" * 16)
+
+    assert not (escaped / "mnemosyne-learning").exists()
+
+
+def test_workspace_preserves_existing_path_when_remote_branch_makes_outcome_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """A deterministic worktree is never force-removed before publish recovery is known."""
+    root = tmp_path / "mnemosyne"
+    root.mkdir()
+    branch = "learn/" + "a" * 16
+    digest = "3af83e7e7e9b9d3c"
+    # The product derives this exact value from the branch; keep the fixture coupled to it.
+    from hashlib import sha256
+
+    digest = sha256(branch.encode("utf-8")).hexdigest()[:16]
+    stale = root / "build" / "mnemosyne-learning" / digest
+    stale.mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+
+    def git(_cwd: Path, argv: tuple[str, ...], _timeout_s: int) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv == ("ls-remote", "--exit-code", "origin", f"refs/heads/{branch}"):
+            return subprocess.CompletedProcess(["git"], 0, stdout="a" * 40 + "\trefs/heads/x\n")
+        return subprocess.CompletedProcess(["git"], 0, stdout="")
+
+    def gh(_argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["gh"], 0, stdout="[]")
+
+    with pytest.raises(LearnDeliveryError, match="publication outcome is ambiguous"):
+        BoundLearningWorkspace(git=git, gh=gh).prepare(_binding(tmp_path), branch)
+
+    assert stale.is_dir()
+    assert not any(call[:2] == ("worktree", "remove") for call in calls)
+
+
+def test_validator_redacts_and_bounds_secret_diagnostics(tmp_path: Path) -> None:
+    """Validator output cannot persist credentials through host result errors."""
+    secret = "ghp_" + "a" * 30
+    api_key = "sk-" + "a" * 26
+
+    def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["uv"],
+            1,
+            stderr=(f"token={secret}\nAuthorization: Bearer {api_key}\n" + "x" * 2000),
+        )
+
+    with pytest.raises(LearnDeliveryError) as raised:
+        MnemosynePluginValidator(runner=runner).validate(tmp_path)
+
+    diagnostic = str(raised.value)
+    assert secret not in diagnostic
+    assert api_key not in diagnostic
+    assert "<redacted>" in diagnostic
+    assert len(diagnostic) <= 1100
 
 
 def test_approved_plan_source_requires_exact_actor_owned_live_plan() -> None:
