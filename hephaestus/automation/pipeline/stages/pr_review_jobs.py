@@ -596,7 +596,7 @@ class PrReviewJobs(_PrReviewHost):
                     verification,
                     str(receipt.get("error") or "host_verification_receipt_invalid"),
                 )
-            if receipt["ok"] or receipt.get("bypassed") is True:
+            if receipt["ok"] or receipt.get("status") == "skipped":
                 continue
             return self._handle_host_verification_failure(
                 item,
@@ -1006,6 +1006,10 @@ class PrReviewJobs(_PrReviewHost):
             item.payload.pop("host_verification_receipts", None)
             return
         spec = specs[len(receipts)]
+        result_value = result.value if isinstance(result.value, dict) else {}
+        status, platform = _host_verification_result_status(
+            result.value, result.ok, result.error, reviewed_head
+        )
         receipts.append(
             {
                 "argv": list(spec.argv),
@@ -1015,15 +1019,11 @@ class PrReviewJobs(_PrReviewHost):
                     and result.value.get("head_sha") == reviewed_head
                     and result.value.get("immutable_source") is True
                 ),
-                "failure_kind": (
-                    result.value.get("failure_kind", "runner")
-                    if isinstance(result.value, dict)
-                    and result.value.get("failure_kind") in {"none", "runner", "test", "validation"}
-                    else "runner"
-                ),
+                "failure_kind": _host_verification_failure_kind(result_value),
                 "ok": result.ok,
-                "bypassed": result.error == TEMPORARY_HOST_VERIFICATION_BYPASS_ERROR,
                 "error": result.error or "",
+                "platform": platform,
+                "status": status,
                 "stdout_tail": result.stdout_tail,
                 "stderr_tail": result.stderr_tail,
             }

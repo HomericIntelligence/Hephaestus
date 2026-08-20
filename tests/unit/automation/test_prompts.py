@@ -409,3 +409,21 @@ def test_address_prompt_round_trips_curly_braced_thread_data() -> None:
     )
 
     assert json.dumps([{"thread_id": "T1", "path": "a.py", "line": 1, "body": body}]) in rendered
+
+
+def test_pr_review_prompts_classify_platform_skips_as_not_applicable() -> None:
+    """Unsupported-platform skips are neither passes nor failed receipts."""
+    rendered = (
+        prompts.get_pr_review_analysis_prompt(pr_number=1, issue_number=1),
+        prompts.get_review_validation_prompt(
+            pr_number=1,
+            issue_number=1,
+            prior_comments_json="[]",
+        ),
+    )
+
+    for prompt in rendered:
+        normalized = " ".join(prompt.split())
+        assert "`status: skipped`" in normalized
+        assert "not local execution evidence" in normalized
+        assert "do not report it as a failed or missing receipt" in normalized

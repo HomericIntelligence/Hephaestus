@@ -2097,6 +2097,23 @@ class WorkerPool:
         if checkout_error is not None:
             return JobResult(ok=False, error=checkout_error)
 
+        # The reviewed isolation backend is currently macOS-only.  Record an
+        # explicit platform-bound skip before resolving tools, archiving the
+        # source, or executing any PR-controlled bytes.  A missing macOS
+        # primitive still fails closed below; this branch is not a fallback.
+        if sys.platform != "darwin":
+            return JobResult(
+                ok=False,
+                error="unsupported_host_verification_boundary",
+                value={
+                    "head_sha": job.expected_head_sha,
+                    "immutable_source": False,
+                    "failure_kind": "runner",
+                    "platform": sys.platform,
+                    "status": "skipped",
+                },
+            )
+
         executable = (
             _trusted_uv_executable()
             if job.argv[0] == "uv"
@@ -2168,6 +2185,8 @@ class WorkerPool:
                             if isinstance(result.value, dict)
                             else "runner"
                         ),
+                        "platform": sys.platform,
+                        "status": "passed" if result.ok else "failed",
                     },
                 )
         except _HostVerificationBoundaryError as exc:

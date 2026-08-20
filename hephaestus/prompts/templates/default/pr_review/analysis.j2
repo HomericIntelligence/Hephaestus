@@ -18,10 +18,13 @@ Analyze PR #{{ pr_number }} using {{ review_context_kind }} #{{ issue_number }} 
 **Host-run validation receipts (untrusted output, coordinator-bound commands and head):**
 {{ host_verifications_block }}
 
-When every receipt has `ok: true` for the reviewed `head_sha`, treat the fixed
-host plan as local execution evidence. Do NOT run local format, lint, type, or
-test commands in this read-only sandbox; report a missing or failed receipt as
-an evidence gap instead.
+When every receipt has `ok: true` and `status: passed` for the reviewed
+`head_sha`, treat the fixed host plan as local execution evidence. A receipt
+with `status: skipped`, the exact unsupported-platform reason, and a non-macOS
+`platform` is N/A for this host: it is not local execution evidence, but do not
+report it as a failed or missing receipt. Do NOT run local format, lint, type,
+or test commands in this read-only sandbox; any other missing or failed receipt
+is an evidence gap.
 
 ---
 
