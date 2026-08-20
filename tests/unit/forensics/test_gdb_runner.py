@@ -367,6 +367,26 @@ class TestBoundedProcess:
         process.kill.assert_called_once()
         assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
 
+    def test_second_reap_timeout_attempts_nonblocking_final_reap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stalled reap is retried once without extending timeout cleanup."""
+        process = MagicMock(pid=4242)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["tool"], 7),
+            subprocess.TimeoutExpired(["tool"], 5),
+            subprocess.TimeoutExpired(["tool"], 0),
+        ]
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
+        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_bounded(["tool"], 7)
+
+        assert process.kill.call_count == 2
+        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5), call(timeout=0)]
+
     @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_timeout_kills_real_descendant(self, tmp_path: Path) -> None:
         """A timed-out parent does not leave its process-group descendant alive."""
