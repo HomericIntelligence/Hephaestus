@@ -142,7 +142,7 @@ class TestGdbCmdPrefixParsing:
             captured.append(list(argv))
             return process
 
-        monkeypatch.setattr("hephaestus.forensics.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.Popen", fake_popen)
         return captured
 
     def test_prefix_none_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
@@ -375,7 +375,9 @@ class TestBoundedProcess:
         parent_code = (
             "import subprocess, sys, time\n"
             "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n"
-            "open(sys.argv[1], 'w').write(str(child.pid))\n"
+            "with open(sys.argv[1], 'w') as pid_file:\n"
+            "    pid_file.write(str(child.pid))\n"
+            "    pid_file.flush()\n"
             "time.sleep(60)\n"
         )
 
@@ -403,6 +405,16 @@ class TestBoundedProcess:
             try:
                 os.kill(child_pid, 0)
             except ProcessLookupError:
+                break
+            # A killed descendant may remain briefly as a zombie until its
+            # reaper collects it; that is terminated, not a live leak.
+            try:
+                state = (
+                    Path(f"/proc/{child_pid}/stat").read_text().split(") ", 1)[1].split(" ", 1)[0]
+                )
+            except (FileNotFoundError, IndexError, OSError):
+                break
+            if state == "Z":
                 break
             time.sleep(0.01)
         else:
