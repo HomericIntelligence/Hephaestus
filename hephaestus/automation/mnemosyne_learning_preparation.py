@@ -24,6 +24,7 @@ from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDe
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
 from hephaestus.automation.review_journal import (
     IssueComment,
+    comment_revision,
     is_plan_comment,
     journal_snapshot,
     plan_fingerprint,
@@ -319,16 +320,22 @@ class GitHubLearningSourceReader:
             raise LearnDeliveryError("approved plan no longer has exclusive state:plan-go")
         comments = self._adapter.comments(intent.repo, intent.issue)
         snapshot = journal_snapshot(comments)
-        owned_plans = [
+        current_owned_plans = [
             comment
             for comment in comments
-            if comment.viewer_did_author and is_plan_comment(comment.body)
+            if (
+                comment.viewer_did_author
+                and is_plan_comment(comment.body)
+                and comment_revision(comment.body) == snapshot.revision
+            )
         ]
         if (
-            len(owned_plans) != 1
-            or owned_plans[0].database_id is None
-            or owned_plans[0].database_id <= 0
+            len(current_owned_plans) != 1
+            or current_owned_plans[0].database_id is None
+            or current_owned_plans[0].database_id <= 0
             or not snapshot.current_plan
+            or plan_fingerprint(current_owned_plans[0].body)
+            != plan_fingerprint(snapshot.current_plan)
         ):
             raise LearnDeliveryError("approved plan canonical comment is absent or ambiguous")
         if (
@@ -342,8 +349,8 @@ class GitHubLearningSourceReader:
             issue=intent.issue,
             revision=snapshot.revision,
             fingerprint=plan_fingerprint(snapshot.current_plan),
-            comment_database_id=owned_plans[0].database_id,
-            source_date=_source_date(owned_plans[0].created_at),
+            comment_database_id=current_owned_plans[0].database_id,
+            source_date=_source_date(current_owned_plans[0].created_at),
             objective=_normalized_text(sections["Objective"], field="Objective"),
             approach=_normalized_text(sections["Approach"], field="Approach"),
             implementation_order=_normalized_text(
