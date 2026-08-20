@@ -53,6 +53,7 @@ from hephaestus.automation.review_journal import (
     current_revision_context,
     is_pending_review,
     journal_snapshot,
+    parse_plan_review_state,
     render_current_plan,
     render_current_review,
 )
@@ -230,6 +231,24 @@ def _plan_is_ready_for_verify(
     if is_replan_entry:
         return False
     return bool(snapshot.current_plan)
+
+
+def _has_open_pr_planning_authority(labels: Sequence[str], snapshot: JournalSnapshot) -> bool:
+    """Return whether an open PR may bypass planning without a new plan.
+
+    An exclusive ``state:plan-go`` is the ordinary durable authority.  During
+    a crash between a finalized canonical review and its label write, the
+    matching canonical plan/review pair is a self-verifying recovery artifact
+    for this *planning-bypass* decision only; it does not authorize
+    implementation or change the label-state authority elsewhere.
+    """
+    if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+        return True
+    return bool(
+        snapshot.current_plan
+        and snapshot.current_review_revision == snapshot.revision
+        and parse_plan_review_state(snapshot.current_review) == STATE_PLAN_GO
+    )
 
 
 def _write_planning_entry_labels(
@@ -562,13 +581,37 @@ class PlanningStage(Stage):
             logger.info("planning:%d: already plan-go; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "plan already approved")
 
-        # An open PR already in flight makes planning redundant. A historic
+        # An open PR already in flight makes planning redundant only after
+        # durable authority confirms the PR has a finalized plan. A historic
         # merged PR is deliberately not a completion shortcut: only GitHub's
         # current closed issue state may terminalize work at seeding.
         open_pr = ctx.github.find_pr_for_issue(item.issue)
+        planning_journal: tuple[list[IssueComment], JournalSnapshot, bool, bool, bool] | None = None
         if open_pr and not force_replan:
-            logger.info("planning:%d: open PR #%d exists; skipping", item.issue, open_pr)
-            return StageOutcome(Disposition.SKIP, f"open PR #{open_pr} exists")
+            try:
+                planning_journal = _load_planning_journal(
+                    item,
+                    ctx,
+                    labels,
+                    force_replan=False,
+                )
+            except CommentJournalReadError as exc:
+                logger.warning(
+                    "planning:%d: plan journal reconciliation read failed: %s",
+                    item.issue,
+                    exc,
+                )
+                return StageOutcome(
+                    Disposition.RETRY,
+                    f"plan journal read failed: {exc}",
+                )
+            if _has_open_pr_planning_authority(labels, planning_journal[1]):
+                logger.info(
+                    "planning:%d: open PR #%d has planning authority; skipping",
+                    item.issue,
+                    open_pr,
+                )
+                return StageOutcome(Disposition.SKIP, f"open PR #{open_pr} has plan authority")
 
         # Entry label normalization. On the plan_review "nogo" fail-back the
         # issue carries state:plan-no-go and NEITHER sibling (apply_plan_verdict
@@ -579,13 +622,7 @@ class PlanningStage(Stage):
         # (#1857). Swap atomically: add needs-plan, remove both siblings, in
         # ONE gh issue edit. Restores state:plan-no-go ──re-plan──▶ needs-plan.
         try:
-            (
-                comments,
-                snapshot,
-                is_replan_entry,
-                revision_already_published,
-                forced_initial_plan,
-            ) = _load_planning_journal(
+            planning_journal = planning_journal or _load_planning_journal(
                 item,
                 ctx,
                 labels,
@@ -601,6 +638,13 @@ class PlanningStage(Stage):
                 Disposition.RETRY,
                 f"plan journal read failed: {exc}",
             )
+        (
+            comments,
+            snapshot,
+            is_replan_entry,
+            revision_already_published,
+            forced_initial_plan,
+        ) = planning_journal
         if not _write_planning_entry_labels(
             item.issue,
             ctx,

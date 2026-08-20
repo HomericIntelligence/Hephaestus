@@ -182,12 +182,32 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert github.mutation_log == []
 
-    def test_open_pr_skips(self, make_ctx: Any, make_work_item: Any) -> None:
-        """An open PR for the issue skips planning with zero writes (gate B)."""
+    def test_open_pr_without_plan_authority_enters_planning(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An open PR cannot bypass planning without durable plan authority (#2659)."""
         stage = PlanningStage()
         github = FakeStageGitHub(open_pr=456)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=4)
+
+        outcome = stage.on_enter(item, ctx)
+
+        assert outcome is None
+        assert github.mutation_log == [("gh_issue_add_labels", (4, (STATE_NEEDS_PLAN,)))]
+
+    def test_open_pr_with_finalized_canonical_plan_skips(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A matching canonical plan and final GO review make an open PR redundant."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(open_pr=456)
+        github.comments[5] = [
+            render_current_plan("Plan v1", revision=1),
+            render_current_review("Approved.\n\nstate:plan-go", revision=1),
+        ]
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=5)
 
         outcome = stage.on_enter(item, ctx)
 
