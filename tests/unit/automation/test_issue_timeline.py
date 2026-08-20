@@ -128,3 +128,44 @@ def test_compaction_retains_history_without_a_canonical_pointer() -> None:
     assert result.plan_body is None
     assert result.review_body is None
     assert result.delete_comment_ids == ()
+
+
+def test_compaction_retains_plan_archive_until_its_exact_successor_is_canonical() -> None:
+    """A rev-1 pointer cannot replace recovery data for its missing rev-2 successor."""
+    comments = [
+        _comment(1, render_current_plan("Plan v1", revision=1)),
+        _comment(2, render_current_review("Review v1", revision=1)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == ()
+
+
+def test_compaction_retains_review_archive_until_verified_revision_successor_exists() -> None:
+    """A stale review pointer cannot replace its archive after a plan recovery crash."""
+    comments = [
+        _comment(1, render_current_plan("Plan v2", revision=2)),
+        _comment(2, render_current_review("Review v1", revision=1)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(4, archive_review_body(1, "Review v1")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == (3,)
+
+
+def test_compaction_deletes_verified_plan_and_review_history_together() -> None:
+    """Both archives compact only after the matching successor pair is durable."""
+    comments = [
+        _comment(1, render_current_plan("Plan v2", revision=2)),
+        _comment(2, render_current_review("Review v2", revision=2)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(4, archive_review_body(1, "Review v1")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == (3, 4)

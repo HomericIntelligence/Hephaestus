@@ -17,6 +17,7 @@ from hephaestus.automation.review_journal import (
     current_plan_context,
     current_revision_context,
     discover_plan_from_comments,
+    is_journal_comment,
     journal_snapshot,
     normalize_issue_comments,
     render_current_plan,
@@ -110,6 +111,19 @@ def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
     assert snapshot.current_plan == ""
     assert snapshot.current_review == ""
     assert snapshot.history == ()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f" {render_current_plan('spoofed')}",
+        f"\n{render_current_review('spoofed', revision=1)}",
+        f"\t{archive_plan_body(1, 'old', 'new')}",
+    ],
+)
+def test_journal_comment_requires_marker_at_first_raw_byte(body: str) -> None:
+    """Whitespace-prefixed protocol text is not removable journal state."""
+    assert is_journal_comment(body) is False
 
 
 def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:

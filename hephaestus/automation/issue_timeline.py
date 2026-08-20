@@ -14,6 +14,8 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     archived_new_plan,
     archived_old_plan,
+    comment_revision,
+    extract_current_plan,
     has_exact_leading_marker,
     is_plan_comment,
     is_plan_review_comment,
@@ -115,16 +117,48 @@ def _has_exact_leading_marker(body: str, marker: str) -> bool:
 def _history_has_canonical_pointer(
     comment: IssueComment,
     *,
+    owned: Sequence[IssueComment],
     target_plan: IssueComment | None,
     target_review: IssueComment | None,
 ) -> bool:
-    """Return whether a legacy artifact can be replaced by its canonical pointer."""
+    """Return whether a legacy artifact has an exactly reconstructed successor.
+
+    Legacy archives are recovery evidence, not merely redundant copies of an
+    arbitrary current pointer.  A plan archive can disappear only after the
+    canonical plan at the archive's immediate successor revision contains the
+    archived recovery payload.  A review archive needs that same verified plan
+    successor and its own immediate canonical review successor.
+    """
     history_match = HISTORY_RE.match(comment.body)
     if history_match is None:
         return True
+    revision = int(history_match.group("revision"))
+    successor_revision = revision + 1
+    plan_is_exact_successor = bool(
+        target_plan is not None
+        and comment_revision(target_plan.body) == successor_revision
+        and extract_current_plan(target_plan.body) == archived_new_plan(comment.body)
+    )
     if history_match.group("kind") == "plan":
-        return target_plan is not None
-    return target_review is not None
+        return plan_is_exact_successor
+
+    # A review archive does not carry a future review payload.  It therefore
+    # needs a same-revision plan archive whose recovery payload reconstructs
+    # the canonical plan, plus the canonical review for that exact successor.
+    matching_plan_archive = any(
+        (match := HISTORY_RE.match(candidate.body)) is not None
+        and match.group("kind") == "plan"
+        and int(match.group("revision")) == revision
+        and target_plan is not None
+        and comment_revision(target_plan.body) == successor_revision
+        and extract_current_plan(target_plan.body) == archived_new_plan(candidate.body)
+        for candidate in owned
+    )
+    return bool(
+        matching_plan_archive
+        and target_review is not None
+        and comment_revision(target_review.body) == successor_revision
+    )
 
 
 def _obsolete_comment_ids(
@@ -141,6 +175,7 @@ def _obsolete_comment_ids(
             continue
         if not _history_has_canonical_pointer(
             comment,
+            owned=owned,
             target_plan=target_plan,
             target_review=target_review,
         ):

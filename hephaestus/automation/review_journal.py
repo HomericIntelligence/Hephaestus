@@ -245,11 +245,10 @@ def discover_plan_from_comments(
 
 def is_journal_comment(body: str) -> bool:
     """Return whether the body is an automation-owned plan journal artifact."""
-    stripped = body.lstrip()
     return (
-        is_plan_comment(stripped)
-        or is_plan_review_comment(stripped)
-        or stripped.startswith(HISTORY_MARKER_PREFIX)
+        is_plan_comment(body)
+        or is_plan_review_comment(body)
+        or body.startswith(HISTORY_MARKER_PREFIX)
     )
 
 
