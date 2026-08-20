@@ -32,6 +32,7 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.requirements_recovery import (
+    ATHENA_FINALIZED_PLAN_PREFIX,
     RECOVERY_PROVENANCE_PREFIX,
     RecoveredRequirements,
     RecoveryDisposition,
@@ -66,6 +67,17 @@ def _fence_present(prompt: str, label: str) -> bool:
         re.search(rf"BEGIN_[0-9A-F]+_{label}\b", prompt)
         and re.search(rf"END_[0-9A-F]+_{label}\b", prompt)
     )
+
+
+def _finalized_body() -> str:
+    """Return a self-verifying finalized planning body fixture."""
+    placeholder = (
+        "## Why\n\nUse the reviewed implementation plan.\n\n"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P={'b' * 64} "
+        f"V={'c' * 64} F=<F> -->"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    return placeholder.replace("F=<F>", f"F={digest}")
 
 
 class TestBuildPlanPrompt:
@@ -142,6 +154,47 @@ class TestPlanningStageEnter:
         assert item.payload["requirements_recovery_required"] is True
         assert item.payload["requirements_recovery_contaminated"] is True
         assert github.mutation_log == []
+
+    def test_verified_finalized_plan_bypasses_force_and_normalizes_plan_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A sealed Athena planning epoch is already reviewed planning authority."""
+        body = _finalized_body()
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO], issue_body=body)
+        item = make_work_item(issue=102)
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=github, config=SimpleNamespace(force=True)),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.ADVANCE
+        assert github.labels[102] == {STATE_PLAN_GO}
+        assert (
+            item.payload["athena_finalized_plan_digest"]
+            == hashlib.sha256(
+                body.replace(
+                    f"F={item.payload['athena_finalized_plan_digest']}",
+                    "F=<F>",
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        assert github.mutation_log == [
+            (
+                "edit_labels",
+                (
+                    102,
+                    (STATE_PLAN_GO,),
+                    (
+                        STATE_PLAN_NO_GO,
+                        STATE_NEEDS_PLAN,
+                        STATE_IMPLEMENTATION_NO_GO,
+                        STATE_IMPLEMENTATION_GO,
+                    ),
+                ),
+            )
+        ]
 
     def test_skip_label_skips(self, make_ctx: Any, make_work_item: Any) -> None:
         """state:skip routes the item away without any writes."""
@@ -956,6 +1009,50 @@ class TestPlanningStageStep:
         assert result.disposition == expected_disposition
         assert github.mutation_log == []
 
+    @pytest.mark.parametrize("terminal", ["skip", "closed"])
+    def test_recovery_label_readback_rejects_terminal_race(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        terminal: str,
+    ) -> None:
+        """A terminal state appearing during a label write cannot confirm success."""
+
+        class TerminalDuringEditGitHub(FakeStageGitHub):
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                super().edit_labels(issue_number, add=add, remove=remove)
+                if terminal == "skip":
+                    self._issue_labels(issue_number).add(STATE_SKIP)
+                else:
+                    self._issue_state = "CLOSED"
+
+        github = TerminalDuringEditGitHub(labels=[STATE_NEEDS_PLAN], merged_pr=90)
+        item = make_work_item(issue=76, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS, "", "Weak.", "Evidence"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.NOGO, RecoveryDisposition.REQUIREMENTS, "Insufficient."
+                ),
+            }
+        )
+
+        result = PlanningStage().step(
+            item,
+            make_ctx(github=github, budget_fn=lambda _name: 1),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+
     def test_obsolete_skip_records_reason_in_one_actor_owned_comment(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1324,6 +1421,60 @@ class TestPlanningStageStep:
         assert provenance.successor_revision == 1
         assert provenance.successor_plan_digest == plan_fingerprint("Recovered successor plan")
 
+    @pytest.mark.parametrize(
+        ("labels", "review", "expected_state"),
+        [
+            (
+                [STATE_NEEDS_PLAN],
+                "Review pending for implementation plan revision 3.",
+                "VERIFY",
+            ),
+            ([STATE_PLAN_NO_GO], "Add tests.\n\nstate:plan-no-go", "ENTER"),
+        ],
+    )
+    def test_forced_recovery_restart_reuses_both_epoch_markers(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        labels: list[str],
+        review: str,
+        expected_state: str,
+    ) -> None:
+        """Force and recovery provenance jointly resume one durable epoch."""
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        source_digest = github_api_mod.issue_body_digest(source)
+        github = FakeStageGitHub(labels=labels, issue_body=source, has_plan=True)
+        github.comments[75] = [
+            render_current_plan(
+                "Forced recovered plan",
+                revision=3,
+                forced_planning_epoch=True,
+                recovery_source_digest=source_digest,
+            ),
+            render_current_review(review, revision=3),
+            render_recovered_requirements(
+                source,
+                "Recovered requirements",
+                "d" * 64,
+                source_digest=source_digest,
+            ),
+        ]
+        item = make_work_item(issue=75, state="ENTER")
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=github, config=SimpleNamespace(force=True)),
+        )
+
+        assert outcome is None
+        assert item.state == expected_state
+        assert item.payload["plan_text"] == "Forced recovered plan"
+        assert item.payload["forced_planning_epoch_started"] is True
+        assert github.mutation_log == []
+        if labels == [STATE_PLAN_NO_GO]:
+            assert item.payload["requires_plan_revision"] is True
+            assert "Add tests." in item.payload["issue_history"]
+
     def test_recovery_with_force_starts_durable_forced_epoch(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1682,6 +1833,41 @@ class TestPlanningStageStep:
         assert second.disposition == Disposition.FINISH_FAIL
         assert item.attempts["plan"] == 2
         assert github.labels[12] == {STATE_PLAN_NO_GO}
+
+    @pytest.mark.parametrize(
+        ("github", "expected_disposition"),
+        [
+            (
+                FakeStageGitHub(labels=[STATE_SKIP], plan_read_error="unavailable"),
+                Disposition.SKIP,
+            ),
+            (
+                FakeStageGitHub(
+                    issue_state="CLOSED",
+                    merged_pr=91,
+                    plan_read_error="unavailable",
+                ),
+                Disposition.FINISH_PASS,
+            ),
+        ],
+    )
+    def test_verify_retry_honors_terminal_live_issue_state(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        github: FakeStageGitHub,
+        expected_disposition: Disposition,
+    ) -> None:
+        """VERIFY read failures do not mutate a skipped or closed issue."""
+        item = make_work_item(issue=77, state="VERIFY")
+        item.payload["plan_text"] = "Candidate"
+
+        result = PlanningStage().step(item, make_ctx(github=github))
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == expected_disposition
+        assert item.attempts.get("plan", 0) == 0
+        assert github.mutation_log == []
 
     def test_verify_publication_journal_error_is_bounded_to_plan_no_go(
         self, make_ctx: Any, make_work_item: Any

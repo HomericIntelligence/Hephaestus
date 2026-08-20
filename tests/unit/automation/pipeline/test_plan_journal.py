@@ -122,6 +122,30 @@ def test_recovery_publication_persists_source_epoch() -> None:
     assert snapshot.recovery_source_digest == source_digest
 
 
+def test_recovery_epoch_can_republish_identical_plan_text() -> None:
+    """New recovery provenance is progress even when the plan prose is unchanged."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+    github.comments[12] = [
+        render_current_plan("Same valid plan", revision=1),
+        render_current_review("Old source.\n\nstate:plan-no-go", revision=1),
+    ]
+    source_digest = "b" * 64
+
+    publication = publish_plan_revision(
+        12,
+        "Same valid plan",
+        github,
+        require_change=True,
+        recovery_source_digest=source_digest,
+    )
+
+    snapshot = journal_snapshot(github.issue_comments(12))
+    assert publication.changed is True
+    assert publication.revision == 2
+    assert snapshot.current_plan == "Same valid plan"
+    assert snapshot.recovery_source_digest == source_digest
+
+
 def test_failed_canonical_plan_write_preserves_the_previous_revision_for_retry() -> None:
     """A failed first write loses no public artifact and a clean retry can publish."""
     github = _CrashOnceJournalGitHub("canonical_plan")

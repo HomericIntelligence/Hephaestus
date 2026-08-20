@@ -196,6 +196,9 @@ def publish_plan_revision(
     candidate_plan = normalized_plan(candidate)
     candidate_fingerprint = plan_fingerprint(candidate)
     current_fingerprint = plan_fingerprint(snapshot.current_plan)
+    recovery_epoch_changed = bool(
+        recovery_source_digest and recovery_source_digest != snapshot.recovery_source_digest
+    )
 
     if contains_raw_patch(candidate):
         return PlanPublication(
@@ -221,7 +224,11 @@ def publish_plan_revision(
             ),
         )
 
-    if snapshot.current_plan and candidate_fingerprint == current_fingerprint:
+    if (
+        snapshot.current_plan
+        and candidate_fingerprint == current_fingerprint
+        and not recovery_epoch_changed
+    ):
         if not require_change:
             return PlanPublication(
                 revision=snapshot.revision,
@@ -240,7 +247,7 @@ def publish_plan_revision(
             ),
         )
 
-    if candidate_fingerprint in known_plan_fingerprints(comments):
+    if candidate_fingerprint in known_plan_fingerprints(comments) and not recovery_epoch_changed:
         return PlanPublication(
             revision=snapshot.revision,
             plan=snapshot.current_plan,

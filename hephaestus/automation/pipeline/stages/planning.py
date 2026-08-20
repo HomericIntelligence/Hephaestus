@@ -68,6 +68,7 @@ from hephaestus.automation.requirements_recovery import (
     recovered_requirements_json,
     render_obsolete_explanation,
     render_recovered_requirements,
+    verified_finalized_plan,
 )
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
@@ -226,27 +227,43 @@ def _refresh_requirements_recovery_context(
     ):
         raise RuntimeError("issue requirements snapshot is incomplete")
     contaminated = has_contaminated_issue_body(body)
-    recovered = next(
-        (
-            restored
-            for comment in reversed(ctx.github.issue_comments(item.issue))
-            if comment.viewer_did_author
-            and (restored := recovered_requirements_for_source(comment.body, body_digest))
-            is not None
-        ),
-        None,
+    finalized = verified_finalized_plan(body)
+    recovered = (
+        next(
+            (
+                restored
+                for comment in reversed(ctx.github.issue_comments(item.issue))
+                if comment.viewer_did_author
+                and (restored := recovered_requirements_for_source(comment.body, body_digest))
+                is not None
+            ),
+            None,
+        )
+        if finalized is None
+        else None
     )
     item.payload["issue_source_body"] = body
-    if recovered is not None:
+    if finalized is not None:
+        item.payload["issue_body"] = body
+        item.payload["athena_finalized_plan_digest"] = finalized.final_body_digest
+        item.payload.pop("requirements_recovered_comment", None)
+        item.payload.pop("requirements_recovery_source_digest", None)
+        item.payload.pop("requires_plan_revision", None)
+        contaminated = False
+    elif recovered is not None:
+        item.payload.pop("athena_finalized_plan_digest", None)
         item.payload["issue_body"] = recovered
         item.payload["requirements_recovered_comment"] = True
         item.payload["requirements_recovery_source_digest"] = body_digest
         item.payload["requires_plan_revision"] = True
         contaminated = False
     else:
+        item.payload.pop("athena_finalized_plan_digest", None)
         item.payload.pop("requirements_recovered_comment", None)
         item.payload.pop("requirements_recovery_source_digest", None)
-    semantic_candidate = recovered is None and is_semantic_disposition_candidate(title, body)
+    semantic_candidate = (
+        finalized is None and recovered is None and is_semantic_disposition_candidate(title, body)
+    )
     semantic_already_cleared = item.payload.get("requirements_semantic_clear_digest") == body_digest
     required = contaminated or (semantic_candidate and not semantic_already_cleared)
     item.payload["issue_title"] = title
@@ -275,7 +292,12 @@ def _retry_incomplete_requirements_snapshot(
 ) -> StageOutcome:
     """Bound incomplete entry reads and fail closed with plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
-    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    live = ctx.github.gh_issue_json(item.issue)
+    if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+        return issue_outcome
+    live_labels = _issue_snapshot_labels(live)
+    if is_skipped(live_labels):
+        return StageOutcome(Disposition.SKIP, "state:skip")
     if STATE_PLAN_BLOCKED in live_labels:
         return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     attempt = item.attempts.get("plan", 0) + 1
@@ -359,7 +381,13 @@ def _apply_recovery_state_label(
         add=[target, *extra],
         remove=removals,
     )
-    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    live_labels = _open_issue_labels_for_transition(
+        item.issue,
+        ctx,
+        allow_skip=target == STATE_SKIP,
+    )
+    if live_labels is None:
+        return False
     if target == STATE_SKIP:
         return (
             STATE_SKIP in live_labels
@@ -378,7 +406,12 @@ def _retry_requirements_recovery(
 ) -> StageOutcome:
     """Retry a correctable recovery once, then preserve plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
-    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    live = ctx.github.gh_issue_json(item.issue)
+    if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+        return issue_outcome
+    live_labels = _issue_snapshot_labels(live)
+    if is_skipped(live_labels):
+        return StageOutcome(Disposition.SKIP, "state:skip")
     if STATE_PLAN_BLOCKED in live_labels:
         return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     attempt = item.attempts.get("plan", 0) + 1
@@ -795,9 +828,8 @@ def _write_planning_entry_labels(
         # has actually been published. This removes the crash window where a
         # needs-plan label plus stale rejected plan could be mistaken for a
         # fresh initial planning entry.
-        return is_exclusive_plan_state(
-            _require_issue_labels_for_transition(issue_number, ctx), STATE_PLAN_NO_GO
-        )
+        live_labels = _open_issue_labels_for_transition(issue_number, ctx)
+        return live_labels is not None and is_exclusive_plan_state(live_labels, STATE_PLAN_NO_GO)
     elif STATE_NEEDS_PLAN not in labels or set(labels).intersection(
         ALL_IMPLEMENTATION_STATE_LABELS
     ):
@@ -811,10 +843,8 @@ def _write_planning_entry_labels(
         ctx.github.edit_labels(issue_number, add=add, remove=remove)
     if ctx.dry_run:
         return True
-    return is_exclusive_plan_state(
-        _require_issue_labels_for_transition(issue_number, ctx),
-        expected_state,
-    )
+    live_labels = _open_issue_labels_for_transition(issue_number, ctx)
+    return live_labels is not None and is_exclusive_plan_state(live_labels, expected_state)
 
 
 def _issue_snapshot_labels(data: object) -> list[str]:
@@ -833,6 +863,25 @@ def _require_issue_labels_for_transition(issue_number: int, ctx: StageContext) -
     return _issue_snapshot_labels(ctx.github.gh_issue_json(issue_number))
 
 
+def _open_issue_labels_for_transition(
+    issue_number: int,
+    ctx: StageContext,
+    *,
+    allow_skip: bool = False,
+) -> list[str] | None:
+    """Return labels only while a transition readback remains non-terminal."""
+    snapshot = ctx.github.gh_issue_json(issue_number)
+    if not isinstance(snapshot, dict) or snapshot.get("number") != issue_number:
+        return None
+    state = snapshot.get("state")
+    if not isinstance(state, str) or state.upper() != "OPEN":
+        return None
+    labels = _issue_snapshot_labels(snapshot)
+    if not allow_skip and is_skipped(labels):
+        return None
+    return labels
+
+
 def _mark_published_plan_pending_review(
     issue_number: int,
     ctx: StageContext,
@@ -843,10 +892,8 @@ def _mark_published_plan_pending_review(
     if was_revision:
         add, remove = enter_planning_transition()
         ctx.github.edit_labels(issue_number, add=add, remove=remove)
-    return is_exclusive_plan_state(
-        _require_issue_labels_for_transition(issue_number, ctx),
-        STATE_NEEDS_PLAN,
-    )
+    live_labels = _open_issue_labels_for_transition(issue_number, ctx)
+    return live_labels is not None and is_exclusive_plan_state(live_labels, STATE_NEEDS_PLAN)
 
 
 def _publish_plan_blocked(
@@ -862,10 +909,8 @@ def _publish_plan_blocked(
         add=[STATE_PLAN_BLOCKED],
         remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
     )
-    confirmed = is_exclusive_plan_state(
-        _require_issue_labels_for_transition(issue_number, ctx),
-        STATE_PLAN_BLOCKED,
-    )
+    live_labels = _open_issue_labels_for_transition(issue_number, ctx)
+    confirmed = live_labels is not None and is_exclusive_plan_state(live_labels, STATE_PLAN_BLOCKED)
     if not confirmed:
         return False
     ctx.github.upsert_issue_comment(
@@ -907,7 +952,12 @@ def _publish_candidate_plan(
 ) -> StageOutcome | None:
     """Publish one plan transaction and confirm its pending-review label state."""
     assert item.issue is not None  # noqa: S101 - caller validates the issue
-    live_labels = _require_issue_labels_for_transition(item.issue, ctx)
+    live = ctx.github.gh_issue_json(item.issue)
+    if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+        return issue_outcome
+    live_labels = _issue_snapshot_labels(live)
+    if is_skipped(live_labels):
+        return StageOutcome(Disposition.SKIP, "state:skip")
     if STATE_PLAN_BLOCKED in live_labels:
         return StageOutcome(
             Disposition.BLOCKED,
@@ -1012,7 +1062,12 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     if not awaiting_revision_candidate and (
         posted_plan or verified_lookup.status is PlanDiscoveryStatus.FOUND
     ):
-        labels = _require_issue_labels_for_transition(item.issue, ctx)
+        live = ctx.github.gh_issue_json(item.issue)
+        if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+            return issue_outcome
+        labels = _issue_snapshot_labels(live)
+        if is_skipped(labels):
+            return StageOutcome(Disposition.SKIP, "state:skip")
         if STATE_PLAN_BLOCKED in labels:
             return StageOutcome(
                 Disposition.BLOCKED,
@@ -1138,6 +1193,23 @@ class PlanningStage(Stage):
         if recovery_required:
             logger.info("planning:%d: requirements recovery required", item.issue)
             return None
+
+        # Athena finalization seals one exact GO-reviewed planning epoch into
+        # the issue body. Its self-verifying F digest is durable planning
+        # authority even after the intermediate plan/review comments are
+        # deleted, and --force must not reopen that completed epoch. Normalize
+        # the loop-owned label so downstream restart routing remains ordinary.
+        if item.payload.get("athena_finalized_plan_digest"):
+            if not is_exclusive_plan_state(labels, STATE_PLAN_GO) and not (
+                ctx.dry_run or _apply_recovery_state_label(item, ctx, STATE_PLAN_GO)
+            ):
+                return StageOutcome(
+                    Disposition.RETRY,
+                    "finalized plan-go label was not confirmed",
+                )
+            record_summary_action(item, "finalized-plan-reused")
+            logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
+            return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")
 
         # Fast-forward only from the sole confirmed plan state. A stale sibling
         # makes the label set contradictory and must never authorize work.

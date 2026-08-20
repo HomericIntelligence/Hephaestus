@@ -35,6 +35,13 @@ epoch metadata. This binds restart routing without folding recovered
 requirements into the plan: a matching plan is post-recovery work, while a
 missing or mismatched marker identifies a stale pre-recovery plan.
 
+A self-verifying Athena finalized-plan marker lives in the issue body rather
+than occupying a comment role. It seals the completed plan/review epoch after
+Athena may delete those intermediate comments. The body marker therefore
+suppresses recovery only while its exact `F` binding verifies; it does not
+increase the bounded comment-role count, and any later body drift starts a new
+recovery/planning epoch.
+
 An obsolete explanation is permitted only after matching planner and reviewer
 GO dispositions and accompanies `state:skip`. It is an audit explanation, not
 routing authority: restart reads labels and independently re-evaluates any

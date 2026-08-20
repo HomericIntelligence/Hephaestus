@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 
 import pytest
 
@@ -13,6 +14,7 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.requirements_recovery import (
+    ATHENA_FINALIZED_PLAN_PREFIX,
     RecoveryDisposition,
     RecoveryVerdict,
     build_recovery_prompt,
@@ -24,8 +26,20 @@ from hephaestus.automation.requirements_recovery import (
     parse_recovery_provenance,
     parse_recovery_review,
     render_recovered_requirements,
+    verified_finalized_plan,
 )
 from hephaestus.automation.review_journal import HISTORY_MARKER
+
+
+def _finalized_body(content: str = "## Why\n\nPreserve the approved behavior.") -> str:
+    """Return a body carrying a correctly self-bound Athena final marker."""
+    placeholder = (
+        f"{content}\n\n{ATHENA_FINALIZED_PLAN_PREFIX}"
+        f"R={'a' * 64} P=plan-comment:{'b' * 64} "
+        f"V=review-comment:{'c' * 64} F=<F> -->"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    return placeholder.replace("F=<F>", f"F={digest}")
 
 
 @pytest.mark.parametrize(
@@ -51,6 +65,56 @@ def test_exact_leading_automation_marker_requires_recovery(first_line: str) -> N
     ],
 )
 def test_noncanonical_or_nonleading_markers_are_not_contamination(body: str) -> None:
+    assert has_contaminated_issue_body(body) is False
+
+
+def test_verified_athena_finalized_body_is_not_recovered_as_generated_requirements() -> None:
+    body = _finalized_body()
+
+    identity = verified_finalized_plan(body)
+
+    assert identity is not None
+    assert identity.requirements_identity == "a" * 64
+    assert identity.plan_identity == f"plan-comment:{'b' * 64}"
+    assert identity.review_identity == f"review-comment:{'c' * 64}"
+    assert (
+        identity.final_body_digest
+        == hashlib.sha256(
+            body.replace(f"F={identity.final_body_digest}", "F=<F>").encode("utf-8")
+        ).hexdigest()
+    )
+    assert has_contaminated_issue_body(body) is False
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda body: body + "\nLater material edit.",
+        lambda body: body.replace("R=" + "a" * 64, "R=malformed identity"),
+        lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=<P>"),
+        lambda body: body + "\n" + body.splitlines()[-1],
+        lambda body: body.replace("F=", "F=0", 1),
+    ],
+)
+def test_invalid_or_drifted_athena_finalization_requires_recovery(
+    mutate: Callable[[str], str],
+) -> None:
+    body = mutate(_finalized_body())
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Document <!-- athena:finalize-plan R=... P=... V=... F=... --> in the guide.",
+        "```text\n<!-- athena:finalize-plan R=x P=y V=z F=0 -->\n```",
+    ],
+)
+def test_nonsemantic_finalized_marker_example_is_ordinary_requirement_text(body: str) -> None:
+
+    assert verified_finalized_plan(body) is None
     assert has_contaminated_issue_body(body) is False
 
 

@@ -43,6 +43,16 @@ pending or rejected post-recovery plan resumes normally. Independently
 confirmed obsolete issues likewise upsert exactly one actor-owned explanation
 before receiving `state:skip`.
 
+An Athena-finalized planning epoch is the terminal exception to recovery. The
+planning stage accepts exactly one top-level
+`<!-- athena:finalize-plan R=... P=... V=... F=... -->` marker only when `F`
+matches SHA-256 of the complete UTF-8 body with that value replaced by the
+literal `<F>`. That verified body already contains a GO-reviewed plan, so the
+stage does not invoke recovery or reopen it under `--force`; it atomically
+normalizes the issue to exclusive `state:plan-go` for downstream routing. A
+missing, malformed, duplicated, or mismatched marker—including a later
+material body edit—is not authority and enters the ordinary recovery path.
+
 ADR-0031 defines how these recovery roles coexist with the canonical plan and
 review roles, including their ownership and compaction rules.
 
@@ -81,6 +91,8 @@ introduced.
 Contaminated issues can recover without human intervention, and every
 actor-owned recovery artifact is attributable and replay-safe. Planning may spend two additional
 read-only agent calls when recovery or semantic disposition review is needed.
+Verified Athena-finalized issues spend no additional planner or plan-review
+model calls, while body drift deterministically invalidates that shortcut.
 Open-PR issues can return to planning, so implementations that predate an
 approved plan may be redone. Operators receive bounded summary counters for
 recovery and skip actions rather than repeated warning noise. Obsolete reasons

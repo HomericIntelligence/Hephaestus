@@ -21,6 +21,7 @@ from hephaestus.prompts import PromptCatalog
 RECOVERY_PROVENANCE_VERSION: Final[int] = 2
 RECOVERY_PROVENANCE_PREFIX: Final[str] = "<!-- hephaestus-recovered-requirements:"
 OBSOLETE_EXPLANATION_MARKER: Final[str] = "<!-- hephaestus-obsolete-explanation:v=1 -->"
+ATHENA_FINALIZED_PLAN_PREFIX: Final[str] = "<!-- athena:finalize-plan "
 
 _DIGEST_RE = r"[0-9a-f]{64}"
 _PROVENANCE_RE = re.compile(
@@ -30,6 +31,13 @@ _PROVENANCE_RE = re.compile(
     rf"(?::successor_revision=(?P<successor_revision>\d+):"
     rf"successor_plan=(?P<successor_plan>{_DIGEST_RE}))? -->$"
 )
+_FINALIZED_PLAN_RE = re.compile(
+    rf"^{re.escape(ATHENA_FINALIZED_PLAN_PREFIX)}"
+    rf"R=(?P<requirements>{_DIGEST_RE}) "
+    rf"P=(?P<plan>[^\s<>]+) V=(?P<review>[^\s<>]+) "
+    rf"F=(?P<final>{_DIGEST_RE}) -->$",
+)
+_MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
 _OBSOLETE_BODY_RE = re.compile(
     r"\b(?:already (?:resolved|implemented|fixed)|no longer (?:needed|applicable)|"
@@ -84,8 +92,81 @@ class RecoveryProvenance:
     successor_plan_digest: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class FinalizedPlanIdentity:
+    """Sealed identities from one self-verifying Athena finalized body."""
+
+    requirements_identity: str
+    plan_identity: str
+    review_identity: str
+    final_body_digest: str
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
+    """Return offsets and lines for top-level Athena finalization claims."""
+    marker_start = ATHENA_FINALIZED_PLAN_PREFIX.rstrip()
+    candidates: list[tuple[int, str]] = []
+    fence_character: str | None = None
+    fence_length = 0
+    offset = 0
+    for raw_line in body.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        fence = _MARKDOWN_FENCE_RE.match(line)
+        if fence is not None:
+            token = fence.group("fence")
+            if fence_character is None:
+                fence_character = token[0]
+                fence_length = len(token)
+            elif (
+                token[0] == fence_character
+                and len(token) >= fence_length
+                and line[fence.end() :].strip() == ""
+            ):
+                fence_character = None
+                fence_length = 0
+        elif fence_character is None and line.startswith(marker_start):
+            candidates.append((offset, line))
+        offset += len(raw_line)
+    return candidates
+
+
+def _has_finalized_plan_candidate(body: str) -> bool:
+    """Return whether a top-level line claims Athena finalization."""
+    return bool(_finalized_plan_candidate_lines(body))
+
+
+def verified_finalized_plan(body: str) -> FinalizedPlanIdentity | None:
+    """Return a finalized-plan identity only when its exact body verifies ``F``.
+
+    Athena defines ``F`` as SHA-256 over the complete UTF-8 issue body after
+    replacing the marker's concrete ``F`` value with the literal ``<F>``.
+    Requiring one exact top-level marker means malformed, duplicated, inline,
+    or materially edited bodies cannot suppress a fresh planning epoch.
+    """
+    candidates = _finalized_plan_candidate_lines(body)
+    if len(candidates) != 1:
+        return None
+    line_offset, marker_line = candidates[0]
+    match = _FINALIZED_PLAN_RE.fullmatch(marker_line)
+    if match is None:
+        return None
+    if any(re.search(_DIGEST_RE, match.group(identity)) is None for identity in ("plan", "review")):
+        return None
+    final_start = line_offset + match.start("final")
+    final_end = line_offset + match.end("final")
+    canonical_body = body[:final_start] + "<F>" + body[final_end:]
+    if _sha256(canonical_body) != match.group("final"):
+        return None
+    return FinalizedPlanIdentity(
+        requirements_identity=match.group("requirements"),
+        plan_identity=match.group("plan"),
+        review_identity=match.group("review"),
+        final_body_digest=match.group("final"),
+    )
 
 
 def has_contaminated_issue_body(body: str) -> bool:
@@ -94,6 +175,7 @@ def has_contaminated_issue_body(body: str) -> bool:
     return bool(
         first_line in {PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER}
         or HISTORY_RE.fullmatch(first_line)
+        or (_has_finalized_plan_candidate(body) and verified_finalized_plan(body) is None)
     )
 
 
