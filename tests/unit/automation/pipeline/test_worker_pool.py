@@ -3532,6 +3532,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run", side_effect=fake_run),
         ):
@@ -3582,6 +3583,7 @@ class TestGitOps:
         with (
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
             patch.object(
                 pool,
                 "_run_rebase_structural_validation",
