@@ -19,6 +19,7 @@ from hephaestus.prompts import PromptCatalog
 
 RECOVERY_PROVENANCE_VERSION: Final[int] = 1
 RECOVERY_PROVENANCE_PREFIX: Final[str] = "<!-- hephaestus-recovered-requirements:"
+OBSOLETE_EXPLANATION_MARKER: Final[str] = "<!-- hephaestus-obsolete-explanation:v=1 -->"
 
 _DIGEST_RE = r"[0-9a-f]{64}"
 _PROVENANCE_RE = re.compile(
@@ -241,6 +242,23 @@ def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
         source_digest=match.group("source"),
         requirements_digest=match.group("requirements"),
         evidence_digest=match.group("evidence"),
+    )
+
+
+def recovered_requirements_for_source(body: str, source_digest: str) -> str | None:
+    """Return a verified recovered-comment payload bound to *source_digest*."""
+    provenance = parse_recovery_provenance(body)
+    if provenance is None or provenance.source_digest != source_digest:
+        return None
+    _marker, _separator, requirements = body.lstrip().partition("\n")
+    return requirements.lstrip("\n") or None
+
+
+def render_obsolete_explanation(reason: str) -> str:
+    """Render the one actor-owned explanation for a confirmed obsolete issue."""
+    return (
+        f"{OBSOLETE_EXPLANATION_MARKER}\n\n"
+        f"Automation skipped this issue as obsolete: {reason.strip()}"
     )
 
 

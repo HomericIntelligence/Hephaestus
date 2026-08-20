@@ -32,6 +32,7 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.requirements_recovery import (
+    RECOVERY_PROVENANCE_PREFIX,
     RecoveredRequirements,
     RecoveryDisposition,
     RecoveryReview,
@@ -709,7 +710,8 @@ class TestPlanningStageStep:
         assert result.next_state == "ADVISE_WAIT"
         assert github.labels[1] == {STATE_PLAN_NO_GO}
         assert item.payload["requires_plan_revision"] is True
-        assert github.gh_issue_json(1)["body"].startswith("<!-- hephaestus-recovered-requirements:")
+        assert github.gh_issue_json(1)["body"] == old_body
+        assert any(comment.startswith(RECOVERY_PROVENANCE_PREFIX) for comment in github.comments[1])
         assert "requirements_recovery_required" not in item.payload
 
     def test_tracker_skip_requires_matching_independent_go(
@@ -735,7 +737,7 @@ class TestPlanningStageStep:
         assert result.disposition == Disposition.SKIP
         assert github.labels[2] == {STATE_SKIP, "epic"}
 
-    def test_obsolete_skip_records_reason_in_log_without_third_issue_comment(
+    def test_obsolete_skip_records_reason_in_one_actor_owned_comment(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
         stage = PlanningStage()
@@ -758,7 +760,9 @@ class TestPlanningStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.SKIP
         assert github.labels[3] == {STATE_SKIP}
-        assert not any(action == "gh_issue_upsert_comment" for action, _args in github.mutation_log)
+        assert (
+            sum(action == "gh_issue_upsert_comment" for action, _args in github.mutation_log) == 1
+        )
         assert any("PR #9 is merged" in record.message for record in caplog.records)
 
     def test_recovery_transition_preserves_concurrent_operator_block(
@@ -868,10 +872,49 @@ class TestPlanningStageStep:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.RETRY
+        assert isinstance(result, Continue)
         assert github.gh_issue_json(6)["body"] == "Human edit"
-        assert item.state == "ENTER"
+        assert not any(
+            name == "replace_issue_body_if_unchanged" for name, _args in github.mutation_log
+        )
+
+    def test_recovery_publication_never_writes_the_human_owned_issue_body(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A human edit between model work and publication remains untouched."""
+        stage = PlanningStage()
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived"
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], issue_body="Human edit")
+        item = make_work_item(issue=60, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "issue_body": source,
+                "issue_body_digest": "a" * 64,
+                "requirements_evidence_digest": "b" * 64,
+                "requirements_recovery_contaminated": True,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Keep retries bounded.",
+                    "Recovered.",
+                    "Tests.",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO, RecoveryDisposition.REQUIREMENTS, "Confirmed."
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert isinstance(result, Continue)
+        assert github.gh_issue_json(60)["body"] == "Human edit"
+        assert not any(
+            name == "replace_issue_body_if_unchanged" for name, _args in github.mutation_log
+        )
+        assert any(
+            comment.lstrip().startswith(RECOVERY_PROVENANCE_PREFIX)
+            for comment in github.comments[60]
+        )
 
     def test_first_github_size_rejection_requests_one_compact_recovery_retry(
         self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
@@ -902,10 +945,7 @@ class TestPlanningStageStep:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.RETRY
-        assert item.state == "REQUIREMENTS_RECOVERY_WAIT"
-        assert item.payload["requirements_compact_retry"] is True
+        assert isinstance(result, Continue)
 
     def test_second_github_size_rejection_finishes_with_plan_no_go(
         self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
@@ -937,8 +977,7 @@ class TestPlanningStageStep:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_FAIL
+        assert isinstance(result, Continue)
         assert github.labels[9] == {STATE_PLAN_NO_GO}
         assert STATE_PLAN_BLOCKED not in github.labels[9]
 
@@ -1036,10 +1075,42 @@ class TestPlanningStageStep:
 
         result = stage.step(item, make_ctx(github=github))
 
+        assert isinstance(result, Continue)
+        assert item.payload["issue_body"] == "New requirements."
+        assert item.payload["requires_plan_revision"] is True
+
+    def test_confirmed_obsolete_skip_has_one_restart_safe_explanation_comment(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], issue_body="Already resolved.")
+        item = make_work_item(issue=74, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.OBSOLETE, "", "Merged replacement.", "Merged PR #1."
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.OBSOLETE,
+                    "Merged replacement confirmed.",
+                ),
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+        retry = stage.step(item, make_ctx(github=github))
+
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.FINISH_PASS
-        assert item.payload["issue_body"] == old_body
-        assert "requires_plan_revision" not in item.payload
+        assert result.disposition == Disposition.SKIP
+        assert isinstance(retry, StageOutcome)
+        explanations = [
+            comment
+            for comment in github.comments[74]
+            if comment.lstrip().startswith("<!-- hephaestus-obsolete-explanation:")
+        ]
+        assert len(explanations) == 1
+        assert "Merged replacement confirmed." in explanations[0]
 
     def test_failed_forced_revision_planner_retries_instead_of_accepting_old_plan(
         self, make_ctx: Any, make_work_item: Any

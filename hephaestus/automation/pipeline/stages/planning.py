@@ -50,6 +50,8 @@ from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
 from hephaestus.automation.protocol import PLAN_REVIEW_CANONICAL_MARKER
 from hephaestus.automation.requirements_recovery import (
+    OBSOLETE_EXPLANATION_MARKER,
+    RECOVERY_PROVENANCE_PREFIX,
     RecoveredRequirements,
     RecoveryDisposition,
     RecoveryReview,
@@ -61,7 +63,9 @@ from hephaestus.automation.requirements_recovery import (
     is_semantic_disposition_candidate,
     parse_recovered_requirements,
     parse_recovery_review,
+    recovered_requirements_for_source,
     recovered_requirements_json,
+    render_obsolete_explanation,
     render_recovered_requirements,
 )
 from hephaestus.automation.review_journal import (
@@ -209,11 +213,27 @@ def _refresh_requirements_recovery_context(
     ):
         raise RuntimeError("issue requirements snapshot is incomplete")
     contaminated = has_contaminated_issue_body(body)
+    recovered = next(
+        (
+            restored
+            for comment in reversed(ctx.github.issue_comments(item.issue))
+            if comment.viewer_did_author
+            and (restored := recovered_requirements_for_source(comment.body, body_digest))
+            is not None
+        ),
+        None,
+    )
+    if recovered is not None:
+        item.payload["issue_body"] = recovered
+        item.payload["requirements_recovered_comment"] = True
+        item.payload["requires_plan_revision"] = True
+        contaminated = False
     semantic_candidate = is_semantic_disposition_candidate(title, body)
     semantic_already_cleared = item.payload.get("requirements_semantic_clear_digest") == body_digest
     required = contaminated or (semantic_candidate and not semantic_already_cleared)
     item.payload["issue_title"] = title
-    item.payload["issue_body"] = body
+    if recovered is None:
+        item.payload["issue_body"] = body
     item.payload["issue_body_digest"] = body_digest
     if required:
         item.payload["requirements_recovery_required"] = True
@@ -325,6 +345,11 @@ def _apply_confirmed_semantic_skip(
             item.issue,
             review.reason,
         )
+        ctx.github.upsert_issue_comment(
+            item.issue,
+            OBSOLETE_EXPLANATION_MARKER,
+            render_obsolete_explanation(review.reason),
+        )
         if not _apply_recovery_state_label(item, ctx, STATE_SKIP):
             return StageOutcome(Disposition.RETRY, "obsolete skip label was not confirmed")
         record_summary_action(item, "obsolete-skipped")
@@ -371,8 +396,8 @@ def _apply_confirmed_requirements(
             return StageOutcome(Disposition.ADVANCE, "existing plan remains approved")
         return Continue(next_state="ADVISE_WAIT" if ctx.config.enable_advise else "PLAN_WAIT")
 
-    # Durable NOGO precedes body replacement. A crash before or after the edit
-    # therefore re-enters recovery/replanning instead of trusting the stale GO.
+    # A recovered comment is actor-owned; the source issue body is never edited
+    # because GitHub has no compare-and-swap primitive for body replacement.
     if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
         return StageOutcome(Disposition.RETRY, "recovery plan-no-go was not confirmed")
     source_body = str(item.payload.get("issue_body") or "")
@@ -383,47 +408,9 @@ def _apply_confirmed_requirements(
         str(item.payload.get("requirements_evidence_digest") or ""),
         source_digest=source_digest,
     )
-    replacement = ctx.github.replace_issue_body_if_unchanged(
-        item.issue,
-        source_digest,
-        recovered_body,
-    )
-    if replacement.conflict:
-        _clear_recovery_results(item)
-        _refresh_requirements_recovery_context(item, ctx)
-        item.state = "ENTER"
-        record_summary_action(item, "requirements-body-conflict")
-        return StageOutcome(Disposition.RETRY, "issue body changed during recovery")
-    if replacement.rejected:
-        rejections = int(item.payload.get("requirements_publication_rejections", 0)) + 1
-        item.payload["requirements_publication_rejections"] = rejections
-        if rejections == 1:
-            _clear_recovery_results(item)
-            item.payload["requirements_compact_retry"] = True
-            item.state = "REQUIREMENTS_RECOVERY_WAIT"
-            return StageOutcome(Disposition.RETRY, "compact requirements retry requested")
-        return StageOutcome(
-            Disposition.FINISH_FAIL,
-            "GitHub rejected both original and compact requirements; plan-no-go retained",
-        )
-    if replacement.retryable:
-        return _retry_requirements_recovery(
-            item,
-            ctx,
-            "issue body replacement is unconfirmed",
-        )
-    if replacement.dry_run:
-        _finish_recovery(item)
-        return StageOutcome(
-            Disposition.FINISH_PASS,
-            "dry-run: would replace recovered requirements and start fresh planning",
-        )
-    if not replacement.replaced and not replacement.dry_run:
-        return StageOutcome(Disposition.RETRY, "issue body replacement was not proven")
-
-    item.payload["issue_body"] = recovered_body
-    if replacement.body_digest:
-        item.payload["issue_body_digest"] = replacement.body_digest
+    ctx.github.upsert_issue_comment(item.issue, RECOVERY_PROVENANCE_PREFIX, recovered_body)
+    item.payload["issue_body"] = proposal.requirements
+    item.payload["requirements_recovered_comment"] = True
     item.payload["requires_plan_revision"] = True
     item.payload.pop("plan_text", None)
     item.payload.pop("issue_history", None)
@@ -930,7 +917,11 @@ class PlanningStage(Stage):
         # Semantic tracker/obsolete candidates use the same two-model gate.
         # This check precedes plan-GO so stale approval cannot authorize a body
         # that is itself a copied plan or review.
-        if _refresh_requirements_recovery_context(item, ctx):
+        try:
+            recovery_required = _refresh_requirements_recovery_context(item, ctx)
+        except CommentJournalReadError as exc:
+            return StageOutcome(Disposition.RETRY, f"plan journal read failed: {exc}")
+        if recovery_required:
             logger.info("planning:%d: requirements recovery required", item.issue)
             return None
 
