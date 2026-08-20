@@ -37,6 +37,7 @@ MAX_ARTIFACT_BYTES = 65_536
 MAX_SOURCE_FIELD_CHARS = 16_384
 VALIDATOR_ARGV = ("uv", "run", "--offline", "--frozen", "python", "scripts/validate_plugins.py")
 VALIDATOR_TIMEOUT_S = 120
+MAX_VALIDATOR_DIAGNOSTIC_CHARS = 1_000
 _REQUIRED_PLAN_SECTIONS = (
     "Objective",
     "Approach",
@@ -45,6 +46,14 @@ _REQUIRED_PLAN_SECTIONS = (
 )
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
+_SECRET_DIAGNOSTIC_PATTERNS = (
+    re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{12,}\b", re.IGNORECASE),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+    re.compile(
+        r"(?i)\b(?:token|secret|password|api[_-]?key|authorization)\s*"
+        r"(?:=|:)\s*(?:bearer\s+)?[^\s]+"
+    ),
+)
 
 
 class LearningSource(Protocol):
@@ -510,21 +519,32 @@ class BoundLearningWorkspace:
         branch: str,
     ) -> PreparedLearningWorkspace:
         """Create a clean worktree from the binding or a live retry PR head."""
-        root = Path(binding.root).resolve()
-        if not root.is_dir() or root.is_symlink():
+        bound_root = Path(binding.root)
+        if not bound_root.is_dir() or bound_root.is_symlink():
             raise LearnDeliveryError("Mnemosyne binding root is not a safe directory")
+        root = bound_root.resolve()
         digest = sha256(branch.encode("utf-8")).hexdigest()[:16]
         parent = root / "build" / "mnemosyne-learning"
         path = parent / digest
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._create_safe_parent(root, parent)
+        try:
+            path.resolve(strict=False).relative_to(root)
+        except ValueError as exc:
+            raise LearnDeliveryError(
+                "Mnemosyne learning worktree escaped the original binding root"
+            ) from exc
         if path.is_symlink():
             raise LearnDeliveryError("Mnemosyne learning worktree must not be a symlink")
+        existing_pr, start = self._existing_pr(binding, branch)
         if path.exists():
+            if existing_pr is None and self._remote_branch_is_published(root, branch):
+                raise LearnDeliveryError(
+                    "learning worktree preserved because publication outcome is ambiguous"
+                )
             _git_success(
                 self._git(root, ("worktree", "remove", "--force", str(path)), self._timeout_s),
                 "stale learning worktree removal",
             )
-        existing_pr, start = self._existing_pr(binding, branch)
         if existing_pr is not None:
             _git_success(
                 self._git(root, ("fetch", "origin", branch), self._timeout_s),
@@ -549,6 +569,42 @@ class BoundLearningWorkspace:
             "learning branch binding",
         )
         return PreparedLearningWorkspace(path=path, existing_pr_number=existing_pr)
+
+    def _create_safe_parent(self, root: Path, parent: Path) -> None:
+        """Create workspace ancestors only when none can redirect outside ``root``."""
+        current = root
+        for part in ("build", "mnemosyne-learning"):
+            current = current / part
+            if current.is_symlink():
+                raise LearnDeliveryError("Mnemosyne learning has a symlinked workspace ancestor")
+            current.mkdir(exist_ok=True, mode=0o700)
+            if current.is_symlink():
+                raise LearnDeliveryError("Mnemosyne learning has a symlinked workspace ancestor")
+        try:
+            parent.resolve(strict=True).relative_to(root)
+        except ValueError as exc:
+            raise LearnDeliveryError(
+                "Mnemosyne learning workspace escaped the original binding root"
+            ) from exc
+
+    def _remote_branch_is_published(self, root: Path, branch: str) -> bool:
+        """Return whether a remote branch proves a prior publish attempt occurred.
+
+        A transport failure is ambiguous too: do not delete the only recovery
+        evidence merely because the classification query itself could not run.
+        """
+        result = self._git(
+            root,
+            ("ls-remote", "--exit-code", "origin", f"refs/heads/{branch}"),
+            self._timeout_s,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 2:
+            return False
+        raise LearnDeliveryError(
+            "learning worktree preserved because publication outcome is ambiguous"
+        )
 
     def _existing_pr(
         self,
@@ -634,11 +690,22 @@ class MnemosynePluginValidator:
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
-            detail = _CONTROL_RE.sub("", detail)[-1000:]
+            detail = _safe_validator_diagnostic(detail)
             raise LearnDeliveryError(
                 f"Mnemosyne plugin validation failed: {detail or result.returncode}"
             )
         return (" ".join(VALIDATOR_ARGV),)
+
+
+def _safe_validator_diagnostic(detail: str) -> str:
+    """Redact and bound untrusted validator output before it becomes durable state."""
+    sanitized = _CONTROL_RE.sub("", detail)
+    for pattern in _SECRET_DIAGNOSTIC_PATTERNS:
+        sanitized = pattern.sub("<redacted>", sanitized)
+    if len(sanitized) <= MAX_VALIDATOR_DIAGNOSTIC_CHARS:
+        return sanitized
+    half = MAX_VALIDATOR_DIAGNOSTIC_CHARS // 2
+    return sanitized[:half] + "…" + sanitized[-half:]
 
 
 class MnemosyneLearningPreparationService:
