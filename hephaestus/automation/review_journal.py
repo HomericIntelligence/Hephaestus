@@ -474,7 +474,10 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     current_plan_body = ""
     current_review_body = ""
     for comment in owned:
-        body = comment.body.lstrip()
+        # Canonical journal markers are opaque protocol tokens.  Treating a
+        # whitespace-prefixed token as canonical would let inert prose alter
+        # the durable timeline reconstruction.
+        body = comment.body
         match = HISTORY_RE.match(body)
         if match:
             identity = (int(match.group("revision")), match.group("kind"))

@@ -82,6 +82,22 @@ def test_snapshot_ignores_foreign_marker_spoofing() -> None:
     assert snapshot.current_review.endswith("state:plan-go")
 
 
+def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
+    """Whitespace-prefixed journal markers are inert rather than canonical state."""
+    snapshot = journal_snapshot(
+        [
+            _owned(f" \t{render_current_plan('spoofed', revision=8)}"),
+            _owned(f"\n{render_current_review('spoofed', revision=8)}"),
+            _owned(f" {archive_plan_body(7, 'old', 'new')}"),
+        ]
+    )
+
+    assert snapshot.revision == 1
+    assert snapshot.current_plan == ""
+    assert snapshot.current_review == ""
+    assert snapshot.history == ()
+
+
 def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:
     """Restart context keeps only the current rejected revision's instructions."""
     comments = [

@@ -112,6 +112,48 @@ def _has_exact_leading_marker(body: str, marker: str) -> bool:
     return has_exact_leading_marker(body, marker)
 
 
+def _history_has_canonical_pointer(
+    comment: IssueComment,
+    *,
+    target_plan: IssueComment | None,
+    target_review: IssueComment | None,
+) -> bool:
+    """Return whether a legacy artifact can be replaced by its canonical pointer."""
+    history_match = HISTORY_RE.match(comment.body)
+    if history_match is None:
+        return True
+    if history_match.group("kind") == "plan":
+        return target_plan is not None
+    return target_review is not None
+
+
+def _obsolete_comment_ids(
+    owned: Sequence[IssueComment],
+    *,
+    keep_ids: set[int],
+    target_plan: IssueComment | None,
+    target_review: IssueComment | None,
+) -> list[int]:
+    """Return owned obsolete IDs whose canonical replacement is durable."""
+    delete_ids: list[int] = []
+    for comment in owned:
+        if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
+            continue
+        if not _history_has_canonical_pointer(
+            comment,
+            target_plan=target_plan,
+            target_review=target_review,
+        ):
+            # A legacy archive is the sole recoverable representation of its
+            # artifact until a canonical pointer exists. Retain it rather than
+            # compacting history into data loss.
+            continue
+        if comment.database_id is None:
+            raise RuntimeError("owned obsolete automation comment has no database id")
+        delete_ids.append(comment.database_id)
+    return delete_ids
+
+
 def plan_issue_timeline_compaction(
     comments: Sequence[IssueComment],
 ) -> IssueTimelineCompaction:
@@ -183,13 +225,12 @@ def plan_issue_timeline_compaction(
         for comment in (target_plan, target_review)
         if comment is not None and comment.database_id is not None
     }
-    delete_ids: list[int] = []
-    for comment in owned:
-        if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
-            continue
-        if comment.database_id is None:
-            raise RuntimeError("owned obsolete automation comment has no database id")
-        delete_ids.append(comment.database_id)
+    delete_ids = _obsolete_comment_ids(
+        owned,
+        keep_ids=keep_ids,
+        target_plan=target_plan,
+        target_review=target_review,
+    )
 
     # Canonical target bodies are PATCHed in place by the caller. Prefixing is
     # asserted here so a parser regression cannot turn an upsert into a new

@@ -113,3 +113,18 @@ def test_existing_canonical_pointer_ignores_newer_legacy_comment() -> None:
     assert "Older canonical" in result.plan_body
     assert result.plan_needs_update is False
     assert result.delete_comment_ids == ()
+
+
+def test_compaction_retains_history_without_a_canonical_pointer() -> None:
+    """A sole recoverable archive is never deleted before a pointer exists."""
+    comments = [
+        _comment(1, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(2, f"{PLAN_COMMENT_MARKER}\n\nHeading-only text"),
+        _comment(3, "Unrelated operator note"),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.plan_body is None
+    assert result.review_body is None
+    assert result.delete_comment_ids == ()
