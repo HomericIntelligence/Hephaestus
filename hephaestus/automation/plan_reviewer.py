@@ -184,7 +184,7 @@ class PlanReviewer:
         self._print_summary(results)
         return results
 
-    def _review_issue(self, issue_number: int, slot_id: int) -> WorkerResult:  # noqa: C901
+    def _review_issue(self, issue_number: int, slot_id: int) -> WorkerResult:
         """Review the plan for a single issue.
 
         Args:
