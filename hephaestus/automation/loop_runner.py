@@ -124,9 +124,7 @@ def _parse_non_negative_int(value: str) -> int:
     try:
         number = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"expected a non-negative integer, got {value!r}"
-        ) from exc
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}") from exc
     if number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {number}")
     return number
@@ -558,8 +556,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_parse_non_negative_int,
         default=DEFAULT_EVENT_LOG_RETENTION_DAYS,
         help=(
-            "Delete inactive pipeline event logs older than this many days; "
-            "0 disables age cleanup."
+            "Delete inactive pipeline event logs older than this many days; 0 disables age cleanup."
         ),
     )
     p.add_argument(
