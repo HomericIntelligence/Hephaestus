@@ -988,12 +988,14 @@ later branch push does not invalidate that posted review; only the final
 `state:implementation-go` transition requires the reviewed head to still be
 the current open, unarmed PR head.
 
-For the registered UV performance verification, the host boundary currently
-requires macOS `sandbox-exec` plus a disposable, quota-backed disk image. On
-other platforms the loop fails closed after writing `state:implementation-no-go`
-rather than running PR code outside that boundary. A Linux or Windows backend
-must be added as a separately reviewed isolation implementation; there is no
-unsandboxed fallback.
+For the registered host-verification plan, the reviewed execution boundary
+currently requires macOS `sandbox-exec` plus disposable, quota-backed disk
+images. Other platforms record an exact-head, platform-bound `skipped` receipt
+before resolving tools, archiving source, or executing PR code. That receipt is
+N/A rather than passing execution evidence, and it does not independently grant
+implementation authority; head-bound CI and the remaining review gates retain
+their separate authority. A Linux or Windows backend must be added as a
+separately reviewed isolation implementation; there is no unsandboxed fallback.
 
 Every host-verification failure also upserts an automation-owned diagnostic on
 the pull request after the exact-head NOGO label is read back. The comment is
