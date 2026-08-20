@@ -60,9 +60,7 @@ _VERSION_RE = re.compile(r"(?<!/)(?<!@)\bv?(\d+\.\d+\.\d+)\b")
 
 # Matches inline code spans so we skip versions inside backticks.
 _INLINE_CODE_RE = re.compile(r"``[^`]+``|`[^`]+`")
-_GIT_TAG_TIMEOUT_WARNING = (
-    "[hephaestus-version] WARNING: git tag lookup timed out; using installed package metadata"
-)
+_GIT_TAG_TIMEOUT_WARNING = "[hephaestus-version] WARNING: git tag lookup timed out"
 
 
 def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
