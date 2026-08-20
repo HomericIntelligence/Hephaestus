@@ -191,6 +191,41 @@ class TestPlanReviewStageOnEnter:
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == []
 
+    def test_on_enter_retries_journal_read_error(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A transient journal read failure must retry rather than terminally fail."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(journal_read_error="rate limited")
+        item = make_work_item(issue=17, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(
+            Disposition.RETRY,
+            "plan journal read failed: rate limited",
+        )
+        assert item.state == "ENTER"
+        assert github.mutation_log == []
+
+    def test_on_enter_retries_blocked_audit_read_error(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Blocked-audit recovery shares the retry boundary for transient reads."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_BLOCKED],
+            journal_read_error="rate limited",
+        )
+        item = make_work_item(issue=18, state="ENTER")
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(
+            Disposition.RETRY,
+            "plan journal read failed: rate limited",
+        )
+        assert item.state == "ENTER"
+        assert github.mutation_log == []
+
     def test_restart_hydrates_current_plan_from_github(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

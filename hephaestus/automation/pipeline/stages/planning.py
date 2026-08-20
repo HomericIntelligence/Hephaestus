@@ -386,6 +386,7 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
             f"plan discovery failed: {lookup.error}",
         )
 
+    initial_plan_found = lookup.status is PlanDiscoveryStatus.FOUND
     plan_text = item.payload.get("plan_text")
     posted_plan = False
     if plan_text is not None:
@@ -407,7 +408,17 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
                 return publication_outcome
             posted_plan = True
 
-    if posted_plan or lookup.status is PlanDiscoveryStatus.FOUND:
+    # The initial lookup only decides whether publication is necessary.  Do
+    # not authorize the handoff from that stale snapshot: another actor can
+    # create or delete the canonical comment while VERIFY is running.
+    verified_lookup = ctx.github.discover_plan(item.issue)
+    if verified_lookup.status is PlanDiscoveryStatus.READ_ERROR:
+        return StageOutcome(
+            Disposition.RETRY,
+            f"plan discovery failed: {verified_lookup.error}",
+        )
+
+    if verified_lookup.status is PlanDiscoveryStatus.FOUND:
         labels = _require_issue_labels_for_transition(item.issue, ctx)
         if STATE_PLAN_BLOCKED in labels:
             return StageOutcome(
@@ -421,6 +432,9 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
             )
         logger.info("planning:%d: plan verified; advancing", item.issue)
         return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
+
+    if posted_plan or initial_plan_found:
+        return StageOutcome(Disposition.RETRY, "plan disappeared before verification")
 
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
