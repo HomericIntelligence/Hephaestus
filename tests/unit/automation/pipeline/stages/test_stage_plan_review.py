@@ -239,6 +239,8 @@ class TestPlanReviewStageOnEnter:
                 issue_number: int,
                 marker: str,
                 body: str,
+                *,
+                legacy_marker: str | None = None,
             ) -> None:
                 if self.fail_once and "Review pending for implementation plan revision 2" in body:
                     self.fail_once = False
@@ -247,6 +249,7 @@ class TestPlanReviewStageOnEnter:
                     issue_number,
                     marker,
                     body,
+                    legacy_marker=legacy_marker,
                 )
 
         stage = PlanReviewStage()
