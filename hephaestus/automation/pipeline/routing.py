@@ -158,6 +158,7 @@ ROUTES: dict[StageName, Route] = {
 # and across lanes comes only from ROUTES.
 _AUXILIARY_STAGES = frozenset({StageName.LEARNING, StageName.FINISHED})
 
+
 def _pipeline_order(routes: Mapping[StageName, Route]) -> tuple[StageName, ...]:
     """Return route order with the universal terminal sink last.
 
