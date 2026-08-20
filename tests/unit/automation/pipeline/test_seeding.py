@@ -7,6 +7,7 @@ detection, and the CLI seed mapping.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from types import SimpleNamespace
@@ -20,7 +21,6 @@ from hephaestus.automation.implementation_go_audit_receipt import PendingImpleme
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
-    EpicSkipTagObligation,
     IssueFacts,
     SeedEntry,
     _label_at_or_past,
@@ -32,6 +32,7 @@ from hephaestus.automation.pipeline.seeding import (
 )
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
+    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -40,6 +41,16 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+
+
+def _finalized_body() -> str:
+    placeholder = (
+        "## Why\n\nUse the reviewed implementation plan.\n\n"
+        f"<!-- athena:finalize-plan R={'a' * 64} P=plan-comment:{'b' * 64} "
+        f"V=review-comment:{'c' * 64} F=<F> -->"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    return placeholder.replace("F=<F>", f"F={digest}")
 
 
 def _facts(
@@ -83,15 +94,14 @@ class TestClassifyIssue:
         assert "state:skip" in reason
         assert any("excluded" in record.message for record in caplog.records)
 
-    def test_untagged_epic_is_excluded_without_encoding_a_mutation_in_reason(
+    def test_labeled_epic_routes_to_independent_planning_review(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The pure classifier describes exclusion; seeding carries obligations separately."""
         with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.seeding"):
             stage, reason = classify_issue(_facts(is_epic=True, labels={"epic"}))
-        assert stage is None
-        assert reason == "#1 is an epic tracking issue"
-        assert any("excluded" in record.message for record in caplog.records)
+        assert stage is StageName.PLANNING
+        assert "semantic disposition review" in reason
+        assert not any("excluded" in record.message for record in caplog.records)
 
     def test_title_inferred_epic_routes_to_independent_planning_review(self) -> None:
         stage, reason = classify_issue(_facts(title="Epic: reliability", is_epic=True))
@@ -109,6 +119,46 @@ class TestClassifyIssue:
 
         assert stage is StageName.PLANNING
         assert "requirements recovery" in reason
+
+    def test_finalized_plan_without_evidence_routes_once_to_label_normalization(self) -> None:
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=_finalized_body()))
+
+        assert stage is StageName.PLANNING
+        assert "finalized-plan evidence" in reason
+
+    def test_finalized_plan_with_evidence_keeps_plan_go_authoritative(self) -> None:
+        stage, _reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=_finalized_body(),
+            )
+        )
+
+        assert stage is StageName.IMPLEMENTATION
+
+    def test_removed_finalized_marker_invalidates_stale_plan_go(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body="## Revised requirements\n\nThe behavior materially changed.",
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
+
+    def test_drifted_finalized_marker_with_open_pr_still_routes_to_recovery(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=f"{_finalized_body()}\nchanged",
+                pr_number=88,
+                pr_is_open=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
 
     def test_epic_already_tagged_skip_needs_no_retag(self) -> None:
         """An epic that already carries state:skip excludes via skip — no tag flag."""
@@ -715,13 +765,13 @@ class TestSeedFromCli:
             entries = seed_from_cli([], [10], [])
         assert entries[0].stage is None
 
-    def test_untagged_epic_surfaces_a_typed_skip_tag_obligation(self) -> None:
-        """The coordinator receives an explicit durable-write obligation, not a reason prefix."""
+    def test_labeled_epic_has_no_skip_obligation_before_model_review(self) -> None:
         facts = _facts(number=10, is_epic=True, labels={"epic"})
         with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
             entry = seed_from_cli([], [10], [])[0]
 
-        assert entry.skip_tag_obligation == EpicSkipTagObligation(issue=10)
+        assert entry.stage is StageName.PLANNING
+        assert entry.skip_tag_obligation is None
 
     def test_title_inferred_epic_has_no_skip_obligation_before_model_review(self) -> None:
         facts = _facts(number=10, title="Epic: queue work", is_epic=True)

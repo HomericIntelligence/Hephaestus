@@ -95,6 +95,7 @@ class FakeStageGitHub(FakeGitHub):
         journal_read_error: str | None = None,
         authorization_reviews: tuple[dict[str, object], ...] | None = None,
         actor_permissions: dict[str, str] | None = None,
+        issue_body_owned_by_viewer: bool = True,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -151,6 +152,7 @@ class FakeStageGitHub(FakeGitHub):
         self._has_plan = has_plan
         self._plan_read_error = plan_read_error
         self._journal_read_error = journal_read_error
+        self._issue_body_owned_by_viewer = issue_body_owned_by_viewer
         self._pr_head_branch = pr_head_branch
         self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
@@ -232,6 +234,10 @@ class FakeStageGitHub(FakeGitHub):
             "state": self._issue_state,
             "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
         }
+
+    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
+        """Return whether the current actor owns the latest issue-body edit."""
+        return self._issue_body_owned_by_viewer
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_merged_closing_pr."""

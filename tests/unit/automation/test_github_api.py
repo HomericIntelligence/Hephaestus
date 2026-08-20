@@ -19,6 +19,7 @@ from hephaestus.automation.github_api import (
     fetch_issue_info,
     gh_create_label,
     gh_issue_add_labels,
+    gh_issue_body_edited_by_viewer,
     gh_issue_comment,
     gh_issue_create,
     gh_issue_delete_comment,
@@ -147,6 +148,33 @@ class TestGhIssueJson:
 
         assert data["title"] == 123
         assert "body" not in data
+
+
+@pytest.mark.parametrize(
+    ("editor", "expected"),
+    [("maintainer", True), ("contributor", False), (None, False)],
+)
+@patch("hephaestus.automation.github_api._gh_call")
+def test_issue_body_editor_matches_authenticated_viewer(
+    mock_gh_call: Any,
+    editor: str | None,
+    expected: bool,
+) -> None:
+    """Standalone finalization checks fail closed for foreign or absent editors."""
+    mock_gh_call.return_value = Mock(
+        stdout=json.dumps(
+            {
+                "data": {
+                    "viewer": {"login": "maintainer"},
+                    "repository": {
+                        "issue": {"editor": {"login": editor} if editor is not None else None}
+                    },
+                }
+            }
+        )
+    )
+
+    assert gh_issue_body_edited_by_viewer(2795, ("owner", "repo")) is expected
 
 
 class TestParseIssueDependencies:

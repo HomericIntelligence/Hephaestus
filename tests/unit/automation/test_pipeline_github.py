@@ -172,6 +172,29 @@ def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> 
     assert isinstance(adapter, StageGitHub)
 
 
+@pytest.mark.parametrize(
+    ("editor", "expected"),
+    [("maintainer", True), ("contributor", False), (None, False)],
+)
+def test_issue_body_editor_must_match_authenticated_viewer(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    editor: str | None,
+    expected: bool,
+) -> None:
+    """Finalization trusts only the current actor's latest body edit."""
+    adapter.repo = "repo"
+    payload = {
+        "data": {
+            "viewer": {"login": "maintainer"},
+            "repository": {"issue": {"editor": {"login": editor} if editor is not None else None}},
+        }
+    }
+    monkeypatch.setattr(adapter, "_graphql", lambda *_args, **_kwargs: payload)
+
+    assert adapter.issue_body_edited_by_viewer(2795) is expected
+
+
 def _external_reviewer_thread(thread_id: str = "reviewer-thread") -> dict[str, Any]:
     """Return an arbitrary reviewer-owned thread eligible for the new protocol."""
     return {

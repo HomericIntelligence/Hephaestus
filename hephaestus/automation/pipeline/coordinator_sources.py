@@ -2,6 +2,7 @@ import sys
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
+from .stages.repo import SYNCED_MAIN_SHA_KEY
 
 # This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
@@ -72,10 +73,10 @@ class SourceCoordinator(_CoordinatorHost):
     ) -> bool:
         """Consume one detached repository cursor until one child is admitted.
 
-        Exclusions (notably epics) need no child capacity and are consumed in
-        order after their durable skip write.  An eligible pending row stays
-        in ``source.pending`` until every possible entry queue and the global
-        permit budget can accept it; no classified product is retained.
+        A pending row stays in ``source.pending`` until every possible entry
+        queue and the global permit budget can accept it; no classified
+        product is retained. Tracker-shaped issues are admitted for semantic
+        planning instead of being skipped from metadata alone.
 
         Returns:
             ``True`` while this cursor remains active, otherwise ``False``
@@ -99,8 +100,6 @@ class SourceCoordinator(_CoordinatorHost):
 
             try:
                 number = int(metadata["number"])
-                labels = list(metadata.get("labels") or [])
-                title = str(metadata.get("title") or "")
             except (KeyError, TypeError, ValueError) as exc:
                 self._record_repo_source_failure(
                     repo, f"discovery failed: malformed metadata: {exc}"
@@ -114,16 +113,6 @@ class SourceCoordinator(_CoordinatorHost):
                 return True
             github = self._ctx_for_repo(repo).github
             try:
-                if source.wave_lease is None and is_epic(labels, title):
-                    github.skip_epics({number: labels})
-                    logger.info(
-                        "repo:%s: #%d is an epic; tagged state:skip, excluded",
-                        repo,
-                        number,
-                    )
-                    source.pending = None
-                    self._progress = True
-                    return True
                 facts = _seeding.seed_issue_from_github(number, github)
                 if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
                     github.ensure_blocked_audit(number)
@@ -162,6 +151,8 @@ class SourceCoordinator(_CoordinatorHost):
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+                if source.base_main_sha is not None:
+                    new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
                 if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
                     source.pending = None
                     source.seeded_count += 1

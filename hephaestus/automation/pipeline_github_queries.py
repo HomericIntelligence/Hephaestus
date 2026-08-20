@@ -320,6 +320,33 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             return data
         return github_api.gh_issue_json(issue_number)
 
+    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
+        """Authenticate the body editor before trusting a finalized-plan seal."""
+        if self._repo_slug is None:
+            return github_api.gh_issue_body_edited_by_viewer(issue_number)
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            " viewer{ login }"
+            " repository(owner:$owner,name:$name){"
+            "  issue(number:$number){ editor{ login } }"
+            " }"
+            "}"
+        )
+        data = self._graphql(query, number=issue_number)
+        root = data.get("data") if isinstance(data, dict) else None
+        viewer = root.get("viewer") if isinstance(root, dict) else None
+        repository = root.get("repository") if isinstance(root, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        editor = issue.get("editor") if isinstance(issue, dict) else None
+        viewer_login = viewer.get("login") if isinstance(viewer, dict) else None
+        editor_login = editor.get("login") if isinstance(editor, dict) else None
+        return (
+            isinstance(viewer_login, str)
+            and bool(viewer_login)
+            and isinstance(editor_login, str)
+            and editor_login.lower() == viewer_login.lower()
+        )
+
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue (``_review_utils``)."""
         if self._repo_slug is not None:

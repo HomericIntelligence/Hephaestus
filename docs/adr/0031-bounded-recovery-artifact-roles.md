@@ -34,13 +34,23 @@ The canonical plan separately retains the matching source digest as hidden
 epoch metadata. This binds restart routing without folding recovered
 requirements into the plan: a matching plan is post-recovery work, while a
 missing or mismatched marker identifies a stale pre-recovery plan.
+Recovery provenance also binds the live title and repository revision; legacy
+artifacts without that complete context are not restart authority. Plan
+publication, successor binding, and pending-review label normalization form a
+resumable transaction, so retries complete missing follow-up writes without
+republishing identical plan prose.
 
 A self-verifying Athena finalized-plan marker lives in the issue body rather
 than occupying a comment role. It seals the completed plan/review epoch after
 Athena may delete those intermediate comments. The body marker therefore
-suppresses recovery only while its exact `F` binding verifies; it does not
-increase the bounded comment-role count, and any later body drift starts a new
-recovery/planning epoch.
+suppresses recovery only while its exact `F` binding verifies. On first
+verification Hephaestus adds `athena:finalized-plan` as durable observation
+metadata; this is not a plan state and does not authorize implementation by
+itself. First observation also verifies that the authenticated automation actor
+owns the latest body edit. The marker plus metadata survive comment compaction without increasing
+the bounded comment-role count. Later marker removal or drift starts a new
+planning/recovery epoch and clears the metadata before a replacement plan can
+advance.
 
 An obsolete explanation is permitted only after matching planner and reviewer
 GO dispositions and accompanies `state:skip`. It is an audit explanation, not

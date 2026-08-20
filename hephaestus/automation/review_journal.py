@@ -284,14 +284,45 @@ def _without_fingerprint_line(text: str) -> str:
     return stripped
 
 
-def extract_current_plan(body: str) -> str:
-    """Return only the plan payload from a current or legacy plan comment."""
-    text = _without_leading_line(body, PLAN_CANONICAL_MARKER)
+def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | None]:
+    """Parse host metadata only from the canonical plan-comment header."""
+    stripped = body.lstrip()
+    canonical = stripped.startswith(PLAN_CANONICAL_MARKER) or stripped.startswith(
+        PLAN_COMMENT_MARKER
+    )
+    if not canonical:
+        return stripped.strip(), (), False, None
+
+    text = _without_leading_line(stripped, PLAN_CANONICAL_MARKER)
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
-    text = _without_fingerprint_line(text)
-    text = text.replace(FORCED_PLANNING_EPOCH_MARKER, "", 1)
-    return RECOVERY_SOURCE_EPOCH_RE.sub("", text, count=1).strip()
+    first = text.lstrip().partition("\n")[0].strip()
+    fingerprints_match = PLAN_FINGERPRINTS_RE.fullmatch(first)
+    fingerprints = (
+        tuple(value for value in fingerprints_match.group("fingerprints").split(",") if value)
+        if fingerprints_match is not None
+        else ()
+    )
+    if fingerprints_match is not None:
+        text = _without_fingerprint_line(text)
+
+    forced = False
+    recovery_source: str | None = None
+    first = text.lstrip().partition("\n")[0].strip()
+    if first == FORCED_PLANNING_EPOCH_MARKER:
+        forced = True
+        text = _without_leading_line(text, FORCED_PLANNING_EPOCH_MARKER)
+    first = text.lstrip().partition("\n")[0].strip()
+    recovery_match = RECOVERY_SOURCE_EPOCH_RE.fullmatch(first)
+    if recovery_match is not None:
+        recovery_source = recovery_match.group("source")
+        text = _without_leading_line(text, first)
+    return text.strip(), fingerprints, forced, recovery_source
+
+
+def extract_current_plan(body: str) -> str:
+    """Return only the plan payload from a current or legacy plan comment."""
+    return _current_plan_parts(body)[0]
 
 
 def extract_current_review(body: str) -> str:
@@ -520,26 +551,20 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     explicit_revision = comment_revision(current_plan_body) if current_plan_body else None
     revision = explicit_revision or max(1, archived_max + 1)
     review_revision = comment_revision(current_review_body) if current_review_body else None
-    fingerprint_match = PLAN_FINGERPRINTS_RE.search(current_plan_body)
-    recovery_source_match = RECOVERY_SOURCE_EPOCH_RE.search(current_plan_body)
-    prior_fingerprints = (
-        tuple(value for value in fingerprint_match.group("fingerprints").split(",") if value)
-        if fingerprint_match
-        else ()
+    current_plan, prior_fingerprints, forced_epoch, recovery_source = _current_plan_parts(
+        current_plan_body
     )
     if current_review_body and review_revision is None and archived_max == 0:
         review_revision = revision
     return JournalSnapshot(
         revision=revision,
-        current_plan=extract_current_plan(current_plan_body) if current_plan_body else "",
+        current_plan=current_plan if current_plan_body else "",
         current_review=(extract_current_review(current_review_body) if current_review_body else ""),
         current_review_revision=review_revision,
         history=tuple(sorted(history, key=lambda item: (item.revision, item.kind != "plan"))),
         prior_plan_fingerprints=prior_fingerprints,
-        forced_planning_epoch=FORCED_PLANNING_EPOCH_MARKER in current_plan_body,
-        recovery_source_digest=(
-            recovery_source_match.group("source") if recovery_source_match else None
-        ),
+        forced_planning_epoch=forced_epoch,
+        recovery_source_digest=recovery_source,
     )
 
 

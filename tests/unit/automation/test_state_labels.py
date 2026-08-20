@@ -13,6 +13,7 @@ from hephaestus.automation import state_labels
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
+    ATHENA_FINALIZED_PLAN_LABEL,
     EPIC_LABELS,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -84,6 +85,12 @@ class TestLabelVocabulary:
         """``state:skip`` is an override, not a plan-state label."""
         assert STATE_SKIP not in ALL_STATE_LABELS
         assert STATE_SKIP.startswith("state:")
+
+    def test_finalized_plan_label_is_evidence_not_a_third_plan_state(self) -> None:
+        """Finalization survives restarts without expanding the state machine."""
+        assert ATHENA_FINALIZED_PLAN_LABEL in STATE_LABEL_SPECS
+        assert ATHENA_FINALIZED_PLAN_LABEL not in ALL_STATE_LABELS
+        assert not ATHENA_FINALIZED_PLAN_LABEL.startswith("state:")
 
     def test_implementation_labels_are_independent_of_plan_state(self) -> None:
         """Implementation-review state is PR-scoped, not part of issue plan state."""

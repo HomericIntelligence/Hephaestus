@@ -126,9 +126,56 @@ def gh_issue_json(
                         "Stripped NUL byte(s) from issue #%s %s field", issue_number, field
                     )
                     data[field] = cleaned
-        return data
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
+    return data
+
+
+def gh_issue_body_edited_by_viewer(
+    issue_number: int,
+    repo: tuple[str, str] | None = None,
+) -> bool:
+    """Return whether the authenticated actor made the latest issue-body edit."""
+    owner, name = repo if repo is not None else _api.get_repo_info()
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        " viewer{ login }"
+        " repository(owner:$owner,name:$name){"
+        "  issue(number:$number){ editor{ login } }"
+        " }"
+        "}"
+    )
+    result = _api._gh_call(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={issue_number}",
+        ]
+    )
+    data = json.loads(result.stdout or "{}")
+    if not isinstance(data, dict):
+        raise RuntimeError("issue body editor GraphQL response was not an object")
+    _check_graphql_errors(data, f"issue body editor for #{issue_number}")
+    root = data.get("data")
+    viewer = root.get("viewer") if isinstance(root, dict) else None
+    repository = root.get("repository") if isinstance(root, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    editor = issue.get("editor") if isinstance(issue, dict) else None
+    viewer_login = viewer.get("login") if isinstance(viewer, dict) else None
+    editor_login = editor.get("login") if isinstance(editor, dict) else None
+    return (
+        isinstance(viewer_login, str)
+        and bool(viewer_login)
+        and isinstance(editor_login, str)
+        and editor_login.lower() == viewer_login.lower()
+    )
 
 
 def _repo_args(repo: tuple[str, str] | None) -> list[str]:

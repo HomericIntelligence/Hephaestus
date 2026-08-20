@@ -46,6 +46,13 @@ STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
 STATE_PLAN_BLOCKED = "state:plan-blocked"
 
+# Durable evidence that Hephaestus has observed and verified the exact Athena
+# finalization marker in the current issue body. This is metadata, not a plan
+# state: ``state:plan-go`` remains the sole implementation admission gate. The
+# evidence lets restart seeding detect a later body rewrite that removed or
+# invalidated the marker instead of trusting a stale plan-go label.
+ATHENA_FINALIZED_PLAN_LABEL = "athena:finalized-plan"
+
 #: All four state labels in one tuple — useful for "ensure none of these are
 #: present" / "remove all of these" operations.
 ALL_STATE_LABELS = (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO, STATE_PLAN_BLOCKED)
@@ -145,6 +152,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert
         "description": "Automation normally skips this issue/PR in every phase.",
+    },
+    ATHENA_FINALIZED_PLAN_LABEL: {
+        "color": "5319e7",
+        "description": "Verified Athena finalized-plan marker for the current issue body.",
     },
 }
 

@@ -38,6 +38,7 @@ from hephaestus.automation.requirements_recovery import (
     RecoveryDisposition,
     RecoveryReview,
     RecoveryVerdict,
+    evidence_digest,
     parse_recovery_provenance,
     render_recovered_requirements,
 )
@@ -50,6 +51,7 @@ from hephaestus.automation.review_journal import (
     render_current_review,
 )
 from hephaestus.automation.state_labels import (
+    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -59,6 +61,45 @@ from hephaestus.automation.state_labels import (
     STATE_SKIP,
 )
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
+
+_RECOVERY_REVISION = "d" * 40
+
+
+def _recovery_binding(
+    source: str,
+    *,
+    issue: int,
+    title: str = "A task",
+    repo: str = "test-repo",
+) -> str:
+    return evidence_digest(repo, issue, _RECOVERY_REVISION, title, source)
+
+
+def _recovered_body(
+    source: str,
+    requirements: str,
+    *,
+    issue: int,
+    title: str = "A task",
+    repo: str = "test-repo",
+    source_digest: str | None = None,
+    successor_revision: int | None = None,
+    successor_plan_digest: str | None = None,
+) -> str:
+    return render_recovered_requirements(
+        source,
+        requirements,
+        _recovery_binding(source, issue=issue, title=title, repo=repo),
+        source_digest=source_digest,
+        successor_revision=successor_revision,
+        successor_plan_digest=successor_plan_digest,
+        issue_title=title,
+        repository_revision=_RECOVERY_REVISION,
+    )
+
+
+def _bind_recovery_revision(item: Any) -> None:
+    item.payload["_synced_default_branch_sha"] = _RECOVERY_REVISION
 
 
 def _fence_present(prompt: str, label: str) -> bool:
@@ -73,8 +114,8 @@ def _finalized_body() -> str:
     """Return a self-verifying finalized planning body fixture."""
     placeholder = (
         "## Why\n\nUse the reviewed implementation plan.\n\n"
-        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P={'b' * 64} "
-        f"V={'c' * 64} F=<F> -->"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=plan-comment:{'b' * 64} "
+        f"V=review-comment:{'c' * 64} F=<F> -->"
     )
     digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
     return placeholder.replace("F=<F>", f"F={digest}")
@@ -170,7 +211,7 @@ class TestPlanningStageEnter:
 
         assert outcome is not None
         assert outcome.disposition is Disposition.ADVANCE
-        assert github.labels[102] == {STATE_PLAN_GO}
+        assert github.labels[102] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
         assert (
             item.payload["athena_finalized_plan_digest"]
             == hashlib.sha256(
@@ -185,7 +226,7 @@ class TestPlanningStageEnter:
                 "edit_labels",
                 (
                     102,
-                    (STATE_PLAN_GO,),
+                    (STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL),
                     (
                         STATE_PLAN_NO_GO,
                         STATE_NEEDS_PLAN,
@@ -195,6 +236,110 @@ class TestPlanningStageEnter:
                 ),
             )
         ]
+
+    def test_removed_finalized_marker_reenters_planning_and_clears_evidence(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A later material body edit starts a fresh planning epoch."""
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL],
+            issue_body="## Revised requirements\n\nThe behavior materially changed.",
+        )
+        item = make_work_item(issue=103)
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert github.labels[103] == {STATE_NEEDS_PLAN}
+        assert item.payload["athena_finalized_plan_invalidated"] is True
+
+    def test_observed_finalized_plan_fast_forwards_without_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL],
+            issue_body=_finalized_body(),
+        )
+
+        outcome = PlanningStage().on_enter(
+            make_work_item(issue=104),
+            make_ctx(github=github),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.ADVANCE
+        assert github.mutation_log == []
+
+    def test_plan_go_without_finalized_evidence_is_normalized(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_PLAN_GO], issue_body=_finalized_body())
+
+        outcome = PlanningStage().on_enter(
+            make_work_item(issue=105),
+            make_ctx(github=github),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.ADVANCE
+        assert github.labels[105] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
+        assert github.mutation_log == [
+            (
+                "edit_labels",
+                (
+                    105,
+                    (STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL),
+                    (
+                        STATE_PLAN_NO_GO,
+                        STATE_NEEDS_PLAN,
+                        STATE_IMPLEMENTATION_NO_GO,
+                        STATE_IMPLEMENTATION_GO,
+                    ),
+                ),
+            )
+        ]
+
+    @pytest.mark.parametrize("force", [False, True])
+    def test_drifted_finalized_marker_enters_recovery_without_normalizing_go(
+        self, make_ctx: Any, make_work_item: Any, force: bool
+    ) -> None:
+        body = f"{_finalized_body()}\n\nLater material edit."
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL],
+            issue_body=body,
+            open_pr=88,
+        )
+        item = make_work_item(issue=106)
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=github, config=SimpleNamespace(force=force)),
+        )
+
+        assert outcome is None
+        assert item.payload["requirements_recovery_required"] is True
+        assert item.payload["requirements_recovery_contaminated"] is True
+        assert github.labels[106] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
+        assert github.mutation_log == []
+
+    def test_foreign_finalized_body_cannot_grant_plan_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_NO_GO],
+            issue_body=_finalized_body(),
+            issue_body_owned_by_viewer=False,
+        )
+        item = make_work_item(issue=107)
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.payload["requirements_recovery_required"] is True
+        assert item.payload["requirements_recovery_contaminated"] is True
+        assert "athena_finalized_plan_digest" not in item.payload
+        assert github.labels[107] == {STATE_PLAN_NO_GO}
+        assert github.mutation_log == []
 
     def test_skip_label_skips(self, make_ctx: Any, make_work_item: Any) -> None:
         """state:skip routes the item away without any writes."""
@@ -835,7 +980,7 @@ class TestPlanningStageStep:
                     RecoveryDisposition.REQUIREMENTS,
                     "Keep retries bounded.",
                     "Recovered from tests.",
-                    "test_retry.py",
+                    "b" * 64,
                 ),
             }
         )
@@ -857,9 +1002,12 @@ class TestPlanningStageStep:
         item = make_work_item(issue=1, state="REQUIREMENTS_RECOVERY_APPLY")
         item.payload.update(
             {
+                "issue_title": "A task",
                 "issue_body": old_body,
+                "issue_source_body": old_body,
                 "issue_body_digest": github.gh_issue_json(1)["bodyDigest"],
-                "requirements_evidence_digest": "b" * 64,
+                "requirements_evidence_digest": _recovery_binding(old_body, issue=1),
+                "requirements_repository_revision": _RECOVERY_REVISION,
                 "requirements_recovery_contaminated": True,
                 "recovered_requirements": RecoveredRequirements(
                     RecoveryDisposition.REQUIREMENTS,
@@ -1237,8 +1385,10 @@ class TestPlanningStageStep:
         item = make_work_item(issue=60, state="REQUIREMENTS_RECOVERY_APPLY")
         item.payload.update(
             {
+                "issue_title": "A task",
                 "issue_body": source,
-                "issue_body_digest": "a" * 64,
+                "issue_source_body": source,
+                "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
                 "requirements_evidence_digest": "b" * 64,
                 "requirements_recovery_contaminated": True,
                 "recovered_requirements": RecoveredRequirements(
@@ -1255,11 +1405,12 @@ class TestPlanningStageStep:
 
         result = stage.step(item, make_ctx(github=github))
 
-        assert isinstance(result, Continue)
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.RETRY
         assert github.gh_issue_json(60)["body"] == "Human edit"
-        assert any(
+        assert not any(
             comment.lstrip().startswith(RECOVERY_PROVENANCE_PREFIX)
-            for comment in github.comments[60]
+            for comment in github.comments.get(60, [])
         )
 
     def test_recovered_comment_with_semantic_candidate_restarts_as_fresh_revision(
@@ -1267,10 +1418,11 @@ class TestPlanningStageStep:
     ) -> None:
         stage = PlanningStage()
         source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
-        recovered = render_recovered_requirements(
+        recovered = _recovered_body(
             source,
             "New requirements",
-            "b" * 64,
+            issue=7,
+            title="Tracking issue for retry work",
         )
         github = FakeStageGitHub(
             labels=[STATE_PLAN_NO_GO],
@@ -1284,6 +1436,7 @@ class TestPlanningStageStep:
             recovered,
         ]
         item = make_work_item(issue=7, state="ENTER")
+        _bind_recovery_revision(item)
 
         outcome = stage.on_enter(item, make_ctx(github=github))
 
@@ -1304,12 +1457,15 @@ class TestPlanningStageStep:
         requirements = "New requirements"
         plan = "Recovered successor plan"
         source_digest = hashlib.sha256(source.encode()).hexdigest()
-        requirements_digest = hashlib.sha256(requirements.encode()).hexdigest()
         plan_digest = hashlib.sha256(plan.encode()).hexdigest()
-        recovered = (
-            f"{RECOVERY_PROVENANCE_PREFIX}v=2:source={source_digest}:"
-            f"requirements={requirements_digest}:evidence={'b' * 64}:"
-            f"successor_revision=2:successor_plan={plan_digest} -->\n\n{requirements}"
+        recovered = _recovered_body(
+            source,
+            requirements,
+            issue=72,
+            title="Tracking issue for retry work",
+            source_digest=source_digest,
+            successor_revision=2,
+            successor_plan_digest=plan_digest,
         )
         github = FakeStageGitHub(
             labels=[STATE_NEEDS_PLAN],
@@ -1318,11 +1474,16 @@ class TestPlanningStageStep:
             has_plan=True,
         )
         github.comments[72] = [
-            render_current_plan(plan, revision=2),
+            render_current_plan(
+                plan,
+                revision=2,
+                recovery_source_digest=source_digest,
+            ),
             render_current_review("Review pending for implementation plan revision 2.", revision=2),
             recovered,
         ]
         item = make_work_item(issue=72, state="ENTER")
+        _bind_recovery_revision(item)
 
         outcome = stage.on_enter(item, make_ctx(github=github))
 
@@ -1356,10 +1517,10 @@ class TestPlanningStageStep:
         stage = PlanningStage()
         source = f"{PLAN_CANONICAL_MARKER}\nDerived"
         source_digest = github_api_mod.issue_body_digest(source)
-        recovered = render_recovered_requirements(
+        recovered = _recovered_body(
             source,
             "Recovered requirements",
-            "b" * 64,
+            issue=72,
             source_digest=source_digest,
         )
         github = FakeStageGitHub(labels=labels, issue_body=source, has_plan=True)
@@ -1373,6 +1534,7 @@ class TestPlanningStageStep:
             recovered,
         ]
         item = make_work_item(issue=72, state="ENTER")
+        _bind_recovery_revision(item)
 
         outcome = stage.on_enter(item, make_ctx(github=github))
 
@@ -1383,6 +1545,14 @@ class TestPlanningStageStep:
         if labels == [STATE_PLAN_NO_GO]:
             assert item.payload["requires_plan_revision"] is True
             assert "Add rollback." in item.payload["issue_history"]
+        else:
+            assert "requires_plan_revision" not in item.payload
+            result = stage.step(item, make_ctx(github=github))
+            assert isinstance(result, StageOutcome)
+            assert result.disposition is Disposition.ADVANCE
+            assert github.mutation_log == [
+                ("gh_issue_upsert_comment", (72, RECOVERY_PROVENANCE_PREFIX))
+            ]
 
     def test_recovered_plan_publication_binds_its_successor_provenance(
         self, make_ctx: Any, make_work_item: Any
@@ -1390,7 +1560,7 @@ class TestPlanningStageStep:
         """The fresh recovery epoch records the exact plan it publishes."""
         stage = PlanningStage()
         source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
-        recovered = render_recovered_requirements(source, "New requirements", "b" * 64)
+        recovered = _recovered_body(source, "New requirements", issue=73)
         github = FakeStageGitHub(
             labels=[STATE_PLAN_NO_GO],
             issue_body=source,
@@ -1400,6 +1570,7 @@ class TestPlanningStageStep:
         item.payload.update(
             {
                 "issue_source_body": source,
+                "issue_title": "A task",
                 "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
                 "requirements_recovered_comment": True,
                 "requires_plan_revision": True,
@@ -1420,6 +1591,67 @@ class TestPlanningStageStep:
         assert provenance is not None
         assert provenance.successor_revision == 1
         assert provenance.successor_plan_digest == plan_fingerprint("Recovered successor plan")
+
+    def test_recovered_plan_followup_retry_does_not_republish_identical_plan(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        class DropFirstPendingLabelGitHub(FakeStageGitHub):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.drop_pending_once = True
+
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                if self.drop_pending_once and STATE_NEEDS_PLAN in add:
+                    self.drop_pending_once = False
+                    return
+                super().edit_labels(issue_number, add=add, remove=remove)
+
+        source = f"{PLAN_CANONICAL_MARKER}\nDerived tracker text"
+        recovered = _recovered_body(source, "New requirements", issue=74)
+        github = DropFirstPendingLabelGitHub(
+            labels=[STATE_PLAN_NO_GO],
+            issue_body=source,
+        )
+        github.comments[74] = [recovered]
+        item = make_work_item(issue=74, state="VERIFY")
+        item.payload.update(
+            {
+                "issue_source_body": source,
+                "issue_title": "A task",
+                "issue_body_digest": hashlib.sha256(source.encode()).hexdigest(),
+                "requirements_recovered_comment": True,
+                "requires_plan_revision": True,
+                "plan_text": "Recovered successor plan",
+            }
+        )
+        ctx = make_ctx(github=github)
+
+        first = PlanningStage().step(item, ctx)
+        plan_writes_after_first = sum(
+            mutation[0] == "gh_issue_upsert_comment" and mutation[1][1] == PLAN_CANONICAL_MARKER
+            for mutation in github.mutation_log
+        )
+        second = PlanningStage().step(item, ctx)
+
+        assert isinstance(first, StageOutcome)
+        assert first.disposition is Disposition.RETRY
+        assert isinstance(second, StageOutcome)
+        assert second.disposition is Disposition.ADVANCE
+        assert plan_writes_after_first == 1
+        assert (
+            sum(
+                mutation[0] == "gh_issue_upsert_comment" and mutation[1][1] == PLAN_CANONICAL_MARKER
+                for mutation in github.mutation_log
+            )
+            == 1
+        )
+        assert "published_plan_pending_followup" not in item.payload
 
     @pytest.mark.parametrize(
         ("labels", "review", "expected_state"),
@@ -1452,14 +1684,15 @@ class TestPlanningStageStep:
                 recovery_source_digest=source_digest,
             ),
             render_current_review(review, revision=3),
-            render_recovered_requirements(
+            _recovered_body(
                 source,
                 "Recovered requirements",
-                "d" * 64,
+                issue=75,
                 source_digest=source_digest,
             ),
         ]
         item = make_work_item(issue=75, state="ENTER")
+        _bind_recovery_revision(item)
 
         outcome = PlanningStage().on_enter(
             item,
@@ -1470,7 +1703,12 @@ class TestPlanningStageStep:
         assert item.state == expected_state
         assert item.payload["plan_text"] == "Forced recovered plan"
         assert item.payload["forced_planning_epoch_started"] is True
-        assert github.mutation_log == []
+        if labels == [STATE_NEEDS_PLAN]:
+            assert github.mutation_log == [
+                ("gh_issue_upsert_comment", (75, RECOVERY_PROVENANCE_PREFIX))
+            ]
+        else:
+            assert github.mutation_log == []
         if labels == [STATE_PLAN_NO_GO]:
             assert item.payload["requires_plan_revision"] is True
             assert "Add tests." in item.payload["issue_history"]
@@ -1492,7 +1730,12 @@ class TestPlanningStageStep:
                 "issue_body": source,
                 "issue_source_body": source,
                 "issue_body_digest": github.gh_issue_json(70)["bodyDigest"],
-                "requirements_evidence_digest": "b" * 64,
+                "requirements_evidence_digest": _recovery_binding(
+                    source,
+                    issue=70,
+                    title="Retry bug",
+                ),
+                "requirements_repository_revision": _RECOVERY_REVISION,
                 "requirements_recovery_contaminated": True,
                 "recovered_requirements": RecoveredRequirements(
                     RecoveryDisposition.REQUIREMENTS,
@@ -2128,7 +2371,16 @@ class TestPlanningStageStep:
         assert github.mutation_log[-2:] == [
             (
                 "edit_labels",
-                (28, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+                (
+                    28,
+                    (STATE_PLAN_BLOCKED,),
+                    (
+                        STATE_NEEDS_PLAN,
+                        STATE_PLAN_NO_GO,
+                        STATE_PLAN_GO,
+                        ATHENA_FINALIZED_PLAN_LABEL,
+                    ),
+                ),
             ),
             ("gh_issue_upsert_comment", (28, PLAN_REVIEW_CANONICAL_MARKER)),
         ]
@@ -2162,7 +2414,16 @@ class TestPlanningStageStep:
         assert github.labels[30] == {STATE_PLAN_BLOCKED}
         assert github.mutation_log[-1] == (
             "edit_labels",
-            (30, (STATE_PLAN_BLOCKED,), (STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+            (
+                30,
+                (STATE_PLAN_BLOCKED,),
+                (
+                    STATE_NEEDS_PLAN,
+                    STATE_PLAN_NO_GO,
+                    STATE_PLAN_GO,
+                    ATHENA_FINALIZED_PLAN_LABEL,
+                ),
+            ),
         )
 
     def test_empty_initial_plan_blocks_instead_of_retrying_planner(

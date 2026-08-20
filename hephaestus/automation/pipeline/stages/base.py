@@ -189,6 +189,10 @@ class StageGitHub(Protocol):
         """Fetch issue JSON (mirrors ``github_api.issues.gh_issue_json``)."""
         ...
 
+    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
+        """Return whether the authenticated actor owns the latest body edit."""
+        ...
+
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue, if any (``_review_utils``)."""
         ...

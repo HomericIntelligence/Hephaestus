@@ -22,14 +22,9 @@ Entry routing (the binding contract is the classification table in
   the block and replaces the label with exactly one eligible plan state
 - ``state:needs-plan`` / no state label → planning
 
-Write-path boundary (epic tagging)
-----------------------------------
-Per the doc row "Epic tagging is the one seeding write; done BEFORE excluding",
-an untagged epic must receive ``state:skip``. The pipeline mutator guard
-(``tests/unit/automation/pipeline/test_pipeline_architecture.py``) forbids
-GitHub mutations in this module, so seeding returns an explicit
-:class:`EpicSkipTagObligation` for the caller to discharge through the existing
-``github_api.skip_epics`` chokepoint before honoring the exclusion.
+Tracker labels and title inference are candidates, not skip authority. Seeding
+routes both through planning so the independent semantic reviewer owns the only
+automatic ``state:skip`` transition.
 """
 
 from __future__ import annotations
@@ -52,8 +47,10 @@ from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.requirements_recovery import (
     has_contaminated_issue_body,
     is_semantic_disposition_candidate,
+    verified_finalized_plan,
 )
 from hephaestus.automation.state_labels import (
+    ATHENA_FINALIZED_PLAN_LABEL,
     EPIC_LABELS,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -272,11 +269,15 @@ def _requirements_recovery_reason(
     """Return the planning-admission reason for semantic recovery, if any."""
     issue_body = facts.body if isinstance(facts.body, str) else ""
     issue_title = facts.title if isinstance(facts.title, str) else ""
+    finalized = verified_finalized_plan(issue_body)
+    has_finalized_evidence = ATHENA_FINALIZED_PLAN_LABEL in facts.labels
+    if finalized is not None and not has_finalized_evidence:
+        return f"#{facts.number} requires finalized-plan evidence normalization"
+    if finalized is None and has_finalized_evidence:
+        return f"#{facts.number} finalized planning epoch changed"
     if has_contaminated_issue_body(issue_body):
         return f"#{facts.number} requires autonomous requirements recovery"
-    if (facts.is_epic and not explicit_tracker) or is_semantic_disposition_candidate(
-        issue_title, issue_body
-    ):
+    if facts.is_epic or is_semantic_disposition_candidate(issue_title, issue_body):
         return f"#{facts.number} requires semantic disposition review"
     return None
 
@@ -287,8 +288,6 @@ def _issue_exclusion_reason(facts: IssueFacts, *, explicit_tracker: bool) -> str
         return f"#{facts.number} tagged {STATE_SKIP}"
     if STATE_PLAN_BLOCKED in facts.labels:
         return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
-    if facts.is_epic and explicit_tracker:
-        return f"#{facts.number} is an epic tracking issue"
     return None
 
 
@@ -535,13 +534,6 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
 
     """
     stage, reason = classify_issue(facts)
-    obligation = (
-        EpicSkipTagObligation(issue=facts.number)
-        if facts.is_epic
-        and bool({label.lower() for label in facts.labels}.intersection(EPIC_LABELS))
-        and STATE_SKIP not in facts.labels
-        else None
-    )
     return SeedEntry(
         kind="issue",
         identifier=facts.number,

@@ -25,6 +25,7 @@ from hephaestus.automation.requirements_recovery import (
     parse_recovered_requirements,
     parse_recovery_provenance,
     parse_recovery_review,
+    recovered_requirements_for_context,
     render_recovered_requirements,
     verified_finalized_plan,
 )
@@ -86,12 +87,62 @@ def test_verified_athena_finalized_body_is_not_recovered_as_generated_requiremen
     assert has_contaminated_issue_body(body) is False
 
 
+def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
+    source = "Original requirements"
+    revision = "d" * 40
+    binding = evidence_digest("repo", 17, revision, "Original title", source)
+    rendered = render_recovered_requirements(
+        source,
+        "Recovered requirements",
+        binding,
+        issue_title="Original title",
+        repository_revision=revision,
+    )
+
+    assert (
+        recovered_requirements_for_context(
+            rendered,
+            repository="repo",
+            issue_number=17,
+            issue_title="Original title",
+            source_body=source,
+            repository_revision=revision,
+        )
+        == "Recovered requirements"
+    )
+    assert (
+        recovered_requirements_for_context(
+            rendered,
+            repository="repo",
+            issue_number=17,
+            issue_title="Edited title",
+            source_body=source,
+            repository_revision=revision,
+        )
+        is None
+    )
+    assert (
+        recovered_requirements_for_context(
+            rendered,
+            repository="repo",
+            issue_number=17,
+            issue_title="Original title",
+            source_body=source,
+            repository_revision="e" * 40,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
         lambda body: body + "\nLater material edit.",
         lambda body: body.replace("R=" + "a" * 64, "R=malformed identity"),
         lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=<P>"),
+        lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=" + "b" * 64),
+        lambda body: body.replace("P=plan-comment:", "P=plan/comment:"),
+        lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=plan-comment:x"),
         lambda body: body + "\n" + body.splitlines()[-1],
         lambda body: body.replace("F=", "F=0", 1),
     ],

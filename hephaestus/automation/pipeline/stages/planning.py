@@ -64,7 +64,7 @@ from hephaestus.automation.requirements_recovery import (
     parse_recovered_requirements,
     parse_recovery_provenance,
     parse_recovery_review,
-    recovered_requirements_for_source,
+    recovered_requirements_for_context,
     recovered_requirements_json,
     render_obsolete_explanation,
     render_recovered_requirements,
@@ -86,6 +86,7 @@ from hephaestus.automation.session_naming import AGENT_PLAN_REVIEWER, AGENT_PLAN
 from hephaestus.automation.state_labels import (
     ALL_IMPLEMENTATION_STATE_LABELS,
     ALL_STATE_LABELS,
+    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
@@ -228,13 +229,27 @@ def _refresh_requirements_recovery_context(
         raise RuntimeError("issue requirements snapshot is incomplete")
     contaminated = has_contaminated_issue_body(body)
     finalized = verified_finalized_plan(body)
+    if finalized is not None and not ctx.github.issue_body_edited_by_viewer(item.issue):
+        finalized = None
+        contaminated = True
+    labels = _issue_snapshot_labels(snapshot)
+    finalized_invalidated = ATHENA_FINALIZED_PLAN_LABEL in labels and finalized is None
     recovered = (
         next(
             (
                 restored
                 for comment in reversed(ctx.github.issue_comments(item.issue))
                 if comment.viewer_did_author
-                and (restored := recovered_requirements_for_source(comment.body, body_digest))
+                and (
+                    restored := recovered_requirements_for_context(
+                        comment.body,
+                        repository=item.repo,
+                        issue_number=item.issue,
+                        issue_title=title,
+                        source_body=body,
+                        repository_revision=_recovery_revision(item, None),
+                    )
+                )
                 is not None
             ),
             None,
@@ -250,6 +265,7 @@ def _refresh_requirements_recovery_context(
         item.payload.pop("requirements_recovery_source_digest", None)
         item.payload.pop("requires_plan_revision", None)
         contaminated = False
+        item.payload.pop("athena_finalized_plan_invalidated", None)
     elif recovered is not None:
         item.payload.pop("athena_finalized_plan_digest", None)
         item.payload["issue_body"] = recovered
@@ -261,6 +277,10 @@ def _refresh_requirements_recovery_context(
         item.payload.pop("athena_finalized_plan_digest", None)
         item.payload.pop("requirements_recovered_comment", None)
         item.payload.pop("requirements_recovery_source_digest", None)
+        if finalized_invalidated:
+            item.payload["athena_finalized_plan_invalidated"] = True
+        else:
+            item.payload.pop("athena_finalized_plan_invalidated", None)
     semantic_candidate = (
         finalized is None and recovered is None and is_semantic_disposition_candidate(title, body)
     )
@@ -376,6 +396,8 @@ def _apply_recovery_state_label(
     else:
         _add, removals = apply_plan_state(target)
         removals = [*removals, *ALL_IMPLEMENTATION_STATE_LABELS]
+    if ATHENA_FINALIZED_PLAN_LABEL not in extra:
+        removals = [*removals, ATHENA_FINALIZED_PLAN_LABEL]
     ctx.github.edit_labels(
         item.issue,
         add=[target, *extra],
@@ -393,9 +415,17 @@ def _apply_recovery_state_label(
             STATE_SKIP in live_labels
             and set(extra).issubset(live_labels)
             and not set(live_labels).intersection(ALL_STATE_LABELS)
+            and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
         )
-    return is_exclusive_plan_state(live_labels, target) and not set(live_labels).intersection(
-        ALL_IMPLEMENTATION_STATE_LABELS
+    return (
+        is_exclusive_plan_state(live_labels, target)
+        and set(extra).issubset(live_labels)
+        and not set(live_labels).intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+        and (
+            ATHENA_FINALIZED_PLAN_LABEL in live_labels
+            if ATHENA_FINALIZED_PLAN_LABEL in extra
+            else ATHENA_FINALIZED_PLAN_LABEL not in live_labels
+        )
     )
 
 
@@ -513,6 +543,8 @@ def _apply_confirmed_requirements(
         proposal.requirements,
         str(item.payload.get("requirements_evidence_digest") or ""),
         source_digest=source_digest,
+        issue_title=str(item.payload.get("issue_title") or ""),
+        repository_revision=str(item.payload.get("requirements_repository_revision") or ""),
     )
     ctx.github.upsert_issue_comment(item.issue, RECOVERY_PROVENANCE_PREFIX, recovered_body)
     item.payload["issue_body"] = proposal.requirements
@@ -588,6 +620,7 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
             str(item.payload.get("issue_body") or ""),
         )
         item.payload["requirements_evidence_digest"] = binding
+        item.payload["requirements_repository_revision"] = revision
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
@@ -630,6 +663,12 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
         workspace = source_workspace_binding(item, ctx, SourceLane.REVIEW)
         revision = _recovery_revision(item, workspace.revision if workspace is not None else None)
         binding = str(item.payload.get("requirements_evidence_digest") or "")
+        if proposal.evidence != binding:
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                "requirements proposal evidence binding did not match",
+            )
         job = AgentJob(
             repo=item.repo,
             issue=item.issue,
@@ -726,6 +765,7 @@ def _recovered_successor_is_current(
     """
     if not (
         snapshot.current_plan
+        and snapshot.recovery_source_digest == source_digest
         and snapshot.current_review_revision == snapshot.revision
         and is_pending_review(snapshot.current_review, revision=snapshot.revision)
     ):
@@ -763,7 +803,14 @@ def _bind_recovered_successor(
         if not comment.viewer_did_author:
             continue
         provenance = parse_recovery_provenance(comment.body)
-        requirements = recovered_requirements_for_source(comment.body, source_digest)
+        requirements = recovered_requirements_for_context(
+            comment.body,
+            repository=item.repo,
+            issue_number=item.issue,
+            issue_title=str(item.payload.get("issue_title") or ""),
+            source_body=source_body,
+            repository_revision=(provenance.repository_revision or "") if provenance else "",
+        )
         if provenance is None or requirements is None:
             continue
         ctx.github.upsert_issue_comment(
@@ -776,6 +823,8 @@ def _bind_recovered_successor(
                 source_digest=source_digest,
                 successor_revision=revision,
                 successor_plan_digest=plan_fingerprint(plan),
+                issue_title=str(item.payload.get("issue_title") or ""),
+                repository_revision=provenance.repository_revision,
             ),
         )
         return True
@@ -814,15 +863,27 @@ def _write_planning_entry_labels(
             add,
             remove,
         )
-        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+        ctx.github.edit_labels(
+            issue_number,
+            add=add,
+            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+        )
     elif force_replan:
         add, remove = enter_planning_transition()
         logger.info("planning:%d: forced entry swap; add %s, remove %s", issue_number, add, remove)
-        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+        ctx.github.edit_labels(
+            issue_number,
+            add=add,
+            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+        )
     elif STATE_PLAN_NO_GO in labels and revision_already_published:
         add, remove = enter_planning_transition()
         logger.info("planning:%d: entry swap; add %s, remove %s", issue_number, add, remove)
-        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+        ctx.github.edit_labels(
+            issue_number,
+            add=add,
+            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+        )
     elif is_replan_entry:
         # Keep state:plan-no-go authoritative until a revised canonical plan
         # has actually been published. This removes the crash window where a
@@ -840,11 +901,19 @@ def _write_planning_entry_labels(
             add,
             remove,
         )
-        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+        ctx.github.edit_labels(
+            issue_number,
+            add=add,
+            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+        )
     if ctx.dry_run:
         return True
     live_labels = _open_issue_labels_for_transition(issue_number, ctx)
-    return live_labels is not None and is_exclusive_plan_state(live_labels, expected_state)
+    return (
+        live_labels is not None
+        and is_exclusive_plan_state(live_labels, expected_state)
+        and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
+    )
 
 
 def _issue_snapshot_labels(data: object) -> list[str]:
@@ -891,9 +960,17 @@ def _mark_published_plan_pending_review(
     """Transition a rejected plan only after its replacement is durable."""
     if was_revision:
         add, remove = enter_planning_transition()
-        ctx.github.edit_labels(issue_number, add=add, remove=remove)
+        ctx.github.edit_labels(
+            issue_number,
+            add=add,
+            remove=[*remove, ATHENA_FINALIZED_PLAN_LABEL],
+        )
     live_labels = _open_issue_labels_for_transition(issue_number, ctx)
-    return live_labels is not None and is_exclusive_plan_state(live_labels, STATE_NEEDS_PLAN)
+    return (
+        live_labels is not None
+        and is_exclusive_plan_state(live_labels, STATE_NEEDS_PLAN)
+        and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
+    )
 
 
 def _publish_plan_blocked(
@@ -907,10 +984,19 @@ def _publish_plan_blocked(
     ctx.github.edit_labels(
         issue_number,
         add=[STATE_PLAN_BLOCKED],
-        remove=[STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO],
+        remove=[
+            STATE_NEEDS_PLAN,
+            STATE_PLAN_NO_GO,
+            STATE_PLAN_GO,
+            ATHENA_FINALIZED_PLAN_LABEL,
+        ],
     )
     live_labels = _open_issue_labels_for_transition(issue_number, ctx)
-    confirmed = live_labels is not None and is_exclusive_plan_state(live_labels, STATE_PLAN_BLOCKED)
+    confirmed = (
+        live_labels is not None
+        and is_exclusive_plan_state(live_labels, STATE_PLAN_BLOCKED)
+        and ATHENA_FINALIZED_PLAN_LABEL not in live_labels
+    )
     if not confirmed:
         return False
     ctx.github.upsert_issue_comment(
@@ -989,6 +1075,12 @@ def _publish_candidate_plan(
             reason=publication.no_progress_reason,
             revision=publication.revision,
         )
+    item.payload["published_plan_pending_followup"] = {
+        "plan": publication.plan,
+        "revision": publication.revision,
+        "was_revision": requires_revision,
+    }
+    item.payload.pop("requires_plan_revision", None)
     if not _bind_recovered_successor(
         item,
         ctx,
@@ -1008,13 +1100,73 @@ def _publish_candidate_plan(
             Disposition.RETRY,
             "exclusive needs-plan label was not confirmed",
         )
-    item.payload.pop("requires_plan_revision", None)
+    item.payload.pop("published_plan_pending_followup", None)
     return None
+
+
+def _resume_published_plan_followup(
+    item: WorkItem,
+    ctx: StageContext,
+) -> StageOutcome | None:
+    """Finish idempotent post-publication writes without republishing a plan."""
+    assert item.issue is not None  # noqa: S101 - stage validates the issue
+    pending_followup = item.payload.get("published_plan_pending_followup")
+    if pending_followup is None:
+        return None
+    if not isinstance(pending_followup, dict):
+        return StageOutcome(Disposition.FINISH_FAIL, "invalid plan publication receipt")
+    plan = pending_followup.get("plan")
+    revision = pending_followup.get("revision")
+    was_revision = pending_followup.get("was_revision")
+    if not (isinstance(plan, str) and isinstance(revision, int) and isinstance(was_revision, bool)):
+        return StageOutcome(Disposition.FINISH_FAIL, "invalid plan publication receipt")
+    if not _bind_recovered_successor(item, ctx, plan=plan, revision=revision):
+        return StageOutcome(
+            Disposition.RETRY,
+            "recovered plan successor provenance was not confirmed",
+        )
+    if not _mark_published_plan_pending_review(
+        item.issue,
+        ctx,
+        was_revision=was_revision,
+    ):
+        return StageOutcome(
+            Disposition.RETRY,
+            "exclusive needs-plan label was not confirmed",
+        )
+    item.payload.pop("published_plan_pending_followup", None)
+    return None
+
+
+def _verify_published_plan_state(item: WorkItem, ctx: StageContext) -> StageOutcome:
+    """Confirm the issue remains eligible after its durable plan publication."""
+    assert item.issue is not None  # noqa: S101 - stage validates the issue
+    live = ctx.github.gh_issue_json(item.issue)
+    if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+        return issue_outcome
+    labels = _issue_snapshot_labels(live)
+    if is_skipped(labels):
+        return StageOutcome(Disposition.SKIP, "state:skip")
+    if STATE_PLAN_BLOCKED in labels:
+        return StageOutcome(
+            Disposition.BLOCKED,
+            "plan was blocked externally before verification",
+        )
+    if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
+        return StageOutcome(
+            Disposition.RETRY,
+            "exclusive needs-plan label was not confirmed",
+        )
+    logger.info("planning:%d: plan verified; advancing", item.issue)
+    return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
 
 
 def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     """Publish or recover the candidate plan, then authorize advancement by label."""
     assert item.issue is not None  # noqa: S101 - stage validates the issue
+    if followup_outcome := _resume_published_plan_followup(item, ctx):
+        return followup_outcome
+
     lookup = ctx.github.discover_plan(item.issue)
     if lookup.status is PlanDiscoveryStatus.READ_ERROR:
         return _retry_incomplete_requirements_snapshot(
@@ -1062,24 +1214,7 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     if not awaiting_revision_candidate and (
         posted_plan or verified_lookup.status is PlanDiscoveryStatus.FOUND
     ):
-        live = ctx.github.gh_issue_json(item.issue)
-        if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
-            return issue_outcome
-        labels = _issue_snapshot_labels(live)
-        if is_skipped(labels):
-            return StageOutcome(Disposition.SKIP, "state:skip")
-        if STATE_PLAN_BLOCKED in labels:
-            return StageOutcome(
-                Disposition.BLOCKED,
-                "plan was blocked externally before verification",
-            )
-        if not is_exclusive_plan_state(labels, STATE_NEEDS_PLAN):
-            return StageOutcome(
-                Disposition.RETRY,
-                "exclusive needs-plan label was not confirmed",
-            )
-        logger.info("planning:%d: plan verified; advancing", item.issue)
-        return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
+        return _verify_published_plan_state(item, ctx)
 
     if posted_plan or initial_plan_found:
         return StageOutcome(Disposition.RETRY, "plan disappeared before verification")
@@ -1193,6 +1328,7 @@ class PlanningStage(Stage):
         if recovery_required:
             logger.info("planning:%d: requirements recovery required", item.issue)
             return None
+        force_replan = force_replan or bool(item.payload.get("athena_finalized_plan_invalidated"))
 
         # Athena finalization seals one exact GO-reviewed planning epoch into
         # the issue body. Its self-verifying F digest is durable planning
@@ -1200,8 +1336,18 @@ class PlanningStage(Stage):
         # deleted, and --force must not reopen that completed epoch. Normalize
         # the loop-owned label so downstream restart routing remains ordinary.
         if item.payload.get("athena_finalized_plan_digest"):
-            if not is_exclusive_plan_state(labels, STATE_PLAN_GO) and not (
-                ctx.dry_run or _apply_recovery_state_label(item, ctx, STATE_PLAN_GO)
+            finalized_state_current = (
+                is_exclusive_plan_state(labels, STATE_PLAN_GO)
+                and ATHENA_FINALIZED_PLAN_LABEL in labels
+            )
+            if not finalized_state_current and not (
+                ctx.dry_run
+                or _apply_recovery_state_label(
+                    item,
+                    ctx,
+                    STATE_PLAN_GO,
+                    extra=(ATHENA_FINALIZED_PLAN_LABEL,),
+                )
             ):
                 return StageOutcome(
                     Disposition.RETRY,
@@ -1251,6 +1397,24 @@ class PlanningStage(Stage):
             and snapshot.recovery_source_digest != recovered_source_digest
             and not recovered_successor
         )
+        pending_recovered_successor = bool(
+            recovered_artifact
+            and revision_already_published
+            and snapshot.recovery_source_digest == recovered_source_digest
+            and not recovered_successor
+        )
+        if pending_recovered_successor:
+            if not _bind_recovered_successor(
+                item,
+                ctx,
+                plan=snapshot.current_plan,
+                revision=snapshot.revision,
+            ):
+                return StageOutcome(
+                    Disposition.RETRY,
+                    "recovered plan successor provenance was not confirmed",
+                )
+            recovered_successor = True
         if recovered_restart:
             # The source-bound recovery artifact authorizes a new planning
             # epoch until it binds a successor plan to the recovered source.
@@ -1261,8 +1425,10 @@ class PlanningStage(Stage):
             revision_already_published = False
         elif recovered_successor:
             # The recovered successor and its pending review are both exact
-            # durable artifacts.  A fresh item must resume that review rather
-            # than reopening a replan epoch or rewriting state:needs-plan.
+            # durable artifacts. Legacy recovery provenance may predate the
+            # successor fields, but the host-owned plan source marker plus its
+            # paired pending review still proves the publication completed. A
+            # fresh item resumes review rather than republishing identical text.
             item.payload.pop("requires_plan_revision", None)
         if force_replan:
             if snapshot.forced_planning_epoch and not is_exclusive_plan_state(

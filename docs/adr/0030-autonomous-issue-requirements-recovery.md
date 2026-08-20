@@ -30,7 +30,9 @@ both decisions before automation applies `state:skip`.
 
 A recovered requirements artifact is an actor-owned comment carrying a hidden
 versioned provenance marker with SHA-256 digests of its source, evidence
-binding, and reconstructed requirements. The source issue body is never
+binding, and reconstructed requirements. Version 3 also binds the issue title
+and exact repository revision; restart recomputes the complete repository,
+issue, title, body, and revision identity before accepting it. The source issue body is never
 rewritten: GitHub exposes no server-enforced compare-and-swap for issue edits,
 so a read-then-write body update could overwrite a concurrent human edit.
 Restart reads only an authenticated actor-owned artifact whose source digest
@@ -47,11 +49,25 @@ An Athena-finalized planning epoch is the terminal exception to recovery. The
 planning stage accepts exactly one top-level
 `<!-- athena:finalize-plan R=... P=... V=... F=... -->` marker only when `F`
 matches SHA-256 of the complete UTF-8 body with that value replaced by the
-literal `<F>`. That verified body already contains a GO-reviewed plan, so the
+literal `<F>`. `P` and `V` must each encode one exact comment ID plus its
+canonical content digest, and the authenticated automation actor must own the
+latest issue-body edit. A checksum alone is integrity evidence, not
+authorization. That verified body already contains a GO-reviewed plan, so the
 stage does not invoke recovery or reopen it under `--force`; it atomically
-normalizes the issue to exclusive `state:plan-go` for downstream routing. A
-missing, malformed, duplicated, or mismatched marker—including a later
-material body edit—is not authority and enters the ordinary recovery path.
+normalizes the issue to exclusive `state:plan-go` and records the independent
+`athena:finalized-plan` evidence label for restart routing. The evidence label
+is metadata, never a third plan state or implementation gate. An intact marker
+with that evidence bypasses planning on every restart. If a later body rewrite
+removes the marker, seeding sends the issue through a fresh planning epoch and
+clears both the stale evidence and stale GO; malformed, duplicated, or
+mismatched markers enter autonomous requirements recovery. GitHub offers no
+historical signal when a finalized body is replaced before Hephaestus first
+observes it, so the durable drift guarantee begins with that first verified
+observation.
+
+Tracker labels and title patterns are candidates, not skip authority.
+Repository discovery routes them through independent semantic planning review;
+only a confirmed tracker or obsolete disposition may apply `state:skip`.
 
 ADR-0031 defines how these recovery roles coexist with the canonical plan and
 review roles, including their ownership and compaction rules.
@@ -92,7 +108,8 @@ Contaminated issues can recover without human intervention, and every
 actor-owned recovery artifact is attributable and replay-safe. Planning may spend two additional
 read-only agent calls when recovery or semantic disposition review is needed.
 Verified Athena-finalized issues spend no additional planner or plan-review
-model calls, while body drift deterministically invalidates that shortcut.
+model calls. Hephaestus records non-state evidence of that observation so later
+body drift deterministically invalidates the shortcut across process restarts.
 Open-PR issues can return to planning, so implementations that predate an
 approved plan may be redone. Operators receive bounded summary counters for
 recovery and skip actions rather than repeated warning noise. Obsolete reasons

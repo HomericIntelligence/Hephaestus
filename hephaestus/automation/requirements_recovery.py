@@ -18,23 +18,27 @@ from hephaestus.automation.review_journal import HISTORY_RE
 from hephaestus.automation.state_labels import is_epic
 from hephaestus.prompts import PromptCatalog
 
-RECOVERY_PROVENANCE_VERSION: Final[int] = 2
+RECOVERY_PROVENANCE_VERSION: Final[int] = 3
 RECOVERY_PROVENANCE_PREFIX: Final[str] = "<!-- hephaestus-recovered-requirements:"
 OBSOLETE_EXPLANATION_MARKER: Final[str] = "<!-- hephaestus-obsolete-explanation:v=1 -->"
 ATHENA_FINALIZED_PLAN_PREFIX: Final[str] = "<!-- athena:finalize-plan "
 
 _DIGEST_RE = r"[0-9a-f]{64}"
+_FINALIZED_COMMENT_ID_RE = r"[A-Za-z0-9_-]+"
+_FINALIZED_ARTIFACT_IDENTITY_RE = rf"{_FINALIZED_COMMENT_ID_RE}:{_DIGEST_RE}"
 _PROVENANCE_RE = re.compile(
     rf"^<!-- hephaestus-recovered-requirements:v=(?P<version>\d+):"
     rf"source=(?P<source>{_DIGEST_RE}):requirements=(?P<requirements>{_DIGEST_RE}):"
     rf"evidence=(?P<evidence>{_DIGEST_RE})"
+    rf"(?::title=(?P<title>{_DIGEST_RE}):revision=(?P<revision>[0-9a-f]{{40}}))?"
     rf"(?::successor_revision=(?P<successor_revision>\d+):"
     rf"successor_plan=(?P<successor_plan>{_DIGEST_RE}))? -->$"
 )
 _FINALIZED_PLAN_RE = re.compile(
     rf"^{re.escape(ATHENA_FINALIZED_PLAN_PREFIX)}"
     rf"R=(?P<requirements>{_DIGEST_RE}) "
-    rf"P=(?P<plan>[^\s<>]+) V=(?P<review>[^\s<>]+) "
+    rf"P=(?P<plan>{_FINALIZED_ARTIFACT_IDENTITY_RE}) "
+    rf"V=(?P<review>{_FINALIZED_ARTIFACT_IDENTITY_RE}) "
     rf"F=(?P<final>{_DIGEST_RE}) -->$",
 )
 _MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
@@ -88,6 +92,8 @@ class RecoveryProvenance:
     source_digest: str
     requirements_digest: str
     evidence_digest: str
+    title_digest: str | None = None
+    repository_revision: str | None = None
     successor_revision: int | None = None
     successor_plan_digest: str | None = None
 
@@ -153,8 +159,6 @@ def verified_finalized_plan(body: str) -> FinalizedPlanIdentity | None:
     line_offset, marker_line = candidates[0]
     match = _FINALIZED_PLAN_RE.fullmatch(marker_line)
     if match is None:
-        return None
-    if any(re.search(_DIGEST_RE, match.group(identity)) is None for identity in ("plan", "review")):
         return None
     final_start = line_offset + match.start("final")
     final_end = line_offset + match.end("final")
@@ -292,6 +296,8 @@ def render_recovered_requirements(
     source_digest: str | None = None,
     successor_revision: int | None = None,
     successor_plan_digest: str | None = None,
+    issue_title: str | None = None,
+    repository_revision: str | None = None,
 ) -> str:
     """Render requirements with a versioned, digest-bound hidden marker."""
     normalized = requirements.strip()
@@ -311,10 +317,26 @@ def render_recovered_requirements(
         and re.fullmatch(_DIGEST_RE, successor_plan_digest) is None
     ):
         raise ValueError("recovery successor plan digest must be a lowercase SHA-256 digest")
+    if (issue_title is None) != (repository_revision is None):
+        raise ValueError("issue title and repository revision must be supplied together")
+    contextual = issue_title is not None and repository_revision is not None
+    if (
+        issue_title is not None
+        and repository_revision is not None
+        and re.fullmatch(r"[0-9a-f]{40}", repository_revision) is None
+    ):
+        raise ValueError("repository revision must be a lowercase full SHA-1")
+    version = RECOVERY_PROVENANCE_VERSION if contextual else 2
+    context_marker = (
+        f":title={_sha256(issue_title)}:revision={repository_revision}"
+        if issue_title is not None and repository_revision is not None
+        else ""
+    )
     marker = (
-        f"{RECOVERY_PROVENANCE_PREFIX}v={RECOVERY_PROVENANCE_VERSION}:"
+        f"{RECOVERY_PROVENANCE_PREFIX}v={version}:"
         f"source={bound_source_digest}:requirements={_sha256(normalized)}:"
         f"evidence={evidence_binding}"
+        + context_marker
         + (
             f":successor_revision={successor_revision}:successor_plan={successor_plan_digest}"
             if successor_revision is not None
@@ -336,7 +358,13 @@ def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
     requirements = remainder.lstrip("\n")
     successor_revision = match.group("successor_revision")
     successor_plan = match.group("successor_plan")
-    if version not in {1, RECOVERY_PROVENANCE_VERSION}:
+    title_digest = match.group("title")
+    repository_revision = match.group("revision")
+    if version not in {1, 2, RECOVERY_PROVENANCE_VERSION}:
+        return None
+    if version >= 3 and (title_digest is None or repository_revision is None):
+        return None
+    if version < 3 and (title_digest is not None or repository_revision is not None):
         return None
     if (successor_revision is None) != (successor_plan is None):
         return None
@@ -347,6 +375,8 @@ def parse_recovery_provenance(body: str) -> RecoveryProvenance | None:
         source_digest=match.group("source"),
         requirements_digest=match.group("requirements"),
         evidence_digest=match.group("evidence"),
+        title_digest=title_digest,
+        repository_revision=repository_revision,
         successor_revision=int(successor_revision) if successor_revision is not None else None,
         successor_plan_digest=successor_plan,
     )
@@ -356,6 +386,37 @@ def recovered_requirements_for_source(body: str, source_digest: str) -> str | No
     """Return a verified recovered-comment payload bound to *source_digest*."""
     provenance = parse_recovery_provenance(body)
     if provenance is None or provenance.source_digest != source_digest:
+        return None
+    _marker, _separator, requirements = body.lstrip().partition("\n")
+    return requirements.lstrip("\n") or None
+
+
+def recovered_requirements_for_context(
+    body: str,
+    *,
+    repository: str,
+    issue_number: int,
+    issue_title: str,
+    source_body: str,
+    repository_revision: str,
+) -> str | None:
+    """Return requirements only when every recovery evidence identity is current."""
+    provenance = parse_recovery_provenance(body)
+    if provenance is None or provenance.version < RECOVERY_PROVENANCE_VERSION:
+        return None
+    if (
+        provenance.source_digest != _sha256(source_body)
+        or provenance.title_digest != _sha256(issue_title)
+        or provenance.repository_revision != repository_revision
+        or provenance.evidence_digest
+        != evidence_digest(
+            repository,
+            issue_number,
+            repository_revision,
+            issue_title,
+            source_body,
+        )
+    ):
         return None
     _marker, _separator, requirements = body.lstrip().partition("\n")
     return requirements.lstrip("\n") or None
