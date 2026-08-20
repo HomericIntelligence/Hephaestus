@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -13,6 +14,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "scripts" / "run_ci_local.sh"
 FAKE_IMAGE_ID = f"sha256:{'a' * 64}"
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _fake_engine(
@@ -142,6 +144,7 @@ def _run_runner(
     rebuild_image: bool = False,
     external_git_common_dir: Path | None = None,
     repo_root: Path = REPO_ROOT,
+    color_environment: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -176,6 +179,10 @@ def _run_runner(
         "HEPHAESTUS_CI_REBUILD": "1" if rebuild_image else "0",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
+    for name in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
+        environment.pop(name, None)
+    if color_environment:
+        environment.update(color_environment)
     result = subprocess.run(
         ["bash", str(repo_root / "scripts" / "run_ci_local.sh"), subset],
         cwd=repo_root,
@@ -190,8 +197,12 @@ def _run_runner(
 def _candidate_repo(tmp_path: Path) -> Path:
     """Create a tiny repository that executes the real local-CI wrapper."""
     repo = tmp_path / "candidate-repo"
-    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "shell" / "lib").mkdir(parents=True)
     shutil.copy2(RUNNER, repo / "scripts" / "run_ci_local.sh")
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "shell" / "lib" / "install_helpers.sh",
+        repo / "scripts" / "shell" / "lib" / "install_helpers.sh",
+    )
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     (repo / "tracked.py").write_text("TRACKED = True\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True)
@@ -526,6 +537,38 @@ def test_subset_success_message_names_only_the_requested_subset(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
     assert "Local CI subset 'integration' passed." in result.stdout
     assert "All local CI checks passed." not in result.stdout
+
+
+def test_non_tty_ci_runner_output_is_plain_by_default(tmp_path: Path) -> None:
+    """The executable CI runner does not emit ANSI into redirected output."""
+    result, _ = _run_runner(tmp_path, "integration")
+
+    assert result.returncode == 0, result.stderr
+    assert ANSI.search(result.stdout) is None
+
+
+def test_no_color_wins_over_force_color_for_ci_runner(tmp_path: Path) -> None:
+    """NO_COLOR suppresses ANSI even when a force control is also set."""
+    result, _ = _run_runner(
+        tmp_path,
+        "integration",
+        color_environment={"NO_COLOR": "1", "FORCE_COLOR": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert ANSI.search(result.stdout) is None
+
+
+def test_force_color_enables_ansi_for_non_tty_ci_runner(tmp_path: Path) -> None:
+    """FORCE_COLOR enables the shared policy when stdout is redirected."""
+    result, _ = _run_runner(
+        tmp_path,
+        "integration",
+        color_environment={"FORCE_COLOR": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert ANSI.search(result.stdout) is not None
 
 
 def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> None:
