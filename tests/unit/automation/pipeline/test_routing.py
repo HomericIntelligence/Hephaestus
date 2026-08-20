@@ -18,6 +18,7 @@ from hephaestus.automation.pipeline.routing import (
     AUXILIARY_PIPELINE_ORDER,
     MAIN_PIPELINE_ORDER,
     PIPELINE_ORDER,
+    _pipeline_order,
 )
 
 _ROUTE_CASES = tuple(pytest.param(stage, route, id=stage.value) for stage, route in ROUTES.items())
@@ -198,6 +199,20 @@ class TestROUTES:
         assert AUXILIARY_PIPELINE_ORDER == (StageName.LEARNING, StageName.FINISHED)
         assert PIPELINE_ORDER[-1] is StageName.FINISHED
         assert tuple(reversed(PIPELINE_ORDER)) == _DRAIN_ORDER
+
+    def test_terminal_sink_is_last_when_routes_are_reordered(self) -> None:
+        """FINISHED stays last even if the route table places it earlier."""
+        reordered = {
+            StageName.FINISHED: ROUTES[StageName.FINISHED],
+            StageName.PLANNING: ROUTES[StageName.PLANNING],
+            StageName.PLAN_REVIEW: ROUTES[StageName.PLAN_REVIEW],
+        }
+
+        assert _pipeline_order(reordered) == (
+            StageName.PLANNING,
+            StageName.PLAN_REVIEW,
+            StageName.FINISHED,
+        )
 
     @pytest.mark.parametrize("stages", _SCOPE_CASES)
     def test_route_order_drives_every_contiguous_scope(self, stages: frozenset[StageName]) -> None:
