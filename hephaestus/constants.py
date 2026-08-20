@@ -104,9 +104,7 @@ def read_timeout_env(
             default,
         )
         return default
-    if (minimum is not None and value < minimum) or (
-        maximum is not None and value > maximum
-    ):
+    if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
         _logger.warning(
             "Ignoring out-of-range %s; using default %ds",
             env_name,
