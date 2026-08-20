@@ -36,16 +36,6 @@ def _gh_error(stderr: str) -> subprocess.CalledProcessError:
     return subprocess.CalledProcessError(1, ["gh"], output="", stderr=stderr)
 
 
-def _issue_body_edit_error(stderr: str) -> subprocess.CalledProcessError:
-    """Build an error from the exact issue-body publication command."""
-    return subprocess.CalledProcessError(
-        1,
-        ["gh", "issue", "edit", "7", "--body-file", "/tmp/body.md"],
-        output="",
-        stderr=stderr,
-    )
-
-
 class TestBreakerPredicateWiring:
     """The ``ignore`` predicate must be defined before ``_GH_BREAKER`` uses it."""
 
@@ -200,17 +190,11 @@ class TestPerTargetPatternInvariants:
         assert _is_service_failure(ConnectionError("reset by peer"))
         assert _is_service_failure(TimeoutError())
 
-    def test_issue_body_size_rejection_is_not_a_service_failure(self) -> None:
-        """A target-specific size rejection must not poison unrelated GitHub calls."""
-        error = _issue_body_edit_error("gh: HTTP 422: body is too long")
-
-        assert not _is_service_failure(error)
-
     @pytest.mark.parametrize(
         "error",
         [
             _gh_error("gh: HTTP 422: body is too long"),
-            _issue_body_edit_error("gh: HTTP 422: validation failed"),
+            _gh_error("gh: HTTP 422: validation failed"),
         ],
     )
     def test_other_422_errors_remain_service_failures(

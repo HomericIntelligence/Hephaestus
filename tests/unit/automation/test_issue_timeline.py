@@ -19,6 +19,7 @@ from hephaestus.automation.requirements_recovery import (
     render_recovered_requirements,
 )
 from hephaestus.automation.review_journal import (
+    FORCED_PLANNING_EPOCH_MARKER,
     HISTORY_MARKER,
     IssueComment,
     archive_plan_body,
@@ -68,6 +69,27 @@ def test_compaction_keeps_only_latest_owned_plan_and_review() -> None:
     assert result.review_body.startswith(PLAN_REVIEW_CANONICAL_MARKER)
     assert "GO" in result.review_body
     assert result.delete_comment_ids == (2, 3, 4, 5, 8, 9)
+
+
+def test_compaction_preserves_forced_planning_epoch_marker() -> None:
+    """A compacted forced plan remains restart authority for --force."""
+    comments = [
+        _comment(1, render_current_plan("Old plan", revision=1)),
+        _comment(
+            2,
+            render_current_plan(
+                "Forced replacement",
+                revision=2,
+                forced_planning_epoch=True,
+            ),
+        ),
+        _comment(3, render_current_review("Pending", revision=2)),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.plan_body is not None
+    assert FORCED_PLANNING_EPOCH_MARKER in result.plan_body
 
 
 def test_compaction_never_claims_or_deletes_foreign_marker_comments() -> None:

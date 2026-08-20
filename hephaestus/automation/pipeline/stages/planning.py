@@ -224,12 +224,15 @@ def _refresh_requirements_recovery_context(
         ),
         None,
     )
+    item.payload["issue_source_body"] = body
     if recovered is not None:
         item.payload["issue_body"] = recovered
         item.payload["requirements_recovered_comment"] = True
         item.payload["requires_plan_revision"] = True
         contaminated = False
-    semantic_candidate = is_semantic_disposition_candidate(title, body)
+    else:
+        item.payload.pop("requirements_recovered_comment", None)
+    semantic_candidate = recovered is None and is_semantic_disposition_candidate(title, body)
     semantic_already_cleared = item.payload.get("requirements_semantic_clear_digest") == body_digest
     required = contaminated or (semantic_candidate and not semantic_already_cleared)
     item.payload["issue_title"] = title
@@ -303,8 +306,6 @@ def _finish_recovery(item: WorkItem) -> None:
     _clear_recovery_results(item)
     item.payload.pop("requirements_recovery_required", None)
     item.payload.pop("requirements_recovery_contaminated", None)
-    item.payload.pop("requirements_compact_retry", None)
-    item.payload.pop("requirements_publication_rejections", None)
 
 
 def _reset_plan_review_session(item: WorkItem, ctx: StageContext) -> None:
@@ -338,6 +339,7 @@ def _apply_recovery_state_label(
         ]
     else:
         _add, removals = apply_plan_state(target)
+        removals = [*removals, *ALL_IMPLEMENTATION_STATE_LABELS]
     ctx.github.edit_labels(
         item.issue,
         add=[target, *extra],
@@ -346,9 +348,8 @@ def _apply_recovery_state_label(
     live_labels = _require_issue_labels_for_transition(item.issue, ctx)
     if target == STATE_SKIP:
         return STATE_SKIP in live_labels and not set(live_labels).intersection(ALL_STATE_LABELS)
-    return is_exclusive_plan_state(
-        live_labels,
-        target,
+    return is_exclusive_plan_state(live_labels, target) and not set(live_labels).intersection(
+        ALL_IMPLEMENTATION_STATE_LABELS
     )
 
 
@@ -454,7 +455,7 @@ def _apply_confirmed_requirements(
     # because GitHub has no compare-and-swap primitive for body replacement.
     if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
         return StageOutcome(Disposition.RETRY, "recovery plan-no-go was not confirmed")
-    source_body = str(item.payload.get("issue_body") or "")
+    source_body = str(item.payload.get("issue_source_body", item.payload.get("issue_body")) or "")
     source_digest = str(item.payload.get("issue_body_digest") or "")
     recovered_body = render_recovered_requirements(
         source_body,
@@ -466,6 +467,8 @@ def _apply_confirmed_requirements(
     item.payload["issue_body"] = proposal.requirements
     item.payload["requirements_recovered_comment"] = True
     item.payload["requires_plan_revision"] = True
+    if bool(getattr(ctx.config, "force", False)):
+        item.payload["forced_planning_epoch_started"] = True
     item.payload.pop("plan_text", None)
     item.payload.pop("issue_history", None)
     record_summary_action(item, "requirements-recovered")
@@ -487,7 +490,7 @@ def _apply_requirements_recovery(
     if STATE_PLAN_BLOCKED in _require_issue_labels_for_transition(item.issue, ctx):
         return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
     expected_title = item.payload.get("issue_title")
-    expected_body = item.payload.get("issue_body")
+    expected_body = item.payload.get("issue_source_body", item.payload.get("issue_body"))
     expected_digest = item.payload.get("issue_body_digest")
     if all(isinstance(value, str) for value in (expected_title, expected_body, expected_digest)):
         live = ctx.github.gh_issue_json(item.issue)
@@ -552,7 +555,6 @@ def _requirements_recovery_step(item: WorkItem, ctx: StageContext) -> StepResult
                 "repository": item.repo,
                 "repository_revision": revision,
                 "evidence_binding": binding,
-                "compact_retry": bool(item.payload.get("requirements_compact_retry")),
             },
             parse=parse_recovered_requirements,
             descr="recover_requirements",
@@ -1011,7 +1013,7 @@ class PlanningStage(Stage):
         try:
             recovery_required = _refresh_requirements_recovery_context(item, ctx)
         except CommentJournalReadError as exc:
-            return StageOutcome(Disposition.RETRY, f"plan journal read failed: {exc}")
+            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         except RuntimeError as exc:
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         if recovery_required:
@@ -1045,10 +1047,17 @@ class PlanningStage(Stage):
                 item.issue,
                 exc,
             )
-            return StageOutcome(
-                Disposition.RETRY,
-                f"plan journal read failed: {exc}",
-            )
+            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
+        recovered_restart = bool(item.payload.get("requirements_recovered_comment"))
+        if recovered_restart:
+            # The source-bound recovery artifact authorizes a new planning
+            # epoch, never reuse of the plan that was derived from the
+            # contaminated issue body.
+            item.payload.pop("plan_text", None)
+            item.payload.pop("plan_revision", None)
+            item.payload.pop("issue_history", None)
+            is_replan_entry = True
+            revision_already_published = False
         if force_replan:
             if revision_already_published and snapshot.forced_planning_epoch:
                 force_replan = False
@@ -1084,7 +1093,9 @@ class PlanningStage(Stage):
         # Restart fast-forward: journal reconciliation already found a current
         # plan, so re-entry must not redo advise + plan.
         # Jump straight to VERIFY; idempotent on repeated on_enter calls.
-        if _plan_is_ready_for_verify(snapshot, is_replan_entry=is_replan_entry):
+        if not recovered_restart and _plan_is_ready_for_verify(
+            snapshot, is_replan_entry=is_replan_entry
+        ):
             logger.info(
                 "planning:%d: plan comment already exists; fast-forward to VERIFY", item.issue
             )

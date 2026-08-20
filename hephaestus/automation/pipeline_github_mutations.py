@@ -181,9 +181,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
                 and self._comment_owned_by_viewer(comment)
             ]
             if not owned:
-                # GitHub may be briefly read-after-write stale. The next
-                # idempotent pass will discover and converge the new pointer.
-                return
+                raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
 
         target_id = owned[-1].get("databaseId")
         if target_id is None:
@@ -192,7 +190,17 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
         if str(owned[-1].get("body", "")) != body:
+        if str(owned[-1].get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
+            comments = self._repo_issue_comments(issue_number)
+            owned = [
+                comment
+                for comment in comments
+                if has_exact_leading_marker(str(comment.get("body", "")), marker)
+                and self._comment_owned_by_viewer(comment)
+            ]
+        if not owned or str(owned[-1].get("body", "")) != body:
+            raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
         for duplicate in owned[:-1]:
             duplicate_id = duplicate.get("databaseId")
             if duplicate_id is not None:

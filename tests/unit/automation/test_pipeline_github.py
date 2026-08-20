@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from multiprocessing import get_context
@@ -3115,16 +3113,49 @@ class TestMutatorMapping:
     def test_upsert_plan_comment_keys_on_marker(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        fetch = MagicMock(return_value=[])
+        body = render_current_plan("body")
+        fetch = MagicMock(
+            side_effect=[
+                [],
+                [{"body": body, "databaseId": 100, "viewerDidAuthor": True}],
+            ]
+        )
         post = MagicMock()
         monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
-        body = render_current_plan("body")
 
         adapter.upsert_plan_comment(5, body)
 
         assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
+
+    def test_upsert_create_requires_owned_exact_body_readback(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful transport write is not a durable publication receipt."""
+        body = render_current_plan("body")
+        monkeypatch.setattr(adapter, "_repo_issue_comments", MagicMock(side_effect=[[], []]))
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", MagicMock())
+
+        with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
+            adapter.upsert_plan_comment(5, body)
+
+    def test_upsert_patch_requires_owned_exact_body_readback(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PATCH success cannot advance until GitHub returns the requested body."""
+        old = render_current_plan("old")
+        new = render_current_plan("new")
+        stale = {"body": old, "databaseId": 100, "viewerDidAuthor": True}
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(side_effect=[[stale], [stale]]),
+        )
+        monkeypatch.setattr(pg, "gh_call", MagicMock())
+
+        with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
+            adapter.upsert_plan_comment(5, new)
 
     def test_upsert_ignores_foreign_canonical_marker_and_creates_owned_comment(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -4761,9 +4792,14 @@ class TestRepoScoping:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
+        current_body = f"{PLAN_COMMENT_MARKER}\nold"
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            nonlocal current_body
             calls.append(argv)
+            if argv[:3] == ["api", "--method", "PATCH"]:
+                current_body = render_current_plan("new")
+                return SimpleNamespace(stdout="")
             if argv == [
                 "api",
                 "/repos/org/repo-a/issues/5/comments?per_page=100&page=1",
@@ -4771,7 +4807,8 @@ class TestRepoScoping:
                 payload = [
                     {
                         "id": 9,
-                        "body": render_current_plan("old"),
+                        "id": 9,
+                        "body": current_body,
                         "viewerDidAuthor": True,
                     }
                 ]

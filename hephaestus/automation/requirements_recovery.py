@@ -268,7 +268,6 @@ def build_recovery_prompt(
     repository: str,
     repository_revision: str,
     evidence_binding: str,
-    compact_retry: bool = False,
 ) -> str:
     """Build the evidence-fenced requirements reconstruction prompt."""
     fenced = fence_content()
@@ -279,7 +278,6 @@ def build_recovery_prompt(
         repository=repository,
         repository_revision=repository_revision,
         evidence_binding=evidence_binding,
-        compact_retry=compact_retry,
         issue_title_block=fenced.fence("ISSUE_TITLE", issue_title),
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
     )

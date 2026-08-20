@@ -84,7 +84,6 @@ __all__ = [
     "GitHubJob",
     "GitJob",
     "ImplementationThreadReplyResult",
-    "IssueBodyReplacementResult",
     "ItemKind",
     "JobHandle",
     "JobRequest",
@@ -130,27 +129,6 @@ class ConditionalMergeResult:
     transport_error: bool = False
     malformed: bool = False
     dry_run: bool = False
-
-
-@dataclass(frozen=True)
-class IssueBodyReplacementResult:
-    """Outcome of one digest-guarded issue-body replacement.
-
-    ``replaced`` is true only after an exact body and digest readback.
-    ``conflict`` means the freshly fetched body no longer matches the caller's
-    comparison token. ``retryable`` represents a transport or readback
-    ambiguity for which this adapter cannot safely claim success. ``rejected``
-    is an explicit server-side validation/size rejection and is distinct from
-    transport uncertainty. Dry-run reports intent without reading or mutating
-    GitHub.
-    """
-
-    replaced: bool = False
-    conflict: bool = False
-    retryable: bool = False
-    rejected: bool = False
-    dry_run: bool = False
-    body_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -209,15 +187,6 @@ class StageGitHub(Protocol):
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (mirrors ``github_api.issues.gh_issue_json``)."""
-        ...
-
-    def replace_issue_body_if_unchanged(
-        self,
-        issue_number: int,
-        expected_body_digest: str,
-        new_body: str,
-    ) -> IssueBodyReplacementResult:
-        """Best-effort replace after a fresh digest match; see ADR-0030's accepted race."""
         ...
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:

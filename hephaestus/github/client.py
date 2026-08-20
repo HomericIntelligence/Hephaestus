@@ -114,22 +114,6 @@ def _is_per_target_error(stderr: str) -> bool:
     return any(p.search(stderr) for p in _PER_TARGET_PATTERNS)
 
 
-def _is_issue_body_size_rejection(exc: subprocess.CalledProcessError) -> bool:
-    """Return whether one issue-body edit exceeded GitHub's body limit.
-
-    This deliberately checks both the exact mutation shape and the narrow
-    validation message. Generic HTTP 422 responses remain breaker failures.
-    """
-    command = [str(part) for part in exc.cmd] if isinstance(exc.cmd, (list, tuple)) else []
-    stderr = exc.stderr or ""
-    return (
-        len(command) >= 6
-        and command[:3] == ["gh", "issue", "edit"]
-        and "--body-file" in command
-        and "body is too long" in stderr.casefold()
-    )
-
-
 def _is_service_failure(exc: BaseException) -> bool:
     """Report whether *exc* is evidence that the GitHub API itself is unhealthy.
 
@@ -137,8 +121,6 @@ def _is_service_failure(exc: BaseException) -> bool:
     (connection reset, timeout) is treated as a genuine service failure.
     """
     if isinstance(exc, subprocess.CalledProcessError):
-        if _is_issue_body_size_rejection(exc):
-            return False
         return not _is_per_target_error(exc.stderr or "")
     return True
 
