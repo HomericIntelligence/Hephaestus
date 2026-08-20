@@ -83,6 +83,44 @@ def test_review_commit_oid_must_match_live_head() -> None:
     assert resolution.status is MergeAuthorizationStatus.STALE
 
 
+def test_null_review_author_is_untrusted_without_vetoing_valid_approval() -> None:
+    """A deleted GitHub actor is untrusted, not a malformed-snapshot outage."""
+    deleted_actor = _review("deleted")
+    deleted_actor["author"] = None
+
+    resolution = _resolve((_review("trusted"), deleted_actor))
+
+    assert resolution.status is MergeAuthorizationStatus.AUTHORIZED
+    assert resolution.authorization is not None
+    assert resolution.authorization.review_id == "trusted"
+
+
+def test_permission_lookup_is_deferred_and_casefold_cached() -> None:
+    """Only current human candidates consume one permission read per actor."""
+    calls: list[str] = []
+
+    def permission_for_actor(login: str) -> str:
+        calls.append(login)
+        return "WRITE"
+
+    resolution = resolve_merge_authorization(
+        (
+            _review("stale", head="b" * 40, author="Stale"),
+            _review("bot", author="automation[bot]"),
+            _review("one", author="Operator"),
+            _review("two", author="operator"),
+        ),
+        repository="org/repo",
+        pr_number=12,
+        head_sha=HEAD,
+        automation_login="hephaestus[bot]",
+        permission_for_actor=permission_for_actor,
+    )
+
+    assert resolution.status is MergeAuthorizationStatus.AMBIGUOUS
+    assert calls == ["Operator"]
+
+
 def test_edited_canonical_review_is_replayed() -> None:
     """A trusted review edited after creation is never accepted."""
     resolution = _resolve((_review(includes_created_edit=True),))

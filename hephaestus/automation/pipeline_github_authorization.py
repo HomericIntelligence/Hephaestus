@@ -9,13 +9,58 @@ from contextlib import suppress
 from urllib.parse import quote
 
 from hephaestus.automation.merge_authorization import normalize_review_database_id
+from hephaestus.github.client import gh_call
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *  # noqa: F403
+from .pipeline_github_transport import _parse_included_http_response
 
 
 class PipelineGitHubAuthorization(_PipelineGitHubHost):
     """Own complete native-review and collaborator-permission snapshots."""
+
+    def _review_commit_id(self, pr_number: int, review_database_id: int) -> str:
+        """Return the REST review's immutable commit ID or fail closed."""
+        if self._repo_slug is None or pr_number <= 0 or review_database_id <= 0:
+            raise RuntimeError("review commit requires a repo-scoped review identity")
+        owner, name = self._owner_name()
+        result = gh_call(
+            [
+                "api",
+                "--method",
+                "GET",
+                f"repos/{owner}/{name}/pulls/{pr_number}/reviews/{review_database_id}",
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("merge authorization review is unavailable")
+        try:
+            review = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("merge authorization review is malformed") from exc
+        if not isinstance(review, dict) or review.get("id") != review_database_id:
+            raise RuntimeError("merge authorization review identity is malformed")
+        commit_id = review.get("commit_id")
+        if not isinstance(commit_id, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_id):
+            raise RuntimeError("merge authorization review commit is malformed")
+        return commit_id
+
+    def _bind_rest_review_commits(
+        self, pr_number: int, reviews: list[dict[str, object]]
+    ) -> tuple[dict[str, object], ...]:
+        """Require REST and GraphQL to agree on every marked review's head."""
+        for review in reviews:
+            if review.get("body") != "<!-- hephaestus-merge-authorization:v1 -->":
+                continue
+            database_id = review.get("fullDatabaseId")
+            if isinstance(database_id, bool) or not isinstance(database_id, int):
+                raise RuntimeError("merge authorization review database id is unavailable")
+            commit_id = self._review_commit_id(pr_number, database_id)
+            graph_commit = review.get("commit")
+            if not isinstance(graph_commit, Mapping) or graph_commit.get("oid") != commit_id:
+                raise RuntimeError("merge authorization review commit changed during admission")
+        return tuple(reviews)
 
     def _complete_merge_authorization_review_snapshot(  # noqa: C901
         self, pr_number: int
@@ -114,7 +159,7 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
             if not page_info["hasNextPage"]:
                 if expected_total != len(reviews):
                     raise RuntimeError("merge authorization review traversal was truncated")
-                return tuple(reviews)
+                return self._bind_rest_review_commits(pr_number, reviews)
             next_cursor = page_info.get("endCursor")
             if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
                 raise RuntimeError("merge authorization review cursor loop")
@@ -139,34 +184,21 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
         if self._repo_slug is None or not isinstance(login, str) or not login:
             raise RuntimeError("repository permission requires a repo and actor")
         owner, name = self._owner_name()
-        result = self._gh(
+        result = gh_call(
             [
                 "api",
                 "--method",
                 "GET",
                 "--include",
-                f"/repos/{owner}/{name}/collaborators/{quote(login, safe='')}/permission",
+                f"repos/{owner}/{name}/collaborators/{quote(login, safe='')}/permission",
             ],
             check=False,
         )
         stdout = result.stdout if isinstance(result.stdout, str) else ""
-        matches = list(re.finditer(r"^HTTP/\S+\s+(\d{3})\b", stdout, re.MULTILINE))
-        if not matches:
-            return None, None
-        status = int(matches[-1].group(1))
-        body_start = stdout.find("\n\n", matches[-1].start())
-        if body_start < 0:
-            body_start = stdout.find("\r\n\r\n", matches[-1].start())
-            separator_length = 4
-        else:
-            separator_length = 2
-        if body_start < 0:
+        status, body, malformed = _parse_included_http_response(stdout)
+        if status == 404:
             return status, None
-        try:
-            body = json.loads(stdout[body_start + separator_length :].strip())
-        except json.JSONDecodeError:
-            return status, None
-        return status, body if isinstance(body, dict) else None
+        return status, None if malformed else body
 
     def repository_permission_for_actor(self, login: str) -> str:
         """Return the actor's current legacy repository permission."""

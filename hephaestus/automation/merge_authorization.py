@@ -129,17 +129,25 @@ def _mapping_field(review: Mapping[str, object], field: str) -> object:
     return review[field]
 
 
-def _provenance(review: Mapping[str, object]) -> tuple[str, str, bool, str]:
+def _provenance(review: Mapping[str, object]) -> tuple[str | None, str | None, bool, str]:
     """Read the fields needed to establish actor and head provenance."""
     author = _mapping_field(review, "author")
-    if not isinstance(author, Mapping):
+    if author is None:
+        # GitHub legitimately returns null for deleted users.  It remains
+        # untrusted provenance, but must not turn a valid operator approval
+        # elsewhere in the snapshot into an availability failure.
+        author_login: str | None = None
+        actor_type: str | None = None
+    elif not isinstance(author, Mapping):
         raise ValueError("review author is unavailable")
-    login = author.get("login")
-    actor_type = author.get("__typename")
-    if not isinstance(login, str) or not login:
-        raise ValueError("review author login is unavailable")
-    if not isinstance(actor_type, str) or not actor_type:
-        raise ValueError("review author type is unavailable")
+    else:
+        login = author.get("login")
+        actor_type = author.get("__typename")
+        if not isinstance(login, str) or not login:
+            raise ValueError("review author login is unavailable")
+        if not isinstance(actor_type, str) or not actor_type:
+            raise ValueError("review author type is unavailable")
+        author_login = login
 
     viewer_did_author = _mapping_field(review, "viewerDidAuthor")
     if not isinstance(viewer_did_author, bool):
@@ -151,7 +159,7 @@ def _provenance(review: Mapping[str, object]) -> tuple[str, str, bool, str]:
     commit_oid = commit.get("oid")
     if not isinstance(commit_oid, str) or not commit_oid:
         raise ValueError("review commit OID is unavailable")
-    return login, actor_type, viewer_did_author, commit_oid
+    return author_login, actor_type, viewer_did_author, commit_oid
 
 
 def _permission(value: str) -> str:
@@ -167,23 +175,40 @@ def _permission(value: str) -> str:
 
 
 def _trusted_actor(
-    login: str,
-    actor_type: str,
+    login: str | None,
+    actor_type: str | None,
     viewer_did_author: bool,
     *,
     automation_login: str,
     permission_for_actor: Callable[[str], str],
 ) -> tuple[bool, str]:
     """Return whether actor provenance is trusted and its normalized permission."""
-    if (
-        actor_type != "User"
-        or viewer_did_author
-        or login.casefold() == automation_login.casefold()
-        or login.casefold().endswith("[bot]")
+    if not _eligible_actor_without_permission(
+        login, actor_type, viewer_did_author, automation_login=automation_login
     ):
+        return False, "NONE"
+    if login is None:
         return False, "NONE"
     actor_permission = _permission(permission_for_actor(login))
     return actor_permission in {"WRITE", "ADMIN"}, actor_permission
+
+
+def _eligible_actor_without_permission(
+    login: str | None,
+    actor_type: str | None,
+    viewer_did_author: bool,
+    *,
+    automation_login: str,
+) -> bool:
+    """Reject actors that never merit a collaborator-permission request."""
+    return not (
+        login is None
+        or actor_type is None
+        or actor_type != "User"
+        or viewer_did_author
+        or login.casefold() == automation_login.casefold()
+        or login.casefold().endswith("[bot]")
+    )
 
 
 def _candidate_metadata(
@@ -275,6 +300,14 @@ def resolve_merge_authorization(  # noqa: C901
     stale = False
     untrusted = False
     marked_ids: set[str] = set()
+    permission_cache: dict[str, str] = {}
+
+    def cached_permission(login: str) -> str:
+        """Read a relevant human actor once, case-insensitively per resolution."""
+        key = login.casefold()
+        if key not in permission_cache:
+            permission_cache[key] = permission_for_actor(login)
+        return permission_cache[key]
 
     for review in reviews:
         if not isinstance(review, Mapping):
@@ -290,19 +323,21 @@ def resolve_merge_authorization(  # noqa: C901
             marked_ids.add(review_id)
         login, actor_type, viewer_did_author, commit_oid = _provenance(review)
         current_head = commit_oid == head_sha
+        if not current_head:
+            stale = stale or _eligible_actor_without_permission(
+                login, actor_type, viewer_did_author, automation_login=automation_login
+            )
+            continue
         trusted, permission = _trusted_actor(
             login,
             actor_type,
             viewer_did_author,
             automation_login=automation_login,
-            permission_for_actor=permission_for_actor,
+            permission_for_actor=cached_permission,
         )
         if not trusted:
             if current_head:
                 untrusted = True
-            continue
-        if not current_head:
-            stale = True
             continue
         try:
             candidate = _candidate_metadata(

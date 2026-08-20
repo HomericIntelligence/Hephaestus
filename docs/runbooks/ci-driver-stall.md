@@ -42,6 +42,11 @@ gh pr review <N> \
 uv run hephaestus-automation-loop --prs <N> --loops 1 --max-workers 1
 ```
 
+For every marked approval, merge wait independently reads GitHub's native
+`GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}` record and
+requires its `commit_id` to equal the reviewed head (and to agree with the
+review snapshot). A review cannot be transferred across a pushed head.
+
 A head race makes the review stale rather than transferable. A direct run or
 restart has no durable reviewed-head proof, so merge wait returns the PR to
 fresh automated review without mutating labels; the durable marked approval

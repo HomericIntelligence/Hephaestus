@@ -21,6 +21,7 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
+import hephaestus.automation.pipeline_github_authorization as authorization_mod
 import hephaestus.automation.pipeline_github_transport as transport_mod
 from hephaestus.automation.implementation_go_audit_receipt import (
     render_pending_implementation_go_audit,
@@ -2376,6 +2377,13 @@ def _authorization_review_page(
     }
 
 
+def _bind_authorization_review_commits(
+    adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep GraphQL pagination tests focused on their transport boundary."""
+    monkeypatch.setattr(adapter, "_review_commit_id", lambda _pr, _review: "a" * 40)
+
+
 class TestMergeAuthorizationQueries:
     """Repository-scoped review pagination and permission reads fail closed."""
 
@@ -2400,6 +2408,7 @@ class TestMergeAuthorizationQueries:
 
         adapter.repo = "repo"
         monkeypatch.setattr(adapter, "_graphql", graphql)
+        _bind_authorization_review_commits(adapter, monkeypatch)
 
         reviews = adapter.merge_authorization_reviews(7)
 
@@ -2425,6 +2434,7 @@ class TestMergeAuthorizationQueries:
         responses = iter([page_one, page_two])
         adapter.repo = "repo"
         monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+        _bind_authorization_review_commits(adapter, monkeypatch)
 
         with pytest.raises(RuntimeError, match="duplicated"):
             adapter.merge_authorization_reviews(7)
@@ -2439,6 +2449,7 @@ class TestMergeAuthorizationQueries:
         responses = iter([first, changed])
         adapter.repo = "repo"
         monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+        _bind_authorization_review_commits(adapter, monkeypatch)
 
         with pytest.raises(RuntimeError, match="snapshot changed"):
             adapter.merge_authorization_reviews(7)
@@ -2480,9 +2491,31 @@ class TestMergeAuthorizationQueries:
             )
             responses = iter([page, repeated])
         monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+        _bind_authorization_review_commits(adapter, monkeypatch)
 
         with pytest.raises(RuntimeError, match=message):
             adapter.merge_authorization_reviews(7)
+
+    def test_rest_review_commit_must_match_graphql_snapshot(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The authorization head is bound to the reviews API commit_id."""
+        page = _authorization_review_page([_authorization_review_node()], total_count=1)
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: page)
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"id": 1, "commit_id": "b" * 40}),
+            )
+        )
+        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
+
+        with pytest.raises(RuntimeError, match="commit changed"):
+            adapter.merge_authorization_reviews(7)
+        call_mock.assert_called_once_with(
+            ["api", "--method", "GET", "repos/org/repo/pulls/7/reviews/1"], check=False
+        )
 
 
 class TestMergeAuthorizationPermissions:
@@ -2526,6 +2559,48 @@ class TestMergeAuthorizationPermissions:
 
         with pytest.raises(RuntimeError, match="permission"):
             adapter.repository_permission_for_actor("operator")
+
+    @pytest.mark.parametrize(
+        ("returncode", "stdout", "expected"),
+        [
+            (0, 'HTTP/2 200 OK\n\n{"permission":"write"}', (200, {"permission": "write"})),
+            (1, 'HTTP/2 404 Not Found\n\n{"message":"Not Found"}', (404, None)),
+        ],
+    )
+    def test_permission_uses_repository_qualified_direct_api_call(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        returncode: int,
+        stdout: str,
+        expected: tuple[int, dict[str, object] | None],
+    ) -> None:
+        """Permission reads cannot inherit the adapter's PR-scoped argv policy."""
+        adapter.repo = "repo"
+        call_mock = MagicMock(return_value=SimpleNamespace(returncode=returncode, stdout=stdout))
+        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
+
+        assert adapter._collaborator_permission_response("Operator Name") == expected
+        call_mock.assert_called_once_with(
+            [
+                "api",
+                "--method",
+                "GET",
+                "--include",
+                "repos/org/repo/collaborators/Operator%20Name/permission",
+            ],
+            check=False,
+        )
+
+    def test_permission_transport_error_is_unavailable(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A direct transport failure remains unavailable rather than no permission."""
+        adapter.repo = "repo"
+        monkeypatch.setattr(authorization_mod, "gh_call", MagicMock(side_effect=OSError("down")))
+
+        with pytest.raises(OSError, match="down"):
+            adapter._collaborator_permission_response("operator")
 
 
 def test_mismatched_authorization_is_rejected_before_transport(
