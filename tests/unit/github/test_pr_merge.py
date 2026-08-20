@@ -499,6 +499,73 @@ class TestMain:
         ] in calls
         assert not any(args[-1].endswith("/status") for args in calls)
 
+    @pytest.mark.parametrize(
+        ("final_status", "final_conclusion"),
+        [("completed", "failure"), ("in_progress", None)],
+        ids=["failing-final-page", "pending-final-page"],
+    )
+    def test_check_runs_paginates_past_first_hundred_before_authorizing_merge(
+        self,
+        monkeypatch,
+        final_status: str,
+        final_conclusion: str | None,
+    ) -> None:
+        """A non-successful run beyond GitHub's first page blocks a merge."""
+        calls: list[list[str]] = []
+        first_page = [
+            {"name": f"success-{index}", "status": "completed", "conclusion": "success"}
+            for index in range(100)
+        ]
+
+        def fake_gh_call(args: list[str]) -> MagicMock:
+            calls.append(args)
+            if args == [
+                "api",
+                "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
+            ]:
+                return _gh_result({"total_count": 101, "check_runs": first_page})
+            if args == [
+                "api",
+                "/repos/owner/repo/commits/abc123/check-runs?per_page=100&page=2",
+            ]:
+                return _gh_result(
+                    {
+                        "total_count": 101,
+                        "check_runs": [
+                            {
+                                "name": "final-gate",
+                                "status": final_status,
+                                "conclusion": final_conclusion,
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(f"Unexpected gh call: {args}")
+
+        monkeypatch.setattr(pr_merge_module, "gh_call", fake_gh_call)
+
+        assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
+        assert calls == [
+            ["api", "/repos/owner/repo/commits/abc123/check-runs?per_page=100"],
+            ["api", "/repos/owner/repo/commits/abc123/check-runs?per_page=100&page=2"],
+        ]
+
+    def test_incomplete_check_run_total_count_blocks_merge(self, monkeypatch) -> None:
+        """A truncated page sequence cannot authorize a merge."""
+        first_page = [
+            {"name": f"success-{index}", "status": "completed", "conclusion": "success"}
+            for index in range(100)
+        ]
+        responses = iter(
+            [
+                _gh_result({"total_count": 101, "check_runs": first_page}),
+                _gh_result({"total_count": 101, "check_runs": []}),
+            ]
+        )
+        monkeypatch.setattr(pr_merge_module, "gh_call", lambda _args: next(responses))
+
+        assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
+
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     def test_returns_1_when_no_repo_detected(self, _mock_git) -> None:
         """main() returns 1 when repo can't be detected."""
@@ -594,7 +661,7 @@ class TestMain:
                 "api",
                 "/repos/owner/repo/commits/abc123/check-runs?per_page=100",
             ]:
-                return _gh_result({"check_runs": []})
+                return _gh_result({"total_count": 0, "check_runs": []})
             if args == ["api", "/repos/owner/repo/commits/abc123/status"]:
                 return _gh_result({"state": "success", "statuses": []})
             if args[:3] == ["api", "-X", "PUT"]:
@@ -698,7 +765,10 @@ class TestMain:
                 ]
             ),
             _gh_result(
-                {"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}
+                {
+                    "total_count": 1,
+                    "check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}],
+                }
             ),
             _gh_result({"merged": True, "sha": "merged", "message": "ok"}),
         ]
@@ -733,11 +803,17 @@ class TestMain:
                 ]
             ),
             _gh_result(
-                {"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}
+                {
+                    "total_count": 1,
+                    "check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}],
+                }
             ),
             subprocess.CalledProcessError(1, ["gh"], stderr="merge conflict"),
             _gh_result(
-                {"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}
+                {
+                    "total_count": 1,
+                    "check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}],
+                }
             ),
             _gh_result({"merged": True, "sha": "merged-two", "message": "ok"}),
         ]

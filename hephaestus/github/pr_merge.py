@@ -265,6 +265,73 @@ def _list_open_prs(repo_name: str) -> list[dict[str, Any]]:
 
 
 _CHECK_SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
+_CHECK_RUNS_PAGE_SIZE = 100
+
+
+def _fetch_check_run_page(endpoint: str, head_sha: str) -> dict[str, Any] | None:
+    """Return one exact-head Check Runs page, or log a fail-closed error."""
+    try:
+        payload = _gh_json(["api", endpoint])
+    except subprocess.CalledProcessError as exc:
+        blob = (exc.stderr or "") + (exc.stdout or "")
+        logger.error(
+            "Error getting check runs for head %s; refusing merge: %s",
+            head_sha,
+            blob.strip() or exc,
+        )
+        return None
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        logger.error("Error getting check runs for head %s; refusing merge: %s", head_sha, exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.error("Invalid check-run response for head %s; refusing merge", head_sha)
+        return None
+    return payload
+
+
+def _parse_check_run_page(payload: dict[str, Any], head_sha: str) -> tuple[int, list[Any]] | None:
+    """Validate the pagination evidence GitHub returned for one Check Runs page."""
+    total_count = payload.get("total_count")
+    checks = payload.get("check_runs")
+    if (
+        not isinstance(total_count, int)
+        or isinstance(total_count, bool)
+        or total_count < 0
+        or not isinstance(checks, list)
+    ):
+        logger.error("Invalid check-run evidence for head %s; refusing merge", head_sha)
+        return None
+    return total_count, checks
+
+
+def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
+    """Return complete exact-head Check Runs evidence, rejecting partial results."""
+    endpoint = f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page={_CHECK_RUNS_PAGE_SIZE}"
+    checks: list[Any] = []
+    expected_count: int | None = None
+    page = 1
+
+    while expected_count is None or len(checks) < expected_count:
+        page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
+        payload = _fetch_check_run_page(page_endpoint, head_sha)
+        if payload is None:
+            return None
+        parsed_page = _parse_check_run_page(payload, head_sha)
+        if parsed_page is None:
+            return None
+        total_count, page_checks = parsed_page
+        if expected_count is None:
+            expected_count = total_count
+        elif total_count != expected_count:
+            logger.error("Inconsistent check-run count for head %s; refusing merge", head_sha)
+            return None
+
+        checks.extend(page_checks)
+        if len(checks) > expected_count or (not page_checks and len(checks) < expected_count):
+            logger.error("Incomplete check-run evidence for head %s; refusing merge", head_sha)
+            return None
+        page += 1
+    return checks
 
 
 def _checks_pass_and_log(repo_name: str, head_sha: str) -> bool:
@@ -274,32 +341,10 @@ def _checks_pass_and_log(repo_name: str, head_sha: str) -> bool:
     commits or evidence formats. Merge eligibility therefore accepts only the
     current Check Runs response for the exact PR head.
     """
-    try:
-        payload = _gh_json(
-            [
-                "api",
-                f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page=100",
-            ]
-        )
-    except subprocess.CalledProcessError as exc:
-        blob = (exc.stderr or "") + (exc.stdout or "")
-        logger.error(
-            "Error getting check runs for head %s; refusing merge: %s",
-            head_sha,
-            blob.strip() or exc,
-        )
-        return False
-    except (RuntimeError, json.JSONDecodeError) as exc:
-        logger.error("Error getting check runs for head %s; refusing merge: %s", head_sha, exc)
+    checks = _all_check_runs_for_head(repo_name, head_sha)
+    if checks is None:
         return False
 
-    if not isinstance(payload, dict):
-        logger.error("Invalid check-run response for head %s; refusing merge", head_sha)
-        return False
-    checks = payload.get("check_runs")
-    if not isinstance(checks, list):
-        logger.error("Invalid check-run evidence for head %s; refusing merge", head_sha)
-        return False
     if not checks:
         logger.error("No check runs reported for head %s; refusing merge", head_sha)
         return False
