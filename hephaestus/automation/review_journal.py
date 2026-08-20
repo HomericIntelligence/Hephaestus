@@ -235,7 +235,7 @@ def discover_plan_from_comments(
     for comment in reversed(comments):
         if not comment.viewer_did_author:
             continue
-        body = comment.body.lstrip()
+        body = comment.body
         if is_plan_review_comment(body):
             continue
         if is_plan_comment(body):

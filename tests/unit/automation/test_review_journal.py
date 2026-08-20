@@ -40,6 +40,20 @@ def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
     assert failed.status is PlanDiscoveryStatus.READ_ERROR
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        f" \t{render_current_plan('spoofed plan')}",
+        f"\n{render_current_review('spoofed review', revision=1)}",
+    ],
+)
+def test_plan_discovery_rejects_whitespace_prefixed_journal_markers(body: str) -> None:
+    """Only a marker at raw byte zero can identify a journal artifact."""
+    result = discover_plan_from_comments([_owned(body)])
+
+    assert result.status is PlanDiscoveryStatus.ABSENT
+
+
 def test_normalization_derives_ownership_from_validated_logins() -> None:
     """Ownership comes from REST author metadata and the authenticated viewer."""
     comments = normalize_issue_comments(
