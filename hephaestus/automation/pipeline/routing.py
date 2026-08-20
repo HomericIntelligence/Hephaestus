@@ -11,6 +11,7 @@ regression cycles remain globally bounded.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -25,7 +26,7 @@ class StageName(StrEnum):
     """Pipeline stage identifiers.
 
     ``ROUTES`` insertion order, not enum declaration order, defines pipeline
-    execution order.
+    order for non-terminal stages. ``FINISHED`` is always the terminal sink.
     """
 
     REPO = "repo"
@@ -157,9 +158,23 @@ ROUTES: dict[StageName, Route] = {
 # and across lanes comes only from ROUTES.
 _AUXILIARY_STAGES = frozenset({StageName.LEARNING, StageName.FINISHED})
 
+def _pipeline_order(routes: Mapping[StageName, Route]) -> tuple[StageName, ...]:
+    """Return route order with the universal terminal sink last.
+
+    The route table remains authoritative for every executable stage's
+    relative order.  ``FINISHED`` is excluded from that ordering because its
+    terminal-sink contract must not depend on an incidental dictionary
+    position.
+    """
+    return (
+        *(stage for stage in routes if stage is not StageName.FINISHED),
+        StageName.FINISHED,
+    )
+
+
 #: Full stage order derived from the authoritative routing table. CI/CD
-#: intentionally has no pipeline stage.
-PIPELINE_ORDER: tuple[StageName, ...] = tuple(ROUTES)
+#: intentionally has no pipeline stage. ``FINISHED`` is always last.
+PIPELINE_ORDER: tuple[StageName, ...] = _pipeline_order(ROUTES)
 MAIN_PIPELINE_ORDER: tuple[StageName, ...] = tuple(
     stage for stage in PIPELINE_ORDER if stage not in _AUXILIARY_STAGES
 )
