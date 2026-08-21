@@ -133,6 +133,8 @@ RUN uv run pre-commit install-hooks && \
 FROM python-snapshot
 
 ARG TARGETARCH
+ARG BATS_VERSION=1.11.1-1
+ARG SHELLCHECK_VERSION=0.10.0-1
 
 LABEL org.opencontainers.image.title="hephaestus-ci"
 LABEL org.opencontainers.image.description="CI container for Hephaestus — validation, testing, security scans"
@@ -149,14 +151,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Runtime-only system packages (no build tools), resolved from the same
 # immutable snapshot as the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bats \
+    bats="${BATS_VERSION}" \
     git \
     curl \
     ca-certificates \
     jq \
     openssh-client \
-    shellcheck \
-    && rm -rf /var/lib/apt/lists/*
+    shellcheck="${SHELLCHECK_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && test "$(bats --version)" = "Bats 1.11.1" \
+    && shellcheck --version | grep -Fx "version: 0.10.0"
 
 # GitHub CLI (gh) — pinned release; native runners ship it preinstalled and the
 # automation pipeline's _trusted_gh_executable() requires it.

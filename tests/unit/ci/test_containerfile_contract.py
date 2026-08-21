@@ -107,6 +107,21 @@ def test_runtime_tools_follow_the_requested_build_architecture() -> None:
     assert source.count('*) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1') == 3
 
 
+def test_shell_tool_versions_are_explicit_and_verified() -> None:
+    """The shared CI image must make Bats/ShellCheck parity inspectable."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+
+    assert "ARG BATS_VERSION=1.11.1-1" in source
+    assert "ARG SHELLCHECK_VERSION=0.10.0-1" in source
+    runtime_stage = source.rindex("FROM python-snapshot")
+    assert source.index("ARG BATS_VERSION=1.11.1-1") > runtime_stage
+    assert source.index("ARG SHELLCHECK_VERSION=0.10.0-1") > runtime_stage
+    assert 'bats="${BATS_VERSION}"' in source
+    assert 'shellcheck="${SHELLCHECK_VERSION}"' in source
+    assert 'test "$(bats --version)" = "Bats 1.11.1"' in source
+    assert 'grep -Fx "version: 0.10.0"' in source
+
+
 def test_github_artifact_downloads_retry_transient_network_failures() -> None:
     """Pinned GitHub downloads must survive transient runner network resets."""
     source = CONTAINERFILE.read_text(encoding="utf-8")

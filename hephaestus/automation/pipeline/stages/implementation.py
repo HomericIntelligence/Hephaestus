@@ -1009,7 +1009,8 @@ class ImplementationStage(Stage):
             # on_job_done (doc: agent_error consumes the implement
             # budget); RETRY re-enters the stage for the next attempt.
             return StageOutcome(Disposition.RETRY, "agent_error")
-        is_hephaestus = item.repo.rsplit("/", 1)[-1].casefold() == "hephaestus"
+        canonical_hephaestus = f"{ctx.org}/Hephaestus".casefold()
+        is_hephaestus = item.repo.casefold() == canonical_hephaestus
         run_hephaestus_pre_pr_checks = (
             is_hephaestus and item.pr is None and not bool(item.payload.get("existing_pr"))
         )

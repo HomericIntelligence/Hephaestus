@@ -269,9 +269,6 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-24.04
-    # The package-install step is external to this repository and can exceed
-    # three minutes during an Ubuntu mirror slowdown.  Keep the job bounded,
-    # while allowing the lint command itself to run.
     timeout-minutes: 10
     needs: [lint, changes-gate]
     if: needs.changes-gate.outputs.code_event == 'true'
@@ -281,21 +278,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Run shellcheck
+      - name: Build the shared CI image
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Run ShellCheck in the shared CI image
         run: |
-          set -euo pipefail
-          shopt -s nullglob globstar
-          files=(scripts/**/*.sh scripts/**/*.sbatch)
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "No shell scripts found — nothing to lint."
-            exit 0
-          fi
-          # severity=error catches genuine bugs (unquoted vars in dangerous
-          # contexts, broken syntax) without bikeshedding on style — matches
-          # the bug class that broke the AchaeanFleet automation loop.
-          shellcheck --severity=error "${files[@]}"
+          podman run --rm -v "$PWD:/workspace:Z" --workdir /workspace \
+            hephaestus-ci:local bash -c '
+              set -euo pipefail
+              shopt -s nullglob globstar
+              files=(scripts/**/*.sh scripts/**/*.sbatch)
+              if [[ ${#files[@]} -eq 0 ]]; then
+                echo "No shell scripts found — nothing to lint."
+                exit 0
+              fi
+              shellcheck --severity=error "${files[@]}"
+            '
 
   pr-policy:
     name: pr-policy
@@ -305,10 +302,10 @@ jobs:
     #   2. The PR title and every branch commit subject follow the accepted
     #      Conventional Commit policy.
     #   3. Every branch commit carries a DCO Signed-off-by trailer.
-    # Push events are skipped because there is no PR to inspect. Merge-group
-    # events post this required context through a dedicated step because the
-    # PR-specific policy was already checked on the source PR and the synthetic
-    # merge-group payload has no pull_request object.
+    # Push events are skipped because there is no PR to inspect. On HEADGREEN
+    # merge queues, the synthetic group head alone is checked, so merge-group
+    # events fail closed unless the named source PR's current head has a
+    # successful GitHub-Actions-owned pr-policy check.
     #
     # This gate intentionally has NO `needs:` — it runs immediately so the
     # policy checks report without depending on another job's timing.
@@ -325,10 +322,57 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: Confirm PR policy was evaluated before queue entry
+      - name: Revalidate the source PR policy result
         if: github.event_name == 'merge_group'
-        run: >-
-          echo "PR policy applies to the source PR; merge-group checks validate the synthetic commit."
+        env:
+          BASE_REF: ${{ github.event.merge_group.base_ref }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          base_branch="${BASE_REF#refs/heads/}"
+          head_ref="${HEAD_REF#refs/heads/}"
+          queue_prefix="gh-readonly-queue/${base_branch}/pr-"
+          if [[ "$head_ref" != "$queue_prefix"* ]]; then
+            echo "::error::Unexpected merge-group head ref: $HEAD_REF"
+            exit 1
+          fi
+          queue_tail="${head_ref#"$queue_prefix"}"
+          if [[ ! "$queue_tail" =~ ^([1-9][0-9]*)-([0-9a-f]{40})$ ]]; then
+            echo "::error::Unable to resolve source PR from merge-group head ref"
+            exit 1
+          fi
+          PR_NUMBER="${BASH_REMATCH[1]}"
+
+          gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" > source-pr.json
+          source_head="$(
+            jq -er --argjson number "$PR_NUMBER" --arg base "$base_branch" '
+              select(
+                .number == $number and
+                .state == "open" and
+                .base.ref == $base
+              )
+              | .head.sha
+              | select(test("^[0-9a-f]{40}$"))
+            ' source-pr.json
+          )"
+
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${REPOSITORY}/commits/${source_head}/check-runs?check_name=pr-policy&filter=latest&per_page=100" \
+            > source-checks.json
+          jq -e --arg head "$source_head" '
+            [
+              .check_runs[]
+              | select(.name == "pr-policy")
+              | select(.app.id == 15368)
+              | select(.head_sha == $head)
+            ] as $policy
+            | ($policy | length) > 0 and
+              all($policy[];
+                .status == "completed" and .conclusion == "success"
+              )
+          ' source-checks.json > /dev/null
 
       # The policy validator must come from the trusted base revision, never
       # from the PR head. The base checkout also provides the bootstrap path for
@@ -658,8 +702,6 @@ jobs:
   shell-tests:
     name: shell-tests
     runs-on: ubuntu-24.04
-    # Bats is installed from the Ubuntu archive; retain a finite guard but do
-    # not cancel the test suite solely because a mirror is slow.
     timeout-minutes: 20
     needs: changes-gate
     if: needs.changes-gate.outputs.code_event == 'true'
@@ -669,21 +711,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: "3.13"
+      - name: Build the shared CI image
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
-        with:
-          just-version: "1.36.0"
-
-      - name: Run bats shell tests
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bats
-          bats --recursive tests/shell
+      - name: Run Bats in the shared CI image
+        run: >-
+          podman run --rm -v "$PWD:/workspace:Z" --workdir /workspace
+          hephaestus-ci:local bats --recursive tests/shell
 
   build:
     name: build

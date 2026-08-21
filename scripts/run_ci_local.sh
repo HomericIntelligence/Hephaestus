@@ -55,6 +55,49 @@ log_warn()  { echo -e "${YELLOW}[CI]${NC} $*"; }
 log_error() { echo -e "${RED}[CI]${NC} $*" >&2; }
 log_step()  { echo -e "\n${BLUE}==>${NC} $*"; }
 
+CANDIDATE_ROOT=""
+CANDIDATE_TREE=""
+CANDIDATE_INDEX_CONTAINER=""
+
+cleanup_candidate_snapshot() {
+    if [ -z "${CANDIDATE_ROOT}" ]; then
+        return
+    fi
+    case "${CANDIDATE_ROOT}" in
+        "${PROJECT_ROOT}"/build/ci-candidate.*)
+            rm -rf -- "${CANDIDATE_ROOT}"
+            ;;
+        *)
+            log_error "Refusing to remove unexpected candidate path: ${CANDIDATE_ROOT}"
+            ;;
+    esac
+    CANDIDATE_ROOT=""
+    CANDIDATE_TREE=""
+    CANDIDATE_INDEX_CONTAINER=""
+}
+
+prepare_candidate_snapshot() {
+    local candidate_relative
+
+    cleanup_candidate_snapshot
+    mkdir -p "${PROJECT_ROOT}/build"
+    CANDIDATE_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-candidate.XXXXXX")"
+    CANDIDATE_TREE="${CANDIDATE_ROOT}/tree"
+    mkdir -p "${CANDIDATE_TREE}"
+
+    # Mirror the bytes that a later `git add -A` and commit would publish,
+    # including non-ignored untracked files, without touching the real index.
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" git -C "${PROJECT_ROOT}" read-tree HEAD
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" git -C "${PROJECT_ROOT}" add -A -- .
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" git -C "${PROJECT_ROOT}" \
+        checkout-index --all --prefix="${CANDIDATE_TREE}/"
+
+    candidate_relative="${CANDIDATE_ROOT#"${PROJECT_ROOT}/"}"
+    CANDIDATE_INDEX_CONTAINER="/workspace/${candidate_relative}/index"
+}
+
+trap cleanup_candidate_snapshot EXIT
+
 # ============================================================================
 # Container engine detection
 # ============================================================================
@@ -150,6 +193,7 @@ resolve_git_metadata_mount() {
 run_in_container() {
     local cmd=("$@")
     local engine_flags=()
+    local candidate_mount=()
 
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
@@ -161,9 +205,14 @@ run_in_container() {
             --env UV_NO_SYNC=1 --env PYTHONPATH=/workspace)
     fi
 
+    if [ -n "${CANDIDATE_TREE}" ]; then
+        candidate_mount+=(--volume "${CANDIDATE_TREE}:/candidate:ro")
+    fi
+
     "${CONTAINER_ENGINE}" run --rm \
         "${engine_flags[@]}" \
         "${GIT_METADATA_MOUNT[@]}" \
+        "${candidate_mount[@]}" \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
         --volume "${PROJECT_ROOT}:/workspace:Z" \
         --workdir /workspace \
@@ -177,7 +226,9 @@ run_in_container() {
 
 run_lint() {
     log_step "Lint (pre-commit + doc-link validation)"
-    run_in_container uv run pre-commit run --all-files --show-diff-on-failure || return 1
+    prepare_candidate_snapshot
+    run_in_container env "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
+        uv run pre-commit run --all-files --show-diff-on-failure || return 1
     run_in_container uv run hephaestus-validate-links docs --repo-root . || return 1
 }
 
@@ -285,16 +336,24 @@ run_shell_tests() {
 
 run_secrets() {
     log_step "Gitleaks repository scan"
-    local args=(detect --source=. --verbose --exit-code=1)
+    local history_args=(detect --source=. --verbose --exit-code=1)
+    local candidate_args=(dir --verbose --exit-code=1 .)
+    prepare_candidate_snapshot
     if [ -f .gitleaks.toml ]; then
-        args+=(--config=.gitleaks.toml)
+        history_args+=(--config=.gitleaks.toml)
+        candidate_args+=(--config=.gitleaks.toml)
     fi
     "${CONTAINER_ENGINE}" run --rm \
         "${GIT_METADATA_MOUNT[@]}" \
         --volume "${PROJECT_ROOT}:/repo:Z" \
         --workdir /repo \
         "${GITLEAKS_IMAGE}" \
-        "${args[@]}"
+        "${history_args[@]}" || return 1
+    "${CONTAINER_ENGINE}" run --rm \
+        --volume "${CANDIDATE_TREE}:/candidate:ro" \
+        --workdir /candidate \
+        "${GITLEAKS_IMAGE}" \
+        "${candidate_args[@]}"
 }
 
 # ============================================================================

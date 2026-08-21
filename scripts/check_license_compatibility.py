@@ -327,9 +327,10 @@ def main() -> int:
         "ALLOWED_EXTRA_COPYLEFT AND document it in NOTICE."
     )
 
-    if os.environ.get("GITHUB_EVENT_NAME", "") == "pull_request":
+    blocking_events = {"pull_request", "merge_group"}
+    if os.environ.get("GITHUB_EVENT_NAME", "") in blocking_events:
         return 1
-    print("(advisory: non-PR event, exit 0)")
+    print("(advisory: non-reviewed event, exit 0)")
     return 0
 
 

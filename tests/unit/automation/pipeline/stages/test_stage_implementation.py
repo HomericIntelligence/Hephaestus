@@ -1991,8 +1991,12 @@ class TestTestsAndFix:
     ) -> None:
         """Hephaestus always runs its repository-owned required-check suite."""
         stage = ImplementationStage()
-        ctx = make_ctx()
-        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(
+            issue=1,
+            repo="HomericIntelligence/Hephaestus",
+            state="TEST_WAIT",
+        )
 
         result = stage.step(item, ctx)
 
@@ -2015,7 +2019,7 @@ class TestTestsAndFix:
     ) -> None:
         """Programmatic generic-test overrides cannot weaken Hephaestus's gate."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(org="HomericIntelligence")
         ctx.config.run_pre_pr_tests = True
         ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
         item = make_work_item(
@@ -2036,12 +2040,32 @@ class TestTestsAndFix:
             "all",
         )
 
+    def test_same_named_repo_in_another_org_preserves_configurable_gate(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only the configured canonical Hephaestus repo gets its fixed gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        ctx.config.run_pre_pr_tests = True
+        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        item = make_work_item(
+            issue=1,
+            repo="OtherOrg/Hephaestus",
+            state="TEST_WAIT",
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == ("pytest", "tests/custom", "-q")
+
     def test_hephaestus_existing_pr_remediation_does_not_repeat_full_local_gate(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Automatic full local checks are confined to initial PR publication."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(
             issue=1,
             pr=1001,
@@ -2166,7 +2190,7 @@ class TestTestsAndFix:
     ) -> None:
         """A red one-shot gate is fixed and rerun before commit, push, or PR creation."""
         stage = ImplementationStage()
-        ctx = make_ctx()
+        ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(issue=1, repo="HomericIntelligence/Hephaestus", state="TEST_WAIT")
 
         first_gate = stage.step(item, ctx)

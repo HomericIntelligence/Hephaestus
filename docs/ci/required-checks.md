@@ -29,7 +29,11 @@ directly to publication; a failing run returns the item to the implementer and
 must pass on the next attempt before publication. For linked implementation
 worktrees, the runner mounts the shared Git
 metadata read-only so hatch-vcs and Git-aware checks operate on the candidate
-commit. The entry point mirrors the locally
+commit. Before lint and secret scanning, it also builds an alternate Git index
+and read-only candidate tree from `HEAD` plus every non-ignored working-tree
+change. This includes untracked source bytes without mutating the implementer's
+real index; pre-commit reads the alternate index, while Gitleaks scans both Git
+history and that exact candidate tree. The entry point mirrors the locally
 executable source-validation jobs in `_required.yml`, including lint, unit and
 integration tests, installed-CLI tests, artifact lifecycle validation,
 security scans, schema and version checks, license policy, shell checks, and
@@ -78,7 +82,12 @@ run on `merge_group: checks_requested`. GitHub therefore evaluates the full
 required suite against each synthetic `gh-readonly-queue/...` commit, including
 the aggregate `required-checks-gate`, every direct ruleset context, and the two
 classic matrix-test contexts. A separate smoke workflow cannot replace those
-required names and is not part of the queue contract.
+required names and is not part of the queue contract. Because the live queue's
+`HEADGREEN` grouping strategy evaluates the synthetic group head, the
+merge-group `pr-policy` job additionally resolves the source PR encoded in the
+queue ref and requires a successful GitHub-Actions-owned `pr-policy` check on
+that PR's exact current head SHA. Missing, malformed, stale, pending, or failed
+source-PR evidence fails closed.
 
 ## Maintenance
 

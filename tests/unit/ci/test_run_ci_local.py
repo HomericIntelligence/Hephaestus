@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -47,10 +48,14 @@ def _fake_engine(
             'if [[ "$1" == "run" ]]; then\n'
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
-            + failure_clause
-            + license_violation_clause
-            + "fi\n"
-            + "exit 0\n"
+            '  for arg in "$@"; do\n'
+            '    case "$arg" in\n'
+            "      *:/candidate:ro)\n"
+            '        candidate_root="${arg%:/candidate:ro}"\n'
+            '        find "$candidate_root" -type f -print >> "$FAKE_ENGINE_LOG"\n'
+            "        ;;\n"
+            "    esac\n"
+            "  done\n" + failure_clause + license_violation_clause + "fi\n" + "exit 0\n"
         ),
         encoding="utf-8",
     )
@@ -91,6 +96,7 @@ def _run_runner(
     image_exists: bool = True,
     rebuild_image: bool = False,
     external_git_common_dir: Path | None = None,
+    repo_root: Path = REPO_ROOT,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -125,14 +131,41 @@ def _run_runner(
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(
-        ["bash", str(RUNNER), subset],
-        cwd=REPO_ROOT,
+        ["bash", str(repo_root / "scripts" / "run_ci_local.sh"), subset],
+        cwd=repo_root,
         env=environment,
         text=True,
         capture_output=True,
         check=False,
     )
     return result, log.read_text(encoding="utf-8")
+
+
+def _candidate_repo(tmp_path: Path) -> Path:
+    """Create a tiny repository that executes the real local-CI wrapper."""
+    repo = tmp_path / "candidate-repo"
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy2(RUNNER, repo / "scripts" / "run_ci_local.sh")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "tracked.py").write_text("TRACKED = True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=CI Test",
+            "-c",
+            "user.email=ci@example.invalid",
+            "commit",
+            "--no-gpg-sign",
+            "-q",
+            "-m",
+            "test: seed candidate repo",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    return repo
 
 
 @pytest.mark.parametrize(
@@ -160,6 +193,7 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "All locally executable CI checks passed." in result.stdout
     for command in (
+        "GIT_INDEX_FILE=/workspace/build/ci-candidate.",
         "uv run pre-commit run --all-files --show-diff-on-failure",
         "uv run hephaestus-validate-links docs --repo-root .",
         "uv run pytest tests/unit",
@@ -181,10 +215,43 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "shellcheck --severity=error",
         "bats --recursive tests/shell",
         "detect --source=. --verbose --exit-code=1",
+        "dir --verbose --exit-code=1 .",
         "HEPHAESTUS_REQUIRE_CLI=1",
         "env GITHUB_EVENT_NAME=pull_request uv run python scripts/check_license_compatibility.py",
     ):
         assert command in log
+
+
+def test_lint_candidate_index_includes_untracked_source(tmp_path: Path) -> None:
+    """New source files are visible to every pre-commit hook before publication."""
+    repo = _candidate_repo(tmp_path)
+    (repo / "new_source.py").write_text("NEW = True\n", encoding="utf-8")
+
+    result, log = _run_runner(tmp_path, "lint", repo_root=repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "new_source.py" in log
+    assert "GIT_INDEX_FILE=/workspace/build/ci-candidate." in log
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert staged.stdout == ""
+
+
+def test_secrets_candidate_tree_includes_untracked_source(tmp_path: Path) -> None:
+    """The filesystem scanner receives the exact uncommitted candidate tree."""
+    repo = _candidate_repo(tmp_path)
+    (repo / "new_secret_source.txt").write_text("candidate bytes\n", encoding="utf-8")
+
+    result, log = _run_runner(tmp_path, "secrets", repo_root=repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "new_secret_source.txt" in log
+    assert "dir --verbose --exit-code=1 ." in log
 
 
 def test_all_fails_for_an_injected_license_violation(tmp_path: Path) -> None:
