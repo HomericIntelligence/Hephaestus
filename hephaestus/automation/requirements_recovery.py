@@ -178,6 +178,10 @@ def verified_finalized_plan(body: str) -> FinalizedPlanIdentity | None:
     match = _FINALIZED_PLAN_RE.fullmatch(marker_line)
     if match is None:
         return None
+    plan_identity = match.group("plan")
+    review_identity = match.group("review")
+    if plan_identity.partition(":")[0] == review_identity.partition(":")[0]:
+        return None
     final_start = line_offset + match.start("final")
     final_end = line_offset + match.end("final")
     canonical_body = body[:final_start] + "<F>" + body[final_end:]
@@ -185,8 +189,8 @@ def verified_finalized_plan(body: str) -> FinalizedPlanIdentity | None:
         return None
     return FinalizedPlanIdentity(
         requirements_identity=match.group("requirements"),
-        plan_identity=match.group("plan"),
-        review_identity=match.group("review"),
+        plan_identity=plan_identity,
+        review_identity=review_identity,
         final_body_digest=match.group("final"),
     )
 

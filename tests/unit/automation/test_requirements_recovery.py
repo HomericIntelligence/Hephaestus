@@ -177,6 +177,19 @@ def test_nested_raw_html_marker_is_not_standalone_authority(prefix: str, suffix:
     assert has_contaminated_issue_body(body) is False
 
 
+def test_plan_and_review_must_reference_distinct_comments() -> None:
+    placeholder = (
+        "## Why\n\nPreserve independently reviewed authority.\n\n"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} "
+        f"P=123456789:{'b' * 64} V=123456789:{'c' * 64} F=<F> -->"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    body = placeholder.replace("F=<F>", f"F={digest}")
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
+
+
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
     source = "Original requirements"
     revision = "d" * 40
