@@ -165,6 +165,26 @@ class TestClassifyIssue:
         assert stage is StageName.PLANNING
         assert "requirements recovery" in reason
 
+    def test_nested_raw_html_marker_invalidates_finalized_epoch_evidence(self) -> None:
+        placeholder = (
+            "<!--\n"
+            f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
+            f"V=987654321:{'c' * 64} F=<F> -->\n"
+            "-->"
+        )
+        digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+        body = placeholder.replace("F=<F>", f"F={digest}")
+
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=body,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
+
     def test_finalized_plan_with_evidence_routes_to_no_model_authentication(self) -> None:
         stage, reason = classify_issue(
             _facts(

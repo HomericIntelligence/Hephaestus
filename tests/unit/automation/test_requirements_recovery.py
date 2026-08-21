@@ -161,6 +161,22 @@ def test_unicode_separator_cannot_desynchronize_commonmark_line_mapping(
     assert has_contaminated_issue_body(body) is True
 
 
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [("<!--\n", "\n-->"), ("<script>\n", "\n</script>"), ("<div>\n", "\n</div>")],
+)
+def test_nested_raw_html_marker_is_not_standalone_authority(prefix: str, suffix: str) -> None:
+    placeholder = (
+        f"{prefix}{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} "
+        f"P=123456789:{'b' * 64} V=987654321:{'c' * 64} F=<F> -->{suffix}"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    body = placeholder.replace("F=<F>", f"F={digest}")
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is False
+
+
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
     source = "Original requirements"
     revision = "d" * 40

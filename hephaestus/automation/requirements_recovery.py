@@ -147,12 +147,14 @@ def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
     for token in MarkdownIt("commonmark").parse(body):
         if token.type != "html_block" or token.level != 0 or token.map is None:
             continue
-        start_line, end_line = token.map
-        for line_number in range(start_line, end_line):
-            raw_line = raw_lines[line_number]
-            line = raw_line.rstrip("\r\n")
-            if _FINALIZED_PLAN_CANDIDATE_RE.match(line):
-                candidates.append((line_offsets[line_number], line))
+        start_line, _end_line = token.map
+        raw_line = raw_lines[start_line]
+        line = raw_line.rstrip("\r\n")
+        # Authority must open its own top-level HTML block. Scanning later
+        # lines would accept marker-shaped text nested inside an outer HTML
+        # comment, script, or container block.
+        if _FINALIZED_PLAN_CANDIDATE_RE.match(line):
+            candidates.append((line_offsets[start_line], line))
     return candidates
 
 
