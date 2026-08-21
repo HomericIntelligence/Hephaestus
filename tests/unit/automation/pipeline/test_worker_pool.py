@@ -5600,13 +5600,13 @@ class TestGitOps:
         assert result.ok is False
         assert "expected origin owner/name" in (result.error or "")
 
-    def test_sync_checkout_rejects_checkout_not_on_default_branch(
+    def test_sync_checkout_accepts_clean_attached_checkout_on_nondefault_branch(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """A reusable feature branch is not silently advanced as though it were main."""
+        """A clean attached runner branch may safely follow the default branch."""
         checkout = tmp_path / "checkout"
         checkout.mkdir()
         job = GitJob(
@@ -5621,47 +5621,20 @@ class TestGitOps:
                 subprocess.CompletedProcess([], 0, stdout=""),
                 subprocess.CompletedProcess([], 0, stdout="feature\n"),
                 subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="feature\n"),
+                subprocess.CompletedProcess([], 0, stdout="0\t0\n"),
+                subprocess.CompletedProcess([], 0),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="feature\n"),
+                subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n" + "a" * 40 + "\n"),
             ]
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        assert mock_run.call_args_list == [
-            call(
-                ["git", "remote", "get-url", "origin"],
-                cwd=checkout,
-                timeout=120,
-                env=ANY,
-            ),
-            call(
-                [
-                    "git",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "status",
-                    "--porcelain",
-                    "--untracked-files=no",
-                ],
-                cwd=checkout,
-                timeout=120,
-                env=ANY,
-            ),
-            call(
-                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-                cwd=checkout,
-                check=False,
-                log_errors=False,
-                timeout=120,
-                env=ANY,
-            ),
-            call(
-                [_trusted_gh_executable(), "api", "repos/owner/name", "--jq", ".default_branch"],
-                cwd=checkout,
-                timeout=120,
-                env=ANY,
-            ),
-        ]
-        assert result.ok is False
-        assert "not on its default branch" in (result.error or "")
+        assert result.ok is True
+        assert result.value == "a" * 40
 
     def test_sync_checkout_rejects_detached_head_before_fetching(
         self,
