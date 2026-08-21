@@ -133,8 +133,13 @@ def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
         if fence is not None:
             token = fence.group("fence")
             if fence_character is None:
-                fence_character = token[0]
-                fence_length = len(token)
+                info_string = line[fence.end() :]
+                # CommonMark rejects backtick-fence openers whose info string
+                # contains a backtick. Treating one as a fence could hide a
+                # following top-level authority claim from fail-closed parsing.
+                if token[0] != "`" or "`" not in info_string:
+                    fence_character = token[0]
+                    fence_length = len(token)
             elif (
                 token[0] == fence_character
                 and len(token) >= fence_length

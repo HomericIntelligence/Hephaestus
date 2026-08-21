@@ -123,6 +123,14 @@ def test_four_space_indented_finalized_example_is_not_top_level_authority() -> N
     assert has_contaminated_issue_body(body) is False
 
 
+def test_invalid_backtick_fence_info_cannot_hide_finalized_claim() -> None:
+    marker = _finalized_body().splitlines()[-1]
+    body = f"```bad`info\n  {marker}\n```"
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
+
+
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
     source = "Original requirements"
     revision = "d" * 40

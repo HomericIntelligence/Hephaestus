@@ -138,6 +138,15 @@ class TestClassifyIssue:
         assert stage is StageName.PLANNING
         assert "requirements recovery" in reason
 
+    def test_invalid_backtick_fence_cannot_hide_claim_from_stale_plan_go(self) -> None:
+        marker = _finalized_body().splitlines()[-1]
+        body = f"```bad`info\n  {marker}\n```"
+
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
     def test_finalized_plan_with_evidence_routes_to_no_model_authentication(self) -> None:
         stage, reason = classify_issue(
             _facts(
