@@ -12,7 +12,12 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
-from hephaestus.automation.issue_waves import WAVE_NON_CODE_PAYLOAD
+from hephaestus.automation.issue_waves import (
+    WAVE_LEASE_PAYLOAD,
+    WAVE_NON_CODE_INTENT_PAYLOAD,
+    WAVE_NON_CODE_PAYLOAD,
+    IssueWaveStore,
+)
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -288,7 +293,41 @@ class TestPlanningStageEnter:
         assert outcome is not None
         assert outcome.disposition is Disposition.FINISH_FAIL
         assert item.attempts["plan"] == 1
-        assert "fail-closed label unavailable" in outcome.note
+        assert "without revoking authority" in outcome.note
+
+    def test_finalized_plan_normalization_retries_through_stale_blocked_latch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A transient write failure cannot turn authenticated finalization into BLOCKED."""
+
+        class FailsFirstNormalizationGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(labels=[STATE_PLAN_BLOCKED], issue_body=_finalized_body())
+                self.edits = 0
+
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                self.edits += 1
+                if self.edits == 1:
+                    raise RuntimeError("transient label failure")
+                super().edit_labels(issue_number, add=add, remove=remove)
+
+        github = FailsFirstNormalizationGitHub()
+        item = make_work_item(issue=117)
+        ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
+
+        first = PlanningStage().on_enter(item, ctx)
+        second = PlanningStage().on_enter(item, ctx)
+
+        assert first is not None and first.disposition is Disposition.RETRY
+        assert second is not None and second.disposition is Disposition.ADVANCE
+        assert item.attempts["plan"] == 1
+        assert github.labels[117] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
 
     @pytest.mark.parametrize(
         ("body", "owned_by_viewer"),
@@ -1412,6 +1451,57 @@ class TestPlanningStageStep:
         assert result.disposition == Disposition.FINISH_PASS
         assert item.payload[WAVE_NON_CODE_PAYLOAD] is True
         assert github.labels[2] == {STATE_SKIP, "epic"}
+
+    @pytest.mark.parametrize(
+        "labels",
+        [[STATE_NEEDS_PLAN], [STATE_SKIP, "epic"]],
+        ids=["before-label-write", "after-label-write"],
+    )
+    def test_pending_wave_non_code_intent_resumes_without_models(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+        labels: list[str],
+    ) -> None:
+        """Either side of the intent/label crash boundary converges to success."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [118])
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=118,
+            reason=reason,
+            extra_labels=("epic",),
+        )
+        item = make_work_item(issue=118, pr=88)
+        item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": reason,
+                    "extra_labels": ["epic"],
+                },
+            }
+        )
+        github = FakeStageGitHub(labels=labels, open_pr=88)
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(
+                github=github,
+                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            ),
+        )
+
+        checkpoint = store.load()
+        assert outcome is not None and outcome.disposition is Disposition.FINISH_PASS
+        assert github.labels[118] == {STATE_SKIP, "epic"}
+        assert item.payload[WAVE_NON_CODE_PAYLOAD] is True
+        assert WAVE_NON_CODE_INTENT_PAYLOAD not in item.payload
+        assert checkpoint is not None
+        recorded = checkpoint.current_wave.outcomes[0]
+        assert recorded.passed and recorded.non_code and recorded.pr_number is None
 
     def test_tracker_skip_requires_epic_label_readback(
         self, make_ctx: Any, make_work_item: Any

@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.automation.issue_waves import IssueWaveStore
+from hephaestus.automation.issue_waves import (
+    WAVE_NON_CODE_INTENT_PAYLOAD,
+    IssueWaveStore,
+)
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.routing import StageName
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
@@ -63,3 +66,48 @@ def test_lease_backed_direct_exclusion_reaches_finished_and_records_failure(
     assert outcome.issue_number == 2453
     assert outcome.passed is False
     assert outcome.reason == item.result.reason
+
+
+def test_lease_backed_non_code_intent_reenters_planning_for_label_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash before state:skip is repaired from the durable reviewed intent."""
+    repo_root = tmp_path / "repo-a"
+    repo_root.mkdir()
+    store = IssueWaveStore(repo_root, "org", "repo-a")
+    lease = store.seal_selection(store.plan_admission(BASE_SHA, 1), [2453])
+    reason = "independently confirmed tracker"
+    store.record_non_code_intent(
+        lease,
+        issue_number=2453,
+        reason=reason,
+        extra_labels=("epic",),
+    )
+    config = PipelineConfig(
+        org="org",
+        repos=["repo-a"],
+        issues=[2453],
+        loops=1,
+        projects_dir=tmp_path,
+        repo_roots={"repo-a": repo_root},
+    )
+    coordinator = Coordinator(
+        config,
+        github=FakeStageGitHub(labels=["state:needs-plan"]),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+    )
+    monkeypatch.setattr(
+        "hephaestus.automation.pipeline.coordinator._admission._filter_open_issues",
+        lambda _repo, issues: list(issues),
+    )
+    coordinator._direct_wave_lease = lease
+    coordinator._begin_direct_issue_source("repo-a", BASE_SHA)
+
+    assert coordinator._drain_direct_issue_source() == 1
+    item = coordinator.queues[StageName.PLANNING].snapshot()[0]
+    assert item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] == {
+        "reason": reason,
+        "extra_labels": ["epic"],
+    }

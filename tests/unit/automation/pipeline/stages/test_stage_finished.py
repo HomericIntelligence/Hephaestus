@@ -158,7 +158,14 @@ class TestRecord:
         """A reviewed tracker/obsolete issue is a durable passing wave outcome."""
         store = IssueWaveStore(tmp_path, "acme", "hephaestus")
         lease = store.seal_selection(store.plan_admission("a" * 40, 1), [42])
-        item = _item(state="RECORD", reason="independently confirmed tracker")
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=42,
+            reason=reason,
+            extra_labels=("epic",),
+        )
+        item = _item(state="RECORD", reason=reason, pr=99)
         item.repo = "hephaestus"
         item.payload[WAVE_LEASE_PAYLOAD] = lease
         item.payload[WAVE_NON_CODE_PAYLOAD] = True
@@ -177,6 +184,7 @@ class TestRecord:
         assert outcome.issue_number == 42
         assert outcome.passed is True
         assert outcome.non_code is True
+        assert outcome.pr_number is None
         assert checkpoint.current_wave.merge_receipts == ()
 
 

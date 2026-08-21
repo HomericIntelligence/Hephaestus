@@ -3895,6 +3895,27 @@ class TestRepoScoping:
             "org/repo-a",
         ]
 
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.CalledProcessError(1, "gh"),
+            subprocess.TimeoutExpired("gh", 30),
+            OSError("transport unavailable"),
+        ],
+    )
+    def test_edit_labels_normalizes_transport_failures(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ) -> None:
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(adapter, "_label_names", lambda: {"state:plan-go"})
+        monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=failure))
+
+        with pytest.raises(RuntimeError, match="failed to edit labels"):
+            adapter.edit_labels(5, add=["state:plan-go"], remove=["state:plan-no-go"])
+
     def test_plan_presence_does_not_backfill_from_review_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -5597,6 +5618,8 @@ class TestReadSurface:
         "failure",
         [
             subprocess.CalledProcessError(1, "gh"),
+            subprocess.TimeoutExpired("gh", 30),
+            OSError("transport unavailable"),
             None,
         ],
     )
@@ -5604,7 +5627,7 @@ class TestReadSurface:
         self,
         adapter: pg.PipelineGitHub,
         monkeypatch: pytest.MonkeyPatch,
-        failure: subprocess.CalledProcessError | None,
+        failure: BaseException | None,
     ) -> None:
         adapter.repo = "repo-a"
         if failure is not None:

@@ -144,6 +144,13 @@ class IssueFacts:
 
 
 @dataclass(frozen=True)
+class EpicSkipTagObligation:
+    """A required durable ``state:skip`` write before an epic is excluded."""
+
+    issue: int
+
+
+@dataclass(frozen=True)
 class SeedEntry:
     """One planned queue push produced by :func:`seed_from_cli`.
 
@@ -165,6 +172,8 @@ class SeedEntry:
         passed: Terminal result for entries clamped directly to ``finished``.
         non_code: Whether a passing terminal entry was semantically confirmed
             as non-code and therefore needs no merge receipt.
+        non_code_labels: Supplemental labels required by a pending reviewed
+            non-code disposition; ``state:skip`` is implicit.
 
     """
 
@@ -182,6 +191,7 @@ class SeedEntry:
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
     non_code: bool = False
+    non_code_labels: tuple[str, ...] = ()
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -285,6 +295,32 @@ def _issue_exclusion_reason(facts: IssueFacts) -> str | None:
     return None
 
 
+def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classification:
+    """Route one open PR; only an approved issue plan reaches special routes."""
+    # An implementation artifact cannot substitute for an approved issue
+    # plan.  Keep planning authoritative even when a PR already exists or
+    # carries a downstream implementation verdict.
+    if state_label != STATE_PLAN_GO:
+        return StageName.PLANNING, f"#{facts.number} open PR missing {STATE_PLAN_GO}"
+    # The loop-owned approval label records review eligibility, not durable
+    # merge authority.  A restart sends it to merge_wait, which confirms an
+    # unarmed PR before returning to review; a matching current-process
+    # proof attempts one ordinary conditional merge. No queue stage
+    # creates, disables, adopts, or polls automatic merge.
+    if facts.pending_implementation_go_audit is not None:
+        return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
+    if facts.pr_has_implementation_go:
+        return (
+            StageName.MERGE_WAIT,
+            f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
+        )
+    if facts.pr_has_implementation_no_go:
+        return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
+    # Only the PR-level label above has approval semantics.  Issue labels
+    # never select a special open-PR route.
+    return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
+
+
 def classify_issue(facts: IssueFacts) -> Classification:
     """Classify an issue into a single entry stage based on GitHub state.
 
@@ -332,28 +368,7 @@ def classify_issue(facts: IssueFacts) -> Classification:
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # An implementation artifact cannot substitute for an approved issue
-        # plan.  Keep planning authoritative even when a PR already exists or
-        # carries a downstream implementation verdict.
-        if state_label != STATE_PLAN_GO:
-            return StageName.PLANNING, f"#{facts.number} open PR missing {STATE_PLAN_GO}"
-        # The loop-owned approval label records review eligibility, not durable
-        # merge authority.  A restart sends it to merge_wait, which confirms an
-        # unarmed PR before returning to review; a matching current-process
-        # proof attempts one ordinary conditional merge. No queue stage
-        # creates, disables, adopts, or polls automatic merge.
-        if facts.pending_implementation_go_audit is not None:
-            return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
-        if facts.pr_has_implementation_go:
-            return (
-                StageName.MERGE_WAIT,
-                f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
-            )
-        if facts.pr_has_implementation_no_go:
-            return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
-        # Only the PR-level label above has approval semantics.  Issue labels
-        # never select a special open-PR route.
-        return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
+        return _classify_open_pr(facts, state_label)
 
     # No PR path: check implementation readiness
     if _label_at_or_past(state_label, STATE_PLAN_GO):
@@ -517,14 +532,24 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
 def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
     """Build one issue seed entry and its required durable-write obligation.
 
+    Seeding remains pure: it can declare, but never execute, the write that
+    makes an epic exclusion durable.  Callers must discharge the typed
+    obligation before they consume the resulting ``stage=None`` entry.
+
     Args:
         facts: Normalized GitHub state for one issue.
 
     Returns:
-        The classified entry.
+        The classified entry, with an epic skip-tag obligation only when the
+        issue is an untagged epic.
 
     """
     stage, reason = classify_issue(facts)
+    obligation = (
+        EpicSkipTagObligation(issue=facts.number)
+        if facts.is_epic and STATE_SKIP not in facts.labels
+        else None
+    )
     return SeedEntry(
         kind="issue",
         identifier=facts.number,

@@ -343,13 +343,31 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
     store = IssueWaveStore(tmp_path, "acme", "hephaestus")
     lease = store.seal_selection(store.plan_admission(BASE, 1), [19])
     reason = "independently confirmed tracker"
-    store.record_terminal_outcome(
+    store.record_non_code_intent(
         lease,
         issue_number=19,
-        passed=True,
         reason=reason,
-        non_code=True,
+        extra_labels=("epic",),
     )
+    pending_facts = SimpleNamespace(
+        number=19,
+        labels=set(),
+        is_epic=False,
+        pr_number=None,
+        pr_is_merged=False,
+        issue_is_closed=False,
+    )
+    pending = wave_entry_from_facts(
+        lease,
+        pending_facts,
+        SeedEntry("issue", 19, StageName.PLANNING, "pending"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert pending.stage is StageName.PLANNING
+    assert pending.non_code and pending.non_code_labels == ("epic",)
+
     facts = SimpleNamespace(
         number=19,
         labels={"state:skip", "epic"},
@@ -358,7 +376,24 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
         pr_is_merged=False,
         issue_is_closed=False,
     )
+    applied = wave_entry_from_facts(
+        lease,
+        facts,
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert applied.stage is StageName.FINISHED
+    assert applied.passed and applied.non_code
 
+    store.record_terminal_outcome(
+        lease,
+        issue_number=19,
+        passed=True,
+        reason=reason,
+        non_code=True,
+    )
     store.validate_prior_wave_facts(lease, {19: facts})
     verified = store.verify_prior_wave(
         lease,

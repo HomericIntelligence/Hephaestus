@@ -21,6 +21,12 @@ from typing import Any, Literal, cast
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import SeedEntry
+from hephaestus.automation.state_labels import (
+    ALL_IMPLEMENTATION_STATE_LABELS,
+    ALL_STATE_LABELS,
+    ATHENA_FINALIZED_PLAN_LABEL,
+    STATE_SKIP,
+)
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
@@ -32,6 +38,7 @@ _SHA_LENGTHS = (40, 64)
 
 WAVE_LEASE_PAYLOAD = "_issue_wave_lease"
 WAVE_NON_CODE_PAYLOAD = "_issue_wave_non_code"
+WAVE_NON_CODE_INTENT_PAYLOAD = "_issue_wave_non_code_intent"
 
 
 class IssueWaveError(RuntimeError):
@@ -184,15 +191,55 @@ class WaveIssueOutcome:
             raise IssueWaveValidationError("wave outcome pr_number must be positive or null")
 
 
+@dataclass(frozen=True)
+class WaveNonCodeIntent:
+    """Durable reviewed intent written before a non-code label transition."""
+
+    issue_number: int
+    reason: str
+    extra_labels: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the reviewed semantic-disposition intent."""
+        if isinstance(self.issue_number, bool) or self.issue_number <= 0:
+            raise IssueWaveValidationError("non-code intent issue_number must be positive")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise IssueWaveValidationError("non-code intent reason must be non-empty")
+        if not isinstance(self.extra_labels, tuple) or any(
+            not isinstance(label, str) or not label or label.startswith("state:")
+            for label in self.extra_labels
+        ):
+            raise IssueWaveValidationError("non-code intent extra labels are invalid")
+        if len(set(self.extra_labels)) != len(self.extra_labels):
+            raise IssueWaveValidationError("non-code intent extra labels contain duplicates")
+
+
 def _require_reviewed_non_code_skip(
     outcome: WaveIssueOutcome,
     facts: Any,
     *,
     drift: str,
+    intent: WaveNonCodeIntent | None = None,
 ) -> None:
     """Require the durable skip label that proves a reviewed non-code outcome."""
-    if facts is None or "state:skip" not in set(getattr(facts, "labels", set())):
+    if (
+        not _non_code_intent_is_applied(intent, facts)
+        if intent is not None
+        else facts is None or STATE_SKIP not in set(getattr(facts, "labels", set()))
+    ):
         raise IssueWaveBlockedError(f"issue #{outcome.issue_number} {drift}")
+
+
+def _non_code_intent_is_applied(intent: WaveNonCodeIntent, facts: Any) -> bool:
+    """Return whether fresh facts exactly confirm a pending non-code transition."""
+    labels = set(getattr(facts, "labels", set())) if facts is not None else set()
+    return (
+        STATE_SKIP in labels
+        and set(intent.extra_labels).issubset(labels)
+        and not labels.intersection(ALL_STATE_LABELS)
+        and not labels.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+        and ATHENA_FINALIZED_PLAN_LABEL not in labels
+    )
 
 
 def _validate_verified_outcome_facts(
@@ -203,10 +250,19 @@ def _validate_verified_outcome_facts(
     for outcome in record.outcomes:
         facts = facts_by_issue.get(outcome.issue_number)
         if outcome.non_code:
+            intent = next(
+                (
+                    item
+                    for item in record.non_code_intents
+                    if item.issue_number == outcome.issue_number
+                ),
+                None,
+            )
             _require_reviewed_non_code_skip(
                 outcome,
                 facts,
                 drift="lost its reviewed non-code skip",
+                intent=intent,
             )
             continue
         receipt = next(
@@ -233,6 +289,7 @@ class WaveRecord:
     lease_nonce: str
     outcomes: tuple[WaveIssueOutcome, ...] = ()
     merge_receipts: tuple[WaveMergeReceipt, ...] = ()
+    non_code_intents: tuple[WaveNonCodeIntent, ...] = ()
     verified_main_sha: str | None = None
 
     def __post_init__(self) -> None:
@@ -248,6 +305,7 @@ class WaveRecord:
         _required_text(self.lease_nonce, "wave record lease_nonce")
         outcome_ids = [outcome.issue_number for outcome in self.outcomes]
         receipt_ids = [receipt.issue_number for receipt in self.merge_receipts]
+        intent_ids = [intent.issue_number for intent in self.non_code_intents]
         if len(set(outcome_ids)) != len(outcome_ids) or not set(outcome_ids).issubset(
             set(self.issue_numbers)
         ):
@@ -256,6 +314,10 @@ class WaveRecord:
             set(self.issue_numbers)
         ):
             raise IssueWaveValidationError("wave receipts do not match the immutable selection")
+        if len(set(intent_ids)) != len(intent_ids) or not set(intent_ids).issubset(
+            set(self.issue_numbers)
+        ):
+            raise IssueWaveValidationError("wave non-code intents do not match the selection")
         if self.verified_main_sha is not None and not is_full_commit_sha(self.verified_main_sha):
             raise IssueWaveValidationError("wave verified_main_sha is invalid")
 
@@ -359,6 +421,14 @@ def _receipt_to_json(receipt: WaveMergeReceipt) -> dict[str, Any]:
     }
 
 
+def _non_code_intent_to_json(intent: WaveNonCodeIntent) -> dict[str, Any]:
+    return {
+        "issue_number": intent.issue_number,
+        "reason": intent.reason,
+        "extra_labels": list(intent.extra_labels),
+    }
+
+
 def _wave_to_json(wave: WaveRecord) -> dict[str, Any]:
     return {
         "wave_index": wave.wave_index,
@@ -368,6 +438,7 @@ def _wave_to_json(wave: WaveRecord) -> dict[str, Any]:
         "lease_nonce": wave.lease_nonce,
         "outcomes": [_outcome_to_json(item) for item in wave.outcomes],
         "merge_receipts": [_receipt_to_json(item) for item in wave.merge_receipts],
+        "non_code_intents": [_non_code_intent_to_json(item) for item in wave.non_code_intents],
         "verified_main_sha": wave.verified_main_sha,
     }
 
@@ -397,8 +468,11 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             raise IssueWaveValidationError("checkpoint wave must be an object")
         outcomes_raw = value.get("outcomes", [])
         receipts_raw = value.get("merge_receipts", [])
-        if not isinstance(outcomes_raw, list) or not isinstance(receipts_raw, list):
-            raise IssueWaveValidationError("checkpoint outcomes and receipts must be lists")
+        intents_raw = value.get("non_code_intents", [])
+        if not all(isinstance(items, list) for items in (outcomes_raw, receipts_raw, intents_raw)):
+            raise IssueWaveValidationError(
+                "checkpoint outcomes, receipts, and non-code intents must be lists"
+            )
         outcomes = tuple(
             WaveIssueOutcome(
                 issue_number=cast(int, item.get("issue_number")),
@@ -424,6 +498,17 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
         )
         if len(receipts) != len(receipts_raw):
             raise IssueWaveValidationError("checkpoint merge receipt must be an object")
+        intents = tuple(
+            WaveNonCodeIntent(
+                issue_number=cast(int, item.get("issue_number")),
+                reason=cast(str, item.get("reason")),
+                extra_labels=tuple(item.get("extra_labels", ())),
+            )
+            for item in intents_raw
+            if isinstance(item, dict)
+        )
+        if len(intents) != len(intents_raw):
+            raise IssueWaveValidationError("checkpoint non-code intent must be an object")
         waves.append(
             WaveRecord(
                 wave_index=cast(int, value.get("wave_index")),
@@ -433,6 +518,7 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
                 lease_nonce=cast(str, value.get("lease_nonce")),
                 outcomes=outcomes,
                 merge_receipts=receipts,
+                non_code_intents=intents,
                 verified_main_sha=value.get("verified_main_sha"),
             )
         )
@@ -815,6 +901,61 @@ class IssueWaveStore:
                 (item for item in record.outcomes if item.issue_number == issue_number), None
             )
 
+    def non_code_intent_for(
+        self,
+        lease: WaveLease,
+        issue_number: int,
+    ) -> WaveNonCodeIntent | None:
+        """Return a durable reviewed non-code transition intent, if present."""
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                return None
+            record = self._current_record(checkpoint, lease)
+            return next(
+                (item for item in record.non_code_intents if item.issue_number == issue_number),
+                None,
+            )
+
+    def record_non_code_intent(
+        self,
+        lease: WaveLease,
+        *,
+        issue_number: int,
+        reason: str,
+        extra_labels: tuple[str, ...] = (),
+    ) -> WaveLease:
+        """Persist reviewed non-code authority before mutating GitHub labels."""
+        intent = WaveNonCodeIntent(issue_number, reason, extra_labels)
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveConflictError("cannot record an intent without a checkpoint")
+            record = self._current_record(checkpoint, lease)
+            existing = next(
+                (item for item in record.non_code_intents if item.issue_number == issue_number),
+                None,
+            )
+            if existing is not None:
+                if existing != intent:
+                    raise IssueWaveConflictError(
+                        "a different non-code intent already exists for this issue"
+                    )
+                return lease
+            updated = replace(
+                record,
+                non_code_intents=(*record.non_code_intents, intent),
+            )
+            waves = (
+                *checkpoint.waves[: record.wave_index],
+                updated,
+                *checkpoint.waves[record.wave_index + 1 :],
+            )
+            self._write_unlocked(
+                replace(checkpoint, generation=checkpoint.generation + 1, waves=waves)
+            )
+            return lease
+
     def record_merge_receipt(
         self,
         lease: WaveLease,
@@ -868,6 +1009,14 @@ class IssueWaveStore:
             if checkpoint is None:
                 raise IssueWaveConflictError("cannot record an outcome without a checkpoint")
             record = self._current_record(checkpoint, lease)
+            intent = next(
+                (item for item in record.non_code_intents if item.issue_number == issue_number),
+                None,
+            )
+            if non_code and (intent is None or intent.reason != reason):
+                raise IssueWaveBlockedError(
+                    f"cannot record non-code outcome for #{issue_number} without matching intent"
+                )
             if (
                 passed
                 and not non_code
@@ -959,10 +1108,19 @@ class IssueWaveStore:
                     )
                 if outcome.non_code:
                     facts = facts_by_issue.get(outcome.issue_number)
+                    intent = next(
+                        (
+                            item
+                            for item in record.non_code_intents
+                            if item.issue_number == outcome.issue_number
+                        ),
+                        None,
+                    )
                     _require_reviewed_non_code_skip(
                         outcome,
                         facts,
                         drift="no longer has its reviewed non-code skip",
+                        intent=intent,
                     )
                     continue
                 receipt = next(
@@ -1106,6 +1264,25 @@ def wave_entry_from_facts(
             reason=f"issue #{facts.number} lost its reviewed non-code skip",
             passed=False,
         )
+    intent = store.non_code_intent_for(lease, facts.number)
+    if intent is not None:
+        if _non_code_intent_is_applied(intent, facts):
+            return replace(
+                entry,
+                stage=StageName.FINISHED,
+                reason=intent.reason,
+                passed=True,
+                non_code=True,
+                non_code_labels=intent.extra_labels,
+            )
+        return replace(
+            entry,
+            stage=StageName.PLANNING,
+            reason=intent.reason,
+            passed=True,
+            non_code=True,
+            non_code_labels=intent.extra_labels,
+        )
     if facts.pr_is_merged and receipt is not None and facts.pr_number == receipt.pr_number:
         return replace(
             entry,
@@ -1128,6 +1305,7 @@ def wave_entry_from_facts(
 __all__ = [
     "WAVE_LEASE_PAYLOAD",
     "WAVE_LIMITS",
+    "WAVE_NON_CODE_INTENT_PAYLOAD",
     "WAVE_NON_CODE_PAYLOAD",
     "IssueWaveBlockedError",
     "IssueWaveConflictError",
@@ -1140,6 +1318,7 @@ __all__ = [
     "WaveIssueOutcome",
     "WaveLease",
     "WaveMergeReceipt",
+    "WaveNonCodeIntent",
     "WaveRecord",
     "is_full_commit_sha",
 ]

@@ -23,7 +23,10 @@ and merge commit. A sibling lock serializes readers and writers; checkpoint
 updates use an atomic owner-only write and a generation compare-and-swap.
 An independently planner/reviewer-confirmed tracker or obsolete issue is stored
 as a passing non-code outcome instead: it has no PR receipt and remains valid
-only while its durable `state:skip` label is still present.
+only while its durable `state:skip` label is still present. The checkpoint
+writes a reviewed non-code intent before changing labels, then records the
+terminal outcome after exact readback. A restart repairs an unapplied intent or
+completes an applied intent without rerunning either model.
 
 Wave admission is performed after synchronized checkout and before label setup.
 The only selectors are 1, 2, 4, 8, and all eligible issues. A later wave needs

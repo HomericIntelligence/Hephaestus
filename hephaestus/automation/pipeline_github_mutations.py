@@ -1,5 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+import subprocess
+
 from hephaestus.automation.merge_authorization import MergeAuthorization
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -107,6 +109,13 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
 
     def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
         """Atomically add+remove labels in a single ``gh issue edit``."""
+        try:
+            self._edit_labels(issue_number, add=add, remove=remove)
+        except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
+            raise RuntimeError(f"failed to edit labels on issue #{issue_number}: {exc}") from exc
+
+    def _edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+        """Execute the label mutation after the public error boundary."""
         if self._skip(f"edit labels on #{issue_number} (+{add} -{remove})"):
             return
         if self._repo_slug is not None:
@@ -157,6 +166,8 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         issue_number: int,
         marker: str,
         body: str,
+        *,
+        legacy_marker: str | None = None,
     ) -> None:
         """Upsert one actor-owned canonical comment keyed on an opaque marker.
 
@@ -164,6 +175,27 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         patched, deleted, nor allowed to deny service. Historical
         human-readable heading-only comments are never migration candidates.
         """
+        try:
+            self._upsert_issue_comment(
+                issue_number,
+                marker,
+                body,
+                legacy_marker=legacy_marker,
+            )
+        except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"failed to upsert issue #{issue_number} comment {marker!r}: {exc}"
+            ) from exc
+
+    def _upsert_issue_comment(
+        self,
+        issue_number: int,
+        marker: str,
+        body: str,
+        *,
+        legacy_marker: str | None = None,
+    ) -> None:
+        """Execute canonical comment upsert after the public error boundary."""
         if not has_exact_leading_marker(body, marker):
             raise ValueError(f"canonical comment body must start with marker {marker!r}")
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
@@ -189,7 +221,6 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         owner, name = (
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
-        if str(owned[-1].get("body", "")) != body:
         if str(owned[-1].get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
             comments = self._repo_issue_comments(issue_number)

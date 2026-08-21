@@ -315,7 +315,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                         "number,title,state,labels,body",
                     ]
                 )
-            except subprocess.CalledProcessError as exc:
+            except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
             try:
                 data = json.loads(result.stdout or "{}")

@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -45,7 +46,14 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
-from hephaestus.automation.issue_waves import WAVE_NON_CODE_PAYLOAD
+from hephaestus.automation.issue_waves import (
+    WAVE_LEASE_PAYLOAD,
+    WAVE_NON_CODE_INTENT_PAYLOAD,
+    WAVE_NON_CODE_PAYLOAD,
+    IssueWaveError,
+    IssueWaveStore,
+    WaveLease,
+)
 from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
@@ -313,6 +321,9 @@ def _retry_incomplete_requirements_snapshot(
     item: WorkItem,
     ctx: StageContext,
     reason: str,
+    *,
+    honor_blocked: bool = True,
+    preserve_finalized_authority: bool = False,
 ) -> StageOutcome:
     """Bound incomplete entry reads and fail closed with plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
@@ -327,7 +338,7 @@ def _retry_incomplete_requirements_snapshot(
         live_labels = _issue_snapshot_labels(live)
         if is_skipped(live_labels):
             return StageOutcome(Disposition.SKIP, "state:skip")
-        if STATE_PLAN_BLOCKED in live_labels:
+        if honor_blocked and STATE_PLAN_BLOCKED in live_labels:
             return StageOutcome(
                 Disposition.BLOCKED,
                 "plan was blocked during requirements recovery",
@@ -339,6 +350,11 @@ def _retry_incomplete_requirements_snapshot(
         return StageOutcome(
             Disposition.RETRY,
             f"requirements snapshot retry {attempt}/{ctx.budget('plan')}: {reason}",
+        )
+    if preserve_finalized_authority:
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"finalized plan normalization exhausted without revoking authority: {reason}",
         )
     try:
         no_go_confirmed = _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO)
@@ -384,6 +400,79 @@ def _finish_recovery(item: WorkItem) -> None:
     _clear_recovery_results(item)
     item.payload.pop("requirements_recovery_required", None)
     item.payload.pop("requirements_recovery_contaminated", None)
+
+
+def _wave_non_code_binding(
+    item: WorkItem,
+    ctx: StageContext,
+) -> tuple[IssueWaveStore, WaveLease] | None:
+    """Return the current issue-wave store/lease pair, when wave-scoped."""
+    lease = item.payload.get(WAVE_LEASE_PAYLOAD)
+    if not isinstance(lease, WaveLease):
+        return None
+    return IssueWaveStore(Path(str(ctx.paths.repo_root)), ctx.org, item.repo), lease
+
+
+def _persist_wave_non_code_intent(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    reason: str,
+    extra_labels: tuple[str, ...],
+) -> None:
+    """Persist reviewed non-code authority before the GitHub label transition."""
+    binding = _wave_non_code_binding(item, ctx)
+    if binding is None:
+        return
+    store, lease = binding
+    assert item.issue is not None  # noqa: S101 - caller validates the issue
+    store.record_non_code_intent(
+        lease,
+        issue_number=item.issue,
+        reason=reason,
+        extra_labels=extra_labels,
+    )
+    item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+        "reason": reason,
+        "extra_labels": list(extra_labels),
+    }
+
+
+def _complete_wave_non_code_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    *,
+    reason: str,
+) -> None:
+    """Record a reviewed non-code outcome after exact skip-label readback."""
+    binding = _wave_non_code_binding(item, ctx)
+    if binding is not None:
+        store, lease = binding
+        assert item.issue is not None  # noqa: S101 - caller validates the issue
+        store.record_terminal_outcome(
+            lease,
+            issue_number=item.issue,
+            passed=True,
+            reason=reason,
+            pr_number=None,
+            non_code=True,
+        )
+    item.payload.pop(WAVE_NON_CODE_INTENT_PAYLOAD, None)
+    item.payload[WAVE_NON_CODE_PAYLOAD] = True
+
+
+def _pending_wave_non_code_intent(item: WorkItem) -> tuple[str, tuple[str, ...]] | None:
+    """Decode the in-memory projection of a durable non-code intent."""
+    raw = item.payload.get(WAVE_NON_CODE_INTENT_PAYLOAD)
+    if not isinstance(raw, dict):
+        return None
+    reason = raw.get("reason")
+    extra_labels = raw.get("extra_labels")
+    if not isinstance(reason, str) or not reason or not isinstance(extra_labels, list):
+        return None
+    if any(not isinstance(label, str) for label in extra_labels):
+        return None
+    return reason, tuple(extra_labels)
 
 
 def _reset_plan_review_session(item: WorkItem, ctx: StageContext) -> None:
@@ -454,6 +543,72 @@ def _apply_recovery_state_label(
     )
 
 
+def _retry_pending_non_code_intent(
+    item: WorkItem,
+    ctx: StageContext,
+    reason: str,
+) -> StageOutcome:
+    """Bound recovery of a durable reviewed non-code label transition."""
+    attempt = item.attempts.get("plan", 0) + 1
+    item.attempts["plan"] = attempt
+    if attempt < ctx.budget("plan"):
+        _reenter_planning(item)
+        return StageOutcome(
+            Disposition.RETRY,
+            f"non-code transition retry {attempt}/{ctx.budget('plan')}: {reason}",
+        )
+    return StageOutcome(
+        Disposition.FINISH_FAIL,
+        f"non-code transition exhausted: {reason}",
+    )
+
+
+def _resume_wave_non_code_intent(
+    item: WorkItem,
+    ctx: StageContext,
+    intent: tuple[str, tuple[str, ...]],
+) -> StageOutcome:
+    """Finish a crash-interrupted reviewed non-code transition without models."""
+    reason, extra_labels = intent
+    try:
+        _persist_wave_non_code_intent(
+            item,
+            ctx,
+            reason=reason,
+            extra_labels=extra_labels,
+        )
+        confirmed = _apply_recovery_state_label(
+            item,
+            ctx,
+            STATE_SKIP,
+            extra=extra_labels,
+        )
+        if not confirmed:
+            return _retry_pending_non_code_intent(
+                item,
+                ctx,
+                "skip label was not confirmed",
+            )
+        _complete_wave_non_code_outcome(item, ctx, reason=reason)
+    except (IssueWaveError, RuntimeError) as exc:
+        return _retry_pending_non_code_intent(item, ctx, str(exc))
+    _finish_recovery(item)
+    action = "tracker-skipped" if "epic" in extra_labels else "obsolete-skipped"
+    record_summary_action(item, action)
+    return StageOutcome(Disposition.FINISH_PASS, reason)
+
+
+def _retry_semantic_transition(
+    item: WorkItem,
+    ctx: StageContext,
+    reason: str,
+) -> StageOutcome:
+    """Retry through the durable intent path once a wave intent exists."""
+    if _pending_wave_non_code_intent(item) is not None:
+        return _retry_pending_non_code_intent(item, ctx, reason)
+    return _retry_requirements_recovery(item, ctx, reason, honor_skip=False)
+
+
 def _retry_requirements_recovery(
     item: WorkItem,
     ctx: StageContext,
@@ -510,57 +665,57 @@ def _apply_confirmed_semantic_skip(
     """Apply a tracker/obsolete skip only after matching independent GO."""
     assert item.issue is not None  # noqa: S101 - caller validates this
     if proposal.disposition is RecoveryDisposition.TRACKER:
+        reason = "independently confirmed tracker"
         try:
+            _persist_wave_non_code_intent(
+                item,
+                ctx,
+                reason=reason,
+                extra_labels=("epic",),
+            )
             skip_confirmed = _apply_recovery_state_label(item, ctx, STATE_SKIP, extra=("epic",))
-        except RuntimeError as exc:
-            return _retry_requirements_recovery(
-                item,
-                ctx,
-                f"tracker skip failed: {exc}",
-                honor_skip=False,
-            )
+        except (IssueWaveError, RuntimeError) as exc:
+            return _retry_semantic_transition(item, ctx, f"tracker skip failed: {exc}")
         if not skip_confirmed:
-            return _retry_requirements_recovery(
-                item,
-                ctx,
-                "tracker skip was not confirmed",
-                honor_skip=False,
-            )
+            return _retry_semantic_transition(item, ctx, "tracker skip was not confirmed")
+        try:
+            _complete_wave_non_code_outcome(item, ctx, reason=reason)
+        except IssueWaveError as exc:
+            return _retry_pending_non_code_intent(item, ctx, str(exc))
         record_summary_action(item, "tracker-skipped")
         _finish_recovery(item)
-        item.payload[WAVE_NON_CODE_PAYLOAD] = True
-        return StageOutcome(Disposition.FINISH_PASS, "independently confirmed tracker")
+        return StageOutcome(Disposition.FINISH_PASS, reason)
     if proposal.disposition is RecoveryDisposition.OBSOLETE:
+        reason = "independently confirmed obsolete"
         logger.info(
             "planning:%d: independently confirmed obsolete issue; applying state:skip: %s",
             item.issue,
             review.reason,
         )
         try:
+            _persist_wave_non_code_intent(
+                item,
+                ctx,
+                reason=reason,
+                extra_labels=(),
+            )
             ctx.github.upsert_issue_comment(
                 item.issue,
                 OBSOLETE_EXPLANATION_MARKER,
                 render_obsolete_explanation(review.reason),
             )
             skip_confirmed = _apply_recovery_state_label(item, ctx, STATE_SKIP)
-        except RuntimeError as exc:
-            return _retry_requirements_recovery(
-                item,
-                ctx,
-                f"obsolete skip failed: {exc}",
-                honor_skip=False,
-            )
+        except (IssueWaveError, RuntimeError) as exc:
+            return _retry_semantic_transition(item, ctx, f"obsolete skip failed: {exc}")
         if not skip_confirmed:
-            return _retry_requirements_recovery(
-                item,
-                ctx,
-                "obsolete skip was not confirmed",
-                honor_skip=False,
-            )
+            return _retry_semantic_transition(item, ctx, "obsolete skip was not confirmed")
+        try:
+            _complete_wave_non_code_outcome(item, ctx, reason=reason)
+        except IssueWaveError as exc:
+            return _retry_pending_non_code_intent(item, ctx, str(exc))
         record_summary_action(item, "obsolete-skipped")
         _finish_recovery(item)
-        item.payload[WAVE_NON_CODE_PAYLOAD] = True
-        return StageOutcome(Disposition.FINISH_PASS, "independently confirmed obsolete")
+        return StageOutcome(Disposition.FINISH_PASS, reason)
     return None
 
 
@@ -664,6 +819,8 @@ def _apply_requirements_recovery(
     if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
         return issue_outcome
     live_labels = _issue_snapshot_labels(live)
+    if pending_intent := _pending_wave_non_code_intent(item):
+        return _resume_wave_non_code_intent(item, ctx, pending_intent)
     if is_skipped(live_labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
     if STATE_PLAN_BLOCKED in live_labels:
@@ -1386,6 +1543,9 @@ class PlanningStage(Stage):
             item.payload.get("forced_planning_epoch_started")
         )
 
+        if pending_intent := _pending_wave_non_code_intent(item):
+            return _resume_wave_non_code_intent(item, ctx, pending_intent)
+
         # Operator override: state:skip -> SKIP. Checked BEFORE the
         # plan-go fast-forward — skip wins over everything (#1835), matching
         # seeding.classify_issue's "skip wins over everything" precedent.
@@ -1436,12 +1596,16 @@ class PlanningStage(Stage):
                         item,
                         ctx,
                         f"finalized plan-go normalization failed: {exc}",
+                        honor_blocked=False,
+                        preserve_finalized_authority=True,
                     )
                 if not finalized_state_confirmed:
                     return _retry_incomplete_requirements_snapshot(
                         item,
                         ctx,
                         "finalized plan-go label was not confirmed",
+                        honor_blocked=False,
+                        preserve_finalized_authority=True,
                     )
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)

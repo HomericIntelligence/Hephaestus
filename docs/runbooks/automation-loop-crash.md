@@ -98,7 +98,8 @@ For a staged rollout, the repository-local checkpoint is
 order; the next invocation is blocked until the prior wave's exact issues have
 passing terminal outcomes. Implementation outcomes require loop-owned normal
 merge receipts; independently reviewed tracker/obsolete outcomes instead require
-their durable `state:skip` label:
+their durable `state:skip` label. A checkpointed non-code intent automatically
+resumes label repair or terminal recording after a crash:
 
 ```bash
 hephaestus-automation-loop --repos <REPO> --issue-limit 1

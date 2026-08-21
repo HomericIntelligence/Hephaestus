@@ -1,5 +1,7 @@
 import sys
 
+from hephaestus.automation.issue_waves import WAVE_NON_CODE_INTENT_PAYLOAD
+
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
 from .stages.repo import SYNCED_MAIN_SHA_KEY
@@ -150,7 +152,13 @@ class SourceCoordinator(_CoordinatorHost):
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
                     if entry.non_code:
-                        new_item.payload[WAVE_NON_CODE_PAYLOAD] = True
+                        if entry.stage is StageName.FINISHED:
+                            new_item.payload[WAVE_NON_CODE_PAYLOAD] = True
+                        else:
+                            new_item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                                "reason": entry.reason,
+                                "extra_labels": list(entry.non_code_labels),
+                            }
                 if source.base_main_sha is not None:
                     new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
                 if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
@@ -473,7 +481,13 @@ class SourceCoordinator(_CoordinatorHost):
         if source.wave_lease is not None:
             item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
             if entry.non_code:
-                item.payload[WAVE_NON_CODE_PAYLOAD] = True
+                if entry.stage is StageName.FINISHED:
+                    item.payload[WAVE_NON_CODE_PAYLOAD] = True
+                else:
+                    item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                        "reason": entry.reason,
+                        "extra_labels": list(entry.non_code_labels),
+                    }
         if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
             repo = (self.config.org, item.repo)
             planned = _admission._fetch_planned_files(issue, repo=repo)
