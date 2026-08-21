@@ -65,11 +65,11 @@ class TestEnsureMnemosyne:
         assert ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"] in calls
         assert not any(call[:3] == ["gh", "repo", "clone"] for call in calls)
 
-    def test_existing_checkout_uses_env_configured_git_timeout(
+    def test_existing_checkout_uses_explicit_git_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Git validation/refresh calls use the centralized call-time timeout."""
-        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "44")
+        """Git validation/refresh calls use the explicit call-time timeout."""
+        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "999")
         mnemosyne_root = tmp_path / "Mnemosyne"
         mnemosyne_root.mkdir()
         timeouts: list[object] = []
@@ -81,15 +81,15 @@ class TestEnsureMnemosyne:
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         with patch("hephaestus.automation.advise_runner.subprocess.run", side_effect=fake_run):
-            assert advise_runner.ensure_mnemosyne(mnemosyne_root) is True
+            assert advise_runner.ensure_mnemosyne(mnemosyne_root, git_timeout_s=44) is True
 
         assert timeouts == [44, 44]
 
-    def test_clone_uses_env_configured_clone_timeout(
+    def test_clone_uses_explicit_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Mnemosyne clone calls use the centralized clone timeout."""
-        monkeypatch.setenv("HEPH_AGENT_CLONE_TIMEOUT", "55")
+        """Mnemosyne clone calls use the explicit timeout and ignore legacy env."""
+        monkeypatch.setenv("HEPH_AGENT_CLONE_TIMEOUT", "999")
         mnemosyne_root = tmp_path / "Mnemosyne"
         target = MnemosyneTarget(
             owner="HomericIntelligence",
@@ -107,7 +107,7 @@ class TestEnsureMnemosyne:
             gh_call.return_value = subprocess.CompletedProcess(
                 ["gh", "repo", "clone"], 0, stdout="", stderr=""
             )
-            assert advise_runner._clone_mnemosyne(mnemosyne_root) is True
+            assert advise_runner._clone_mnemosyne(mnemosyne_root, timeout_s=55) is True
 
         assert gh_call.call_args.kwargs["timeout"] == 55
         # The clone targets the resolved slug, not a hardcoded upstream literal.

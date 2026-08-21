@@ -22,6 +22,7 @@ from hephaestus.cli.utils import (
     format_output,
     resolve_repo_root,
 )
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, get_repo_root
 
 
@@ -94,6 +95,7 @@ def run_ruff_complexity_check(
             text=True,
             cwd=repo_root,
             timeout=NETWORK_TIMEOUT,
+            env=build_python_phase_env(repo_root),
         )
     except subprocess.TimeoutExpired as exc:
         timeout = exc.timeout if exc.timeout is not None else NETWORK_TIMEOUT

@@ -15,10 +15,10 @@ core pattern handler::
     HANDLER=$(command -v hephaestus-coredump-handler)
     echo "|${HANDLER} %p %e %t %s %P" | sudo tee /proc/sys/kernel/core_pattern
 
-The kernel invokes a pipe handler with a *minimal environment*, so the
-``COREDUMP_TARGET_DIRS`` env var cannot reach it. When a specific output
-directory is required (e.g. a CI workspace path that a container bind-mount
-maps to), pass it as a literal ``--target-dir`` argument in the
+The kernel invokes a pipe handler with a *minimal environment*. When ordered
+output-directory candidates are required (e.g. a CI workspace path that a
+container bind-mount maps to), pass them as literal repeatable ``--target-dir``
+arguments in the
 ``core_pattern`` line — the kernel forwards literal args verbatim::
 
     echo "|${HANDLER} --target-dir /workspace/crash-bundle/cores %p %e %t %s %P" \\
@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import os
 import re
 import sys
 from datetime import UTC, datetime
@@ -65,7 +64,7 @@ DEFAULT_TARGET_DIRS: tuple[str, ...] = ("/tmp/crash-bundle/cores",)  # nosec B10
 #: process from filling the host disk.
 DEFAULT_MAX_BYTES: int = 4 * 1024 * 1024 * 1024
 
-#: Regex for parsing ``COREDUMP_MAX_BYTES``: integer with optional IEC unit
+#: Regex for parsing ``--max-bytes``: integer with optional IEC unit
 #: suffix (K/M/G/T, case-insensitive, optional trailing 'i' and/or 'B' for
 #: ``KiB``/``MB``/etc.). Whitespace allowed at either end. Bare digits and
 #: ``4G``/``500M``/``2GiB`` all parse; ``-1``/``0``/``4X``/``4G500M`` do not.
@@ -80,7 +79,7 @@ _UNIT_MULTIPLIERS: dict[str, int] = {
 
 
 def _parse_max_bytes(raw: str) -> int | None:
-    """Parse a ``COREDUMP_MAX_BYTES`` value, returning ``None`` on any failure.
+    """Parse a ``--max-bytes`` value, returning ``None`` on any failure.
 
     Accepts bare digits (``"4096"``) and IEC suffixes (``"4G"``, ``"500M"``,
     ``"2GiB"``, case-insensitive). All suffixes use power-of-two (IEC)
@@ -104,6 +103,16 @@ def _parse_max_bytes(raw: str) -> int | None:
     except (ValueError, KeyError):
         return None
     return value if value > 0 else None
+
+
+def _max_bytes_arg(raw: str) -> int:
+    """Parse a positive core-size option for argparse."""
+    value = _parse_max_bytes(raw)
+    if value is None:
+        raise argparse.ArgumentTypeError(
+            "max bytes must be positive digits with an optional K/M/G/T suffix"
+        )
+    return value
 
 
 def resolve_target_dir(candidates: list[str]) -> Path:
@@ -178,7 +187,7 @@ def verify_crash_bundle(log_dir: Path) -> tuple[str, str]:
     Classification keys off the lines :func:`_log` writes. A ``wrote `` line
     means the core was captured (verdict :data:`BUNDLE_OK`) even if a WARNING
     is also present, because a successful capture can still log a chmod or
-    ``COREDUMP_MAX_BYTES`` warning (see :func:`write_core` / :func:`main`). Any
+    size-limit warning (see :func:`write_core` / :func:`main`). Any
     other non-empty log means the handler ran but recorded no successful
     capture (:data:`BUNDLE_RAN_WITH_ERRORS`). A missing/empty/unreadable log
     means the handler never ran (:data:`BUNDLE_NOT_RUN`) — the silent-loss case.
@@ -287,14 +296,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target-dir",
+        action="append",
         default=None,
         help=(
-            "explicit output directory for the core file. Takes precedence over "
-            "COREDUMP_TARGET_DIRS and the built-in default. The kernel invokes a "
-            "core_pattern pipe handler with a minimal environment, so an env var "
-            "cannot reach it — pass this literal flag in the core_pattern line "
-            "when a specific directory (e.g. a CI workspace path) is required."
+            "ordered output-directory candidate for the core file. Repeat for "
+            "fallback candidates. The built-in default is used when omitted."
         ),
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=_max_bytes_arg,
+        default=DEFAULT_MAX_BYTES,
+        help="maximum captured core size in bytes (optional K/M/G/T suffix)",
     )
     parser.add_argument(
         "--verify",
@@ -321,27 +334,20 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_candidates(target_dir: str | None) -> list[str]:
-    """Resolve ordered output-directory candidates from CLI/env/default.
-
-    Mirrors the precedence documented on :func:`main`: an explicit
-    ``--target-dir`` wins over ``COREDUMP_TARGET_DIRS`` (colon-separated),
-    which wins over :data:`DEFAULT_TARGET_DIRS`.
+def _resolve_candidates(target_dirs: list[str] | None) -> list[str]:
+    """Resolve ordered output-directory candidates from CLI values or defaults.
 
     Args:
-        target_dir: The ``--target-dir`` CLI value, or ``None`` if unset.
+        target_dirs: Repeatable ``--target-dir`` values, or ``None`` if unset.
 
     Returns:
         The ordered list of candidate directory paths (may contain empties).
 
     """
-    if target_dir:
-        return [target_dir]
-    target_dirs = os.environ.get("COREDUMP_TARGET_DIRS")
-    return target_dirs.split(":") if target_dirs else list(DEFAULT_TARGET_DIRS)
+    return list(target_dirs) if target_dirs else list(DEFAULT_TARGET_DIRS)
 
 
-def _run_verify(target_dir: str | None, as_json: bool) -> int:
+def _run_verify(target_dirs: list[str] | None, as_json: bool) -> int:
     """Run ``--verify`` mode: assert the handler-ran contract, never read stdin.
 
     Resolves the bundle directory *read-only* — it deliberately does NOT call
@@ -349,7 +355,7 @@ def _run_verify(target_dir: str | None, as_json: bool) -> int:
     fabricate the very directory whose absence is the lost-signal indicator.
 
     Args:
-        target_dir: The ``--target-dir`` CLI value, or ``None`` if unset.
+        target_dirs: Repeatable ``--target-dir`` values, or ``None`` if unset.
         as_json: Whether to emit a JSON status envelope instead of plain text.
 
     Returns:
@@ -357,7 +363,7 @@ def _run_verify(target_dir: str | None, as_json: bool) -> int:
         :data:`VERIFY_SIGNAL_LOST_EXIT` (verdict ``NOT_RUN``).
 
     """
-    cleaned = [c for c in _resolve_candidates(target_dir) if c]
+    cleaned = [c for c in _resolve_candidates(target_dirs) if c]
     if not cleaned:
         raise ValueError("no candidate target directories provided")
     # log_dir is the parent of target_dir (see write_core).
@@ -374,14 +380,11 @@ def _run_verify(target_dir: str | None, as_json: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``hephaestus-coredump-handler`` console script.
 
-    Configuration precedence for the output directory:
+    Repeatable ``--target-dir`` values provide ordered candidates and survive
+    the kernel's minimal handler environment. When omitted,
+    :data:`DEFAULT_TARGET_DIRS` is used.
 
-    1. ``--target-dir`` CLI option (highest — survives the kernel's minimal
-       handler environment).
-    2. ``COREDUMP_TARGET_DIRS`` env var — colon-separated candidate dirs.
-    3. :data:`DEFAULT_TARGET_DIRS` — the built-in fallback.
-
-    ``COREDUMP_MAX_BYTES`` (env var) caps the core size in bytes.
+    ``--max-bytes`` caps the core size in bytes.
 
     Args:
         argv: Argument vector (defaults to ``sys.argv[1:]``).
@@ -426,24 +429,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 1
 
-    # --target-dir wins over the env var, which wins over the built-in default.
     target_dir = resolve_target_dir(_resolve_candidates(args.target_dir))
-
-    max_bytes_env = os.environ.get("COREDUMP_MAX_BYTES")
-    if max_bytes_env and max_bytes_env.strip():
-        parsed = _parse_max_bytes(max_bytes_env)
-        if parsed is None:
-            _log(
-                target_dir.parent,
-                f"WARNING: COREDUMP_MAX_BYTES={max_bytes_env!r} is not a valid "
-                f"byte count (expected digits with optional K/M/G/T suffix); "
-                f"falling back to default {DEFAULT_MAX_BYTES}",
-            )
-            max_bytes = DEFAULT_MAX_BYTES
-        else:
-            max_bytes = parsed
-    else:
-        max_bytes = DEFAULT_MAX_BYTES
 
     out_path = write_core(
         sys.stdin.buffer,
@@ -452,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
         crash_time=args.crash_time,
         signal=args.signal,
         target_dir=target_dir,
-        max_bytes=max_bytes,
+        max_bytes=args.max_bytes,
     )
     if args.json:
         emit_json_status(0, message="core written", path=str(out_path))

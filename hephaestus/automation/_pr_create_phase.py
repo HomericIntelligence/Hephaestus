@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.constants import pre_pr_test_timeout
 
 from ._stage_context import StageMixin
@@ -79,11 +80,14 @@ class PRCreatePhase(StageMixin):
 
     def _run_tests_in_worktree(self, worktree_path: Path, issue_number: int) -> bool:
         """Run the worktree test suite as a pre-PR gate (A2-004)."""
-        timeout_s = pre_pr_test_timeout()
+        timeout_s = getattr(self.options, "pre_pr_test_timeout", None)
+        if timeout_s is None:
+            timeout_s = pre_pr_test_timeout()
         try:
             result = subprocess.run(
                 ["uv", "run", "pytest", "tests", "-q", "--tb=short"],
                 cwd=worktree_path,
+                env=build_python_phase_env(worktree_path),
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,

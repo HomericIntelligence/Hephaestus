@@ -19,7 +19,7 @@ from ..github_jobs import (
     ReconcilePrReviewRequest,
     ReplyHandoffAttempted,
 )
-from .base import source_workspace_binding
+from .base import source_workspace_binding, stage_timeout
 from .pr_review_diagnostics import publish_host_verification_failure
 from .pr_review_recovery import (
     consume_reply_handoff_receipt,
@@ -231,7 +231,7 @@ class PrReviewJobs(_PrReviewHost):
         job = GitJob(
             repo=item.repo,
             op="create_worktree",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
             kwargs=kwargs,
             descr="direct_pr_review_worktree",
         )
@@ -275,7 +275,7 @@ class PrReviewJobs(_PrReviewHost):
         job = GitJob(
             repo=item.repo,
             op="verify_pr_review_checkout",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "diff_collect", GIT_JOB_TIMEOUT_S),
             kwargs={
                 "worktree_path": str(_worktree_path(item, ctx)),
                 "branch": item.branch,
@@ -368,7 +368,7 @@ class PrReviewJobs(_PrReviewHost):
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=get_pr_review_analysis_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
-            timeout_s=pr_reviewer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
             workspace=workspace,
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
@@ -538,7 +538,7 @@ class PrReviewJobs(_PrReviewHost):
             model=stage_model(ctx, "reviewer", reviewer_model),
             prompt_builder=get_review_validation_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
-            timeout_s=pr_reviewer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
             workspace=workspace,
             session_agent=AGENT_PR_REVIEWER,
             resume_session_id=item.session_ids.get(AGENT_PR_REVIEWER),
@@ -704,7 +704,7 @@ class PrReviewJobs(_PrReviewHost):
             session_agent=AGENT_PR_REVIEWER,
             model=stage_model(ctx, "reviewer", reviewer_model),
             cwd=_worktree_path(item, ctx),
-            timeout_s=pr_reviewer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout()),
             session_id=item.session_ids.get(AGENT_PR_REVIEWER),
             sandbox="read-only",
             execution_request=ExecutionRequest(
@@ -730,7 +730,7 @@ class PrReviewJobs(_PrReviewHost):
             session_agent=session_agent,
             model=stage_model(ctx, "implementer", implementer_model),
             cwd=_worktree_path(item, ctx),
-            timeout_s=implementer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             session_id=item.session_ids.get(session_agent),
             sandbox="read-only",
             execution_request=ExecutionRequest(
@@ -799,7 +799,7 @@ class PrReviewJobs(_PrReviewHost):
             job = GitJob(
                 repo=item.repo,
                 op="remove_worktree",
-                timeout_s=GIT_JOB_TIMEOUT_S,
+                timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
                 kwargs={
                     "worktree_path": review_worktree,
                     "repo_root": str(ctx.paths.repo_root),

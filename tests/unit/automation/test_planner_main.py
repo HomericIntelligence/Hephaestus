@@ -62,6 +62,25 @@ def test_parse_args_default_parallel_uses_shared_worker_default() -> None:
     assert args.parallel == DEFAULT_WORKER_COUNT
 
 
+def test_timeout_flags_thread_into_pipeline_config() -> None:
+    """Standalone planner timeout options configure their pipeline operations."""
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--agent-timeout",
+            "11",
+            "--reviewer-timeout",
+            "12",
+            "--reviewer-model",
+            "review-model",
+        ]
+    )
+    config = captured["config"]
+    assert (config.planner_timeout, config.reviewer_timeout) == (11, 12)
+    assert config.reviewer_model == "review-model"
+
+
 def test_plan_review_reset_is_scoped_to_explicit_issues() -> None:
     """Planner rejects discovery-wide resets and forwards selected identities."""
     with pytest.raises(SystemExit):

@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-from threading import Event
 from unittest.mock import patch
 
 import pytest
 
 from hephaestus.github import mnemosyne_repo
 from hephaestus.github.mnemosyne_repo import (
-    LEGACY_OWNER_ENV_VAR,
-    OWNER_ENV_VAR,
     UPSTREAM_SLUG,
     CurrentRepositoryMetadata,
     MnemosyneResolutionError,
@@ -30,13 +27,6 @@ UPSTREAM_METADATA = RepositoryMetadata(
     default_branch="main",
     head_sha=SHA,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clear_owner_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(OWNER_ENV_VAR, raising=False)
-    monkeypatch.delenv(LEGACY_OWNER_ENV_VAR, raising=False)
-    monkeypatch.setattr(mnemosyne_repo, "_legacy_owner_warning_emitted", Event())
 
 
 def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
@@ -108,16 +98,17 @@ def test_repository_metadata_reads_default_head_ref_when_repo_view_omits_oid() -
     gh_json.assert_called_once_with(["api", f"repos/{UPSTREAM_SLUG}/git/ref/heads/main"])
 
 
-def test_explicit_owner_uses_new_env_var_and_skips_current_repo_probe(
+def test_explicit_owner_argument_skips_current_repo_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(OWNER_ENV_VAR, "acme")
+    monkeypatch.setenv("HOMERIC_INTELLIGENCE_MNEMOSYNE_OWNER", "poison-owner")
+    monkeypatch.setenv("HEPH_MNEMOSYNE_OWNER", "retired-owner")
 
     with (
         patch.object(mnemosyne_repo, "fetch_current_repository_metadata") as current,
         patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
     ):
-        target = resolve_mnemosyne_target()
+        target = resolve_mnemosyne_target(override_owner="acme")
 
     assert target == MnemosyneTarget(
         owner="acme",
@@ -202,23 +193,3 @@ def test_github_api_failure_is_fatal_when_trust_cannot_be_decided() -> None:
     ):
         with pytest.raises(MnemosyneResolutionError, match="auth failed"):
             resolve_mnemosyne_target()
-
-
-def test_legacy_owner_warning_is_emitted_once_per_process(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setenv(LEGACY_OWNER_ENV_VAR, "legacy-owner")
-    current = CurrentRepositoryMetadata("mvillmow", "User", "ADMIN")
-
-    with (
-        patch.object(mnemosyne_repo, "fetch_current_repository_metadata", return_value=current),
-        patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
-    ):
-        resolve_mnemosyne_target()
-        resolve_mnemosyne_target()
-
-    messages = [
-        record.message for record in caplog.records if LEGACY_OWNER_ENV_VAR in record.message
-    ]
-    assert len(messages) == 1

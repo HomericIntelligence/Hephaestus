@@ -23,7 +23,9 @@ itself before `resolve_agent("pi")` enforced the adapter gate.
 External broker packages may publish a zero-argument adapter factory in the
 `hephaestus.pi_isolation_adapters` Python entry-point group. A fresh process
 loads exactly one named factory only when the operator explicitly sets
-`HEPH_PI_ISOLATION_ADAPTER` to that public entry-point name.
+`--pi-isolation-adapter` to that public entry-point name. Issue #2798 removed
+the original ambient-variable selection as part of the next-major explicit
+configuration migration; no compatibility fallback remains.
 
 Hephaestus does not bundle a broker, enumerate and auto-select installed
 brokers, or fall back to direct Pi execution. Missing, duplicate, unloadable,

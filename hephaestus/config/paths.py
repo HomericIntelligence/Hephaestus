@@ -2,26 +2,21 @@
 
 This module centralizes lookup of the "projects root" directory — the
 parent directory under which sibling HomericIntelligence repositories
-are checked out. Historically this was hardcoded to ``~/Projects``;
-callers now resolve it via :func:`resolve_projects_dir`, which honors
-an explicit override, the ``PROJECTS_ROOT`` environment variable, or
-falls back to the current checkout's parent or the historical default.
+are checked out. Callers resolve it through an explicit override,
+current-checkout discovery, or the historical ``~/Projects`` default.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 from pathlib import Path
+
+from hephaestus.config.child_environments import build_git_child_env
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROJECTS_DIR: Path = Path.home() / "Projects"
-
-# Module-level guard so the warning fires at most once per
-# (override, env) tuple per process. Tests can clear this to re-trigger.
-_warned_keys: set[tuple[str | None, str | None]] = set()
 
 
 def _current_checkout_parent() -> Path | None:
@@ -33,6 +28,7 @@ def _current_checkout_parent() -> Path | None:
             text=True,
             check=True,
             timeout=5,
+            env=build_git_child_env(),
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return None
@@ -70,20 +66,12 @@ def resolve_projects_dir(
 
     Priority:
       1. explicit ``override`` argument (e.g. from a CLI flag)
-      2. ``$PROJECTS_ROOT`` environment variable, IFF that directory exists
-      3. current checkout parent, when ``prefer_cwd_parent`` is true
-      4. :data:`DEFAULT_PROJECTS_DIR` (``~/Projects``)
-
-    A warning is emitted when the fallback path is taken because neither
-    an override nor a usable ``PROJECTS_ROOT`` was supplied. A distinct
-    warning fires when ``PROJECTS_ROOT`` is set but its directory does
-    not exist. Warnings are de-duplicated per process per
-    ``(override, env)`` tuple.
+      2. current checkout parent, when ``prefer_cwd_parent`` is true
+      3. :data:`DEFAULT_PROJECTS_DIR` (``~/Projects``)
 
     Args:
         override: Optional explicit path (e.g. from a ``--projects-dir`` CLI
-            flag). When provided, the env var and default are skipped and no
-            warning is emitted.
+            flag). When provided, discovery and the default are skipped.
         prefer_cwd_parent: When true, use the parent of the current git
             checkout as the default projects root before falling back to
             :data:`DEFAULT_PROJECTS_DIR`. This is useful for automation loops
@@ -96,37 +84,11 @@ def resolve_projects_dir(
     if override is not None:
         return Path(override).resolve()
 
-    env = os.environ.get("PROJECTS_ROOT")
-    key: tuple[str | None, str | None] = (override, env)
-
-    if env:
-        env_path = Path(env)
-        if env_path.is_dir():
-            return env_path.resolve()
-        if key not in _warned_keys:
-            logger.warning(
-                "PROJECTS_ROOT=%s does not exist; falling back to %s",
-                env,
-                DEFAULT_PROJECTS_DIR,
-            )
-            _warned_keys.add(key)
-        return DEFAULT_PROJECTS_DIR
-
     if prefer_cwd_parent:
         cwd_parent = _current_checkout_parent()
         if cwd_parent is not None:
             return cwd_parent
 
-    if key not in _warned_keys:
-        # Benign: an unset PROJECTS_ROOT with no override is the normal case;
-        # the default is a correct fallback. DEBUG (visible under -v) rather
-        # than routine WARNING noise (#1556). A *nonexistent* PROJECTS_ROOT
-        # (above) stays at WARNING — that is operator misconfiguration.
-        logger.debug(
-            "PROJECTS_ROOT not set and no --projects-dir given; falling back to default: %s",
-            DEFAULT_PROJECTS_DIR,
-        )
-        _warned_keys.add(key)
     return DEFAULT_PROJECTS_DIR
 
 

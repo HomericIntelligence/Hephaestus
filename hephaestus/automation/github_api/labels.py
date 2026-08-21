@@ -43,6 +43,7 @@ def gh_list_labels(
     *,
     raise_on_error: bool = False,
     repo: tuple[str, str] | None = None,
+    timeout: int | None = None,
 ) -> set[str]:
     """Return the set of label names that exist in the current repository.
 
@@ -66,7 +67,7 @@ def gh_list_labels(
 
     def _fetch() -> set[str]:
         cmd = _with_repo(["label", "list", "--json", "name", "--limit", "200"], repo)
-        result = _api._gh_call(cmd)
+        result = _api._gh_call(cmd, timeout=timeout)
         data = json.loads(result.stdout)
         return {item["name"] for item in data}
 

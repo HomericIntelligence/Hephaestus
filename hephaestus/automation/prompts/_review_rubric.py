@@ -2,26 +2,40 @@
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .catalog import PromptCatalog
 
 _DEFAULT_PLUGIN_SKILLS_SUBPATH = Path(".claude/plugins/marketplaces/Hephaestus/skills")
 _PR_REVIEW_SKILL_NAME = "pr-review"
+_PLUGIN_SKILLS_DIR: ContextVar[Path | None] = ContextVar("plugin_skills_dir", default=None)
 
 
-def _skill_reference() -> str:
+@contextmanager
+def plugin_skills_context(skills_dir: Path | None) -> Iterator[None]:
+    """Set the per-invocation skill root and reliably restore prior state."""
+    token = _PLUGIN_SKILLS_DIR.set(skills_dir)
+    try:
+        yield
+    finally:
+        _PLUGIN_SKILLS_DIR.reset(token)
+
+
+def _skill_reference(skills_dir: Path | None = None) -> str:
     """Resolve the installed Athena pr-review skill when available."""
-    override = os.environ.get("HEPHAESTUS_PLUGIN_SKILLS_DIR")
-    skills_dir = Path(override) if override else Path.home() / _DEFAULT_PLUGIN_SKILLS_SUBPATH
+    skills_dir = (
+        skills_dir or _PLUGIN_SKILLS_DIR.get() or Path.home() / _DEFAULT_PLUGIN_SKILLS_SUBPATH
+    )
     candidate = skills_dir / _PR_REVIEW_SKILL_NAME / "SKILL.md"
     return str(candidate) if candidate.is_file() else ""
 
 
-def build_review_rubric() -> str:
+def build_review_rubric(skills_dir: Path | None = None) -> str:
     """Render the review rubric with its runtime skill reference."""
-    skill_ref = _skill_reference()
+    skill_ref = _skill_reference(skills_dir)
     if skill_ref:
         skill_line = (
             "`$athena:pr-review` skill (rubric summarized below — refer to the full skill at\n"
@@ -64,7 +78,7 @@ def get_implementation_loop_review_rubric() -> str:
 
 def get_pr_review_rubric() -> str:
     """Return the PR-review rubric."""
-    return _fragment("pr")
+    return f"{build_review_rubric()}\n\n{_fragment('pr')}"
 
 
 def get_full_sweep_suffix() -> str:
@@ -104,4 +118,5 @@ __all__ = [
     "get_plan_review_rubric",
     "get_pr_review_rubric",
     "get_review_output_format",
+    "plugin_skills_context",
 ]

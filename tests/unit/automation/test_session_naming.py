@@ -516,13 +516,13 @@ class TestSessionJsonlPath:
     reason="Creates a throwaway git repo via real `git init`/`git commit`; skipped on win32 (#742)",
 )
 class TestCurrentTrunkGithash:
-    """``current_trunk_githash`` reads env or falls back to live rev-parse."""
+    """``current_trunk_githash`` uses explicit context or live rev-parse."""
 
-    def test_env_var_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_explicit_trunk_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HEPH_TRUNK_GITHASH", "deadbee")
         # tmp_path is not a git repo; if the env var weren't honored we'd get
         # "unknown" from the fallback.
-        assert current_trunk_githash(tmp_path) == "deadbee"
+        assert current_trunk_githash(tmp_path, trunk_githash="deadbee") == "deadbee"
 
     def test_falls_back_to_short_githash(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

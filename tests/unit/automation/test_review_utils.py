@@ -110,13 +110,13 @@ class TestSetupReviewLogging:
         with patch("hephaestus.automation._review_utils.configure_cli_logging") as configure:
             review_utils.setup_review_logging(verbose=False)
 
-        configure.assert_called_once_with(verbose=False)
+        configure.assert_called_once_with(verbose=False, log_format="text")
 
     def test_verbose_sets_debug_level(self) -> None:
         with patch("hephaestus.automation._review_utils.configure_cli_logging") as configure:
             review_utils.setup_review_logging(verbose=True)
 
-        configure.assert_called_once_with(verbose=True)
+        configure.assert_called_once_with(verbose=True, log_format="text")
 
 
 # ---------------------------------------------------------------------------
@@ -1057,9 +1057,7 @@ class TestWriteWorkReport:
         from hephaestus.automation._review_utils import write_work_report
 
         path = tmp_path / "report.txt"
-        monkeypatch.setenv("HEPH_WORK_REPORT", str(path))
-
-        write_work_report(42)
+        write_work_report(42, path)
 
         assert path.read_text(encoding="utf-8") == "42"
 
@@ -1067,10 +1065,8 @@ class TestWriteWorkReport:
         """OSError (e.g., permission denied) is silently swallowed."""
         from hephaestus.automation._review_utils import write_work_report
 
-        monkeypatch.setenv("HEPH_WORK_REPORT", "/nonexistent/path/report.txt")
-
         # Should not raise
-        write_work_report(7)
+        write_work_report(7, Path("/nonexistent/path/report.txt"))
 
     def test_context_env_unset_does_not_call_work_units_fn(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1098,9 +1094,7 @@ class TestWriteWorkReport:
         from hephaestus.automation._review_utils import work_report_context
 
         report = tmp_path / "report.txt"
-        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
-
-        with work_report_context(lambda: 42):
+        with work_report_context(lambda: 42, report):
             pass
 
         assert report.read_text(encoding="utf-8") == "42"
@@ -1112,10 +1106,8 @@ class TestWriteWorkReport:
         from hephaestus.automation._review_utils import work_report_context
 
         report = tmp_path / "report.txt"
-        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
-
         with pytest.raises(RuntimeError, match=r"^boom$"):
-            with work_report_context(lambda: 7):
+            with work_report_context(lambda: 7, report):
                 raise RuntimeError("boom")
 
         assert report.read_text(encoding="utf-8") == "7"
@@ -1133,7 +1125,7 @@ class TestWriteWorkReport:
             raise ValueError("report failed")
 
         with pytest.raises(RuntimeError, match=r"^boom$"):
-            with work_report_context(work_units):
+            with work_report_context(work_units, report):
                 raise RuntimeError("boom")
 
         assert not report.exists()
@@ -1150,7 +1142,7 @@ class TestWriteWorkReport:
         def work_units() -> int:
             raise ValueError("report failed")
 
-        with work_report_context(work_units):
+        with work_report_context(work_units, report):
             pass
 
         assert not report.exists()

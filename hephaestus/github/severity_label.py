@@ -15,18 +15,16 @@ CWE-94 issue-body injection class). The server-controlled issue number is
 validated numeric before use.
 
 Usage:
-    python -m hephaestus.github.severity_label
-
-    Reads ``GITHUB_REPOSITORY``, ``ISSUE_NUMBER`` and ``ISSUE_BODY`` from the
-    environment (bound by the workflow, never interpolated into the shell).
+    python -m hephaestus.github.severity_label \
+      --repo owner/name --issue-number 42 --body-file issue-body.md
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
+from pathlib import Path
 
 from hephaestus.cli.utils import (
     add_github_throttle_args,
@@ -35,7 +33,7 @@ from hephaestus.cli.utils import (
     configure_github_throttle_from_args,
     emit_json_status,
 )
-from hephaestus.github.client import gh_call
+from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
 
 # Allow-list: the only labels this tool may ever apply. Mirrors the provisioned
 # ``severity:*`` labels (verified via ``gh label list``).
@@ -77,16 +75,24 @@ def parse_severity(issue_body: str) -> str | None:
     return None
 
 
-def _gh(*args: str) -> str:
+def _gh(*args: str, timeout: int | None = None) -> str:
     """Run ``gh`` through :func:`gh_call` (circuit breaker + rate-limit retry).
 
     Routing through the shared adapter — never bare ``subprocess.run`` — is the
     invariant #1433 established for this module.
     """
-    return gh_call(list(args), check=True).stdout
+    if timeout is None:
+        return gh_call(list(args), check=True).stdout
+    return gh_call(list(args), check=True, timeout=timeout).stdout
 
 
-def apply_severity_label(repo: str, issue_number: int, selected: str | None) -> None:
+def apply_severity_label(
+    repo: str,
+    issue_number: int,
+    selected: str | None,
+    *,
+    gh_timeout: int | None = None,
+) -> None:
     """Reconcile the issue's ``severity:*`` labels to exactly ``selected``.
 
     Lists the issue's current labels, removes any ``severity:*`` label that is
@@ -99,11 +105,13 @@ def apply_severity_label(repo: str, issue_number: int, selected: str | None) -> 
         selected: A value from :data:`VALID_SEVERITIES`, or ``None`` to clear.
 
     """
+    gh_kwargs = {"timeout": gh_timeout} if gh_timeout is not None else {}
     current = _gh(
         "api",
         f"repos/{repo}/issues/{issue_number}/labels",
         "--jq",
         ".[].name",
+        **gh_kwargs,
     ).split()
     target = f"severity:{selected}" if selected else None
     # Remove any stale severity:* label (reconciliation, not just add).
@@ -114,6 +122,7 @@ def apply_severity_label(repo: str, issue_number: int, selected: str | None) -> 
                 "--method",
                 "DELETE",
                 f"repos/{repo}/issues/{issue_number}/labels/{name}",
+                **gh_kwargs,
             )
     if target and target not in current:
         _gh(
@@ -123,15 +132,21 @@ def apply_severity_label(repo: str, issue_number: int, selected: str | None) -> 
             f"repos/{repo}/issues/{issue_number}/labels",
             "-f",
             f"labels[]={target}",
+            **gh_kwargs,
         )
 
 
+def _read_body(path: str) -> str:
+    """Read an issue body from *path*, where ``-`` selects standard input."""
+    return sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Reconcile the severity label for the issue named by the environment.
+    """Reconcile an issue severity label from explicit CLI inputs.
 
     Args:
         argv: Optional argument vector (defaults to ``sys.argv[1:]``); used so
-            ``--help`` works without requiring the workflow env vars.
+            ``--help`` works without reading the body input.
 
     Returns:
         Process exit code (0 on success, 1 on a non-numeric issue number).
@@ -140,34 +155,61 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Reconcile the severity:* label for a GitHub issue from its issue-form "
-            "Severity answer. Reads GITHUB_REPOSITORY, ISSUE_NUMBER and ISSUE_BODY "
-            "from the environment."
+            "Severity answer supplied as an explicit file or standard input."
         )
     )
     add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
+    parser.add_argument("--repo", required=True, metavar="OWNER/NAME")
+    parser.add_argument("--issue-number", required=True, type=int, metavar="N")
+    parser.add_argument(
+        "--body-file",
+        required=True,
+        metavar="PATH",
+        help="issue body path, or - to read standard input",
+    )
+    parser.add_argument(
+        "--gh-timeout",
+        type=positive_timeout,
+        default=DEFAULT_GH_TIMEOUT,
+        metavar="SECONDS",
+        help=f"per-call GitHub CLI timeout (default: {DEFAULT_GH_TIMEOUT})",
+    )
     args = parser.parse_args(argv)
     configure_github_throttle_from_args(args)
 
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    repo = args.repo
     if not repo or "/" not in repo:
-        message = f"Unexpected GITHUB_REPOSITORY {repo!r} (expected owner/name)"
+        message = f"Unexpected --repo {repo!r} (expected owner/name)"
         if args.json:
             emit_json_status(1, message)
         else:
             print(message, file=sys.stderr)
         return 1
-    raw = os.environ.get("ISSUE_NUMBER", "")
-    if not raw.isdigit():
-        message = f"Unexpected ISSUE_NUMBER {raw!r} (not a positive integer)"
+    if args.issue_number <= 0:
+        message = f"Unexpected --issue-number {args.issue_number!r} (not a positive integer)"
         if args.json:
             emit_json_status(1, message)
         else:
             print(message, file=sys.stderr)
         return 1
-    selected = parse_severity(os.environ.get("ISSUE_BODY", ""))
-    apply_severity_label(repo, int(raw), selected)
+    try:
+        body = _read_body(args.body_file)
+    except OSError as exc:
+        message = f"Could not read --body-file {args.body_file!r}: {exc}"
+        if args.json:
+            emit_json_status(1, message)
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    selected = parse_severity(body)
+    apply_severity_label(
+        repo,
+        args.issue_number,
+        selected,
+        gh_timeout=args.gh_timeout,
+    )
     message = f"Reconciled severity label to: {selected or '(none)'}"
     if args.json:
         emit_json_status(0, message, severity=selected)

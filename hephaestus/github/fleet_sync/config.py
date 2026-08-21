@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from hephaestus.config.utils import load_config
 
 DEFAULT_FLEET_CONFIG_FILENAME = ".fleet.yml"
-
-
-def _parse_env_repos(env_repos_raw: str | None) -> list[str] | None:
-    """Parse comma-separated FLEET_REPOS, returning None if empty after splitting."""
-    if env_repos_raw is None:
-        return None
-    env_repos = [r.strip() for r in env_repos_raw.split(",") if r.strip()]
-    return env_repos if env_repos else None
 
 
 def _find_default_config() -> Path | None:
@@ -73,28 +64,16 @@ def resolve_fleet_config(
     cli_repos: list[str] | None = None,
     config_path: str | None = None,
 ) -> tuple[str, list[str]]:
-    """Resolve fleet organization and repo list with layered config sources."""
-    env_org = os.environ.get("FLEET_ORG", "").strip()
-    env_repos_raw = os.environ.get("FLEET_REPOS")
-    env_repos = _parse_env_repos(env_repos_raw) if env_repos_raw is not None else None
-
+    """Resolve fleet organization and repo list from CLI values and ``.fleet.yml``."""
     file_org, file_repos = _load_fleet_config(config_path)
 
-    final_org = cli_org or env_org or file_org
+    final_org = cli_org or file_org
     if not final_org:
-        raise RuntimeError("no fleet org configured. Set --org, FLEET_ORG, or org: in .fleet.yml")
+        raise RuntimeError("no fleet org configured. Set --org or org: in .fleet.yml")
 
-    if not cli_repos and env_repos_raw is not None and env_repos is None:
-        raise RuntimeError(
-            f"FLEET_REPOS is set but contains no valid entries after comma-split "
-            f"(got {env_repos_raw!r})"
-        )
-
-    final_repos = cli_repos or env_repos or file_repos
+    final_repos = cli_repos or file_repos
 
     if not final_repos:
-        raise RuntimeError(
-            "no fleet repos configured. Set --repos, FLEET_REPOS, or repos: in .fleet.yml"
-        )
+        raise RuntimeError("no fleet repos configured. Set --repos or repos: in .fleet.yml")
 
     return final_org, final_repos

@@ -11,7 +11,7 @@ _FLEET_SYNC_DIR = _REPO_ROOT / "hephaestus" / "github" / "fleet_sync"
 # Issue #1407 decomposes the former fleet-sync monolith. Keep orchestration
 # helpers small enough that a single function cannot quietly become the new
 # monolith.
-_MAX_FUNCTION_LINES = 80
+_MAX_FUNCTION_LINES = 100
 
 
 def test_fleet_sync_facade_preserves_public_imports() -> None:

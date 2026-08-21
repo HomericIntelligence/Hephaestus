@@ -60,12 +60,12 @@ class TestAddAgentTimeoutArg:
         assert args.agent_timeout == 3600
         assert isinstance(args.agent_timeout, int)
 
-    def test_default_is_none_when_not_provided(self) -> None:
-        """Omitting --agent-timeout leaves args.agent_timeout as None."""
+    def test_default_is_established_budget_when_not_provided(self) -> None:
+        """Omitting --agent-timeout uses the established 7200-second budget."""
         parser = _fresh_parser()
         add_agent_timeout_arg(parser)
         args = parser.parse_args([])
-        assert args.agent_timeout is None
+        assert args.agent_timeout == 7200
 
     def test_custom_flag_and_dest(self) -> None:
         """Custom flag and dest are honoured by the helper."""
@@ -75,12 +75,12 @@ class TestAddAgentTimeoutArg:
         assert args.planner_timeout == 100
         assert not hasattr(args, "agent_timeout")
 
-    def test_custom_default_doc_does_not_change_parse_default(self) -> None:
-        """default_doc is display-only; parse default stays None."""
+    def test_custom_default_changes_parse_default(self) -> None:
+        """The typed default is both documented and returned by argparse."""
         parser = _fresh_parser()
-        add_agent_timeout_arg(parser, default_doc=999)
+        add_agent_timeout_arg(parser, default=999)
         args = parser.parse_args([])
-        assert args.agent_timeout is None
+        assert args.agent_timeout == 999
 
     def test_non_integer_exits_with_error(self) -> None:
         """A non-integer value triggers argparse error (exits 2)."""
@@ -121,12 +121,12 @@ class TestAddAdviseTimeoutArg:
         assert args.advise_timeout == 1800
         assert isinstance(args.advise_timeout, int)
 
-    def test_default_is_none_when_not_provided(self) -> None:
-        """Omitting --advise-timeout leaves args.advise_timeout as None."""
+    def test_default_is_established_budget_when_not_provided(self) -> None:
+        """Omitting --advise-timeout uses the established 7200-second budget."""
         parser = _fresh_parser()
         add_advise_timeout_arg(parser)
         args = parser.parse_args([])
-        assert args.advise_timeout is None
+        assert args.advise_timeout == 7200
 
     def test_dest_is_advise_timeout(self) -> None:
         """The destination attribute is named advise_timeout."""
@@ -160,12 +160,12 @@ class TestAddGitMessageTimeoutArg:
         assert args.git_message_timeout == 300
         assert isinstance(args.git_message_timeout, int)
 
-    def test_default_is_none_when_not_provided(self) -> None:
-        """Omitting --git-message-timeout leaves args.git_message_timeout as None."""
+    def test_default_is_established_budget_when_not_provided(self) -> None:
+        """Omitting --git-message-timeout uses the established 1200-second budget."""
         parser = _fresh_parser()
         add_git_message_timeout_arg(parser)
         args = parser.parse_args([])
-        assert args.git_message_timeout is None
+        assert args.git_message_timeout == 1200
 
     def test_dest_is_git_message_timeout(self) -> None:
         """The destination attribute is named git_message_timeout."""
@@ -199,12 +199,12 @@ class TestAddLearnTimeoutArg:
         assert args.learn_timeout == 7200
         assert isinstance(args.learn_timeout, int)
 
-    def test_default_is_none_when_not_provided(self) -> None:
-        """Omitting --learn-timeout leaves args.learn_timeout as None."""
+    def test_default_is_established_budget_when_not_provided(self) -> None:
+        """Omitting --learn-timeout uses the established 1200-second budget."""
         parser = _fresh_parser()
         add_learn_timeout_arg(parser)
         args = parser.parse_args([])
-        assert args.learn_timeout is None
+        assert args.learn_timeout == 1200
 
     def test_dest_is_learn_timeout(self) -> None:
         """The destination attribute is named learn_timeout."""
@@ -238,12 +238,12 @@ class TestAddFollowUpTimeoutArg:
         assert args.follow_up_timeout == 4800
         assert isinstance(args.follow_up_timeout, int)
 
-    def test_default_is_none_when_not_provided(self) -> None:
-        """Omitting --follow-up-timeout leaves args.follow_up_timeout as None."""
+    def test_default_is_established_budget_when_not_provided(self) -> None:
+        """Omitting --follow-up-timeout uses the established 7200-second budget."""
         parser = _fresh_parser()
         add_follow_up_timeout_arg(parser)
         args = parser.parse_args([])
-        assert args.follow_up_timeout is None
+        assert args.follow_up_timeout == 7200
 
     def test_dest_is_follow_up_timeout(self) -> None:
         """The destination attribute is named follow_up_timeout."""
@@ -277,12 +277,12 @@ class TestAddPollMaxWaitArg:
         assert args.poll_max_wait == 600
         assert isinstance(args.poll_max_wait, int)
 
-    def test_default_is_none_when_not_provided(self) -> None:
-        """Omitting --poll-max-wait leaves args.poll_max_wait as None."""
+    def test_default_is_established_budget_when_not_provided(self) -> None:
+        """Omitting --poll-max-wait uses the established 1200-second budget."""
         parser = _fresh_parser()
         add_poll_max_wait_arg(parser)
         args = parser.parse_args([])
-        assert args.poll_max_wait is None
+        assert args.poll_max_wait == 1200
 
     def test_dest_is_poll_max_wait(self) -> None:
         """The destination attribute is named poll_max_wait."""
@@ -351,16 +351,16 @@ class TestCombinedFlags:
         assert args.follow_up_timeout == 900
         assert args.poll_max_wait == 600
 
-    def test_all_defaults_are_none_when_flags_omitted(self) -> None:
-        """When all flags are absent each dest defaults to None."""
+    def test_all_defaults_are_established_budgets_when_flags_omitted(self) -> None:
+        """Every omitted flag resolves to its established positive budget."""
         parser = self._build_full_parser()
         args = parser.parse_args([])
-        assert args.agent_timeout is None
-        assert args.advise_timeout is None
-        assert args.git_message_timeout is None
-        assert args.learn_timeout is None
-        assert args.follow_up_timeout is None
-        assert args.poll_max_wait is None
+        assert args.agent_timeout == 7200
+        assert args.advise_timeout == 7200
+        assert args.git_message_timeout == 1200
+        assert args.learn_timeout == 1200
+        assert args.follow_up_timeout == 7200
+        assert args.poll_max_wait == 1200
 
 
 _TIMEOUT_ARGUMENTS: tuple[tuple[Callable[[argparse.ArgumentParser], None], str], ...] = (
@@ -660,12 +660,12 @@ class TestImplementerMainTimeoutThreading:
 
     @pytest.mark.parametrize(
         "flag",
-        ["--git-message-timeout", "--agent-timeout", "--learn-timeout", "--advise-timeout"],
+        ["--git-message-timeout", "--agent-timeout", "--address-review-timeout"],
     )
     def test_timeout_flag_parses_and_main_dispatches(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str
     ) -> None:
-        """A historical per-phase timeout flag parses and main() reaches run_pipeline."""
+        """An active implementation-stage timeout reaches the pipeline boundary."""
         import sys
         from unittest.mock import patch
 

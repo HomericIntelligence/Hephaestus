@@ -899,7 +899,6 @@ class TestMain:
         from hephaestus.automation import plan_reviewer
 
         report = tmp_path / "report.txt"
-        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
         monkeypatch.setattr(
             "sys.argv",
             [
@@ -911,6 +910,8 @@ class TestMain:
                 "--json",
                 "--agent",
                 "claude",
+                "--work-report",
+                str(report),
             ],
         )
 
@@ -1061,10 +1062,20 @@ class TestPlanReviewerAlreadyReviewedFlag:
         mock_reviewer.run.return_value = results
         report = tmp_path / "report.txt"
 
-        monkeypatch.setenv("HEPH_WORK_REPORT", str(report))
         monkeypatch.setattr(
             "sys.argv",
-            ["plan-reviewer", "--issues", "1", "2", "3", "4", "--agent", "claude"],
+            [
+                "plan-reviewer",
+                "--issues",
+                "1",
+                "2",
+                "3",
+                "4",
+                "--agent",
+                "claude",
+                "--work-report",
+                str(report),
+            ],
         )
         with patch.object(plan_reviewer_mod, "PlanReviewer", return_value=mock_reviewer):
             rc = plan_reviewer_mod.main()

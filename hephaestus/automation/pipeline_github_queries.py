@@ -581,6 +581,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                     f"/repos/{owner}/{name}/branches/{branch}/protection",
                 ],
                 check=False,
+                timeout=self._gh_timeout,
             )
             if result.returncode != 0:
                 return False

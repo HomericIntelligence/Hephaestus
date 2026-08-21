@@ -264,8 +264,8 @@ class TestRunLearn:
         model_idx = cmd_args.index("--model")
         assert cmd_args[model_idx + 1] == "claude-haiku-4-5"
 
-    def test_learn_model_env_override_respected(self, tmp_path: Path) -> None:
-        """HEPH_LEARN_MODEL env override is used by run_learn (A5-12)."""
+    def test_explicit_learn_model_is_respected(self, tmp_path: Path) -> None:
+        """An explicit learn model wins while the removed environment is inert."""
         worktree_path = tmp_path / "worktree"
         worktree_path.mkdir()
 
@@ -278,7 +278,14 @@ class TestRunLearn:
             patch.dict(os.environ, {"HEPH_LEARN_MODEL": "claude-opus-4-7"}),
             patch("hephaestus.automation.learn.run", return_value=mock_result) as mock_run,
         ):
-            run_learn("session-abc", worktree_path, 42, tmp_path, session_agent="claude")
+            run_learn(
+                "session-abc",
+                worktree_path,
+                42,
+                tmp_path,
+                session_agent="claude",
+                model="claude-opus-4-7",
+            )
 
         cmd_args = mock_run.call_args[0][0]
         model_idx = cmd_args.index("--model")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from unittest.mock import call, patch
+from unittest.mock import ANY, call, patch
 
 import pytest
 
@@ -41,7 +41,7 @@ def test_run_uses_current_interpreter_and_bounds_failure_output(
     with patch.object(host_coverage, "run_subprocess", return_value=result) as run:
         assert host_coverage._run(("-m", "example")) == 4
 
-    run.assert_called_once_with([sys.executable, "-m", "example"], check=False)
+    run.assert_called_once_with([sys.executable, "-m", "example"], env=ANY, check=False)
     captured = capsys.readouterr()
     assert captured.out == stdout[-host_coverage._FAILURE_OUTPUT_TAIL_CHARS :]
     assert captured.err == (

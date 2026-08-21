@@ -7,7 +7,7 @@ Public adapter contract
 ``gh_call`` is the canonical entry point for invoking the ``gh`` CLI
 anywhere in hephaestus. It wraps every call in the ``github-api`` circuit
 breaker (opens after 5 sustained failures, fail-fast for 60s), enforces
-per-thread throttling via ``GH_RATE_LIMIT_PER_SEC``, detects REST and
+global throttling, detects REST and
 GraphQL rate limits and waits until reset, and translates Claude
 per-period usage caps into ``ClaudeUsageCapError``.
 

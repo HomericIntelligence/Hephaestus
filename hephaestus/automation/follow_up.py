@@ -43,7 +43,7 @@ from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
 from ._review_utils import log_file_path
-from .agent_config import DEFAULT_AGENT_TIMEOUT
+from .agent_config import DEFAULT_AGENT_TIMEOUT, learn_model
 from .git_utils import issue_ref, run
 from .github_api import gh_issue_comment, gh_issue_create
 from .prompts import get_follow_up_prompt
@@ -431,7 +431,7 @@ def run_follow_up_issues(  # noqa: C901  # orchestration: quota-check + parse + 
                 prompt=prompt_file.read_text(),
                 cwd=worktree_path,
                 timeout=timeout,
-                model=direct_agent_model(agent, "HEPH_LEARN_MODEL"),
+                model=direct_agent_model(agent, model_value=learn_model()),
             )
             stdout = agent_json_stdout(direct_result.stdout, direct_result.session_id)
         else:

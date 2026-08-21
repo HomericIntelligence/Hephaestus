@@ -8,6 +8,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_DIR = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
+SEVERITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "auto-label-severity.yml"
 FORMS = ["feature_request.yml", "bug_report.yml"]
 
 SEVERITY_OPTIONS = ["critical", "major", "minor", "nitpick"]
@@ -93,3 +94,16 @@ def test_forms_document_auto_state_label() -> None:
             i["attributes"]["value"] for i in _load(form)["body"] if i.get("type") == "markdown"
         )
         assert "state:needs-plan" in md
+
+
+def test_severity_workflow_passes_event_data_to_explicit_cli_inputs() -> None:
+    """The workflow no longer relies on severity_label's ambient env protocol."""
+    workflow = yaml.safe_load(SEVERITY_WORKFLOW.read_text(encoding="utf-8"))
+    step = workflow["jobs"]["label-severity"]["steps"][-1]
+
+    assert step["env"]["REPOSITORY"] == "${{ github.repository }}"
+    assert "GITHUB_REPOSITORY" not in step["env"]
+    assert '--repo "$REPOSITORY"' in step["run"]
+    assert '--issue-number "$ISSUE_NUMBER"' in step["run"]
+    assert "--body-file -" in step["run"]
+    assert "printf '%s' \"$ISSUE_BODY\"" in step["run"]

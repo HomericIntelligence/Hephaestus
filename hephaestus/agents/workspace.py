@@ -14,6 +14,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.utils.worktree_identity import source_worktree_name
 
 
@@ -199,6 +200,7 @@ def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedP
         check=check,
         capture_output=True,
         text=True,
+        env=build_git_child_env(),
     )
 
 

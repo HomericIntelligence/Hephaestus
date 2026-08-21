@@ -28,6 +28,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
+from hephaestus.config.child_environments import (
+    build_git_child_env,
+    build_pi_child_env,
+    read_approved_parent_env,
+)
 from hephaestus.github.client import gh_call
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -49,18 +54,6 @@ FORBIDDEN_MANIFEST_FIELDS = frozenset(
     {"dependencies", "optionalDependencies", "peerDependencies", "scripts"}
 )
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
-_ALLOWED_CHILD_ENV = (
-    "COMSPEC",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "PATH",
-    "PATHEXT",
-    "SYSTEMROOT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-)
 
 
 class GitHubTransport(Protocol):
@@ -302,10 +295,15 @@ def _run_command(
     timeout: int = 300,
 ) -> subprocess.CompletedProcess[str]:
     """Run one bounded child command without a shell and require success."""
+    effective_env = env
+    if effective_env is None:
+        effective_env = (
+            build_git_child_env() if command and command[0] == "git" else read_approved_parent_env()
+        )
     result = subprocess.run(
         list(command),
         cwd=cwd,
-        env=env,
+        env=effective_env,
         input=input_text,
         capture_output=True,
         text=True,
@@ -340,16 +338,7 @@ def validate_checkout(path: Path, expected_remote: str, expected_head: str) -> N
 
 
 def _child_environment(agent_directory: Path) -> dict[str, str]:
-    environment = {name: os.environ[name] for name in _ALLOWED_CHILD_ENV if name in os.environ}
-    environment.update(
-        {
-            "GIT_TERMINAL_PROMPT": "0",
-            "PI_CODING_AGENT_DIR": str(agent_directory),
-            "PI_SKIP_VERSION_CHECK": "1",
-            "PI_TELEMETRY": "0",
-        }
-    )
-    return environment
+    return build_pi_child_env(pi_dir=agent_directory)
 
 
 def _find_installed_package(agent_directory: Path) -> Path:

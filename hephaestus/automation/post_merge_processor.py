@@ -25,7 +25,7 @@ from hephaestus.agents.runtime import (
 )
 
 from .claude_invoke import describe_claude_failure, invoke_claude_with_session
-from .claude_models import implementer_model
+from .claude_models import implementer_model, learn_model
 from .git_utils import get_repo_slug, issue_ref, pr_ref
 from .learn import build_learn_prompt, compact_session, mnemosyne_update_evidence
 from .session_naming import AGENT_CI_DRIVER
@@ -162,7 +162,7 @@ class PostMergeProcessor:
                     execution_request=ExecutionRequest(
                         AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW
                     ),
-                    model=direct_agent_model(options.agent, "HEPH_LEARN_MODEL"),
+                    model=direct_agent_model(options.agent, model_value=learn_model()),
                     sandbox="workspace-write",
                 )
                 self._last_learn_evidence = mnemosyne_update_evidence(direct_result.stdout or "")

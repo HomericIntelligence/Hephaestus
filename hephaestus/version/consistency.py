@@ -44,6 +44,7 @@ from hephaestus.cli.utils import (
     resolve_repo_root,
 )
 from hephaestus.utils.helpers import METADATA_TIMEOUT
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
 
@@ -108,6 +109,7 @@ def _version_from_git_tag(repo_root: Path) -> str | None:
             text=True,
             check=False,
             timeout=METADATA_TIMEOUT,
+            env=build_git_child_env(),
         )
     except subprocess.TimeoutExpired:
         print(_GIT_TAG_TIMEOUT_WARNING, file=sys.stderr)
