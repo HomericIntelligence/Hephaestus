@@ -239,6 +239,7 @@ class TestPlanningStageEnter:
                         STATE_IMPLEMENTATION_NO_GO,
                         STATE_IMPLEMENTATION_GO,
                         STATE_PLAN_BLOCKED,
+                        STATE_SKIP,
                     ),
                 ),
             )
@@ -328,6 +329,41 @@ class TestPlanningStageEnter:
         assert second is not None and second.disposition is Disposition.ADVANCE
         assert item.attempts["plan"] == 1
         assert github.labels[117] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
+
+    def test_finalized_plan_retry_accepts_eventually_visible_normalization(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A committed label edit must not exhaust when only its first readback fails."""
+
+        class DelayedReadbackGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(labels=[STATE_PLAN_NO_GO], issue_body=_finalized_body())
+                self.fail_next_readback = False
+
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                super().edit_labels(issue_number, add=add, remove=remove)
+                self.fail_next_readback = True
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                if self.fail_next_readback:
+                    self.fail_next_readback = False
+                    raise RuntimeError("eventually consistent readback")
+                return super().gh_issue_json(issue_number)
+
+        item = make_work_item(issue=119)
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=DelayedReadbackGitHub(), budget_fn=lambda _name: 1),
+        )
+
+        assert outcome is not None and outcome.disposition is Disposition.ADVANCE
+        assert item.attempts.get("plan", 0) == 0
 
     @pytest.mark.parametrize(
         ("body", "owned_by_viewer"),
@@ -436,6 +472,7 @@ class TestPlanningStageEnter:
                         STATE_IMPLEMENTATION_NO_GO,
                         STATE_IMPLEMENTATION_GO,
                         STATE_PLAN_BLOCKED,
+                        STATE_SKIP,
                     ),
                 ),
             )
@@ -1472,6 +1509,8 @@ class TestPlanningStageStep:
             lease,
             issue_number=118,
             reason=reason,
+            evidence_digest=_recovery_binding("", issue=118),
+            repository_revision=_RECOVERY_REVISION,
             extra_labels=("epic",),
         )
         item = make_work_item(issue=118, pr=88)
@@ -1481,6 +1520,9 @@ class TestPlanningStageStep:
                 WAVE_NON_CODE_INTENT_PAYLOAD: {
                     "reason": reason,
                     "extra_labels": ["epic"],
+                    "evidence_digest": _recovery_binding("", issue=118),
+                    "repository_revision": _RECOVERY_REVISION,
+                    "explanation": "",
                 },
             }
         )
@@ -1502,6 +1544,99 @@ class TestPlanningStageStep:
         assert checkpoint is not None
         recorded = checkpoint.current_wave.outcomes[0]
         assert recorded.passed and recorded.non_code and recorded.pr_number is None
+
+    def test_stale_non_code_intent_yields_to_authenticated_finalized_plan(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Edited requirements invalidate pending skip authority before finalization reuse."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [120])
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=120,
+            reason=reason,
+            evidence_digest=_recovery_binding("Old tracker body", issue=120),
+            repository_revision=_RECOVERY_REVISION,
+            extra_labels=("epic",),
+        )
+        body = _finalized_body()
+        item = make_work_item(issue=120)
+        item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": reason,
+                    "extra_labels": ["epic"],
+                    "evidence_digest": _recovery_binding("Old tracker body", issue=120),
+                    "repository_revision": _RECOVERY_REVISION,
+                    "explanation": "",
+                },
+            }
+        )
+        github = FakeStageGitHub(labels=[STATE_SKIP, "epic"], issue_body=body)
+        ctx = make_ctx(
+            github=github,
+            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+        )
+
+        stale = PlanningStage().on_enter(item, ctx)
+        finalized = PlanningStage().on_enter(item, ctx)
+
+        assert stale is not None and stale.disposition is Disposition.RETRY
+        assert finalized is not None and finalized.disposition is Disposition.ADVANCE
+        assert github.labels[120] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL, "epic"}
+
+    def test_pending_obsolete_intent_restores_explanation_before_skip(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Crash recovery replays the durable obsolete rationale before labels."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [121])
+        explanation = "Merged replacement confirmed."
+        binding = _recovery_binding("Already resolved.", issue=121)
+        store.record_non_code_intent(
+            lease,
+            issue_number=121,
+            reason="independently confirmed obsolete",
+            evidence_digest=binding,
+            repository_revision=_RECOVERY_REVISION,
+            explanation=explanation,
+        )
+        item = make_work_item(issue=121)
+        item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": "independently confirmed obsolete",
+                    "extra_labels": [],
+                    "evidence_digest": binding,
+                    "repository_revision": _RECOVERY_REVISION,
+                    "explanation": explanation,
+                },
+            }
+        )
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN], issue_body="Already resolved.")
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(
+                github=github,
+                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            ),
+        )
+
+        assert outcome is not None and outcome.disposition is Disposition.FINISH_PASS
+        assert github.labels[121] == {STATE_SKIP}
+        comments = [str(comment) for comment in github.comments[121]]
+        assert len(comments) == 1
+        assert explanation in comments[0]
 
     def test_tracker_skip_requires_epic_label_readback(
         self, make_ctx: Any, make_work_item: Any

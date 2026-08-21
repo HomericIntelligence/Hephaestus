@@ -98,8 +98,12 @@ For a staged rollout, the repository-local checkpoint is
 order; the next invocation is blocked until the prior wave's exact issues have
 passing terminal outcomes. Implementation outcomes require loop-owned normal
 merge receipts; independently reviewed tracker/obsolete outcomes instead require
-their durable `state:skip` label. A checkpointed non-code intent automatically
-resumes label repair or terminal recording after a crash:
+their exact durable `state:skip` label set. A checkpointed non-code intent
+automatically resumes explanation/label repair or terminal recording after a
+crash only while its reviewed title, body, and repository-revision evidence
+still matches. If the issue changed, the loop re-enters normal semantic review;
+an authenticated Athena-finalized body advances as completed planning instead
+of inheriting the stale skip decision:
 
 ```bash
 hephaestus-automation-loop --repos <REPO> --issue-limit 1

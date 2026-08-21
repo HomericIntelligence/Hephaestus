@@ -33,6 +33,7 @@ from hephaestus.automation.pipeline.stages.repo import (
     RepoStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.requirements_recovery import evidence_digest
 
 BASE = "a" * 40
 HEAD = "b" * 40
@@ -347,10 +348,14 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
         lease,
         issue_number=19,
         reason=reason,
+        evidence_digest=evidence_digest("hephaestus", 19, BASE, "A task", ""),
+        repository_revision=BASE,
         extra_labels=("epic",),
     )
     pending_facts = SimpleNamespace(
         number=19,
+        title="A task",
+        body="",
         labels=set(),
         is_epic=False,
         pr_number=None,
@@ -370,6 +375,8 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
 
     facts = SimpleNamespace(
         number=19,
+        title="A task",
+        body="",
         labels={"state:skip", "epic"},
         is_epic=True,
         pr_number=None,
@@ -414,6 +421,18 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
     )
     assert resumed.stage is StageName.FINISHED
     assert resumed.passed and resumed.non_code and resumed.reason == reason
+
+    missing_epic = wave_entry_from_facts(
+        lease,
+        SimpleNamespace(**{**vars(facts), "labels": {"state:skip"}}),
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert missing_epic.stage is StageName.FINISHED
+    assert missing_epic.passed is False
+    assert "lost its reviewed non-code skip" in missing_epic.reason
 
     with pytest.raises(IssueWaveBlockedError, match="non-code skip"):
         store.validate_prior_wave_facts(

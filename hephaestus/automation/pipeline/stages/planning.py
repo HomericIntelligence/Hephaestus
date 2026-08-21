@@ -53,6 +53,7 @@ from hephaestus.automation.issue_waves import (
     IssueWaveError,
     IssueWaveStore,
     WaveLease,
+    WaveNonCodeIntent,
 )
 from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
@@ -336,6 +337,12 @@ def _retry_incomplete_requirements_snapshot(
         if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
             return issue_outcome
         live_labels = _issue_snapshot_labels(live)
+        if preserve_finalized_authority and _finalized_plan_state_is_current(live_labels):
+            record_summary_action(item, "finalized-plan-reused")
+            return StageOutcome(
+                Disposition.ADVANCE,
+                "Athena finalized plan normalization confirmed by retry readback",
+            )
         if is_skipped(live_labels):
             return StageOutcome(Disposition.SKIP, "state:skip")
         if honor_blocked and STATE_PLAN_BLOCKED in live_labels:
@@ -419,6 +426,7 @@ def _persist_wave_non_code_intent(
     *,
     reason: str,
     extra_labels: tuple[str, ...],
+    explanation: str = "",
 ) -> None:
     """Persist reviewed non-code authority before the GitHub label transition."""
     binding = _wave_non_code_binding(item, ctx)
@@ -426,15 +434,25 @@ def _persist_wave_non_code_intent(
         return
     store, lease = binding
     assert item.issue is not None  # noqa: S101 - caller validates the issue
+    evidence = item.payload.get("requirements_evidence_digest")
+    revision = item.payload.get("requirements_repository_revision")
+    if not isinstance(evidence, str) or not isinstance(revision, str):
+        raise IssueWaveError("non-code intent lacks reviewed evidence binding")
     store.record_non_code_intent(
         lease,
         issue_number=item.issue,
         reason=reason,
+        evidence_digest=evidence,
+        repository_revision=revision,
         extra_labels=extra_labels,
+        explanation=explanation,
     )
     item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
         "reason": reason,
         "extra_labels": list(extra_labels),
+        "evidence_digest": evidence,
+        "repository_revision": revision,
+        "explanation": explanation,
     }
 
 
@@ -461,18 +479,39 @@ def _complete_wave_non_code_outcome(
     item.payload[WAVE_NON_CODE_PAYLOAD] = True
 
 
-def _pending_wave_non_code_intent(item: WorkItem) -> tuple[str, tuple[str, ...]] | None:
+def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
     """Decode the in-memory projection of a durable non-code intent."""
     raw = item.payload.get(WAVE_NON_CODE_INTENT_PAYLOAD)
     if not isinstance(raw, dict):
         return None
     reason = raw.get("reason")
     extra_labels = raw.get("extra_labels")
-    if not isinstance(reason, str) or not reason or not isinstance(extra_labels, list):
+    evidence = raw.get("evidence_digest")
+    revision = raw.get("repository_revision")
+    explanation = raw.get("explanation", "")
+    if (
+        item.issue is None
+        or not isinstance(reason, str)
+        or not reason
+        or not isinstance(extra_labels, list)
+        or not isinstance(evidence, str)
+        or not isinstance(revision, str)
+        or not isinstance(explanation, str)
+    ):
         return None
     if any(not isinstance(label, str) for label in extra_labels):
         return None
-    return reason, tuple(extra_labels)
+    try:
+        return WaveNonCodeIntent(
+            issue_number=item.issue,
+            reason=reason,
+            evidence_digest=evidence,
+            repository_revision=revision,
+            extra_labels=tuple(extra_labels),
+            explanation=explanation,
+        )
+    except IssueWaveError:
+        return None
 
 
 def _reset_plan_review_session(item: WorkItem, ctx: StageContext) -> None:
@@ -482,6 +521,17 @@ def _reset_plan_review_session(item: WorkItem, ctx: StageContext) -> None:
         reset_issues.add(item.issue)
 
 
+def _finalized_plan_state_is_current(labels: Sequence[str]) -> bool:
+    """Return whether labels are the exact durable state for a finalized plan."""
+    label_set = set(labels)
+    return (
+        is_exclusive_plan_state(labels, STATE_PLAN_GO)
+        and ATHENA_FINALIZED_PLAN_LABEL in label_set
+        and STATE_SKIP not in label_set
+        and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+    )
+
+
 def _apply_recovery_state_label(
     item: WorkItem,
     ctx: StageContext,
@@ -489,6 +539,7 @@ def _apply_recovery_state_label(
     *,
     extra: Sequence[str] = (),
     clear_blocked: bool = False,
+    clear_skip: bool = False,
 ) -> bool:
     """Atomically write and confirm one recovery-owned issue state.
 
@@ -510,6 +561,8 @@ def _apply_recovery_state_label(
         removals = [*removals, *ALL_IMPLEMENTATION_STATE_LABELS]
     if clear_blocked:
         removals = [*removals, STATE_PLAN_BLOCKED]
+    if clear_skip:
+        removals = [*removals, STATE_SKIP]
     if ATHENA_FINALIZED_PLAN_LABEL not in extra:
         removals = [*removals, ATHENA_FINALIZED_PLAN_LABEL]
     ctx.github.edit_labels(
@@ -534,6 +587,7 @@ def _apply_recovery_state_label(
     return (
         is_exclusive_plan_state(live_labels, target)
         and set(extra).issubset(live_labels)
+        and STATE_SKIP not in live_labels
         and not set(live_labels).intersection(ALL_IMPLEMENTATION_STATE_LABELS)
         and (
             ATHENA_FINALIZED_PLAN_LABEL in live_labels
@@ -566,22 +620,46 @@ def _retry_pending_non_code_intent(
 def _resume_wave_non_code_intent(
     item: WorkItem,
     ctx: StageContext,
-    intent: tuple[str, tuple[str, ...]],
+    intent: WaveNonCodeIntent,
 ) -> StageOutcome:
     """Finish a crash-interrupted reviewed non-code transition without models."""
-    reason, extra_labels = intent
     try:
-        _persist_wave_non_code_intent(
-            item,
-            ctx,
-            reason=reason,
-            extra_labels=extra_labels,
+        live = ctx.github.gh_issue_json(intent.issue_number)
+    except RuntimeError as exc:
+        return _retry_pending_non_code_intent(item, ctx, str(exc))
+    title = live.get("title") if isinstance(live, dict) else None
+    body = live.get("body") if isinstance(live, dict) else None
+    current_evidence = (
+        evidence_digest(
+            item.repo,
+            intent.issue_number,
+            intent.repository_revision,
+            title,
+            body,
         )
+        if isinstance(title, str) and isinstance(body, str)
+        else None
+    )
+    if current_evidence != intent.evidence_digest:
+        item.payload.pop(WAVE_NON_CODE_INTENT_PAYLOAD, None)
+        _clear_recovery_results(item)
+        _reenter_planning(item)
+        return StageOutcome(
+            Disposition.RETRY,
+            "non-code intent evidence changed; re-entering finalized/semantic review",
+        )
+    try:
+        if intent.explanation:
+            ctx.github.upsert_issue_comment(
+                intent.issue_number,
+                OBSOLETE_EXPLANATION_MARKER,
+                render_obsolete_explanation(intent.explanation),
+            )
         confirmed = _apply_recovery_state_label(
             item,
             ctx,
             STATE_SKIP,
-            extra=extra_labels,
+            extra=intent.extra_labels,
         )
         if not confirmed:
             return _retry_pending_non_code_intent(
@@ -589,13 +667,13 @@ def _resume_wave_non_code_intent(
                 ctx,
                 "skip label was not confirmed",
             )
-        _complete_wave_non_code_outcome(item, ctx, reason=reason)
+        _complete_wave_non_code_outcome(item, ctx, reason=intent.reason)
     except (IssueWaveError, RuntimeError) as exc:
         return _retry_pending_non_code_intent(item, ctx, str(exc))
     _finish_recovery(item)
-    action = "tracker-skipped" if "epic" in extra_labels else "obsolete-skipped"
+    action = "tracker-skipped" if "epic" in intent.extra_labels else "obsolete-skipped"
     record_summary_action(item, action)
-    return StageOutcome(Disposition.FINISH_PASS, reason)
+    return StageOutcome(Disposition.FINISH_PASS, intent.reason)
 
 
 def _retry_semantic_transition(
@@ -698,6 +776,7 @@ def _apply_confirmed_semantic_skip(
                 ctx,
                 reason=reason,
                 extra_labels=(),
+                explanation=review.reason,
             )
             ctx.github.upsert_issue_comment(
                 item.issue,
@@ -1546,20 +1625,6 @@ class PlanningStage(Stage):
         if pending_intent := _pending_wave_non_code_intent(item):
             return _resume_wave_non_code_intent(item, ctx, pending_intent)
 
-        # Operator override: state:skip -> SKIP. Checked BEFORE the
-        # plan-go fast-forward — skip wins over everything (#1835), matching
-        # seeding.classify_issue's "skip wins over everything" precedent.
-        if is_skipped(labels):
-            if is_plan_go(labels):
-                logger.warning(
-                    "planning:%d: state:skip AND state:plan-go both present — "
-                    "skip wins; see docs/runbooks/state-skip-revival.md if "
-                    "this issue should be revived",
-                    item.issue,
-                )
-            logger.info("planning:%d: state:skip; skipping", item.issue)
-            return StageOutcome(Disposition.SKIP, "state:skip")
-
         # Derived automation artifacts in the issue body are not requirements.
         # Semantic tracker/obsolete candidates use the same two-model gate.
         # This check precedes plan-GO so stale approval cannot authorize a body
@@ -1578,10 +1643,7 @@ class PlanningStage(Stage):
         # deleted, and --force must not reopen that completed epoch. Normalize
         # the loop-owned label so downstream restart routing remains ordinary.
         if item.payload.get("athena_finalized_plan_digest"):
-            finalized_state_current = (
-                is_exclusive_plan_state(labels, STATE_PLAN_GO)
-                and ATHENA_FINALIZED_PLAN_LABEL in labels
-            )
+            finalized_state_current = _finalized_plan_state_is_current(labels)
             if not finalized_state_current:
                 try:
                     finalized_state_confirmed = ctx.dry_run or _apply_recovery_state_label(
@@ -1590,6 +1652,7 @@ class PlanningStage(Stage):
                         STATE_PLAN_GO,
                         extra=(ATHENA_FINALIZED_PLAN_LABEL,),
                         clear_blocked=True,
+                        clear_skip=True,
                     )
                 except RuntimeError as exc:
                     return _retry_incomplete_requirements_snapshot(
@@ -1610,6 +1673,21 @@ class PlanningStage(Stage):
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")
+
+        # Operator state:skip remains authoritative for ordinary issues. The
+        # authenticated finalized-plan case above is the sole exception: its
+        # self-verifying body proves planning completed and repairs a stale
+        # loop-owned skip left by an interrupted non-code transition.
+        if is_skipped(labels):
+            if is_plan_go(labels):
+                logger.warning(
+                    "planning:%d: state:skip AND state:plan-go both present — "
+                    "skip wins; see docs/runbooks/state-skip-revival.md if "
+                    "this issue should be revived",
+                    item.issue,
+                )
+            logger.info("planning:%d: state:skip; skipping", item.issue)
+            return StageOutcome(Disposition.SKIP, "state:skip")
 
         # BLOCKED is an operator-owned hold for ordinary planning. The one
         # exception is an authenticated Athena finalization above: that body

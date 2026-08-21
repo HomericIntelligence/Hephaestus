@@ -12,6 +12,7 @@ from hephaestus.automation.issue_waves import (
 )
 from hephaestus.automation.pipeline.coordinator import Coordinator, PipelineConfig
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.requirements_recovery import evidence_digest
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
@@ -82,6 +83,8 @@ def test_lease_backed_non_code_intent_reenters_planning_for_label_repair(
         lease,
         issue_number=2453,
         reason=reason,
+        evidence_digest=evidence_digest("repo-a", 2453, BASE_SHA, "A task", ""),
+        repository_revision=BASE_SHA,
         extra_labels=("epic",),
     )
     config = PipelineConfig(
@@ -110,4 +113,7 @@ def test_lease_backed_non_code_intent_reenters_planning_for_label_repair(
     assert item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] == {
         "reason": reason,
         "extra_labels": ["epic"],
+        "evidence_digest": evidence_digest("repo-a", 2453, BASE_SHA, "A task", ""),
+        "repository_revision": BASE_SHA,
+        "explanation": "",
     }

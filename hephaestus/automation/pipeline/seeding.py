@@ -174,6 +174,12 @@ class SeedEntry:
             as non-code and therefore needs no merge receipt.
         non_code_labels: Supplemental labels required by a pending reviewed
             non-code disposition; ``state:skip`` is implicit.
+        non_code_evidence_digest: Digest binding a pending non-code disposition
+            to its independently reviewed issue and repository evidence.
+        non_code_repository_revision: Exact repository revision included in
+            the pending non-code evidence binding.
+        non_code_explanation: Actor-owned rationale that must be restored
+            before an obsolete disposition may apply ``state:skip``.
 
     """
 
@@ -192,6 +198,9 @@ class SeedEntry:
     pending_implementation_go_label_confirmed: bool = False
     non_code: bool = False
     non_code_labels: tuple[str, ...] = ()
+    non_code_evidence_digest: str = ""
+    non_code_repository_revision: str = ""
+    non_code_explanation: str = ""
 
 
 def _get_state_label(labels: set[str]) -> str | None:

@@ -24,9 +24,13 @@ updates use an atomic owner-only write and a generation compare-and-swap.
 An independently planner/reviewer-confirmed tracker or obsolete issue is stored
 as a passing non-code outcome instead: it has no PR receipt and remains valid
 only while its durable `state:skip` label is still present. The checkpoint
-writes a reviewed non-code intent before changing labels, then records the
-terminal outcome after exact readback. A restart repairs an unapplied intent or
-completes an applied intent without rerunning either model.
+writes a reviewed non-code intent before changing labels. That intent binds the
+issue title/body and repository revision supplied to both models and, for an
+obsolete disposition, retains the actor-owned explanation. A restart first
+revalidates that evidence, restores the explanation, repairs the label, and
+records the terminal outcome after exact readback. Evidence drift returns to
+normal semantic or finalized-plan authentication instead of replaying the stale
+skip decision.
 
 Wave admission is performed after synchronized checkout and before label setup.
 The only selectors are 1, 2, 4, 8, and all eligible issues. A later wave needs

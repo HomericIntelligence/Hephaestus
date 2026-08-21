@@ -158,6 +158,9 @@ class SourceCoordinator(_CoordinatorHost):
                             new_item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
                                 "reason": entry.reason,
                                 "extra_labels": list(entry.non_code_labels),
+                                "evidence_digest": entry.non_code_evidence_digest,
+                                "repository_revision": entry.non_code_repository_revision,
+                                "explanation": entry.non_code_explanation,
                             }
                 if source.base_main_sha is not None:
                     new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
@@ -487,6 +490,9 @@ class SourceCoordinator(_CoordinatorHost):
                     item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
                         "reason": entry.reason,
                         "extra_labels": list(entry.non_code_labels),
+                        "evidence_digest": entry.non_code_evidence_digest,
+                        "repository_revision": entry.non_code_repository_revision,
+                        "explanation": entry.non_code_explanation,
                     }
         if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
             repo = (self.config.org, item.repo)
