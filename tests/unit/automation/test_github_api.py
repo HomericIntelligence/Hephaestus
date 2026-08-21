@@ -113,6 +113,21 @@ class TestGhIssueJson:
         with pytest.raises(RuntimeError, match="Failed to fetch issue"):
             gh_issue_json(123)
 
+    @pytest.mark.parametrize(
+        "error",
+        [subprocess.TimeoutExpired("gh", 30), OSError("gh unavailable")],
+        ids=["timeout", "os-error"],
+    )
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_transport_failures_are_normalized(
+        self, mock_gh_call: Any, error: BaseException
+    ) -> None:
+        """Issue authority reads expose one bounded adapter error contract."""
+        mock_gh_call.side_effect = error
+
+        with pytest.raises(RuntimeError, match="Failed to fetch issue"):
+            gh_issue_json(123)
+
     @patch("hephaestus.automation.github_api._gh_call")
     def test_strips_null_bytes_from_title_and_body(self, mock_gh_call: Any) -> None:
         """#1661: NUL bytes in title/body are stripped at the source."""

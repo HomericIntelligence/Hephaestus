@@ -568,6 +568,7 @@ def _host_verification_profile(
         Path("/opt/homebrew"),
         Path("/usr/local"),
     )
+    canonical_tmp = Path(os.path.sep) / "tmp"
     return "\n".join(
         (
             "(version 1)",
@@ -612,7 +613,7 @@ def _host_verification_profile(
             # through ``/private/tmp`` before a mocked boundary can observe
             # it, so permit metadata for the directory itself without
             # granting reads of its contents.
-            f'(allow file-read-metadata (literal "{_sandbox_string(Path("/tmp"))}"))',
+            f'(allow file-read-metadata (literal "{_sandbox_string(canonical_tmp)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
             "(deny network*)",

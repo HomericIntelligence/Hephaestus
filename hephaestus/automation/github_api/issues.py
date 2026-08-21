@@ -136,7 +136,7 @@ def gh_issue_json(
             data["authoritySanitized"] = True
         if isinstance(raw_body, str):
             data["bodyDigest"] = issue_body_digest(raw_body)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as e:
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, TypeError, ValueError) as e:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
     return data
 

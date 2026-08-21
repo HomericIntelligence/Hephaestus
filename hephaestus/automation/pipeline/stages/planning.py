@@ -1775,6 +1775,22 @@ class PlanningStage(Stage):
         if pending_intent := _pending_wave_non_code_intent(item):
             return _resume_wave_non_code_intent(item, ctx, pending_intent)
 
+        # A skip with no pending wave intent is operator-owned and absolute.
+        # Check it before recovery evidence reads so an unavailable comment
+        # journal cannot delay or defeat the operator's terminal decision. A
+        # drifted loop-owned skip is removed only by the provenance-bound
+        # retirement path above.
+        if is_skipped(labels):
+            if is_plan_go(labels):
+                logger.warning(
+                    "planning:%d: state:skip AND state:plan-go both present — "
+                    "skip wins; see docs/runbooks/state-skip-revival.md if "
+                    "this issue should be revived",
+                    item.issue,
+                )
+            logger.info("planning:%d: state:skip; skipping", item.issue)
+            return StageOutcome(Disposition.SKIP, "state:skip")
+
         # Derived automation artifacts in the issue body are not requirements.
         # Semantic tracker/obsolete candidates use the same two-model gate.
         # This check precedes plan-GO so stale approval cannot authorize a body
@@ -1786,20 +1802,6 @@ class PlanningStage(Stage):
         except RuntimeError as exc:
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         force_replan = force_replan or bool(item.payload.get("athena_finalized_plan_invalidated"))
-
-        # A skip with no pending wave intent is operator-owned and absolute.
-        # A drifted loop-owned skip is removed only by the provenance-bound
-        # retirement path above, before finalization can be considered.
-        if is_skipped(labels):
-            if is_plan_go(labels):
-                logger.warning(
-                    "planning:%d: state:skip AND state:plan-go both present — "
-                    "skip wins; see docs/runbooks/state-skip-revival.md if "
-                    "this issue should be revived",
-                    item.issue,
-                )
-            logger.info("planning:%d: state:skip; skipping", item.issue)
-            return StageOutcome(Disposition.SKIP, "state:skip")
 
         # Athena finalization seals one exact GO-reviewed planning epoch into
         # the issue body. Its self-verifying F digest is durable planning

@@ -613,6 +613,29 @@ class TestPlanningStageEnter:
         assert outcome.disposition == Disposition.SKIP
         assert github.mutation_log == []
 
+    def test_operator_skip_does_not_require_comment_journal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An absolute operator skip survives an unavailable recovery journal."""
+        stage = PlanningStage()
+
+        class CountingGitHub(FakeStageGitHub):
+            comment_reads = 0
+
+            def issue_comments(self, issue_number: int) -> list[IssueComment]:
+                self.comment_reads += 1
+                return super().issue_comments(issue_number)
+
+        github = CountingGitHub(labels=[STATE_SKIP])
+        item = make_work_item(issue=2)
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.SKIP
+        assert github.comment_reads == 0
+        assert github.mutation_log == []
+
     def test_skip_wins_over_plan_go_with_warning(
         self, make_ctx: Any, make_work_item: Any, caplog: Any
     ) -> None:
