@@ -311,6 +311,7 @@ class TestFetchIssueInfo:
             "state": "OPEN",
             "labels": [{"name": "bug"}, {"name": "priority"}],
             "body": "Depends on #100",
+            "authoritySanitized": True,
         }
 
         issue = fetch_issue_info(123)
@@ -320,6 +321,7 @@ class TestFetchIssueInfo:
         assert issue.state == IssueState.OPEN
         assert "bug" in issue.labels
         assert 100 in issue.dependencies
+        assert issue.authority_sanitized is True
 
 
 class TestIsIssueClosed:

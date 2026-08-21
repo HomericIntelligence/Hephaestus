@@ -117,6 +117,8 @@ class IssueFacts:
             ``state:implementation-go``.
         pr_has_implementation_no_go: True iff the open PR carries
             ``state:implementation-no-go``.
+        authority_sanitized: Whether title/body text required prompt-safe
+            sanitization and therefore cannot serve as exact authority.
 
     Invariants (established by :func:`seed_issue`'s tri-state fetch):
         - Exactly one of {no live PR, open PR, merged PR} holds:
@@ -141,6 +143,7 @@ class IssueFacts:
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
     body: str = ""
+    authority_sanitized: bool = False
 
 
 @dataclass(frozen=True)
@@ -454,6 +457,7 @@ def seed_issue(issue_number: int) -> IssueFacts:
         issue_is_closed=issue_info.state == IssueState.CLOSED,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
+        authority_sanitized=issue_info.authority_sanitized,
     )
 
 
@@ -538,6 +542,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         pending_implementation_go_audit=pending_implementation_go_audit,
+        authority_sanitized=issue_data.get("authoritySanitized") is True,
     )
 
 

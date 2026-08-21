@@ -239,7 +239,7 @@ def _non_code_intent_matches_facts(
     repository: str,
 ) -> bool:
     """Return whether fresh issue text matches the independently reviewed evidence."""
-    if intent.retired or facts is None:
+    if intent.retired or facts is None or getattr(facts, "authority_sanitized", False) is True:
         return False
     title = getattr(facts, "title", None)
     body = getattr(facts, "body", None)

@@ -760,4 +760,5 @@ def fetch_issue_info(issue_number: int) -> IssueInfo:
         state=IssueState(issue_data["state"]),
         labels=[label["name"] for label in issue_data.get("labels", [])],
         dependencies=_api.parse_issue_dependencies(issue_data.get("body", "")),
+        authority_sanitized=issue_data.get("authoritySanitized") is True,
     )

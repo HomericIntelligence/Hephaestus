@@ -1569,6 +1569,45 @@ class TestPlanningStageStep:
         assert item.payload[WAVE_NON_CODE_PAYLOAD] is True
         assert github.labels[2] == {STATE_SKIP, "epic"}
 
+    def test_sanitized_recovery_snapshot_cannot_apply_semantic_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """In-flight recovery results cannot authorize a sanitized snapshot."""
+
+        class SanitizedAuthorityGitHub(FakeStageGitHub):
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                snapshot = super().gh_issue_json(issue_number)
+                snapshot["authoritySanitized"] = True
+                return snapshot
+
+        github = SanitizedAuthorityGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=3, state="REQUIREMENTS_RECOVERY_APPLY")
+        snapshot = github.gh_issue_json(3)
+        item.payload.update(
+            {
+                "issue_title": snapshot["title"],
+                "issue_source_body": snapshot["body"],
+                "issue_body_digest": snapshot["bodyDigest"],
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.TRACKER, "", "Tracks children.", "Checklist"
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.TRACKER,
+                    "Confirmed tracker.",
+                ),
+            }
+        )
+
+        result = PlanningStage().step(
+            item,
+            make_ctx(github=github, budget_fn=lambda _name: 2),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.RETRY
+        assert STATE_SKIP not in github.labels[3]
+
     @pytest.mark.parametrize(
         "labels",
         [[STATE_NEEDS_PLAN], [STATE_SKIP, "epic"]],
@@ -1624,6 +1663,58 @@ class TestPlanningStageStep:
         assert checkpoint is not None
         recorded = checkpoint.current_wave.outcomes[0]
         assert recorded.passed and recorded.non_code and recorded.pr_number is None
+
+    def test_sanitized_pending_non_code_intent_retires_without_skip(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Sanitized text cannot reuse independently reviewed skip authority."""
+
+        class SanitizedAuthorityGitHub(FakeStageGitHub):
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                snapshot = super().gh_issue_json(issue_number)
+                snapshot["authoritySanitized"] = True
+                return snapshot
+
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [119])
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=119,
+            reason=reason,
+            evidence_digest=_recovery_binding("", issue=119),
+            repository_revision=_RECOVERY_REVISION,
+            extra_labels=("epic",),
+        )
+        item = make_work_item(
+            issue=119,
+            payload={
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": reason,
+                    "extra_labels": ["epic"],
+                    "evidence_digest": _recovery_binding("", issue=119),
+                    "repository_revision": _RECOVERY_REVISION,
+                    "explanation": "",
+                },
+            },
+        )
+        github = SanitizedAuthorityGitHub(labels=[STATE_NEEDS_PLAN])
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(
+                github=github,
+                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            ),
+        )
+
+        assert outcome is not None and outcome.disposition is Disposition.RETRY
+        assert STATE_SKIP not in github.labels[119]
+        assert store.non_code_intent_for(lease, 119) is None
 
     def test_stale_non_code_intent_yields_to_authenticated_finalized_plan(
         self,

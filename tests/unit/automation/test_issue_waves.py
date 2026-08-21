@@ -435,6 +435,16 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
     assert applied.stage is StageName.FINISHED
     assert applied.passed and applied.non_code
 
+    sanitized = wave_entry_from_facts(
+        lease,
+        SimpleNamespace(**{**vars(facts), "authority_sanitized": True}),
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert sanitized.stage is StageName.PLANNING
+
     store.record_terminal_outcome(
         lease,
         issue_number=19,

@@ -717,6 +717,9 @@ def _resume_wave_non_code_intent(
         return _retry_pending_non_code_intent(item, ctx, str(exc))
     title = live.get("title") if isinstance(live, dict) else None
     body = live.get("body") if isinstance(live, dict) else None
+    authority_sanitized = (
+        live.get("authoritySanitized") is True if isinstance(live, dict) else False
+    )
     current_evidence = (
         evidence_digest(
             item.repo,
@@ -725,7 +728,7 @@ def _resume_wave_non_code_intent(
             title,
             body,
         )
-        if isinstance(title, str) and isinstance(body, str)
+        if not authority_sanitized and isinstance(title, str) and isinstance(body, str)
         else None
     )
     if intent.retired or current_evidence != intent.evidence_digest:
@@ -835,6 +838,13 @@ def _retry_requirements_recovery(
         return _retry_incomplete_requirements_snapshot(item, ctx, f"{reason}; {exc}")
     if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
         return issue_outcome
+    if live.get("authoritySanitized") is True:
+        _clear_recovery_results(item)
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
+            "authority-bearing issue text required sanitization",
+        )
     live_labels = _issue_snapshot_labels(live)
     if honor_skip and is_skipped(live_labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
@@ -1030,6 +1040,13 @@ def _apply_requirements_recovery(
         return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
     if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
         return issue_outcome
+    if live.get("authoritySanitized") is True:
+        _clear_recovery_results(item)
+        return _retry_incomplete_requirements_snapshot(
+            item,
+            ctx,
+            "authority-bearing issue text required sanitization",
+        )
     live_labels = _issue_snapshot_labels(live)
     if pending_intent := _pending_wave_non_code_intent(item):
         return _resume_wave_non_code_intent(item, ctx, pending_intent)

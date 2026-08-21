@@ -451,12 +451,16 @@ def _issue_info(
     labels: list[str],
     title: str = "A task",
     state: IssueState = IssueState.OPEN,
+    *,
+    authority_sanitized: bool = False,
 ) -> MagicMock:
     info = MagicMock()
     info.number = number
     info.labels = labels
     info.title = title
     info.state = state
+    info.body = ""
+    info.authority_sanitized = authority_sanitized
     return info
 
 
@@ -471,11 +475,17 @@ class TestSeedIssueFetchLayer:
         *,
         pr_labels: list[str] | None = None,
         issue_state: IssueState = IssueState.OPEN,
+        authority_sanitized: bool = False,
     ) -> IssueFacts:
         with (
             patch(
                 "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                return_value=_issue_info(issue, labels, state=issue_state),
+                return_value=_issue_info(
+                    issue,
+                    labels,
+                    state=issue_state,
+                    authority_sanitized=authority_sanitized,
+                ),
             ),
             patch(
                 "hephaestus.automation._review_utils._gh_call",
@@ -586,6 +596,11 @@ class TestSeedIssueFetchLayer:
         assert facts.number == 101
         assert {STATE_PLAN_GO, "other-label"} <= facts.labels
 
+    def test_global_issue_seed_preserves_sanitized_authority_flag(self) -> None:
+        facts = self._seed(101, [STATE_NEEDS_PLAN], [], authority_sanitized=True)
+
+        assert facts.authority_sanitized is True
+
     def test_blocked_comment_without_blocked_label_cannot_control_restart(self) -> None:
         """Seeding never infers BLOCKED from review prose after a label-write failure."""
         github = MagicMock()
@@ -595,6 +610,7 @@ class TestSeedIssueFetchLayer:
             "body": "",
             "state": "OPEN",
             "labels": [{"name": STATE_NEEDS_PLAN}],
+            "authoritySanitized": True,
         }
         github.issue_comments.side_effect = AssertionError("comments are not state authority")
         github.find_pr_for_issue.return_value = None
@@ -605,6 +621,7 @@ class TestSeedIssueFetchLayer:
 
         assert stage is StageName.PLANNING
         assert STATE_PLAN_BLOCKED not in facts.labels
+        assert facts.authority_sanitized is True
         github.issue_comments.assert_not_called()
 
     def test_pending_go_audit_receipt_routes_restart_back_to_pr_review(self) -> None:
