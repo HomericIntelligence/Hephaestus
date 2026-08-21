@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 # package object so package-level test patches keep reaching internal callers.
 _gh_call = gh_call
 _GH_BREAKER = _gh_client._GH_BREAKER
-_GH_THROTTLE = _gh_client._GH_THROTTLE
 io_write_secure = write_secure
 
 # Mutable module state from the former flat module. Submodules read and write

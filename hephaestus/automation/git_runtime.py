@@ -4,6 +4,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.cache import ThreadSafeCache
 from hephaestus.utils.git import run_git as _shared_run_git
 from hephaestus.utils.helpers import get_repo_root as get_repo_root, run_subprocess
@@ -35,11 +36,11 @@ def run(
             )
         return run_subprocess(
             cmd,
+            env=env if env is not None else read_approved_parent_env(),
             cwd=str(cwd) if cwd else None,
             timeout=timeout,
             check=check,
             log_on_error=False,
-            env=env,
         )
     except subprocess.TimeoutExpired:
         if log_errors:

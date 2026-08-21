@@ -49,6 +49,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    stage_timeout,
 )
 from .repo import (
     DIRECT_SCOPE_LOCAL_BRANCH_CLEANUP_KEY,
@@ -226,7 +227,7 @@ class FinishedStage(Stage):
                             job=GitJob(
                                 repo=item.repo,
                                 op="release_branch_reservation",
-                                timeout_s=GIT_JOB_TIMEOUT_S,
+                                timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
                                 kwargs={
                                     "branch": branch_name,
                                     "base_sha": base_sha,
@@ -313,7 +314,7 @@ class FinishedStage(Stage):
         job = GitJob(
             repo=item.repo,
             op="remove_worktree",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
             # Use the concrete worktree path: the cleanup worker constructs a
             # fresh WorktreeManager, so its in-memory issue map is empty.
             kwargs=kwargs,

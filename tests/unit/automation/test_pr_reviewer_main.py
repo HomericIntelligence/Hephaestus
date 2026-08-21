@@ -60,9 +60,14 @@ def test_main_builds_pr_review_scope_and_dispatches() -> None:
     assert config.repos == ["widget"]
     assert config.issues == [123]
     assert config.dry_run is True
-    # Scope is trimmed to exactly the single pr_review stage.
     assert config.scope is not None
     assert config.scope.stages == frozenset({StageName.PR_REVIEW})
+
+
+def test_agent_timeout_threads_into_pipeline_config() -> None:
+    """Standalone reviewer timeout configures the review agent operation."""
+    captured = _run_main_capturing_config(["--issues", "123", "--agent-timeout", "11"])
+    assert captured["config"].reviewer_timeout == 11
 
 
 def test_main_maps_max_workers_to_worker_pool() -> None:

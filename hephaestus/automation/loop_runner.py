@@ -45,6 +45,12 @@ if TYPE_CHECKING:
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.automation._review_utils import build_automation_parser
+from hephaestus.automation.agent_config import (
+    fallback_model as default_fallback_model,
+    implementer_model as default_implementer_model,
+    planner_model as default_planner_model,
+    reviewer_model as default_reviewer_model,
+)
 from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_COUNT,
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
@@ -202,23 +208,15 @@ def _default_phase_timeout_s() -> float:
     An agent job that shells out to an external coding agent can stall
     indefinitely on a network hang; a non-``None`` default keeps every job
     bounded even when the operator does not pass ``--phase-timeout``.
-    Overridable via ``HEPH_PHASE_TIMEOUT`` (seconds). A malformed env value logs
-    a warning and falls back to the default rather than crashing at startup.
-
     The 7800s default lets the outer job guard safely exceed the longest
     in-agent timeout (2h) so a healthy job never trips it.
     """
-    import os
+    return 7800.0
 
-    default = 7800
-    raw = os.environ.get("HEPH_PHASE_TIMEOUT")
-    if raw is None:
-        return float(default)
-    try:
-        return float(raw)
-    except ValueError:
-        LOG.warning("Ignoring non-numeric HEPH_PHASE_TIMEOUT=%r — using default %ds", raw, default)
-        return float(default)
+
+def _resolve_model_option(role_value: str, global_value: str, default: str) -> str:
+    """Resolve model precedence once at the CLI boundary."""
+    return role_value or global_value or default
 
 
 @dataclass
@@ -253,6 +251,10 @@ class LoopConfig:
     # file concurrently — defer the later one (#1623).
     serialize_file_overlap: bool = True
     agent: str = "claude"
+    disable_pi_automation: bool = False
+    auth_status_timeout: int = 10
+    pi_isolation_adapter: str | None = None
+    pi_dir: Path | None = None
     issues: list[int] = field(default_factory=list)
     reset_plan_review_session: bool = False
     prs: list[int] = field(default_factory=list)
@@ -270,6 +272,7 @@ class LoopConfig:
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
+    fallback_model: str = ""
     planner_reasoning_effort: str = ""
     reviewer_reasoning_effort: str = ""
     implementer_reasoning_effort: str = ""
@@ -278,6 +281,22 @@ class LoopConfig:
     gh_extra_path_root: Path | None = None
     gh_global_rate: float = 10.0
     gh_global_burst: float = 30.0
+    rate_guard_enabled: bool = True
+    rate_guard_threshold: int = 200
+    plugin_skills_dir: Path | None = None
+    planner_timeout: int = 1200
+    reviewer_timeout: int = 1200
+    implementer_timeout: int = 1800
+    address_review_timeout: int = 7200
+    git_message_timeout: int = 1200
+    poll_max_wait: int = 1200
+    clone_timeout: int = 120
+    network_timeout: int = 120
+    gh_timeout: int = 120
+    metadata_timeout: int = 10
+    rebase_timeout: int = 2400
+    diff_collect_timeout: int = 60
+    pre_pr_test_timeout: int = 600
     # Org is resolved at runtime from --org / --repos / cwd detection; no
     # hardcoded fallback. Always set by main() before dispatch.
     org: str = ""
@@ -286,8 +305,7 @@ class LoopConfig:
     # match its remote repository.  Keep that exceptional path explicit while
     # retaining ``projects_dir / repo`` as the normal multi-repo convention.
     repo_roots: dict[str, Path] = field(default_factory=dict)
-    # Per-agent-job timeout in seconds. Defaults to an env-overridable bound
-    # (``HEPH_PHASE_TIMEOUT``); ``--phase-timeout`` overrides it and a
+    # Per-agent-job timeout in seconds. ``--phase-timeout`` overrides it and a
     # non-positive value disables the bound (``None``).
     phase_timeout_s: float | None = field(default_factory=_default_phase_timeout_s)
     # Prometheus text + JSON health endpoint. Zero deliberately disables the
@@ -466,7 +484,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "Model ID applied to every phase (planner, reviewer, implementer, advise) "
-            "for child processes, so no HEPH_*_MODEL env vars are required. The /learn "
+            "for child processes. The /learn "
             "step inherits its parent phase's model automatically. A per-phase flag below "
             "overrides this for that phase."
         ),
@@ -495,6 +513,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Model ID for implementer child processes (implement, address-review, drive-green)",
     )
+    p.add_argument("--fallback-model", default="", help="Claude quota fallback model ID")
     p.add_argument(
         "--reviewer-reasoning-effort",
         choices=("default", "low", "medium", "high", "xhigh"),
@@ -526,8 +545,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Local directory containing repo clones. When omitted, resolved from "
-            "the ``PROJECTS_ROOT`` env var (if set and existing), otherwise the "
-            "current checkout parent when available, then "
+            "the current checkout parent when available, then "
             f"``{DEFAULT_PROJECTS_DIR}``."
         ),
     )
@@ -536,10 +554,65 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=_default_phase_timeout_s(),
         help=(
-            "Per-phase timeout in seconds (default: HEPH_PHASE_TIMEOUT or "
-            f"{int(_default_phase_timeout_s())}s). Pass 0 or a negative value to disable. "
+            f"Per-phase timeout in seconds (default: {int(_default_phase_timeout_s())}s). "
+            "Pass 0 or a negative value to disable. "
             "This bounds each AGENT JOB the pipeline runs, not a whole phase subprocess."
         ),
+    )
+    p.add_argument(
+        "--rate-guard",
+        action="store_true",
+        dest="rate_guard_enabled",
+        default=True,
+        help="Enable the GraphQL remaining-budget guard (default).",
+    )
+    p.add_argument(
+        "--no-rate-guard",
+        action="store_false",
+        dest="rate_guard_enabled",
+        help="Disable the GraphQL remaining-budget guard.",
+    )
+    timeout_defaults = (
+        ("planner", 1200),
+        ("reviewer", 1200),
+        ("implementer", 1800),
+        ("address-review", 7200),
+        ("git-message", 1200),
+        ("clone", 120),
+        ("network", 120),
+        ("gh", 120),
+        ("metadata", 10),
+        ("rebase", 2400),
+        ("diff-collect", 60),
+        ("pre-pr-test", 600),
+    )
+    for timeout_name, timeout_default in timeout_defaults:
+        p.add_argument(
+            f"--{timeout_name}-timeout",
+            dest=f"{timeout_name.replace('-', '_')}_timeout",
+            type=_parse_positive_int,
+            default=timeout_default,
+            metavar="SECONDS",
+        )
+    p.add_argument(
+        "--poll-max-wait",
+        type=_parse_positive_int,
+        default=1200,
+        metavar="SECONDS",
+    )
+    p.add_argument(
+        "--rate-guard-threshold",
+        type=_parse_positive_int,
+        default=200,
+        metavar="N",
+        help="Park agent jobs below this GraphQL remaining budget (default: 200).",
+    )
+    p.add_argument(
+        "--plugin-skills-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Explicit root containing installed automation skills.",
     )
     p.add_argument(
         "--metrics-port",
@@ -672,7 +745,7 @@ def _pipeline_event_log_path(
 # ---------------------------------------------------------------------------
 
 
-def _preflight_token_scopes(org: str, probe_repo: str) -> None:
+def _preflight_token_scopes(org: str, probe_repo: str, *, timeout: int = 120) -> None:
     """Verify the gh token can read ``org/probe_repo`` before dispatch."""
     try:
         out = gh_call(
@@ -684,6 +757,7 @@ def _preflight_token_scopes(org: str, probe_repo: str) -> None:
                 "--jq",
                 ".permissions",
             ],
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(
@@ -714,8 +788,8 @@ def _preflight_token_scopes(org: str, probe_repo: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _setup_logging(verbose: bool) -> None:
-    configure_cli_logging(verbose=verbose)
+def _setup_logging(verbose: bool, log_format: str = "text") -> None:
+    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def _resolve_org_and_repos(
@@ -739,7 +813,7 @@ def _resolve_org_and_repos(
                 [],
                 "--issues/--prs require exactly one repository via --repos REPO.",
             )
-        detected_org, _ = _detect_cwd_repo()
+        detected_org, _ = _detect_cwd_repo(metadata_timeout=args.metadata_timeout)
         explicit_org = args.org if isinstance(args.org, str) else None
         org = explicit_org or detected_org
         if not org:
@@ -753,7 +827,7 @@ def _resolve_org_and_repos(
     # Branches 2 + 3: --org variants
     if args.org is not None:
         if args.org is _ORG_AUTODETECT:
-            detected_org, _ = _detect_cwd_repo()
+            detected_org, _ = _detect_cwd_repo(metadata_timeout=args.metadata_timeout)
             if not detected_org:
                 return (
                     "",
@@ -781,7 +855,7 @@ def _resolve_org_and_repos(
         )
 
     # Branch 4: no flags — default to cwd repo
-    detected_org, detected_repo = _detect_cwd_repo()
+    detected_org, detected_repo = _detect_cwd_repo(metadata_timeout=args.metadata_timeout)
     if not (detected_org and detected_repo):
         return (
             "",
@@ -852,14 +926,35 @@ def _build_pipeline_config(
         grace_s=30.0,  # Default grace period
         phase_timeout_s=cfg.phase_timeout_s,
         agent=cfg.agent,
+        disable_pi_automation=cfg.disable_pi_automation,
+        auth_status_timeout=cfg.auth_status_timeout,
+        pi_isolation_adapter=cfg.pi_isolation_adapter,
+        pi_dir=cfg.pi_dir,
         model=cfg.model,
         planner_model=cfg.planner_model,
         reviewer_model=cfg.reviewer_model,
         implementer_model=cfg.implementer_model,
+        fallback_model=cfg.fallback_model,
         planner_reasoning_effort=cfg.planner_reasoning_effort,
         reviewer_reasoning_effort=cfg.reviewer_reasoning_effort,
         implementer_reasoning_effort=cfg.implementer_reasoning_effort,
         gh_extra_path_root=cfg.gh_extra_path_root,
+        rate_guard_enabled=cfg.rate_guard_enabled,
+        rate_guard_threshold=cfg.rate_guard_threshold,
+        plugin_skills_dir=cfg.plugin_skills_dir,
+        planner_timeout=cfg.planner_timeout,
+        reviewer_timeout=cfg.reviewer_timeout,
+        implementer_timeout=cfg.implementer_timeout,
+        address_review_timeout=cfg.address_review_timeout,
+        git_message_timeout=cfg.git_message_timeout,
+        poll_max_wait=cfg.poll_max_wait,
+        clone_timeout=cfg.clone_timeout,
+        network_timeout=cfg.network_timeout,
+        gh_timeout=cfg.gh_timeout,
+        metadata_timeout=cfg.metadata_timeout,
+        rebase_timeout=cfg.rebase_timeout,
+        diff_collect_timeout=cfg.diff_collect_timeout,
+        pre_pr_test_timeout=cfg.pre_pr_test_timeout,
         no_advise=cfg.no_advise,
         enable_learn=not cfg.no_learn,
         nitpick=cfg.nitpick,
@@ -887,7 +982,7 @@ def _current_checkout_repo_roots(
     """Return an explicit root only for an eligible noncanonical cwd checkout.
 
     A user-supplied projects root (either the CLI flag or a valid
-    ``PROJECTS_ROOT``) is an authoritative request to use conventional
+    ``--projects-dir``) is an authoritative request to use conventional
     ``projects_dir / repo`` locations.  The automatic exception exists solely
     for running the loop from a differently named checkout, such as a swarm
     worktree.  Automation's own ``build/.worktrees/issue-N`` checkouts are
@@ -896,11 +991,7 @@ def _current_checkout_repo_roots(
     if args.projects_dir is not None:
         return {}
 
-    configured_root = os.environ.get("PROJECTS_ROOT")
-    if configured_root and Path(configured_root).is_dir():
-        return {}
-
-    detected_org, detected_repo = _detect_cwd_repo()
+    detected_org, detected_repo = _detect_cwd_repo(metadata_timeout=args.metadata_timeout)
     if not detected_repo or not detected_org or detected_org.casefold() != org.casefold():
         return {}
 
@@ -970,7 +1061,7 @@ def _dispatch_pipeline(
 
     """
     if not cfg.dry_run and repos:
-        _preflight_token_scopes(cfg.org, repos[0])
+        _preflight_token_scopes(cfg.org, repos[0], timeout=cfg.gh_timeout)
     from hephaestus.automation.pipeline.coordinator import run_pipeline
 
     config = _build_pipeline_config(
@@ -993,8 +1084,14 @@ def main(argv: list[str] | None = None) -> int:
     """Console-script entry point. Returns the process exit code."""
     args = _parse_args(argv)
     configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose)
-    agent = resolve_agent(args.agent)
+    _setup_logging(args.verbose, args.log_format)
+    agent = resolve_agent(
+        args.agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
+    )
 
     phases = _validate_phases(args.phases)
 
@@ -1009,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
     streaming_org_scope = args.org is not None and not args.repos and not (args.issues or args.prs)
     root_scope_repos = repos
     if streaming_org_scope:
-        cwd_org, cwd_repo = _detect_cwd_repo()
+        cwd_org, cwd_repo = _detect_cwd_repo(metadata_timeout=args.metadata_timeout)
         if cwd_repo and cwd_org and cwd_org.casefold() == org.casefold():
             # Preserve the current checkout for its matching repository even
             # though the streamed source has not yet yielded that name.
@@ -1025,6 +1122,10 @@ def main(argv: list[str] | None = None) -> int:
         parallel_repos=args.parallel_repos,
         phases=phases,
         agent=agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
         issues=args.issues or [],
         reset_plan_review_session=args.reset_plan_review_session,
         prs=args.prs or [],
@@ -1036,20 +1137,45 @@ def main(argv: list[str] | None = None) -> int:
         drive_green_all=args.drive_green_all,
         run_pre_pr_tests=args.run_pre_pr_tests,
         model=args.model,
-        planner_model=args.planner_model,
-        reviewer_model=args.reviewer_model,
-        implementer_model=args.implementer_model,
+        planner_model=_resolve_model_option(
+            args.planner_model, args.model, default_planner_model()
+        ),
+        reviewer_model=_resolve_model_option(
+            args.reviewer_model, args.model, default_reviewer_model()
+        ),
+        implementer_model=_resolve_model_option(
+            args.implementer_model, args.model, default_implementer_model()
+        ),
+        fallback_model=_resolve_model_option(
+            args.fallback_model, args.model, default_fallback_model()
+        ),
         planner_reasoning_effort=args.planner_reasoning_effort,
         reviewer_reasoning_effort=args.reviewer_reasoning_effort,
         implementer_reasoning_effort=args.implementer_reasoning_effort,
         gh_extra_path_root=args.gh_extra_path_root,
         gh_global_rate=args.gh_global_rate,
         gh_global_burst=args.gh_global_burst,
+        rate_guard_enabled=args.rate_guard_enabled,
+        rate_guard_threshold=args.rate_guard_threshold,
+        plugin_skills_dir=args.plugin_skills_dir,
+        planner_timeout=args.planner_timeout,
+        reviewer_timeout=args.reviewer_timeout,
+        implementer_timeout=args.implementer_timeout,
+        address_review_timeout=args.address_review_timeout,
+        git_message_timeout=args.git_message_timeout,
+        poll_max_wait=args.poll_max_wait,
+        clone_timeout=args.clone_timeout,
+        network_timeout=args.network_timeout,
+        gh_timeout=args.gh_timeout,
+        metadata_timeout=args.metadata_timeout,
+        rebase_timeout=args.rebase_timeout,
+        diff_collect_timeout=args.diff_collect_timeout,
+        pre_pr_test_timeout=args.pre_pr_test_timeout,
         org=org,
         projects_dir=projects_dir,
         repo_roots=_current_checkout_repo_roots(args, org, root_scope_repos, projects_dir),
         # A non-positive --phase-timeout explicitly disables the bound; any
-        # positive value (including the env-overridable default) applies it.
+        # positive value applies it.
         phase_timeout_s=(
             args.phase_timeout if args.phase_timeout and args.phase_timeout > 0 else None
         ),
@@ -1058,7 +1184,11 @@ def main(argv: list[str] | None = None) -> int:
         event_log_retention_count=args.event_log_retention_count,
     )
 
-    org_repo_source = (lambda: _iter_gh_repos(org)) if streaming_org_scope else None
+    org_repo_source = (
+        (lambda: _iter_gh_repos(org, network_timeout=cfg.network_timeout))
+        if streaming_org_scope
+        else None
+    )
 
     if not repos and org_repo_source is None:
         return _error_exit(args, "Repo list is empty; nothing to do.", "empty repo list")

@@ -9,8 +9,6 @@ import pytest
 
 from hephaestus.github import mnemosyne_repo
 from hephaestus.github.mnemosyne_repo import (
-    LEGACY_OWNER_ENV_VAR,
-    OWNER_ENV_VAR,
     UPSTREAM_SLUG,
     CurrentRepositoryMetadata,
     MnemosyneResolutionError,
@@ -29,12 +27,6 @@ UPSTREAM_METADATA = RepositoryMetadata(
     default_branch="main",
     head_sha=SHA,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clear_owner_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(OWNER_ENV_VAR, raising=False)
-    monkeypatch.delenv(LEGACY_OWNER_ENV_VAR, raising=False)
 
 
 def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
@@ -106,16 +98,17 @@ def test_repository_metadata_reads_default_head_ref_when_repo_view_omits_oid() -
     gh_json.assert_called_once_with(["api", f"repos/{UPSTREAM_SLUG}/git/ref/heads/main"])
 
 
-def test_explicit_owner_uses_new_env_var_and_skips_current_repo_probe(
+def test_explicit_owner_argument_skips_current_repo_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(OWNER_ENV_VAR, "acme")
+    monkeypatch.setenv("HOMERIC_INTELLIGENCE_MNEMOSYNE_OWNER", "poison-owner")
+    monkeypatch.setenv("HEPH_MNEMOSYNE_OWNER", "retired-owner")
 
     with (
         patch.object(mnemosyne_repo, "fetch_current_repository_metadata") as current,
         patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
     ):
-        target = resolve_mnemosyne_target()
+        target = resolve_mnemosyne_target(override_owner="acme")
 
     assert target == MnemosyneTarget(
         owner="acme",

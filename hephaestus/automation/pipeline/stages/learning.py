@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.agents.workspace import SourceLane
-from hephaestus.automation.agent_config import learn_claude_timeout
+from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
 from hephaestus.automation.review_journal import journal_snapshot, plan_fingerprint
@@ -17,7 +17,7 @@ from ..job_results import JobResult
 from ..routing import Disposition, StageName, StageOutcome
 from ..stage_results import Continue, JobRequest
 from ..work_item import LearningIntent, WorkItem
-from .base import source_workspace_binding
+from .base import source_workspace_binding, stage_timeout
 
 StepResult = Continue | JobRequest | StageOutcome
 
@@ -102,15 +102,16 @@ class LearningStage:
                     issue=intent.issue,
                     agent=str(getattr(ctx.config, "agent", "") or "claude"),
                     model=str(
-                        getattr(ctx.config, "implementer_model", "")
+                        getattr(ctx.config, "learn_model", "")
                         or getattr(ctx.config, "model", "")
+                        or learn_model()
                     ),
                     cwd=(
                         workspace.cwd
                         if workspace
                         else Path(item.worktree or str(ctx.paths.worktree))
                     ),
-                    timeout_s=learn_claude_timeout(),
+                    timeout_s=stage_timeout(ctx, "learn", learn_claude_timeout),
                     workspace=workspace,
                     payload=payload,
                 ),

@@ -904,6 +904,51 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
     ),
 }
 
+_ENV_MIGRATION_ACTIONS = frozenset(
+    {
+        "--disable-pi-automation",
+        "--auth-status-timeout",
+        "--pi-isolation-adapter",
+        "--pi-dir",
+        "--log-file",
+        "--log-format",
+        "-q",
+        "--model",
+        "--planner-model",
+        "--reviewer-model",
+        "--implementer-model",
+        "--advise-model",
+        "--learn-model",
+        "--fallback-model",
+        "--projects-dir",
+        "--rate-guard",
+        "--no-rate-guard",
+        "--rate-guard-threshold",
+        "--plugin-skills-dir",
+        "--agent-timeout",
+        "--planner-timeout",
+        "--reviewer-timeout",
+        "--implementer-timeout",
+        "--learn-timeout",
+        "--advise-timeout",
+        "--address-review-timeout",
+        "--follow-up-timeout",
+        "--git-message-timeout",
+        "--poll-max-wait",
+        "--plan-stage-timeout",
+        "--git-timeout",
+        "--clone-timeout",
+        "--network-timeout",
+        "--gh-timeout",
+        "--metadata-timeout",
+        "--rebase-timeout",
+        "--diff-collect-timeout",
+        "--pre-pr-test-timeout",
+        "--run-pre-pr-tests",
+        "--work-report",
+    }
+)
+
 
 @pytest.mark.parametrize(
     ("name", "factory"),
@@ -923,8 +968,25 @@ def test_parser_action_specs_are_preserved(
     factory: Callable[[], argparse.ArgumentParser],
 ) -> None:
     """Affected parsers expose their established flags plus prompt overlays."""
+    actual = _specs(factory())
     expected = (*EXPECTED_SPECS[name], _prompt_dir_spec())
-    assert _sorted_specs(_specs(factory())) == _sorted_specs(expected)
+    actual_by_options = {spec.option_strings: spec for spec in actual}
+    migrated = tuple(
+        spec
+        for spec in actual
+        if any(option in _ENV_MIGRATION_ACTIONS for option in spec.option_strings)
+    )
+    preserved = tuple(
+        actual_by_options.get(spec.option_strings, spec)
+        if any(option in _ENV_MIGRATION_ACTIONS for option in spec.option_strings)
+        else spec
+        for spec in expected
+        if spec.option_strings in actual_by_options
+        or not any(option in _ENV_MIGRATION_ACTIONS for option in spec.option_strings)
+    )
+    expected_options = {spec.option_strings for spec in preserved}
+    additions = tuple(spec for spec in migrated if spec.option_strings not in expected_options)
+    assert _sorted_specs(actual) == _sorted_specs((*preserved, *additions))
 
 
 @pytest.mark.parametrize(

@@ -66,11 +66,13 @@ through installed `hephaestus-*` console scripts.
 
 ### Pi smoke validation
 
-- **`pi_smoke.py`** — Run a tool-free Pi smoke prompt using
-  `HEPH_PI_PROVIDER` and `HEPH_PI_MODEL` from the environment.
+- **`pi_smoke.py`** — Run a tool-free Pi smoke prompt using a private mode-0600
+  TOML file supplied with `--pi-alias-config`; use `--pi-dir` for a non-default
+  coding-agent configuration directory.
 - **`pi_smoke_slurm.py`** — Submit `scripts/slurm/pi_smoke.sbatch` with
   `sbatch` using a minimized environment and a fresh ACL-verified private
-  scheduler run directory.
+  scheduler run directory; alias config, Pi directory, and log paths are
+  explicit arguments.
 - **`slurm/pi_smoke.sbatch`** — Slurm batch template that invokes
   `pi_smoke.py` on a cluster node with a fixed export list and no shared
   scheduler artifact (copy and fill partition/account locally).
@@ -89,7 +91,7 @@ Collection is read-only with respect to GitHub:
 ```bash
 uv run python scripts/pi_package_acceptance.py collect \
   --athena-checkout "$ATHENA_CHECKOUT" \
-  --implementation-pr "$HEPHAESTUS_PR_NUMBER" \
+  --implementation-pr "$IMPLEMENTATION_PR_NUMBER" \
   --pi-bin "$ATHENA_PI_BIN" \
   --output-dir build/pi-acceptance
 ```

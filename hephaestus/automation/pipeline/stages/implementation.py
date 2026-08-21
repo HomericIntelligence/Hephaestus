@@ -87,6 +87,7 @@ from hephaestus.automation.address_review_core import (
 from hephaestus.automation.agent_config import (
     advise_claude_timeout,
     advise_model,
+    git_message_agent_timeout,
     implementer_claude_timeout,
     implementer_model,
 )
@@ -161,6 +162,7 @@ from .base import (
     agent_provider,
     source_workspace_binding,
     stage_model,
+    stage_timeout,
     write_skip_label,
 )
 from .repo import (
@@ -517,7 +519,7 @@ class ImplementationStage(Stage):
         worktree_job = GitJob(
             repo=item.repo,
             op="create_worktree",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
             kwargs=kwargs,
             descr="create_worktree",
         )
@@ -595,7 +597,7 @@ class ImplementationStage(Stage):
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=get_dirty_reused_worktree_decision_prompt,
             cwd=_worktree_path(item, ctx),
-            timeout_s=implementer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             sandbox="read-only",
             allowed_tools="Read,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
@@ -666,7 +668,7 @@ class ImplementationStage(Stage):
         job = GitJob(
             repo=item.repo,
             op="rebase",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
             kwargs=kwargs,
             descr="rebase_writer_before_review",
         )
@@ -695,7 +697,7 @@ class ImplementationStage(Stage):
         job = GitJob(
             repo=item.repo,
             op="continue_rebase",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
             kwargs={
                 "cwd": _worktree_path(item, ctx),
                 "base_sha": item.payload.get("rebase_base_sha"),
@@ -760,7 +762,7 @@ class ImplementationStage(Stage):
                 agent=agent_provider(ctx),
                 model=stage_model(ctx, "advise", advise_model),
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
-                timeout_s=advise_claude_timeout(),
+                timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
                 workspace=workspace,
                 payload={
                     "issue_number": item.issue,
@@ -847,7 +849,7 @@ class ImplementationStage(Stage):
                 model=stage_model(ctx, "implementer", implementer_model),
                 prompt_builder=get_address_review_prompt,
                 cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
-                timeout_s=implementer_claude_timeout(),
+                timeout_s=stage_timeout(ctx, "address_review", implementer_claude_timeout),
                 workspace=workspace,
                 allowed_tools="Read,Write,Edit,Glob,Grep,Bash,Task,Skill",
                 session_agent=AGENT_IMPLEMENTER,
@@ -903,7 +905,7 @@ class ImplementationStage(Stage):
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
-            timeout_s=implementer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout),
             workspace=workspace,
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
@@ -973,7 +975,7 @@ class ImplementationStage(Stage):
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_implementation_prompt,
             cwd=_worktree_path(item, ctx),
-            timeout_s=implementer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             allowed_tools="Read,Write,Edit,Glob,Grep",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
@@ -1035,10 +1037,14 @@ class ImplementationStage(Stage):
             repo=item.repo,
             cwd=_worktree_path(item, ctx),
             argv=test_argv,
-            timeout_s=(
-                HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S
-                if run_hephaestus_pre_pr_checks
-                else PRE_PR_TEST_TIMEOUT_S
+            timeout_s=stage_timeout(
+                ctx,
+                "pre_pr_test",
+                (
+                    HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S
+                    if run_hephaestus_pre_pr_checks
+                    else PRE_PR_TEST_TIMEOUT_S
+                ),
             ),
             descr="pre_pr_tests",
         )
@@ -1063,7 +1069,7 @@ class ImplementationStage(Stage):
             model=stage_model(ctx, "implementer", implementer_model),
             prompt_builder=build_test_fix_prompt,
             cwd=_worktree_path(item, ctx),
-            timeout_s=implementer_claude_timeout(),
+            timeout_s=stage_timeout(ctx, "implementer", implementer_claude_timeout()),
             allowed_tools="Read,Write,Edit,Glob,Grep,Bash",
             session_agent=AGENT_IMPLEMENTER,
             resume_session_id=item.session_ids.get(AGENT_IMPLEMENTER),
@@ -1095,6 +1101,7 @@ class ImplementationStage(Stage):
             "branch": item.branch,
             "agent": agent,
             "agent_model": stage_model(ctx, "implementer", implementer_model, provider=agent),
+            "git_message_timeout": stage_timeout(ctx, "git_message", git_message_agent_timeout()),
         }
         direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
         # A direct cursor's bootstrap pin reserves a newly created writer
@@ -1123,7 +1130,7 @@ class ImplementationStage(Stage):
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
             kwargs=kwargs,
             descr="commit_push",
         )

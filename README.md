@@ -276,26 +276,23 @@ uv add --editable ../Hephaestus
 - `load_config(path)`: Load YAML or JSON configuration files
 - `get_setting(config, key_path)`: Dot-notation config access
 - `merge_configs(*configs)`: Deep-merge multiple configuration dicts
-- `merge_with_env(config, prefix)`: Overlay environment variables onto config
 
-#### Environment Variable Convention
+#### Explicit configuration
 
-`merge_with_env` maps environment variables to config keys using **double underscore (`__`) as the nesting delimiter**. Single underscores are preserved as part of the key name.
-
-| Environment Variable | Config Key |
-|---|---|
-| `HEPHAESTUS_DATABASE__HOST` | `{"database": {"host": ...}}` |
-| `HEPHAESTUS_MAX_CONNECTIONS` | `{"max_connections": ...}` |
-| `HEPHAESTUS_DATABASE__MAX_RETRIES` | `{"database": {"max_retries": ...}}` |
-
-Numeric strings are automatically converted to `int` or `float`. To also convert boolean-like strings (`true`/`false`/`yes`/`no`/`on`/`off`) to Python `bool`, pass `convert_bools=True`:
+Hephaestus does not overlay `HEPH_*` or `HEPHAESTUS_*` environment variables
+onto application configuration. Load a configuration file, parse command-line
+options at the application boundary, and merge those explicit values:
 
 ```python
-from hephaestus.config.utils import merge_with_env
+from hephaestus.config import load_config, merge_configs
 
-# HEPHAESTUS_DEBUG=true → {"debug": True} (not the string "true")
-config = merge_with_env({}, convert_bools=True)
+file_config = load_config("hephaestus.yml")
+cli_overrides = {"database": {"host": args.database_host}}
+config = merge_configs(file_config, cli_overrides)
 ```
+
+See the [environment-variable registry](docs/environment-variables.md) for the
+remaining narrowly approved runtime variables and the deny-by-default policy.
 
 ### I/O Utilities (`hephaestus.io`)
 
@@ -306,7 +303,7 @@ config = merge_with_env({}, convert_bools=True)
 
 Run any command with `--help` to see full usage.
 
-The package currently installs 57 console scripts from `[project.scripts]`.
+The package currently installs 58 console scripts from `[project.scripts]`.
 
 ### Automation
 
@@ -334,19 +331,20 @@ and are not planned again.
 
 Pi uses operator-local provider configuration only. Do not commit Pi provider
 config, endpoint URLs, hostnames, checkpoint names, model identifiers, or local
-aliases. Configure the OpenAI-compatible provider in the local Pi config, set
-`HEPH_PI_PROVIDER=<operator-local-provider-alias>` and
-`HEPH_PI_MODEL=<operator-local-alias>` for the explicit smoke sentinel, and see
+aliases. Configure the OpenAI-compatible provider in the local Pi config, then
+write a private, mode-`0600` TOML alias file containing exactly `provider` and
+`model` strings. Pass its path with `--pi-alias-config`; aliases are parsed in
+process and are never forwarded through the parent environment, subprocess
+arguments, logs, or Slurm exports. See
 [`docs/pi-private-provider.md`](docs/pi-private-provider.md) for the sanitized
-setup and denylist guard. That smoke seam does not yet select those values
-through Pi's native provider/model contract. Run
+setup and denylist guard. Run
 `hephaestus-install-pi-plugins --dry-run --json` to inspect the exact package
 plan and `hephaestus-install-pi-plugins --global --yes --no-approve` to install
 the safe global defaults. Passing package preflight does not admit normal Pi
 automation: in a standard installation, `--agent pi` fails before stage or
 wrapper dispatch because no OS-isolation adapter is bundled. A trusted host
 integration must provide a named `hephaestus.pi_isolation_adapters` entry point,
-and the operator must select it with `HEPH_PI_ISOLATION_ADAPTER`. That adapter
+and the operator must select it with `--pi-isolation-adapter ENTRY_POINT`. That adapter
 enforces the resolved filesystem and network policy; the local setup otherwise
 supports only the explicit adapter-smoke seam.
 
@@ -433,6 +431,7 @@ zero totals, and zero requested/processed counts.
 | `hephaestus-check-coverage` | Check test coverage against configurable thresholds |
 | `hephaestus-check-doc-config` | Enforce consistency between documentation metric values and authoritative config sources |
 | `hephaestus-check-docstrings` | Check Python docstrings for genuine sentence fragments |
+| `hephaestus-check-environment-variables` | Enforce the exact deny-by-default runtime environment registry |
 | `hephaestus-check-python-version` | Check Python version consistency across project configuration files |
 | `hephaestus-check-readmes` | Markdown validation utilities for HomericIntelligence projects |
 | `hephaestus-check-stale-scripts` | Detect scripts in `scripts/` with no references in CI configs or other scripts |

@@ -18,6 +18,12 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
         ("hephaestus.cli.utils", "configure_cli_logging", {"verbose": False}, logging.INFO),
         ("hephaestus.cli.utils", "configure_cli_logging", {"verbose": True}, logging.DEBUG),
         (
+            "hephaestus.cli.utils",
+            "configure_cli_logging",
+            {"verbose": False, "log_format": "json"},
+            logging.INFO,
+        ),
+        (
             "hephaestus.automation._review_utils",
             "setup_review_logging",
             {"verbose": False},
@@ -54,6 +60,7 @@ def test_cli_logging_helpers_delegate_to_shared_helper(
         format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
         primary_stream="stderr",
+        json_format=kwargs.get("log_format") == "json",
     )
 
 
@@ -72,22 +79,18 @@ def test_implementer_setup_logging_routes_log_dir_to_shared_helper(tmp_path: Pat
         format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
         primary_stream="stderr",
+        json_format=False,
     )
 
 
 def test_tidy_logging_delegates_to_shared_helper() -> None:
-    """Tidy logging uses the shared helper with its compact human format."""
+    """Tidy logging forwards the selected explicit format to the shared helper."""
     module = import_module("hephaestus.github.tidy")
 
-    with patch.object(module, "setup_logging", Mock()) as setup:
-        module._configure_logging(verbose=False)
+    with patch.object(module, "configure_cli_logging", Mock()) as configure:
+        module._configure_logging(verbose=False, log_format="json")
 
-    setup.assert_called_once_with(
-        level=logging.INFO,
-        format_string="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-        primary_stream="stderr",
-    )
+    configure.assert_called_once_with(verbose=False, log_format="json")
 
 
 def test_fleet_sync_main_delegates_logging_to_shared_helper() -> None:
@@ -98,15 +101,10 @@ def test_fleet_sync_main_delegates_logging_to_shared_helper() -> None:
         patch.object(module, "configure_github_throttle_from_args") as throttle,
         patch.object(module, "resolve_agent", return_value="claude"),
         patch.object(module, "resolve_fleet_config", return_value=("Org", [])),
-        patch.object(module, "setup_logging", Mock()) as setup,
+        patch.object(module, "configure_cli_logging", Mock()) as configure,
     ):
-        rc = module.main(["--verbose"])
+        rc = module.main(["--verbose", "--log-format", "json"])
 
     assert rc == 0
     throttle.assert_called_once()
-    setup.assert_called_once_with(
-        level=logging.DEBUG,
-        format_string="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-        primary_stream="stderr",
-    )
+    configure.assert_called_once_with(verbose=True, log_format="json")

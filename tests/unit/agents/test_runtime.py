@@ -370,7 +370,6 @@ def test_run_codex_session_recovers_last_message_on_wrapper_timeout(tmp_path: Pa
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
-        patch.dict("os.environ", {"HEPH_CODEX_FINAL_MESSAGE_GRACE": "0"}),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
         result = agent_runtime.run_codex_session(
@@ -378,6 +377,7 @@ def test_run_codex_session_recovers_last_message_on_wrapper_timeout(tmp_path: Pa
             cwd=tmp_path,
             timeout=30,
             sandbox="workspace-write",
+            _final_message_grace_seconds=0,
         )
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
@@ -666,7 +666,6 @@ def test_run_codex_session_rejects_failure_before_timeout_recovered_no_edits(
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
-        patch.dict("os.environ", {"HEPH_CODEX_FINAL_MESSAGE_GRACE": "0"}),
         patch("subprocess.Popen", side_effect=fake_popen),
         pytest.raises(
             agent_runtime.AgentExecutionError,
@@ -678,6 +677,7 @@ def test_run_codex_session_rejects_failure_before_timeout_recovered_no_edits(
             cwd=tmp_path,
             timeout=30,
             sandbox="workspace-write",
+            _final_message_grace_seconds=0,
         )
 
 
@@ -1360,10 +1360,7 @@ def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(
         captured["prompt_mode"] = prompt_path.stat().st_mode & 0o777
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
-    with (
-        patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
-        patch("subprocess.run", side_effect=fake_run),
-    ):
+    with patch("subprocess.run", side_effect=fake_run):
         result = agent_runtime.run_pi_smoke_session(
             "private prompt content",
             cwd=tmp_path,
@@ -1383,7 +1380,6 @@ def test_run_pi_smoke_session_uses_json_mode_without_retaining_session(
     assert captured["kwargs"]["cwd"] == tmp_path
     assert captured["kwargs"]["timeout"] == 30
     assert captured["kwargs"]["check"] is True
-    assert "HEPH_PI_MODEL" not in captured["kwargs"]["env"]
     assert "private-alias" not in captured["kwargs"]["env"].values()
     assert captured["kwargs"]["env"]["PI_TELEMETRY"] == "0"
     assert captured["kwargs"]["env"]["PI_SKIP_VERSION_CHECK"] == "1"
@@ -1500,8 +1496,7 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     monkeypatch.setenv("PI_TELEMETRY", "1")
     monkeypatch.setenv("PI_SKIP_VERSION_CHECK", "0")
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", "/operator/pi-agent")
     monkeypatch.setenv("TMPDIR", "/untrusted-temp")
     monkeypatch.setenv("TMP", "/untrusted-temp")
     monkeypatch.setenv("TEMP", "/untrusted-temp")
@@ -1510,12 +1505,11 @@ def test_pi_child_environment_excludes_ambient_credentials_and_forces_privacy(
 
     assert env["PI_TELEMETRY"] == "0"
     assert env["PI_SKIP_VERSION_CHECK"] == "1"
+    assert "PI_CODING_AGENT_DIR" not in env
     for name in (
         "GH_TOKEN",
         "GITHUB_TOKEN",
         "AWS_SECRET_ACCESS_KEY",
-        "HEPH_PI_PROVIDER",
-        "HEPH_PI_MODEL",
         "TMPDIR",
         "TMP",
         "TEMP",
@@ -1545,7 +1539,6 @@ def test_run_pi_smoke_session_rejects_incomplete_event_stdout(
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
     with (
-        patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
         patch("subprocess.run", side_effect=fake_run),
         pytest.raises(RuntimeError, match=error),
     ):
@@ -1600,13 +1593,6 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(
         )
 
     with (
-        patch.dict(
-            "os.environ",
-            {
-                "HEPH_PI_PROVIDER": "private-provider-alias",
-                "HEPH_PI_MODEL": "private-test-alias",
-            },
-        ),
         patch("subprocess.run", side_effect=fake_run),
         pytest.raises(subprocess.CalledProcessError) as exc_info,
     ):
@@ -1615,6 +1601,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_failures(
             cwd=tmp_path,
             timeout=30,
             model="private-test-alias",
+            provider="private-provider-alias",
         )
 
     exc = exc_info.value
@@ -1650,13 +1637,6 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(
         )
 
     with (
-        patch.dict(
-            "os.environ",
-            {
-                "HEPH_PI_PROVIDER": "private-provider-alias",
-                "HEPH_PI_MODEL": "private-test-alias",
-            },
-        ),
         patch("subprocess.run", side_effect=fake_run),
         pytest.raises(subprocess.TimeoutExpired) as exc_info,
     ):
@@ -1665,6 +1645,7 @@ def test_run_pi_smoke_session_redacts_private_values_from_timeouts(
             cwd=tmp_path,
             timeout=30,
             model="private-test-alias",
+            provider="private-provider-alias",
         )
 
     exc = exc_info.value
@@ -1760,12 +1741,9 @@ def test_run_pi_smoke_session_redacts_generated_session_from_timeout(
 
 
 def test_pi_private_redaction_tokens_merge_project_and_local_denylists(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """The committed policy and local policy must both protect Pi diagnostics."""
-    monkeypatch.delenv("HEPH_PI_PROVIDER", raising=False)
-    monkeypatch.delenv("HEPH_PI_MODEL", raising=False)
     (tmp_path / ".heph-project-denylist").write_text(
         "PROJECT_DENYLIST_TOKEN\nSHARED_DENYLIST_TOKEN\n",
         encoding="utf-8",
@@ -1982,10 +1960,7 @@ def test_run_pi_smoke_session_disables_tools(
         captured_cmd.extend(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
-    with (
-        patch.dict("os.environ", {"HEPH_PI_MODEL": ""}),
-        patch("subprocess.run", side_effect=fake_run),
-    ):
+    with patch("subprocess.run", side_effect=fake_run):
         result = agent_runtime.run_pi_smoke_session(
             "review prompt",
             cwd=tmp_path,
@@ -2015,49 +1990,14 @@ def test_resume_pi_session_rejects_raw_resume_even_after_admission(tmp_path: Pat
     invoke.assert_not_called()
 
 
-def test_direct_agent_model_uses_operator_pi_alias_and_codex_default() -> None:
-    """Direct-runner model defaults are provider-aware and explicit."""
-    with patch.dict(
-        "os.environ",
-        {
-            "HEPH_PI_MODEL": "operator-local-alias",
-            "HEPH_IMPLEMENTER_MODEL": "phase-model",
-        },
-        clear=True,
-    ):
-        assert agent_runtime.direct_agent_model("pi", "HEPH_IMPLEMENTER_MODEL") == (
-            "operator-local-alias"
-        )
+def test_direct_agent_model_preserves_empty_explicit_value_and_default() -> None:
+    """Explicit values win; only ``None`` selects the established default."""
+    for agent in agent_runtime.AGENT_CHOICES:
+        assert agent_runtime.direct_agent_model(agent, "phase-model") == "phase-model"
+        assert agent_runtime.direct_agent_model(agent, "") == ""
+        assert agent_runtime.direct_agent_model(agent, None) == ""
         assert (
-            agent_runtime.direct_agent_model(
-                "codex",
-                "HEPH_IMPLEMENTER_MODEL",
-                codex_default="fallback-model",
-            )
-            == "phase-model"
-        )
-        assert (
-            agent_runtime.direct_agent_model(
-                "codex",
-                "HEPH_UNSET_MODEL",
-                codex_default="fallback-model",
-            )
-            == "fallback-model"
-        )
-        assert agent_runtime.direct_agent_model("codex", "HEPH_UNSET_MODEL") == ""
-        assert agent_runtime.direct_agent_model("claude", "HEPH_IMPLEMENTER_MODEL") == (
-            "phase-model"
-        )
-        assert (
-            agent_runtime.direct_agent_model("pi", codex_default="standalone-default")
-            == "operator-local-alias"
-        )
-        assert (
-            agent_runtime.direct_agent_model("codex", codex_default="standalone-default")
-            == "standalone-default"
-        )
-        assert (
-            agent_runtime.direct_agent_model("claude", codex_default="standalone-default")
+            agent_runtime.direct_agent_model(agent, None, codex_default="standalone-default")
             == "standalone-default"
         )
 
@@ -2282,11 +2222,8 @@ def test_is_agent_authenticated_pi_rejects_missing_model_config(tmp_path: Path) 
         assert not agent_runtime.is_agent_authenticated("pi")
 
 
-def test_is_agent_authenticated_uses_env_configured_status_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Auth status probes use the centralized call-time timeout reader."""
-    monkeypatch.setenv("HEPH_AGENT_AUTH_STATUS_TIMEOUT", "77")
+def test_is_agent_authenticated_uses_explicit_status_timeout() -> None:
+    """Auth status probes use the timeout resolved at the CLI boundary."""
     with (
         patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/claude"),
         patch(
@@ -2296,7 +2233,7 @@ def test_is_agent_authenticated_uses_env_configured_status_timeout(
             ),
         ) as mock_run,
     ):
-        assert agent_runtime.is_agent_authenticated("claude")
+        assert agent_runtime.is_agent_authenticated("claude", auth_status_timeout=77)
 
     assert mock_run.call_args.kwargs["timeout"] == 77
 
@@ -2352,7 +2289,7 @@ def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> Non
         with pytest.raises(RuntimeError, match="hephaestus-install-pi-plugins"):
             agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
-    preflight.assert_called_once_with(tmp_path)
+    preflight.assert_called_once_with(tmp_path, pi_dir=None)
 
 
 def test_resolve_pi_is_na_without_a_host_isolation_adapter(tmp_path: Path) -> None:
@@ -2371,7 +2308,7 @@ def test_resolve_pi_is_na_without_a_host_isolation_adapter(tmp_path: Path) -> No
             agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
 
-def test_pi_models_configured_honors_pi_coding_agent_dir(
+def test_pi_models_configured_honors_explicit_pi_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Private Pi model discovery follows the operator-selected Pi root."""
@@ -2380,9 +2317,9 @@ def test_pi_models_configured_honors_pi_coding_agent_dir(
     (pi_dir / "models.json").write_text(
         json.dumps({"models": [{"id": "private-alias"}]}), encoding="utf-8"
     )
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "poison"))
 
-    assert agent_runtime._pi_models_configured() is True
+    assert agent_runtime._pi_models_configured(pi_dir) is True
 
 
 def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: Path) -> None:
@@ -2395,7 +2332,7 @@ def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: P
     ) as preflight:
         with pytest.raises(RuntimeError, match="package_inventory_mismatch"):
             agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
-    preflight.assert_called_once_with(tmp_path)
+    preflight.assert_called_once_with(tmp_path, pi_dir=None)
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:

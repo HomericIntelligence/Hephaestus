@@ -427,7 +427,7 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         probe_cwd = kwargs["cwd"]
         assert probe_env is not None
         assert probe_cwd is not None
-        isolated_agent_dir = Path(probe_env["PI_CODING_AGENT_DIR"])
+        isolated_agent_dir = Path(probe_env["HOME"]) / ".pi" / "agent"
         isolated_paths.extend((isolated_agent_dir, probe_cwd))
         if isolated_agent_dir == pi_dir or probe_cwd == cwd:
             ambient_sentinel.write_text("loaded", encoding="utf-8")
@@ -513,7 +513,7 @@ def test_isolated_probe_preserves_verified_package_scopes(tmp_path: Path) -> Non
         probe_env,
         trust,
     ):
-        agent_dir = Path(probe_env["PI_CODING_AGENT_DIR"])
+        agent_dir = Path(probe_env["HOME"]) / ".pi" / "agent"
         user_settings = json.loads((agent_dir / "settings.json").read_text(encoding="utf-8"))
         project_settings = json.loads(
             (probe_cwd / ".pi" / "settings.json").read_text(encoding="utf-8")
@@ -716,9 +716,9 @@ def test_pi_child_environment_honors_the_operator_agent_directory(
     from hephaestus.agents import pi_plugins
 
     pi_dir = tmp_path / "pi-agent"
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "poison"))
 
-    assert pi_plugins._pi_child_env()["PI_CODING_AGENT_DIR"] == str(pi_dir)
+    assert pi_plugins._pi_child_env(pi_dir=pi_dir)["PI_CODING_AGENT_DIR"] == str(pi_dir)
 
 
 def test_installer_rejects_invalid_controls_and_reports_timeout(tmp_path: Path) -> None:

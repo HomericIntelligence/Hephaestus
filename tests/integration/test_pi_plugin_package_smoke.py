@@ -19,11 +19,13 @@ from hephaestus.agents.pi_plugins import (
 
 @pytest.mark.nightly
 def test_catalog_pinned_packages_install_and_preflight(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_pi_package_smoke: bool,
 ) -> None:
     """A compatible Pi preflight loads packages without ambient extensions."""
-    if os.environ.get("HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE") != "1":
-        pytest.skip("set HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE=1 for live package evidence")
+    if not require_pi_package_smoke:
+        pytest.skip("pass --require-pi-package-smoke for live package evidence")
     command = shutil.which("hephaestus-install-pi-plugins")
     assert command is not None, "installed console script is required"
     assert shutil.which("pi") is not None, "catalog-pinned Pi CLI is required"
@@ -87,10 +89,12 @@ def test_catalog_pinned_packages_install_and_preflight(
 
 
 @pytest.mark.nightly
-def test_incompatible_real_pi_fails_before_loading_extensions(tmp_path: Path) -> None:
+def test_incompatible_real_pi_fails_before_loading_extensions(
+    tmp_path: Path, require_pi_package_smoke: bool
+) -> None:
     """A real wrong Pi release cannot execute even a configured sentinel extension."""
-    if os.environ.get("HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE") != "1":
-        pytest.skip("set HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE=1 for live package evidence")
+    if not require_pi_package_smoke:
+        pytest.skip("pass --require-pi-package-smoke for live package evidence")
     command = shutil.which("hephaestus-install-pi-plugins")
     npm = shutil.which("npm")
     assert command is not None, "installed console script is required"

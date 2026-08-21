@@ -26,9 +26,8 @@ import logging
 
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.cli.utils import (
-    add_advise_timeout_arg,
     add_agent_timeout_arg,
-    add_git_message_timeout_arg,
+    add_pipeline_runtime_args,
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -37,6 +36,7 @@ from hephaestus.cli.utils import (
 from hephaestus.config.paths import resolve_projects_dir
 
 from ._review_utils import build_automation_parser
+from .agent_config import fallback_model, planner_model, reviewer_model
 from .git_utils import get_repo_info
 from .github_api import (
     GitHubRateLimitError,
@@ -56,14 +56,14 @@ RATE_LIMIT_DEFERRED_EXIT_CODE = 75
 _PLANNER_SCOPE_STAGES: frozenset[StageName] = frozenset({StageName.PLANNING, StageName.PLAN_REVIEW})
 
 
-def _setup_logging(verbose: bool = False) -> None:
+def _setup_logging(verbose: bool = False, log_format: str = "text") -> None:
     """Configure logging for the CLI.
 
     Args:
         verbose: Enable verbose (DEBUG) logging.
 
     """
-    configure_cli_logging(verbose=verbose)
+    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -153,9 +153,10 @@ Examples:
         action="store_true",
         help="Do not create or execute auxiliary learning intents",
     )
-    add_agent_timeout_arg(parser)
-    add_advise_timeout_arg(parser)
-    add_git_message_timeout_arg(parser)
+    add_agent_timeout_arg(parser, default=1200)
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
+    parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
+    add_pipeline_runtime_args(parser, role="planner", timeouts=("gh", "metadata"))
     return parser
 
 
@@ -204,18 +205,24 @@ def main() -> int:
     install_sigtstp_only()
     args = _parse_args()
     configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose)
+    _setup_logging(args.verbose, args.log_format)
 
     log = logging.getLogger(__name__)
     log.info("Starting issue planner (pipeline, planning scope)")
-    agent = resolve_agent(args.agent)
+    agent = resolve_agent(
+        args.agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
+    )
 
     org, repo = _resolve_repo()
 
     issues = list(args.issues) if args.issues else []
     if not issues:
         try:
-            issues = gh_list_open_issues()
+            issues = gh_list_open_issues(timeout=args.gh_timeout)
         except GitHubRateLimitError as e:
             reset_epoch = e.reset_epoch if e.reset_epoch > 0 else None
             reset_description = (
@@ -266,9 +273,21 @@ def main() -> int:
         learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        model=args.model,
+        planner_model=planner_model(args.planner_model or args.model or None),
+        reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
+        fallback_model=fallback_model(args.fallback_model or args.model or None),
+        planner_timeout=args.agent_timeout,
+        reviewer_timeout=args.reviewer_timeout,
         no_advise=args.no_advise,
         enable_learn=not args.no_learn,
-        projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
+        projects_dir=resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True),
+        rate_guard_enabled=args.rate_guard_enabled,
+        rate_guard_threshold=args.rate_guard_threshold,
+        gh_timeout=args.gh_timeout,
+        metadata_timeout=args.metadata_timeout,
         json_out=args.json,
         scope=PipelineScope(_PLANNER_SCOPE_STAGES),
         # --force re-plans issues already at-or-past state:plan-go (seeding

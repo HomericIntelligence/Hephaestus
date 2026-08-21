@@ -38,6 +38,7 @@ class PipelineGitHubJobRunner:
 
     org: str
     dry_run: bool
+    gh_timeout: int = 120
 
     def run(self, job: GitHubJob) -> GitHubReceipt:
         """Execute one request without sharing a coordinator/client instance."""
@@ -46,6 +47,7 @@ class PipelineGitHubJobRunner:
             repo=job.repo,
             dry_run=self.dry_run,
             repo_root=job.repo_root,
+            gh_timeout=self.gh_timeout,
         )
         match job.request:
             case RecoverReplyJournalRequest():

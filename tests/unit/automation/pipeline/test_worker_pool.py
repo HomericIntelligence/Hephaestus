@@ -607,6 +607,8 @@ class TestWorkerPoolSubmitComplete:
             sandbox="read-only",
             execution_request=None,
             session_binding=None,
+            disable_pi_automation=False,
+            auth_status_timeout=10,
         )
 
     def test_submit_and_complete_non_claude_agent_job(
@@ -625,7 +627,14 @@ class TestWorkerPoolSubmitComplete:
             pool.submit(job, StageName.IMPLEMENTATION)
             _handle, result = completion_q.get(timeout=10)
 
-        mock_resolve.assert_called_once_with("codex", cwd=job.cwd)
+        mock_resolve.assert_called_once_with(
+            "codex",
+            cwd=job.cwd,
+            disable_pi_automation=False,
+            auth_status_timeout=10,
+            pi_isolation_adapter=None,
+            pi_dir=None,
+        )
         mock_session.assert_called_once_with(
             agent="codex",
             prompt="test prompt",
@@ -637,6 +646,8 @@ class TestWorkerPoolSubmitComplete:
             process_tracker=subprocess_registry.track_process_group,
             execution_request=None,
             resume_binding=None,
+            disable_pi_automation=False,
+            pi_dir=None,
         )
         assert result.ok is True
         assert result.value == "codex output"
@@ -671,6 +682,8 @@ class TestWorkerPoolSubmitComplete:
             process_tracker=subprocess_registry.track_process_group,
             execution_request=None,
             resume_binding=None,
+            disable_pi_automation=False,
+            pi_dir=None,
         )
         run.assert_not_called()
         assert result.ok is True
@@ -4374,6 +4387,7 @@ class TestGitOps:
             allowed_paths=None,
             timeout=60,
             agent_model="sol:medium",
+            git_message_timeout=1200,
         )
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
@@ -4687,15 +4701,19 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
         )
-        with patch("hephaestus.automation.git_utils.run") as mock_run:
+        with (
+            patch(f"{_WP}.gh_call", create=True) as mock_gh,
+            patch("hephaestus.automation.git_utils.run") as mock_run,
+        ):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        mock_run.assert_called_once_with(
-            ["gh", "repo", "clone", "owner/name", "/tmp/dest"],
-            cwd=None,
+        mock_gh.assert_called_once_with(
+            ["repo", "clone", "owner/name", "/tmp/dest"],
             timeout=120,
+            max_retries=1,
         )
+        mock_run.assert_not_called()
         assert result.ok is True
 
     def test_sync_checkout_fast_forwards_clean_expected_default_branch(
@@ -5942,7 +5960,7 @@ class TestGitOps:
             kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
         )
         with patch(
-            "hephaestus.automation.git_utils.run",
+            f"{_WP}.gh_call",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
         ):
             pool.submit(job, StageName.REPO)
@@ -5970,7 +5988,7 @@ class TestGitOps:
             stderr="fatal: repository access denied",
         )
 
-        with patch("hephaestus.automation.git_utils.run", side_effect=exc):
+        with patch(f"{_WP}.gh_call", side_effect=exc):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 

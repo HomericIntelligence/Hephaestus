@@ -2,7 +2,7 @@
 #SBATCH --job-name=pi-smoke
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
-#SBATCH --export=PATH,HOME,USER,LOGNAME,LANG,LC_ALL,LC_CTYPE,TMPDIR,TMP,TEMP,HEPH_PI_PROVIDER,HEPH_PI_MODEL,HEPH_PI_SMOKE_LOG_DIR
+#SBATCH --export=NONE
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -12,8 +12,15 @@
 
 set -euo pipefail
 
-: "${HEPH_PI_PROVIDER:?Set HEPH_PI_PROVIDER to an operator-local Pi provider alias}"
-: "${HEPH_PI_MODEL:?Set HEPH_PI_MODEL to an operator-local Pi model alias}"
-: "${HEPH_PI_SMOKE_LOG_DIR:=pi-smoke-logs}"
+: "${1:?Pass the operator-owned Pi alias config path}"
+: "${2:?Pass the private Pi smoke log directory}"
 
-python3 scripts/pi_smoke.py --cwd "${SLURM_SUBMIT_DIR:-$PWD}" --log-dir "$HEPH_PI_SMOKE_LOG_DIR"
+pi_args=(
+    --pi-alias-config "$1"
+    --cwd "${SLURM_SUBMIT_DIR:-$PWD}"
+    --log-dir "$2"
+)
+if [[ -n "${3:-}" ]]; then
+    pi_args+=(--pi-dir "$3")
+fi
+python3 scripts/pi_smoke.py "${pi_args[@]}"

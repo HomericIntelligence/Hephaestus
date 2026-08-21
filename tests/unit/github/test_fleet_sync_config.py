@@ -21,7 +21,7 @@ class TestResolveFleetConfig:
     """Tests for resolve_fleet_config() layered resolution chain."""
 
     def test_cli_args_override_everything(self, monkeypatch, tmp_path) -> None:
-        """CLI args have highest priority."""
+        """CLI args have highest priority and removed env names are inert."""
         cfg = tmp_path / ".fleet.yml"
         cfg.write_text("org: FromFile\nrepos: [a, b]\n")
         monkeypatch.setenv("FLEET_ORG", "FromEnv")
@@ -32,15 +32,15 @@ class TestResolveFleetConfig:
         assert org == "FromCli"
         assert repos == ["p", "q"]
 
-    def test_env_overrides_file(self, monkeypatch, tmp_path) -> None:
-        """Environment variables override config file."""
+    def test_removed_environment_does_not_override_file(self, monkeypatch, tmp_path) -> None:
+        """Removed FLEET_* variables are poison values, never config sources."""
         cfg = tmp_path / ".fleet.yml"
         cfg.write_text("org: FromFile\nrepos: [a, b]\n")
         monkeypatch.setenv("FLEET_ORG", "FromEnv")
         monkeypatch.setenv("FLEET_REPOS", "x,y")
         org, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=str(cfg))
-        assert org == "FromEnv"
-        assert repos == ["x", "y"]
+        assert org == "FromFile"
+        assert repos == ["a", "b"]
 
     def test_file_used_when_no_env_or_cli(self, monkeypatch, tmp_path) -> None:
         """Config file is used when CLI and env are absent."""
@@ -70,76 +70,22 @@ class TestResolveFleetConfig:
         with pytest.raises(RuntimeError, match="no fleet repos configured"):
             resolve_fleet_config(cli_org=None, cli_repos=None, config_path=str(cfg))
 
-    def test_env_repos_comma_split(self, monkeypatch, no_discovered_config) -> None:
-        """FLEET_REPOS is comma-separated with whitespace trimmed."""
-        monkeypatch.setenv("FLEET_ORG", "Org")
-        monkeypatch.setenv("FLEET_REPOS", "r1, r2 ,r3")
-        _, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
-        assert repos == ["r1", "r2", "r3"]
-
-    def test_env_repos_numeric_not_coerced(self, monkeypatch, no_discovered_config) -> None:
-        """FLEET_REPOS=123,456 stays as strings, not converted to int (R0-Major regression)."""
-        monkeypatch.setenv("FLEET_ORG", "Org")
-        monkeypatch.setenv("FLEET_REPOS", "123,456")
-        _, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
-        assert repos == ["123", "456"]
-        assert all(isinstance(r, str) for r in repos)
-
-    def test_env_repos_empty_after_split_raises(self, monkeypatch, no_discovered_config) -> None:
-        """FLEET_REPOS set but with no valid entries fails with the differentiated error.
-
-        The matcher pins the FLEET_REPOS-specific diagnostic (``FLEET_REPOS is set``)
-        rather than the substring ``FLEET_REPOS``, which the generic fallback message
-        ("no fleet repos configured. Set --repos, FLEET_REPOS, ...") would also satisfy.
-        """
-        monkeypatch.setenv("FLEET_ORG", "Org")
-        monkeypatch.setenv("FLEET_REPOS", " , , ")
-        with pytest.raises(RuntimeError, match=r"FLEET_REPOS is set but contains no valid entries"):
-            resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
-
-    def test_env_repos_empty_string_raises_differentiated_error(
+    def test_removed_environment_cannot_supply_missing_config(
         self, monkeypatch, no_discovered_config
     ) -> None:
-        """FLEET_REPOS='' (set but empty) hits the differentiated error, not the generic one.
-
-        ``FLEET_REPOS=''`` follows the set-but-empty path (raw is ``''`` not ``None``),
-        so operators must see the FLEET_REPOS-specific diagnostic to tell it apart from
-        leaving the variable unset.
-        """
-        monkeypatch.setenv("FLEET_ORG", "Org")
-        monkeypatch.setenv("FLEET_REPOS", "")
-        with pytest.raises(RuntimeError, match=r"FLEET_REPOS is set but contains no valid entries"):
+        """Poison FLEET_* values cannot satisfy required fleet selection."""
+        monkeypatch.setenv("FLEET_ORG", "PoisonOrg")
+        monkeypatch.setenv("FLEET_REPOS", "poison-repo")
+        with pytest.raises(RuntimeError, match="no fleet org configured"):
             resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
 
-    def test_cli_repos_override_bad_env_repos(self, monkeypatch, no_discovered_config) -> None:
-        """An explicit --repos overrides a malformed FLEET_REPOS without erroring.
-
-        The differentiated FLEET_REPOS error must NOT fire when a higher-priority CLI
-        value is present, since the bad env var is irrelevant in that case.
-        """
-        monkeypatch.setenv("FLEET_ORG", "Org")
-        monkeypatch.setenv("FLEET_REPOS", " , , ")
-        org, repos = resolve_fleet_config(cli_org=None, cli_repos=["repoX"], config_path=None)
-        assert org == "Org"
-        assert repos == ["repoX"]
-
     def test_explicit_missing_config_file_raises(self, monkeypatch, tmp_path) -> None:
-        """An explicit nonexistent --config path fails closed even when env is set."""
+        """An explicit nonexistent --config path fails closed."""
         monkeypatch.setenv("FLEET_ORG", "Org")
         monkeypatch.setenv("FLEET_REPOS", "r1")
         missing = tmp_path / "nope.yml"
         with pytest.raises(RuntimeError, match=r"fleet config file not found: .*nope\.yml"):
             resolve_fleet_config(cli_org=None, cli_repos=None, config_path=str(missing))
-
-    def test_no_discovered_config_falls_through_to_env(
-        self, monkeypatch, no_discovered_config
-    ) -> None:
-        """Auto-discovery finding nothing (config_path=None) still falls through to env."""
-        monkeypatch.setenv("FLEET_ORG", "Org")
-        monkeypatch.setenv("FLEET_REPOS", "r1")
-        org, repos = resolve_fleet_config(cli_org=None, cli_repos=None, config_path=None)
-        assert org == "Org"
-        assert repos == ["r1"]
 
     def test_config_path_none_searches_cwd_then_repo_root(self, monkeypatch, tmp_path) -> None:
         """When config_path is None, searches ./.fleet.yml then repo-root."""

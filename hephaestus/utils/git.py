@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.diagnostics import redact_git_diagnostic as _redact_git_diagnostics
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT, run_subprocess
 from hephaestus.utils.retry import is_network_error, retry_with_backoff
@@ -186,9 +187,11 @@ def run_git(
             "dry_run": dry_run,
             "log_on_error": log_errors,
         }
-        if env is not None:
-            kwargs["env"] = env
-        return run_subprocess(["git", *normalized_args], **kwargs)
+        return run_subprocess(
+            ["git", *normalized_args],
+            env=env if env is not None else build_git_signing_env(),
+            **kwargs,
+        )
 
     if retries <= 0:
         return _call()
@@ -213,7 +216,13 @@ def run_git(
         raise
 
 
-def git_config_get(key: str, *, global_: bool = False, cwd: Path | str | None = None) -> str | None:
+def git_config_get(
+    key: str,
+    *,
+    global_: bool = False,
+    cwd: Path | str | None = None,
+    timeout: int | None = METADATA_TIMEOUT,
+) -> str | None:
     """Return a git config value, or None when the key is unset."""
     args = ["config"]
     if global_:
@@ -223,7 +232,7 @@ def git_config_get(key: str, *, global_: bool = False, cwd: Path | str | None = 
         result = run_git(
             args,
             cwd=cwd,
-            timeout=METADATA_TIMEOUT,
+            timeout=timeout,
             check=False,
             log_on_error=False,
         )
@@ -286,22 +295,31 @@ def git_push(
     )
 
 
-def git_unmerged_files(cwd: Path | str) -> list[str]:
+def git_unmerged_files(
+    cwd: Path | str,
+    *,
+    timeout: int | None = METADATA_TIMEOUT,
+) -> list[str]:
     """Return unresolved conflict paths from Git's NUL-delimited output."""
     result = run_git(
         ["diff", "--name-only", "--diff-filter=U", "-z"],
         cwd=cwd,
-        timeout=METADATA_TIMEOUT,
+        timeout=timeout,
     )
     return [path for path in result.stdout.split("\0") if path]
 
 
-def git_rev_list_count(cwd: Path | str, revspec: str) -> int:
+def git_rev_list_count(
+    cwd: Path | str,
+    revspec: str,
+    *,
+    timeout: int | None = METADATA_TIMEOUT,
+) -> int:
     """Return ``git rev-list --count`` for ``revspec`` in ``cwd``."""
     result = run_git(
         ["rev-list", "--count", revspec],
         cwd=cwd,
-        timeout=METADATA_TIMEOUT,
+        timeout=timeout,
     )
     return int(result.stdout.strip())
 
@@ -320,9 +338,19 @@ def git_ls_remote_contains(
     ref: str,
     *,
     raise_on_error: bool = False,
+    timeout: int | None = NETWORK_TIMEOUT,
 ) -> bool:
     """Return whether ``remote`` advertises ``ref`` as an exact ref."""
-    return git_ls_remote_sha(cwd, remote, ref, raise_on_error=raise_on_error) is not None
+    return (
+        git_ls_remote_sha(
+            cwd,
+            remote,
+            ref,
+            raise_on_error=raise_on_error,
+            timeout=timeout,
+        )
+        is not None
+    )
 
 
 def git_ls_remote_sha(
@@ -331,13 +359,14 @@ def git_ls_remote_sha(
     ref: str,
     *,
     raise_on_error: bool = False,
+    timeout: int | None = NETWORK_TIMEOUT,
 ) -> str | None:
     """Return the SHA advertised for an exact remote ref, if present."""
     try:
         result = run_git(
             ["ls-remote", remote, ref],
             cwd=cwd,
-            timeout=NETWORK_TIMEOUT,
+            timeout=timeout,
             check=True,
             log_on_error=False,
         )

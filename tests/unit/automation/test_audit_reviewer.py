@@ -519,8 +519,14 @@ class TestParser:
                 mock_instance.run.return_value = (0, [])
                 mock_cls.return_value = mock_instance
                 main(["--codex"])
-                mock_resolve.assert_called_once_with("codex")
-                assert mock_cls.call_args[1]["agent"] == "codex"
+        mock_resolve.assert_called_once_with(
+            "codex",
+            disable_pi_automation=False,
+            auth_status_timeout=10,
+            pi_isolation_adapter=None,
+            pi_dir=None,
+        )
+        assert mock_cls.call_args[1]["agent"] == "codex"
 
     def test_dry_run_skips_resolve_agent(self) -> None:
         with mock.patch("hephaestus.automation.audit_reviewer.resolve_agent") as mock_resolve:
@@ -541,7 +547,7 @@ class TestParser:
 
                 main(["--dry-run", "--verbose"])
 
-        configure.assert_called_once_with(verbose=True)
+        configure.assert_called_once_with(verbose=True, log_format="text")
 
     def test_json_flag_emits_envelope_on_exit(self) -> None:
         with mock.patch("hephaestus.automation.audit_reviewer.AuditReviewer") as mock_cls:

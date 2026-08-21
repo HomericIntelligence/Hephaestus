@@ -1,11 +1,11 @@
-"""Shared gh CLI adapter with circuit breaker, rate-limit retry, and throttle.
+"""Shared gh CLI adapter with circuit breaker and rate-limit retry.
 
 Public contract
 ---------------
 ``gh_call(args, *, check=True, retry_on_rate_limit=True, max_retries=6, timeout=None)``
    Run ``gh <args>``. Every invocation passes through the ``github-api``
-   circuit breaker, the per-thread throttle (``GH_RATE_LIMIT_PER_SEC``),
-   REST + GraphQL rate-limit detection (waits until reset), and Claude
+   circuit breaker, global throttle, REST + GraphQL rate-limit detection
+   (waits until reset), and Claude
    per-period usage-cap interception.
 
 Bare ``subprocess.run(["gh", ...])`` calls bypass the breaker and are a
@@ -21,14 +21,14 @@ Raises:
 
 from __future__ import annotations
 
+import argparse
 import logging
-import os
 import re
 import subprocess
-import threading
 import time
 from collections.abc import Mapping
 
+from hephaestus.github.environment import gh_child_environment
 from hephaestus.github.rate_limit import (
     detect_claude_usage_cap,
     detect_claude_usage_limit,
@@ -46,16 +46,23 @@ from hephaestus.utils.helpers import run_subprocess
 logger = logging.getLogger(__name__)
 
 
-def gh_cli_timeout() -> int:
-    """Timeout for individual ``gh`` CLI calls (default 120s, env HEPH_GH_TIMEOUT)."""
-    raw = os.environ.get("HEPH_GH_TIMEOUT")
-    if raw is None:
-        return 120
+DEFAULT_GH_TIMEOUT = 120
+
+
+def gh_cli_timeout(timeout: int | None = None) -> int:
+    """Return an explicit GitHub timeout or the fixed 120-second default."""
+    return DEFAULT_GH_TIMEOUT if timeout is None else timeout
+
+
+def positive_timeout(value: str) -> int:
+    """Parse a strictly positive timeout value for CLI boundaries."""
     try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Ignoring non-integer HEPH_GH_TIMEOUT=%r — using default 120s", raw)
-        return 120
+        timeout = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be an integer") from exc
+    if timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be positive")
+    return timeout
 
 
 # Facts about the REQUESTED TARGET, not about GitHub's health: the service was
@@ -130,7 +137,6 @@ def _breaker_should_ignore(exc: BaseException) -> bool:
     return not _is_service_failure(exc)
 
 
-_GH_THROTTLE = threading.local()
 # NOTE: the predicate and its pattern table are defined ABOVE this call on
 # purpose. `ignore=` is evaluated at module import, so a forward reference here
 # raises NameError and makes this module unimportable.
@@ -213,19 +219,6 @@ class PromptTooLongError(RuntimeError):
     """
 
     pass
-
-
-def _gh_throttle_wait() -> None:
-    rate = float(os.environ.get("GH_RATE_LIMIT_PER_SEC", "5"))
-    if rate <= 0:
-        return
-    min_interval = 1.0 / rate
-    last = getattr(_GH_THROTTLE, "last_call", 0.0)
-    now = time.monotonic()
-    elapsed = now - last
-    if elapsed < min_interval:
-        time.sleep(min_interval - elapsed)
-    _GH_THROTTLE.last_call = time.monotonic()
 
 
 # GraphQL emits "Resource not accessible by …" with HTTP 200 when the token
@@ -432,13 +425,12 @@ def _gh_call_impl(
     for attempt in range(max_retries):
         try:
             gh_global_throttle_acquire()
-            _gh_throttle_wait()
             result = run_subprocess(
                 ["gh", *args],
                 check=check,
-                timeout=timeout if timeout is not None else gh_cli_timeout(),
+                timeout=gh_cli_timeout(timeout),
                 log_on_error=log_on_error,
-                env=dict(env) if env is not None else None,
+                env=dict(env) if env is not None else gh_child_environment(),
                 track_process_group=track_process_group,
             )
             return result

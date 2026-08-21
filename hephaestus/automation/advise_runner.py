@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hephaestus.automation.mnemosyne_binding import default_mnemosyne_root as binding_mnemosyne_root
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.constants import agent_clone_timeout, agent_git_timeout
 from hephaestus.github.client import gh_call
 from hephaestus.github.mnemosyne_repo import resolve_mnemosyne_target
@@ -84,7 +85,7 @@ def default_mnemosyne_root() -> Path:
     return binding_mnemosyne_root()
 
 
-def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
+def _clone_mnemosyne(mnemosyne_root: Path, *, timeout_s: int | None = None) -> bool:
     """Clone the resolved Mnemosyne repository into ``mnemosyne_root``.
 
     The clone target is resolved via
@@ -92,7 +93,7 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
     prefers the gh-authenticated user's own fork (creating it if needed) and
     falls back to the upstream ``HomericIntelligence/Mnemosyne``.
     """
-    timeout_s = agent_clone_timeout()
+    timeout_s = timeout_s if timeout_s is not None else agent_clone_timeout()
     target = resolve_mnemosyne_target()
     try:
         logger.info("Cloning %s to %s...", target.slug, mnemosyne_root)
@@ -105,6 +106,7 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
             ],
             check=True,
             timeout=timeout_s,
+            env=build_git_child_env(),
         )
         logger.info("%s cloned successfully", target.slug)
         return True
@@ -122,9 +124,9 @@ def _clone_mnemosyne(mnemosyne_root: Path) -> bool:
         return False
 
 
-def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
+def _is_valid_mnemosyne_checkout(mnemosyne_root: Path, *, git_timeout_s: int | None = None) -> bool:
     """Return True when an existing Mnemosyne path is a usable git checkout."""
-    timeout_s = agent_git_timeout()
+    timeout_s = git_timeout_s if git_timeout_s is not None else agent_git_timeout()
     try:
         result = subprocess.run(
             ["git", "-C", str(mnemosyne_root), "rev-parse", "--is-inside-work-tree"],
@@ -132,6 +134,7 @@ def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=build_git_child_env(),
         )
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("Failed to validate Mnemosyne checkout at %s: %s", mnemosyne_root, e)
@@ -146,7 +149,12 @@ def _is_valid_mnemosyne_checkout(mnemosyne_root: Path) -> bool:
     return True
 
 
-def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
+def ensure_mnemosyne(
+    mnemosyne_root: Path,
+    *,
+    git_timeout_s: int | None = None,
+    clone_timeout_s: int | None = None,
+) -> bool:
     """Clone Mnemosyne if absent, else fast-forward the existing clone.
 
     Uses an in-process lock plus a POSIX ``fcntl`` file lock so that multiple
@@ -172,7 +180,9 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                 # Re-check after acquiring the file lock. A previous process may
                 # have completed or corrupted the checkout while we were waiting.
                 if mnemosyne_root.exists():
-                    if not _is_valid_mnemosyne_checkout(mnemosyne_root):
+                    if not _is_valid_mnemosyne_checkout(
+                        mnemosyne_root, git_timeout_s=git_timeout_s
+                    ):
                         logger.warning(
                             "Removing invalid Mnemosyne checkout at %s before re-clone",
                             mnemosyne_root,
@@ -180,13 +190,16 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                         shutil.rmtree(mnemosyne_root, ignore_errors=True)
                     else:
                         try:
-                            timeout_s = agent_git_timeout()
+                            timeout_s = (
+                                git_timeout_s if git_timeout_s is not None else agent_git_timeout()
+                            )
                             subprocess.run(
                                 ["git", "-C", str(mnemosyne_root), "pull", "--ff-only"],
                                 check=True,
                                 capture_output=True,
                                 text=True,
                                 timeout=timeout_s,
+                                env=build_git_child_env(),
                             )
                             logger.debug("Mnemosyne refreshed at %s", mnemosyne_root)
                         except Exception as e:
@@ -196,7 +209,7 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                             )
                         return True
 
-                cloned = _clone_mnemosyne(mnemosyne_root)
+                cloned = _clone_mnemosyne(mnemosyne_root, timeout_s=clone_timeout_s)
                 # Do NOT unlink lock_path here — the file-lock sentinel must
                 # remain on disk until the fd closes in the finally block.
                 # Unlinking while LOCK_EX is held lets a second process open a
@@ -208,7 +221,12 @@ def ensure_mnemosyne(mnemosyne_root: Path) -> bool:
                     fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
+def resolve_marketplace(
+    mnemosyne_root: Path,
+    *,
+    git_timeout_s: int | None = None,
+    clone_timeout_s: int | None = None,
+) -> tuple[Path | None, str]:
     """Ensure Mnemosyne is present and return its ``marketplace.json`` path.
 
     Recovers once from a missing marketplace file by re-cloning.
@@ -220,7 +238,11 @@ def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
         tell "clone failed" apart from "manifest missing".
 
     """
-    if not mnemosyne_root.exists() and not ensure_mnemosyne(mnemosyne_root):
+    if not mnemosyne_root.exists() and not ensure_mnemosyne(
+        mnemosyne_root,
+        git_timeout_s=git_timeout_s,
+        clone_timeout_s=clone_timeout_s,
+    ):
         return None, "Mnemosyne unavailable"
 
     marketplace_path = mnemosyne_root / ".claude-plugin" / "marketplace.json"
@@ -232,7 +254,14 @@ def resolve_marketplace(mnemosyne_root: Path) -> tuple[Path | None, str]:
         marketplace_path,
     )
     shutil.rmtree(mnemosyne_root, ignore_errors=True)
-    if not ensure_mnemosyne(mnemosyne_root) or not marketplace_path.exists():
+    if (
+        not ensure_mnemosyne(
+            mnemosyne_root,
+            git_timeout_s=git_timeout_s,
+            clone_timeout_s=clone_timeout_s,
+        )
+        or not marketplace_path.exists()
+    ):
         logger.error(
             "Recovery failed: marketplace.json still missing at %s; skipping advise step",
             marketplace_path,
@@ -455,6 +484,8 @@ def run_advise(
     issue_body: str,
     invoke: Callable[[str], str],
     build_prompt: Callable[..., str],
+    git_timeout_s: int | None = None,
+    clone_timeout_s: int | None = None,
 ) -> str:
     """Run skill selection and return prompt-ready context (or a skip marker).
 
@@ -481,7 +512,11 @@ def run_advise(
         repo_root = get_repo_root()
         mnemosyne_root = default_mnemosyne_root()
 
-        marketplace_path, skip_reason = resolve_marketplace(mnemosyne_root)
+        marketplace_path, skip_reason = resolve_marketplace(
+            mnemosyne_root,
+            git_timeout_s=git_timeout_s,
+            clone_timeout_s=clone_timeout_s,
+        )
         if marketplace_path is None:
             return advise_skipped(skip_reason)
 

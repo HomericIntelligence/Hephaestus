@@ -167,15 +167,16 @@ def _coauthor_for_agent(agent: str) -> tuple[str, str]:
     return _AGENT_COMMIT_IDENTITIES.get(agent, _AGENT_COMMIT_IDENTITIES["claude"])
 
 
-def _provenance_for_agent(agent: str) -> str:
+def _provenance_for_agent(agent: str, model: str | None = None) -> str:
     """Return the value for an ``Implemented-By:`` trailer.
 
     For Claude agents this is the resolved model id (honoring
-    ``HEPH_IMPLEMENTER_MODEL``); for direct agents it is the provider display name.
+    the explicitly selected implementation model); for direct agents it is the
+    provider display name.
     """
     if uses_direct_agent_runner(agent):
         return agent_display_name(agent)
-    return implementer_model()
+    return model or implementer_model()
 
 
 def _issue_body(issue: Any) -> str:
@@ -365,10 +366,11 @@ def _format_commit_message(
     agent: str,
     subject: str,
     body: str,
+    model: str | None = None,
 ) -> str:
     """Render the final commit message with orchestrator-owned policy trailers."""
     coauthor_name, coauthor_email = _coauthor_for_agent(agent)
-    provenance = _provenance_for_agent(agent)
+    provenance = _provenance_for_agent(agent, model)
     clean_body = _strip_reserved_lines(body)
     body_block = f"\n\n{clean_body}" if clean_body else ""
     return f"""{subject}{body_block}
@@ -439,6 +441,7 @@ def _generate_commit_message(
             agent=agent,
             subject=parts.subject,
             body=parts.body,
+            model=agent_model,
         )
     except Exception as exc:
         logger.warning(
@@ -446,7 +449,13 @@ def _generate_commit_message(
             issue_ref(issue_number),
             exc,
         )
-        return _fallback_commit_message(issue_number, issue_title, agent)
+        return _format_commit_message(
+            issue_number=issue_number,
+            agent=agent,
+            subject=f"feat: Implement #{issue_number}",
+            body=issue_title,
+            model=agent_model,
+        )
 
 
 def _fallback_pr_message(issue_number: int, issue_title: str, agent: str) -> _PrMessageParts:

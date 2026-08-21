@@ -20,10 +20,9 @@ reflects the cost/quality tradeoff for each phase:
 - Reviewers / advise / learn → Sonnet (middle ground)
 - Git/PR message writing is tiny metadata generation → Haiku
 
-Each function honors a ``HEPH_<PHASE>_MODEL`` environment variable so an
-operator can override without code changes (e.g. when one tier's quota is
-exhausted). Unknown overrides emit a **warning** but are still accepted so
-operators can experiment with preview models without a code change.
+Model overrides are resolved once by CLI entry points and passed explicitly.
+Unknown overrides emit a **warning** but are still accepted so operators can
+experiment with preview models without a code change.
 
 Codex reasoning overrides
 -------------------------
@@ -38,12 +37,8 @@ the Codex provider and never modify Claude or Pi model IDs.
 
 Timeouts
 --------
-Agent timeout overrides are accepted only from their canonical environment
-variables. Shared phase budgets use ``HEPH_AGENT_PLAN_TIMEOUT``,
-``HEPH_AGENT_REVIEW_TIMEOUT``, ``HEPH_AGENT_IMPL_TIMEOUT``, and
-``HEPH_AGENT_LEARN_TIMEOUT``; the outer planning wrapper uses
-``HEPH_PLAN_STAGE_TIMEOUT``. The remaining timeout accessors retain their
-function-specific ``HEPH_*`` variables defined below.
+Timeouts are typed CLI/configuration values. The compatibility accessors below
+return deterministic defaults and never inspect process-global state.
 
 If an env var is set but not an integer, the default is used and a warning is
 logged on first read; we never crash on a malformed timeout because the cost
@@ -86,7 +81,6 @@ from hephaestus.constants import (
     AGENT_LEARN_TIMEOUT,
     AGENT_PLAN_TIMEOUT,
     AGENT_REVIEW_TIMEOUT,
-    read_timeout_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,7 +93,7 @@ HAIKU_45 = "claude-haiku-4-5"
 CODEX_ADVISE = "gpt-5.4-mini"
 
 # Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
-# the known set so pinning them via HEPH_*_MODEL doesn't emit a spurious
+# the known set so pinning them via explicit model options doesn't emit a spurious
 # "Unknown model" warning. (Fable and Mythos sit above Opus; 4.8 is the
 # current Opus.)
 OPUS_48 = "claude-opus-4-8"
@@ -132,55 +126,52 @@ def normalize_claude_model(model: str) -> str:
     return _MODEL_ALIASES.get(value.lower(), value)
 
 
-def _resolve_model(env_var: str, default: str) -> str:
-    """Return the model ID for *env_var*, warning if the value is unknown.
+def _resolve_model(value: str | None, default: str) -> str:
+    """Return an explicitly configured model ID or *default*.
 
     Args:
-        env_var: Name of the environment variable to check.
+        value: Explicit model value, or ``None`` to use the default.
         default: Default model ID to use when the variable is unset.
 
     Returns:
         The resolved model ID string.
 
     """
-    value = os.environ.get(env_var)
     if value is None:
         return default
     resolved = normalize_claude_model(value)
     if resolved not in _KNOWN_MODELS:
         logger.warning(
-            "Unknown model %r set in %s (known: %s). "
-            "Proceeding, but verify the model ID is correct.",
+            "Unknown model %r (known: %s). Proceeding, but verify the model ID is correct.",
             resolved,
-            env_var,
             ", ".join(sorted(_KNOWN_MODELS)),
         )
     return resolved
 
 
-def planner_model() -> str:
+def planner_model(value: str | None = None) -> str:
     """Model used to generate implementation plans from issue text."""
-    return _resolve_model("HEPH_PLANNER_MODEL", OPUS)
+    return _resolve_model(value, OPUS)
 
 
-def implementer_model() -> str:
+def implementer_model(value: str | None = None) -> str:
     """Model used by the implementer worker that runs ``claude`` in a worktree.
 
     Also used for any phase that resumes the implementer's session
     (e.g. address-review, ci-driver), since ``claude --resume`` is locked
     to the model that created the session.
     """
-    return _resolve_model("HEPH_IMPLEMENTER_MODEL", HAIKU)
+    return _resolve_model(value, HAIKU)
 
 
-def reviewer_model() -> str:
+def reviewer_model(value: str | None = None) -> str:
     """Model used by plan/PR reviewers and the review-fix loop."""
-    return _resolve_model("HEPH_REVIEWER_MODEL", SONNET)
+    return _resolve_model(value, SONNET)
 
 
-def advise_model() -> str:
+def advise_model(value: str | None = None) -> str:
     """Claude model used by the advise skill-selection step."""
-    return _resolve_model("HEPH_ADVISE_MODEL", HAIKU)
+    return _resolve_model(value, HAIKU)
 
 
 def codex_advise_model() -> str:
@@ -188,9 +179,9 @@ def codex_advise_model() -> str:
     return CODEX_ADVISE
 
 
-def learn_model() -> str:
+def learn_model(value: str | None = None) -> str:
     """Model used by /learn and follow-up issue filing."""
-    return _resolve_model("HEPH_LEARN_MODEL", HAIKU)
+    return _resolve_model(value, HAIKU)
 
 
 def git_message_model() -> str:
@@ -202,15 +193,14 @@ def git_message_model() -> str:
     return HAIKU
 
 
-def fallback_model() -> str:
+def fallback_model(value: str | None = None) -> str:
     """Model substituted when a model-specific usage cap is detected (#1793).
 
     A "reached your <model> limit … switch models with /model" 429 carries no
     reset epoch, so waiting cannot help — the invoke chokepoint retries on
-    this model instead. Honors ``HEPH_FALLBACK_MODEL``; defaults to
-    :data:`OPUS` (the current Opus).
+    this model instead. Defaults to :data:`OPUS` (the current Opus).
     """
-    return _resolve_model("HEPH_FALLBACK_MODEL", OPUS)
+    return _resolve_model(value, OPUS)
 
 
 # ── Subprocess timeouts ──────────────────────────────────────────────────────
@@ -228,15 +218,6 @@ DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT: int = DEFAULT_THROUGHPUT_TIMEOUT
 DEFAULT_CI_POLL_MAX_WAIT: int = DEFAULT_THROUGHPUT_TIMEOUT
 
 
-def _read_int_env(name: str, default: int) -> int:
-    """Return ``int(os.environ[name])`` or ``default`` if unset/invalid.
-
-    Thin delegate to :func:`hephaestus.constants.read_timeout_env`, kept for the
-    in-module callers; that helper logs and falls back on a non-integer value.
-    """
-    return read_timeout_env(name, default)
-
-
 def agent_default_timeout() -> int:
     """Return the generic agent-invocation timeout in seconds (default 7200s).
 
@@ -246,62 +227,62 @@ def agent_default_timeout() -> int:
     budget (planner/reviewer/implementer/...) may leak in here, since every
     agent type funnels through that single entry point (#1415).
     """
-    return _read_int_env("HEPH_AGENT_DEFAULT_TIMEOUT", DEFAULT_AGENT_TIMEOUT)
+    return DEFAULT_AGENT_TIMEOUT
 
 
 def planner_claude_timeout() -> int:
     """Timeout for planner agent calls (default 1200s)."""
-    return read_timeout_env("HEPH_AGENT_PLAN_TIMEOUT", AGENT_PLAN_TIMEOUT)
+    return AGENT_PLAN_TIMEOUT
 
 
 def plan_stage_timeout() -> int:
     """Timeout for the outer ``hephaestus-plan-issues`` stage (default 7200s)."""
-    return read_timeout_env("HEPH_PLAN_STAGE_TIMEOUT", PLAN_STAGE_TIMEOUT)
+    return PLAN_STAGE_TIMEOUT
 
 
 def plan_reviewer_claude_timeout() -> int:
     """Timeout for agent calls inside the plan reviewer (default 1200s)."""
-    return read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", AGENT_REVIEW_TIMEOUT)
+    return AGENT_REVIEW_TIMEOUT
 
 
 def implementer_claude_timeout() -> int:
     """Timeout for the implementer's agent invocation (default 1800s)."""
-    return read_timeout_env("HEPH_AGENT_IMPL_TIMEOUT", AGENT_IMPL_TIMEOUT)
+    return AGENT_IMPL_TIMEOUT
 
 
 def advise_claude_timeout() -> int:
     """Timeout for advise agent calls (default 7200s)."""
-    return _read_int_env("HEPH_ADVISE_AGENT_TIMEOUT", 7200)
+    return 7200
 
 
 def pr_reviewer_claude_timeout() -> int:
     """Timeout for the PR reviewer's agent analysis (default 1200s)."""
-    return read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", AGENT_REVIEW_TIMEOUT)
+    return AGENT_REVIEW_TIMEOUT
 
 
 def address_review_claude_timeout() -> int:
     """Timeout for the address-review fix session (default 7200s)."""
-    return _read_int_env("HEPH_ADDRESS_REVIEW_AGENT_TIMEOUT", 7200)
+    return 7200
 
 
 def ci_driver_claude_timeout() -> int:
     """Timeout for the CI-driver fix session (default 7200s)."""
-    return _read_int_env("HEPH_CI_DRIVER_AGENT_TIMEOUT", 7200)
+    return 7200
 
 
 def learn_claude_timeout() -> int:
     """Timeout for ``/learn`` agent calls (default 1200s)."""
-    return read_timeout_env("HEPH_AGENT_LEARN_TIMEOUT", AGENT_LEARN_TIMEOUT)
+    return AGENT_LEARN_TIMEOUT
 
 
 def follow_up_claude_timeout() -> int:
     """Timeout for the follow-up-issue agent session (default 7200s)."""
-    return _read_int_env("HEPH_FOLLOW_UP_AGENT_TIMEOUT", 7200)
+    return 7200
 
 
 def git_message_agent_timeout() -> int:
     """Timeout for the lightweight commit/PR message writer (default 1200s)."""
-    return _read_int_env("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT)
+    return DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT
 
 
 def ci_poll_max_wait() -> int:
@@ -309,9 +290,9 @@ def ci_poll_max_wait() -> int:
 
     Bounds the exponential-backoff wait in :mod:`ci_driver` while CI checks
     are still pending. Re-read on each invocation so tests and operators can
-    tune it at runtime via ``HEPH_CI_POLL_MAX_WAIT``.
+    tune it through typed CLI configuration.
     """
-    return _read_int_env("HEPH_CI_POLL_MAX_WAIT", DEFAULT_CI_POLL_MAX_WAIT)
+    return DEFAULT_CI_POLL_MAX_WAIT
 
 
 # Re-exported from hephaestus.github.client so the gh-adapter timeout lives
@@ -372,10 +353,7 @@ _GIT_REPO_ENV_KEYS = (
 
 def _repo_scoped_git_env() -> dict[str, str]:
     """Return environment for explicit ``git -C`` calls, ignoring outer repos."""
-    env = os.environ.copy()
-    for key in _GIT_REPO_ENV_KEYS:
-        env.pop(key, None)
-    return env
+    return {"PATH": os.defpath}
 
 
 def reviewer_agent(base_agent: str, iteration: int) -> str:
@@ -555,18 +533,16 @@ def short_githash(repo_path: Path) -> str:
     return out.stdout.strip() or "unknown"
 
 
-def current_trunk_githash(repo_path: Path | None = None) -> str:
+def current_trunk_githash(
+    repo_path: Path | None = None, *, trunk_githash: str | None = None
+) -> str:
     """Return the trunk SHA every phase should use for session naming.
 
-    Reads ``HEPH_TRUNK_GITHASH`` (set once per repo loop iteration by
-    ``scripts/run_automation_loop.sh``) so all phases within one loop
-    iteration share the same SHA. Falls back to live ``git rev-parse`` on
-    ``repo_path`` (or cwd) when the env var is unset — useful for one-off
-    CLI invocations outside the loop.
+    A loop may pass its captured trunk SHA explicitly so all phases within one
+    iteration share the same value. Otherwise this falls back to live Git.
     """
-    env_value = os.environ.get("HEPH_TRUNK_GITHASH")
-    if env_value:
-        return env_value
+    if trunk_githash:
+        return trunk_githash
     return short_githash(repo_path if repo_path is not None else Path.cwd())
 
 
@@ -715,7 +691,6 @@ __all__ = [
     "planner_claude_timeout",
     "planner_model",
     "pr_reviewer_claude_timeout",
-    "read_timeout_env",
     "resolve_session_jsonl_path",
     "reviewer_agent",
     "reviewer_model",

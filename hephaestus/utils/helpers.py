@@ -15,7 +15,6 @@ from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
 
-from hephaestus.constants import read_timeout_env
 from hephaestus.logging.utils import get_logger
 
 logger = get_logger(__name__)
@@ -23,10 +22,9 @@ logger = get_logger(__name__)
 # Subprocess timeouts for different operation types.
 # METADATA_TIMEOUT: local, non-network queries (git status, git config, uv tree)
 # NETWORK_TIMEOUT: operations touching the network (gh calls, git clone/fetch/push)
-# Both support env-var overrides for CI tuning. read_timeout_env logs and falls
-# back to the default on a non-integer value rather than crashing at import.
-METADATA_TIMEOUT: int = read_timeout_env("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", 10)
-NETWORK_TIMEOUT: int = read_timeout_env("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", 120)
+# Callers can override these defaults through explicit timeout parameters.
+METADATA_TIMEOUT: int = 10
+NETWORK_TIMEOUT: int = 120
 
 
 def slugify(text: str) -> str:
@@ -244,12 +242,13 @@ def _run_tracked_process_group(
 
 def run_subprocess(
     cmd: list[str],
+    *,
+    env: dict[str, str],
     cwd: str | Path | None = None,
     timeout: float | None = None,
     check: bool = True,
     dry_run: bool = False,
     log_on_error: bool = True,
-    env: dict[str, str] | None = None,
     track_process_group: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run subprocess command with proper error handling.
@@ -262,8 +261,7 @@ def run_subprocess(
         dry_run: If True, log the command but do not execute it
         log_on_error: If False, suppress ERROR logging when the command fails.
             Use when failure is expected and already handled by the caller.
-        env: Optional environment dict to pass to subprocess.run().
-            If provided, replaces the current process environment.
+        env: Exact environment dict replacing the current process environment.
         track_process_group: Run the child in a tracked POSIX process group so
             an owning host can stop active work during forced shutdown.
 
@@ -280,7 +278,7 @@ def run_subprocess(
 
     # Inject correlation ID into subprocess environment if set.
     # Function-local import to keep module import graph clean.
-    effective_env = env.copy() if env is not None else os.environ.copy()
+    effective_env = env.copy()
     from hephaestus.logging.utils import get_current_correlation_id
 
     cid = get_current_correlation_id()
@@ -327,42 +325,6 @@ def run_subprocess(
         raise
 
 
-def get_proj_root(proj_name: str) -> str:
-    """Get absolute path to project root by name.
-
-    First checks for PROJECT_ROOT environment variable, then searches
-    filesystem for a git repository with matching name.
-
-    Args:
-        proj_name: Name of the project (e.g., 'Hephaestus')
-
-    Returns:
-        Absolute path to project root
-
-    Raises:
-        ValueError: If project root cannot be determined
-
-    """
-    proj_env_var = f"{proj_name.upper()}_ROOT"
-    proj_root = os.environ.get(proj_env_var)
-
-    if not proj_root:
-        # Fallback to relative path approach
-        current_dir = Path.cwd()
-        while current_dir != current_dir.parent:
-            if (current_dir / ".git").exists() and current_dir.name == proj_name:
-                proj_root = str(current_dir)
-                break
-            current_dir = current_dir.parent
-
-    if not proj_root:
-        raise ValueError(
-            f"Could not determine {proj_name} root. Please set {proj_env_var} environment variable."
-        )
-
-    return proj_root
-
-
 def install_package(package_name: str, upgrade: bool = False) -> bool:
     """Install a single Python package with pip.
 
@@ -403,7 +365,9 @@ def install_package(package_name: str, upgrade: bool = False) -> bool:
     cmd.append(package_name)
 
     try:
-        run_subprocess(cmd)
+        from hephaestus.config.child_environments import build_python_phase_env
+
+        run_subprocess(cmd, env=build_python_phase_env(Path.cwd()))
         logger.info("Successfully installed %s", package_name)
         return True
     except subprocess.CalledProcessError as e:

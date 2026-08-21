@@ -3,7 +3,7 @@
 Mnemosyne is a repository dependency, not a Pi package.  Resolution follows
 Athena's dependency-resolution contract:
 
-1. ``HOMERIC_INTELLIGENCE_MNEMOSYNE_OWNER`` or an explicit ``override_owner``
+1. An explicit ``override_owner``
    is an explicit trust decision.  Invalid explicit owners are fatal.
 2. Without an override, a same-owner ``Mnemosyne`` repository is used only when
    the current repository owner is an organization, the viewer can write, and
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -31,8 +30,6 @@ logger = logging.getLogger(__name__)
 UPSTREAM_OWNER = "HomericIntelligence"
 MNEMOSYNE_REPO = "Mnemosyne"
 UPSTREAM_SLUG = f"{UPSTREAM_OWNER}/{MNEMOSYNE_REPO}"
-OWNER_ENV_VAR = "HOMERIC_INTELLIGENCE_MNEMOSYNE_OWNER"
-LEGACY_OWNER_ENV_VAR = "HEPH_MNEMOSYNE_OWNER"
 
 _OWNER_RE = re.compile(r"(?=.{1,39}\Z)[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*")
 _WRITE_PERMISSIONS = frozenset({"WRITE", "MAINTAIN", "ADMIN"})
@@ -266,21 +263,13 @@ def resolve_mnemosyne_target(
 ) -> MnemosyneTarget:
     """Resolve Mnemosyne with Athena's explicit trust and fallback rules."""
     del allow_fork
-    raw_override = override_owner if override_owner is not None else os.environ.get(OWNER_ENV_VAR)
+    raw_override = override_owner
     if raw_override:
         owner = validate_owner(raw_override)
         metadata = fetch_repository_metadata(_slug_for(owner))
         if metadata is None:  # pragma: no cover - missing_ok is false above
             raise MnemosyneResolutionError(f"{owner}/Mnemosyne metadata unavailable")
         return _target_from_metadata(owner, metadata, MnemosyneTrustBasis.EXPLICIT_OVERRIDE)
-
-    if legacy := os.environ.get(LEGACY_OWNER_ENV_VAR):
-        logger.warning(
-            "%s is ignored; use %s=%s to make an explicit Mnemosyne trust decision",
-            LEGACY_OWNER_ENV_VAR,
-            OWNER_ENV_VAR,
-            legacy,
-        )
 
     current = fetch_current_repository_metadata()
     if (

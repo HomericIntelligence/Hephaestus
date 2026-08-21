@@ -34,6 +34,7 @@ from hephaestus.automation.mnemosyne_delivery import (
     valid_delivery_receipt,
 )
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest, AthenaSkillResult
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.github.client import gh_call
 from hephaestus.io.utils import write_secure
 from hephaestus.utils import subprocess_registry
@@ -305,6 +306,7 @@ class DefaultCorpusReader:
         try:
             result = run_subprocess(
                 ["git", *argv],
+                env=build_git_child_env(),
                 cwd=root,
                 check=False,
                 track_process_group=True,

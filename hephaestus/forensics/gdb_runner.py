@@ -15,18 +15,17 @@ Usage::
 
     hephaestus-run-under-gdb <core-dir> <command> [args...]
 
-Environment variables:
+Explicit options:
 
-* ``RUN_UNDER_GDB=0`` — skip gdb entirely and exec the command directly
-  (local-dev escape hatch; gdb adds overhead).
-* ``GDB_CMD_PREFIX`` — optional command prefix inserted before ``gdb``, e.g.
+* ``--direct`` — skip gdb entirely and execute the command directly.
+* ``--gdb-cmd-prefix`` — optional command prefix inserted before ``gdb``, e.g.
   ``"uv run --"``. Parsed with ``shlex.split`` so values containing
   shell-quoted whitespace (e.g. ``"'/path with space/uv' run --"``) are
   tokenized correctly.
 
 Security:
 
-* ``GDB_CMD_PREFIX`` is an intentional escape hatch and its tokens are spliced
+* ``--gdb-cmd-prefix`` is an intentional escape hatch and its tokens are spliced
   into the ``gdb`` argv, so unvalidated input would allow argv injection (e.g.
   ``--init-eval-command``). The value is tokenized with ``shlex.split`` (so
   shell-quoted whitespace is honored) and each resulting token MUST either be
@@ -59,6 +58,7 @@ import time
 from pathlib import Path
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, emit_json_status
+from hephaestus.config.child_environments import read_approved_parent_env
 
 # A literal space is permitted because tokens are produced by ``shlex.split``
 # and spliced into ``subprocess.run`` WITHOUT a shell: an embedded space can
@@ -68,7 +68,7 @@ _GDB_PREFIX_TOKEN_RE = re.compile(r"[A-Za-z0-9_./:=,@+~ \-]+")
 
 
 def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
-    """Whitelist-validate ``GDB_CMD_PREFIX`` into argv tokens.
+    """Whitelist-validate an explicit gdb command prefix into argv tokens.
 
     Returns ``[]`` for ``None``/empty/whitespace-only input. Otherwise
     tokenizes with :func:`shlex.split` so values containing shell-quoted
@@ -78,7 +78,7 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
     would let a caller inject gdb flags such as ``--init-eval-command``).
 
     Args:
-        raw: The raw env-var / kwarg value.
+        raw: The raw ``--gdb-cmd-prefix`` value.
 
     Returns:
         The validated argv tokens, ready to splice before ``gdb``.
@@ -87,7 +87,7 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
         ValueError: If the value cannot be tokenized (e.g. an unbalanced
             quote), if any token contains disallowed characters, or if a token
             is a ``-``-leading flag-like token other than the bare ``--``. The
-            message is prefixed with ``GDB_CMD_PREFIX``.
+            message identifies the ``--gdb-cmd-prefix`` option.
 
     """
     if not raw or not raw.strip():
@@ -96,7 +96,7 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
         tokens = shlex.split(raw)
     except ValueError as exc:
         raise ValueError(
-            f"GDB_CMD_PREFIX value {raw!r} is not valid shell syntax "
+            f"--gdb-cmd-prefix value {raw!r} is not valid shell syntax "
             f"({exc}); refusing to splice into gdb argv"
         ) from exc
     for tok in tokens:
@@ -104,13 +104,13 @@ def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
             continue
         if tok.startswith("-"):
             raise ValueError(
-                f"GDB_CMD_PREFIX token {tok!r} is a flag-like token; only the "
+                f"--gdb-cmd-prefix token {tok!r} is a flag-like token; only the "
                 "bare argv terminator '--' is permitted among '-'-leading "
                 "tokens, to prevent gdb argv injection"
             )
         if not _GDB_PREFIX_TOKEN_RE.fullmatch(tok):
             raise ValueError(
-                f"GDB_CMD_PREFIX token {tok!r} contains characters outside the "
+                f"--gdb-cmd-prefix token {tok!r} contains characters outside the "
                 r"allowed set [A-Za-z0-9_./:=,@+~ \-]; refusing to splice into "
                 "gdb argv"
             )
@@ -251,8 +251,7 @@ def run_under_gdb(
         be resolved on ``PATH`` (the POSIX "command not found" convention).
 
     Raises:
-        ValueError: If ``gdb_cmd_prefix`` (or the ``GDB_CMD_PREFIX`` env var
-            that feeds it) contains an unsafe token. See the module
+        ValueError: If ``gdb_cmd_prefix`` contains an unsafe token. See the module
             ``Security:`` note for the whitelist.
 
     """
@@ -298,7 +297,7 @@ def run_under_gdb(
             command_bin,
             *command_args,
         ]
-        gdb_status = subprocess.run(gdb_cmd, check=False).returncode
+        gdb_status = subprocess.run(gdb_cmd, check=False, env=read_approved_parent_env()).returncode
 
         # Prefer the Python-recorded exit code; fall back to gdb's own status
         # if the file is missing (gdb died before the hook fired).
@@ -324,6 +323,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--direct",
+        action="store_true",
+        help="execute the command directly without starting gdb",
+    )
+    parser.add_argument(
+        "--gdb-cmd-prefix",
+        default=None,
+        help="validated command prefix inserted before gdb (for example: 'uv run --')",
+    )
+    parser.add_argument(
         "core_dir",
         help="directory for cores and gdb logs (created if absent)",
     )
@@ -344,11 +353,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``hephaestus-run-under-gdb`` console script.
 
-    Reads two environment variables:
-
-    * ``RUN_UNDER_GDB=0`` — bypass gdb and exec the command directly.
-    * ``GDB_CMD_PREFIX`` — optional prefix inserted before ``gdb``; parsed with
-      ``shlex.split`` so shell-quoted whitespace in paths is preserved.
+    The explicit ``--direct`` and ``--gdb-cmd-prefix`` options control the
+    wrapper behavior; ambient process configuration is ignored.
 
     Args:
         argv: Argument vector (defaults to ``sys.argv[1:]``).
@@ -359,11 +365,14 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
 
-    # Escape hatch: RUN_UNDER_GDB=0 bypasses gdb for local dev.
-    if os.environ.get("RUN_UNDER_GDB") == "0":
-        rc = subprocess.run([args.command, *args.command_args], check=False).returncode
+    if args.direct:
+        rc = subprocess.run(
+            [args.command, *args.command_args],
+            check=False,
+            env=read_approved_parent_env(),
+        ).returncode
         if args.json:
-            emit_json_status(rc, message="ran command directly (RUN_UNDER_GDB=0)")
+            emit_json_status(rc, message="ran command directly")
         return rc
 
     try:
@@ -371,12 +380,12 @@ def main(argv: list[str] | None = None) -> int:
             core_dir=args.core_dir,
             command=args.command,
             command_args=args.command_args,
-            gdb_cmd_prefix=os.environ.get("GDB_CMD_PREFIX"),
+            gdb_cmd_prefix=args.gdb_cmd_prefix,
         )
     except ValueError as exc:
         print(f"[run-under-gdb] ERROR: {exc}", file=sys.stderr)
         if args.json:
-            emit_json_status(2, message=f"invalid GDB_CMD_PREFIX: {exc}")
+            emit_json_status(2, message=f"invalid --gdb-cmd-prefix: {exc}")
         return 2
     if args.json:
         emit_json_status(rc, message="ran command under gdb")

@@ -17,13 +17,22 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 
-def test_submit_uses_export_names_without_alias_values(
+def _alias_config(tmp_path: Path) -> Path:
+    config = tmp_path / "pi-aliases.toml"
+    config.write_text(
+        'provider = "private-provider-alias"\nmodel = "private-model-alias"\n',
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+    return config
+
+
+def test_submit_passes_paths_as_job_args_without_alias_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Slurm submission must export alias env var names, never alias values."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    """Slurm passes config/log paths as args while exporting no ambient state."""
+    alias_config = _alias_config(tmp_path)
     monkeypatch.setenv("GH_TOKEN", "github-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     log_dir = tmp_path / "logs"
@@ -39,12 +48,23 @@ def test_submit_uses_export_names_without_alias_values(
     )
     monkeypatch.setattr(_mod.subprocess, "run", run)
 
-    assert _mod.main(["--log-dir", str(log_dir), "--sbatch", "sbatch"]) == 0
+    assert (
+        _mod.main(
+            [
+                "--pi-alias-config",
+                str(alias_config),
+                "--log-dir",
+                str(log_dir),
+                "--sbatch",
+                "sbatch",
+            ]
+        )
+        == 0
+    )
 
     cmd = run.call_args.args[0]
     cmd_text = "\0".join(cmd)
-    assert f"--export={','.join(_mod.EXPORT_NAMES)}" in cmd
-    assert "ALL" not in _mod.EXPORT_NAMES
+    assert "--export=NONE" in cmd
     output_arg = next(argument for argument in cmd if argument.startswith("--output="))
     private_run_dir = Path(output_arg.removeprefix("--output=")).parent
     error_arg = next(argument for argument in cmd if argument.startswith("--error="))
@@ -53,27 +73,27 @@ def test_submit_uses_export_names_without_alias_values(
     assert Path(error_arg.removeprefix("--error=")).name == "pi-smoke-%j.err"
     assert private_run_dir.parent == log_dir
     assert private_run_dir.name.startswith("pi-smoke-")
+    template_index = cmd.index(str(_mod.DEFAULT_TEMPLATE))
+    assert cmd[template_index + 1 :] == [str(alias_config), str(private_run_dir)]
     assert "private-provider-alias" not in cmd_text
     assert "private-model-alias" not in cmd_text
     assert "github-secret" not in cmd_text
     assert "aws-secret" not in cmd_text
     submission_env = run.call_args.kwargs["env"]
-    assert submission_env["HEPH_PI_SMOKE_LOG_DIR"] == str(private_run_dir)
     assert "GH_TOKEN" not in submission_env
     assert "AWS_SECRET_ACCESS_KEY" not in submission_env
     assert "github-secret" not in submission_env.values()
     assert "aws-secret" not in submission_env.values()
-    assert set(submission_env).issubset(_mod.EXPORT_NAMES)
+    assert str(alias_config) not in submission_env.values()
+    assert str(private_run_dir) not in submission_env.values()
     assert stat.S_IMODE(private_run_dir.stat().st_mode) & 0o077 == 0
 
 
-def test_missing_alias_env_blocks_submission(
+def test_missing_alias_config_option_blocks_submission(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Submission should fail before sbatch when required aliases are absent."""
-    monkeypatch.delenv("HEPH_PI_PROVIDER", raising=False)
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    """Submission fails before sbatch without an explicit alias config path."""
     run = Mock()
     monkeypatch.setattr(_mod.subprocess, "run", run)
 
@@ -82,18 +102,40 @@ def test_missing_alias_env_blocks_submission(
     run.assert_not_called()
 
 
+def test_explicit_pi_directory_is_passed_as_a_job_argument(tmp_path: Path) -> None:
+    """Slurm carries an explicit Pi directory as argv, not scheduler environment."""
+    alias_config = _alias_config(tmp_path)
+    pi_dir = tmp_path / "pi-agent"
+    args = _mod.build_parser().parse_args(
+        [
+            "--pi-alias-config",
+            str(alias_config),
+            "--pi-dir",
+            str(pi_dir),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ]
+    )
+
+    command = _mod.build_sbatch_cmd(args)
+
+    assert command[-3:] == [str(alias_config), str(tmp_path / "logs"), str(pi_dir)]
+
+
 def test_submit_fails_closed_without_user_only_log_permissions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Slurm submission must not run when its scheduler logs cannot be protected."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    alias_config = _alias_config(tmp_path)
     monkeypatch.setattr(_mod, "_private_smoke_log_permissions_supported", lambda: False)
     run = Mock()
     monkeypatch.setattr(_mod.subprocess, "run", run)
 
-    assert _mod.main(["--log-dir", str(tmp_path / "logs")]) == 1
+    assert (
+        _mod.main(["--pi-alias-config", str(alias_config), "--log-dir", str(tmp_path / "logs")])
+        == 1
+    )
 
     run.assert_not_called()
 
@@ -111,8 +153,7 @@ def test_submit_redacts_sbatch_failure_diagnostics(
         encoding="utf-8",
     )
     monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
+    alias_config = _alias_config(tmp_path)
     private_run_dir = tmp_path / "private-run"
     private_run_dir.mkdir(mode=0o700)
     monkeypatch.setattr(_mod, "_prepare_private_log_dir", lambda _log_dir: private_run_dir)
@@ -129,7 +170,10 @@ def test_submit_redacts_sbatch_failure_diagnostics(
         ),
     )
 
-    assert _mod.main(["--log-dir", str(tmp_path / "logs")]) == 9
+    assert (
+        _mod.main(["--pi-alias-config", str(alias_config), "--log-dir", str(tmp_path / "logs")])
+        == 9
+    )
 
     diagnostics = capsys.readouterr().err
     assert "private-provider-alias" not in diagnostics
@@ -142,6 +186,9 @@ def test_default_template_has_a_minimal_export_and_no_scheduler_artifact() -> No
     template = _SCRIPT.parent / "slurm" / "pi_smoke.sbatch"
     text = template.read_text(encoding="utf-8")
 
-    assert f"#SBATCH --export={','.join(_mod.EXPORT_NAMES)}" in text
+    assert "#SBATCH --export=NONE" in text
     assert "#SBATCH --output=/dev/null" in text
     assert "#SBATCH --error=/dev/null" in text
+    assert "pi_smoke.py" in text
+    assert "--pi-alias-config" in text
+    assert "--pi-dir" in text

@@ -265,9 +265,9 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "uv run pytest tests/unit",
         "uv run hephaestus-check-test-structure",
         "uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml",
-        "HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration",
+        "uv run pytest tests/integration --require-cli",
         "uv build --wheel",
-        "HEPHAESTUS_REQUIRE_CLI=1 build/cli-venv/bin/pytest",
+        "build/cli-venv/bin/pytest",
         "uv run pytest tests/integration --override-ini=addopts= "
         "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact",
         "uv run pip-audit",
@@ -282,7 +282,7 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "bats --recursive tests/shell",
         "detect --source=. --verbose --exit-code=1",
         "dir --verbose --exit-code=1 .",
-        "HEPHAESTUS_REQUIRE_CLI=1",
+        "--require-cli",
         "env GITHUB_EVENT_NAME=pull_request uv run python scripts/check_license_compatibility.py",
     ):
         assert command in log
@@ -365,7 +365,7 @@ def test_integration_requires_installed_cli_entry_points(tmp_path: Path) -> None
     result, log = _run_runner(tmp_path, "integration")
 
     assert result.returncode == 0, result.stderr
-    assert "HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration" in log
+    assert "uv run pytest tests/integration --require-cli" in log
 
 
 def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:

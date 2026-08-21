@@ -16,7 +16,6 @@ _APPROVED_DIRECT_IMPORTS: frozenset[tuple[str, str]] = frozenset(
         ("_implement_phase.py", "claude_models"),
         ("advise_runner.py", "claude_invoke"),
         ("audit_reviewer.py", "claude_invoke"),
-        ("audit_reviewer.py", "claude_models"),
         ("comment_difficulty.py", "claude_invoke"),
         ("comment_difficulty.py", "claude_models"),
         ("learn.py", "claude_models"),

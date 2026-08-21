@@ -13,7 +13,6 @@ import pytest
 from hephaestus.utils.helpers import (
     _format_cmd_for_log,
     flatten_dict,
-    get_proj_root,
     get_repo_root,
     human_readable_size,
     install_package,
@@ -254,25 +253,36 @@ class TestRunSubprocess:
 
     def test_successful_command(self):
         """Runs command successfully and returns result."""
-        result = run_subprocess(["echo", "hello"])
+        result = run_subprocess(["echo", "hello"], env={"PATH": os.defpath})
         assert result.returncode == 0
         assert "hello" in result.stdout
 
     def test_with_cwd(self, tmp_path):
         """Runs command in specified working directory."""
-        result = run_subprocess(["pwd"], cwd=str(tmp_path))
+        result = run_subprocess(["pwd"], env={"PATH": os.defpath}, cwd=str(tmp_path))
         assert result.returncode == 0
+
+    def test_default_environment_does_not_copy_parent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ambient variables are not propagated to a child by default."""
+        monkeypatch.setenv("HEPHAESTUS_POISON", "must-not-leak")
+        result = run_subprocess(
+            [sys.executable, "-c", "import os; print(os.getenv('HEPHAESTUS_POISON', 'absent'))"],
+            env={"PATH": os.defpath},
+        )
+        assert result.stdout.strip() == "absent"
 
     def test_failed_command_raises(self):
         """Raises CalledProcessError for non-zero exit."""
         with pytest.raises(subprocess.CalledProcessError):
-            run_subprocess(["false"])
+            run_subprocess(["false"], env={"PATH": os.defpath})
 
     def test_log_on_error_false_suppresses_error_log(self):
         """When log_on_error=False, failure does not call logger.error."""
         with patch("hephaestus.utils.helpers.logger.error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
-                run_subprocess(["false"], log_on_error=False)
+                run_subprocess(["false"], env={"PATH": os.defpath}, log_on_error=False)
 
         assert not mock_error.called
 
@@ -280,7 +290,7 @@ class TestRunSubprocess:
         """When log_on_error=True (default), failure calls logger.error."""
         with patch("hephaestus.utils.helpers.logger.error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
-                run_subprocess(["false"], log_on_error=True)
+                run_subprocess(["false"], env={"PATH": os.defpath}, log_on_error=True)
 
         assert mock_error.called
 
@@ -294,7 +304,7 @@ class TestRunSubprocess:
 
         with patch("hephaestus.utils.helpers.logger.error") as mock_error:
             with pytest.raises(subprocess.CalledProcessError):
-                run_subprocess(["false", long_arg])
+                run_subprocess(["false", long_arg], env={"PATH": os.defpath})
 
         rendered = str(mock_error.call_args_list)
         assert long_arg not in rendered, "full long arg leaked into log"
@@ -315,7 +325,7 @@ class TestRunSubprocess:
             patch("hephaestus.utils.helpers.logger.error") as mock_error,
         ):
             with pytest.raises(subprocess.CalledProcessError):
-                run_subprocess(["pre-commit", "run"])
+                run_subprocess(["pre-commit", "run"], env={"PATH": os.defpath})
 
         rendered = str(mock_error.call_args_list)
         assert "stdout:" in rendered
@@ -338,7 +348,7 @@ class TestRunSubprocess:
             patch("hephaestus.utils.helpers.logger.error") as mock_error,
         ):
             with pytest.raises(subprocess.CalledProcessError):
-                run_subprocess(["tool"])
+                run_subprocess(["tool"], env={"PATH": os.defpath})
 
         rendered = str(mock_error.call_args_list)
         assert "stderr:" in rendered
@@ -361,21 +371,17 @@ class TestFormatCmdForLog:
         assert "a" * 100 in out
 
 
-class TestGetProjRoot:
-    """Tests for get_proj_root."""
+def test_get_proj_root_removed_from_utility_surfaces() -> None:
+    """The dynamic ``<PROJECT>_ROOT`` environment API remains absent."""
+    import hephaestus
+    import hephaestus.utils as utils_pkg
+    import hephaestus.utils.helpers as helpers
 
-    def test_from_env_variable(self, monkeypatch, tmp_path):
-        """Returns path from environment variable."""
-        monkeypatch.setenv("MYPROJECT_ROOT", str(tmp_path))
-        result = get_proj_root("MyProject")
-        assert result == str(tmp_path)
-
-    def test_raises_when_not_found(self, monkeypatch, tmp_path):
-        """Raises ValueError when project root not found."""
-        monkeypatch.delenv("NONEXISTENTPROJECT_ROOT", raising=False)
-        with pytest.raises(ValueError, match="Could not determine"):
-            # Use a name that won't match any git repo
-            get_proj_root("NonExistentProject_XYZ_12345")
+    assert not hasattr(helpers, "get_proj_root")
+    assert not hasattr(utils_pkg, "get_proj_root")
+    assert "get_proj_root" not in utils_pkg.__all__
+    assert not hasattr(hephaestus, "get_proj_root")
+    assert "get_proj_root" not in hephaestus._LAZY_IMPORTS
 
 
 class TestInstallPackage:
@@ -509,7 +515,7 @@ class TestRunSubprocessTimeoutLogging:
             patch("hephaestus.utils.helpers.logger.error") as mock_error,
         ):
             with pytest.raises(subprocess.TimeoutExpired):
-                run_subprocess(["sleep", "99"], timeout=1)
+                run_subprocess(["sleep", "99"], env={"PATH": os.defpath}, timeout=1)
 
         # logger.error must have been called with a message that mentions the timeout
         assert mock_error.called
@@ -523,7 +529,7 @@ class TestRunSubprocessTimeoutLogging:
         exc = subprocess.TimeoutExpired(cmd=["ls"], timeout=5)
         with patch("subprocess.run", side_effect=exc):
             with pytest.raises(subprocess.TimeoutExpired):
-                run_subprocess(["ls"], timeout=5)
+                run_subprocess(["ls"], env={"PATH": os.defpath}, timeout=5)
 
     def test_timeout_log_on_error_false_suppresses_error_log(self) -> None:
         """Expected timeout failures can suppress lower-level ERROR logs."""
@@ -533,7 +539,12 @@ class TestRunSubprocessTimeoutLogging:
             patch("hephaestus.utils.helpers.logger.error") as mock_error,
         ):
             with pytest.raises(subprocess.TimeoutExpired):
-                run_subprocess(["sleep", "99"], timeout=1, log_on_error=False)
+                run_subprocess(
+                    ["sleep", "99"],
+                    env={"PATH": os.defpath},
+                    timeout=1,
+                    log_on_error=False,
+                )
 
         mock_error.assert_not_called()
 
@@ -544,7 +555,7 @@ class TestRunSubprocessTimeoutLogging:
             patch("hephaestus.utils.subprocess_registry.supported", return_value=False),
             patch("subprocess.run", return_value=completed) as run,
         ):
-            result = run_subprocess(["tool"], track_process_group=True)
+            result = run_subprocess(["tool"], env={"PATH": os.defpath}, track_process_group=True)
 
         assert result is completed
         run.assert_called_once()
@@ -567,6 +578,7 @@ class TestRunSubprocessTimeoutLogging:
                         "time.sleep(5)"
                     ),
                 ],
+                env={"PATH": os.defpath},
                 timeout=0.1,
                 track_process_group=True,
             )

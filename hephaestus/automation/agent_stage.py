@@ -235,7 +235,14 @@ def run_agent(args: argparse.Namespace) -> int:
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    agent = resolve_agent(args.agent, cwd=repo_root)
+    agent = resolve_agent(
+        args.agent,
+        cwd=repo_root,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=getattr(args, "pi_isolation_adapter", None),
+        pi_dir=getattr(args, "pi_dir", None),
+    )
     args.agent = agent
 
     if args.athena_skill:

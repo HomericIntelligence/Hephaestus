@@ -36,6 +36,21 @@ def test_json_success_emits_single_envelope(
         "stdout": '{"data": true}\n',
         "stderr": "",
     }
+    mock_gh_call.assert_called_once_with(["api", "rate_limit"], timeout=120)
+
+
+@patch("hephaestus.github.gh_cli.configure_github_throttle_from_args")
+@patch("hephaestus.github.gh_cli.gh_call")
+def test_explicit_gh_timeout_reaches_adapter(
+    mock_gh_call: MagicMock,
+    _mock_configure: MagicMock,
+) -> None:
+    """The wrapper resolves --gh-timeout once and passes the typed value."""
+    mock_gh_call.return_value = _completed()
+
+    assert main(["--gh-timeout", "37", "api", "rate_limit"]) == 0
+
+    mock_gh_call.assert_called_once_with(["api", "rate_limit"], timeout=37)
 
 
 @patch("hephaestus.github.gh_cli.configure_github_throttle_from_args")

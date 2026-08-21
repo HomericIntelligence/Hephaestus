@@ -8,7 +8,7 @@ import os
 import time
 from datetime import UTC
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -507,7 +507,9 @@ class TestGhRateLimitResetEpoch:
             check=True,
             timeout=10,
             log_on_error=False,
+            env=ANY,
         )
+        assert mock_run.call_args.kwargs["env"]["PATH"]
 
     def test_caches_within_ttl(self) -> None:
         """Second call within TTL must not re-invoke gh."""

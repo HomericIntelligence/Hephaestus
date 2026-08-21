@@ -8,11 +8,20 @@ from typing import Any
 
 from hephaestus.github.auto_merge import defer_auto_merge
 from hephaestus.github.client import gh_call
-from hephaestus.github.fleet_sync.models import PRInfo, PRStatus
+from hephaestus.github.fleet_sync.models import (
+    DEFAULT_FLEET_TIMEOUTS,
+    FleetTimeouts,
+    PRInfo,
+    PRStatus,
+)
 from hephaestus.logging.utils import get_logger
-from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
+
+
+def _timeouts_arg(timeouts: FleetTimeouts | None) -> dict[str, Any]:
+    """Return a typed optional timeout keyword for internal adapters."""
+    return {"timeouts": timeouts} if timeouts is not None else {}
 
 
 def _gh(
@@ -21,6 +30,7 @@ def _gh(
     org: str | None = None,
     check: bool = True,
     dry_run: bool = False,
+    timeouts: FleetTimeouts | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run gh CLI, optionally scoped to a repo, routed through the shared adapter."""
     full_args = args
@@ -34,7 +44,11 @@ def _gh(
         logger.info("[dry-run] gh %s", " ".join(full_args))
         return subprocess.CompletedProcess(full_args, 0, stdout="[]", stderr="")
 
-    return gh_call(full_args, check=check, timeout=NETWORK_TIMEOUT)
+    return gh_call(
+        full_args,
+        check=check,
+        timeout=(timeouts or DEFAULT_FLEET_TIMEOUTS).gh,
+    )
 
 
 def _ci_state(checks: list[dict[str, Any]]) -> str:
@@ -53,13 +67,20 @@ def _ci_state(checks: list[dict[str, Any]]) -> str:
     return "SUCCESS"
 
 
-def _fetch_pr_ci_state(repo: str, number: int, org: str | None = None) -> str:
+def _fetch_pr_ci_state(
+    repo: str,
+    number: int,
+    org: str | None = None,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> str:
     """Fetch a single PR's statusCheckRollup and reduce it to a CI state."""
     try:
         result = _gh(
             ["pr", "view", str(number), "--json", "statusCheckRollup"],
             repo=repo,
             org=org,
+            **_timeouts_arg(timeouts),
         )
         data = json.loads(result.stdout)
     except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
@@ -68,7 +89,12 @@ def _fetch_pr_ci_state(repo: str, number: int, org: str | None = None) -> str:
     return _ci_state(data.get("statusCheckRollup") or [])
 
 
-def list_prs(repo: str, org: str) -> list[PRInfo]:
+def list_prs(
+    repo: str,
+    org: str,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> list[PRInfo]:
     """List all open PRs in a repo with their readiness status."""
     try:
         result = _gh(
@@ -86,6 +112,7 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
             ],
             repo=repo,
             org=org,
+            **_timeouts_arg(timeouts),
         )
         prs_raw: list[dict[str, Any]] = json.loads(result.stdout)
     except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as e:
@@ -94,7 +121,12 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
     out: list[PRInfo] = []
 
     for p in prs_raw:
-        ci = _fetch_pr_ci_state(repo, p["number"], org)
+        ci = _fetch_pr_ci_state(
+            repo,
+            p["number"],
+            org,
+            **_timeouts_arg(timeouts),
+        )
         mergeable = p.get("mergeable", "UNKNOWN")
         merge_state = p.get("mergeStateStatus", "UNKNOWN")
 
@@ -129,20 +161,41 @@ def list_prs(repo: str, org: str) -> list[PRInfo]:
     return out
 
 
-def _defer_auto_merge(pr: PRInfo, org: str) -> bool:
+def _defer_auto_merge(
+    pr: PRInfo,
+    org: str,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> bool:
     """Disable a pre-existing fleet PR arm and verify the read-back."""
     return defer_auto_merge(
         pr.number,
-        lambda args: _gh(args, repo=pr.repo, org=org, check=False),
+        lambda args: _gh(
+            args,
+            repo=pr.repo,
+            org=org,
+            check=False,
+            **_timeouts_arg(timeouts),
+        ),
     )
 
 
-def merge_pr(pr: PRInfo, org: str, dry_run: bool = False) -> bool:
+def merge_pr(
+    pr: PRInfo,
+    org: str,
+    dry_run: bool = False,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> bool:
     """Contain an existing arm, then refuse fleet-sync automatic merging."""
     if dry_run:
         logger.info("  [dry-run] Would verify auto-merge is disabled for PR #%d", pr.number)
         return False
-    if not _defer_auto_merge(pr, org):
+    if not _defer_auto_merge(
+        pr,
+        org,
+        **_timeouts_arg(timeouts),
+    ):
         return False
     logger.error("  Refusing to merge PR #%d while the PR-review gate is unavailable", pr.number)
     return False

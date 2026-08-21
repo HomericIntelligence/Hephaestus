@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
 from hephaestus.automation.github_api import skip_epics
 from hephaestus.automation.state_labels import is_epic
+from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.github.client import gh_call
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -29,7 +30,7 @@ from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 LOG = logging.getLogger(__name__)
 
 
-def _detect_cwd_repo() -> tuple[str | None, str | None]:
+def _detect_cwd_repo(*, metadata_timeout: int = METADATA_TIMEOUT) -> tuple[str | None, str | None]:
     """Return ``(org, repo_name)`` for the current working directory.
 
     Returns ``(None, None)`` when cwd is not inside a git repo. For GitHub
@@ -45,7 +46,8 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
             capture_output=True,
             text=True,
             check=True,
-            timeout=METADATA_TIMEOUT,
+            timeout=metadata_timeout,
+            env=build_git_signing_env(),
         ).stdout.strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return (None, None)
@@ -58,7 +60,8 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
             capture_output=True,
             text=True,
             check=True,
-            timeout=METADATA_TIMEOUT,
+            timeout=metadata_timeout,
+            env=build_git_signing_env(),
         ).stdout.strip()
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         url = ""
@@ -86,7 +89,7 @@ def _detect_cwd_repo() -> tuple[str | None, str | None]:
     return (org, repo)
 
 
-def _iter_gh_repos(org: str) -> Iterator[str]:
+def _iter_gh_repos(org: str, *, network_timeout: int = NETWORK_TIMEOUT) -> Iterator[str]:
     """Yield non-archived, non-fork organization repos one REST page at a time.
 
     The generator does not prefetch the next page: the coordinator owns when
@@ -106,7 +109,7 @@ def _iter_gh_repos(org: str) -> Iterator[str]:
                         f"&direction=asc&page={page}"
                     ),
                 ],
-                timeout=NETWORK_TIMEOUT,
+                timeout=network_timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"gh repo list {org} timed out after {exc.timeout}s") from exc
@@ -151,7 +154,9 @@ def _gh_list_repos(org: str) -> list[str]:
         raise SystemExit(str(exc)) from exc
 
 
-def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
+def _iter_open_issue_meta(
+    org: str, repo: str, *, network_timeout: int = NETWORK_TIMEOUT
+) -> Iterator[dict[str, Any]]:
     """Yield normalized open-issue metadata one GitHub page at a time.
 
     The REST issues endpoint is deliberately requested one bounded page at a
@@ -179,7 +184,7 @@ def _iter_open_issue_meta(org: str, repo: str) -> Iterator[dict[str, Any]]:
                     f"/repos/{org}/{repo}/issues?state=open&per_page=100"
                     f"&sort=created&direction=asc&page={page}",
                 ],
-                timeout=NETWORK_TIMEOUT,
+                timeout=network_timeout,
             )
             entries = json.loads(out.stdout or "[]")
             if not isinstance(entries, list):
@@ -467,6 +472,7 @@ def _detect_remote_base_ref(repo: str, repo_dir: Path) -> str:
             text=True,
             check=False,
             timeout=METADATA_TIMEOUT,
+            env=build_git_signing_env(),
         )
         detected = symbolic.stdout.strip()
         if symbolic.returncode == 0 and detected:
@@ -482,6 +488,7 @@ def _detect_remote_base_ref(repo: str, repo_dir: Path) -> str:
                 text=True,
                 check=False,
                 timeout=METADATA_TIMEOUT,
+                env=build_git_signing_env(),
             )
         except subprocess.TimeoutExpired:
             continue
@@ -501,6 +508,7 @@ def _local_ahead_count(repo: str, repo_dir: Path, base_ref: str) -> int:
             text=True,
             check=False,
             timeout=METADATA_TIMEOUT,
+            env=build_git_signing_env(),
         )
     except subprocess.TimeoutExpired:
         LOG.warning("[%s] timed out checking local commits ahead of %s", repo, base_ref)
@@ -523,7 +531,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
     rebase ran against whatever the local clone already had; callers should
     surface the staleness in operator-facing logs but the SHA value itself
     remains a clean git hash (no suffix) because it is exported to phase
-    subprocesses as ``HEPH_TRUNK_GITHASH`` and used for session naming
+    child work as an explicit typed value and used for session naming
     (``hephaestus/automation/session_naming.py:181``). Adding a suffix
     would propagate the "stale" marker into every child session label and
     would also break any future caller that consumed the env var as a git
@@ -542,6 +550,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
             capture_output=True,
             text=True,
             timeout=NETWORK_TIMEOUT,
+            env=build_git_signing_env(),
             circuit_breaker_name="git-fetch",
         )
     except subprocess.TimeoutExpired:
@@ -575,6 +584,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
         text=True,
         check=False,
         timeout=METADATA_TIMEOUT,
+        env=build_git_signing_env(),
     )
     if rb.returncode != 0:
         subprocess.run(
@@ -582,6 +592,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
             capture_output=True,
             check=False,
             timeout=METADATA_TIMEOUT,
+            env=build_git_signing_env(),
         )
         if local_ahead > 0:
             LOG.warning(
@@ -599,6 +610,7 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
                 capture_output=True,
                 check=False,
                 timeout=METADATA_TIMEOUT,
+                env=build_git_signing_env(),
             )
     sha = subprocess.run(
         ["git", "-C", str(repo_dir), "rev-parse", "--short=7", "HEAD"],
@@ -606,5 +618,6 @@ def _rebase_main(repo: str, repo_dir: Path) -> tuple[str, bool]:
         text=True,
         check=False,
         timeout=METADATA_TIMEOUT,
+        env=build_git_signing_env(),
     )
     return (sha.stdout.strip() or "unknown", fetch_ok)

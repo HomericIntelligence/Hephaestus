@@ -7,6 +7,7 @@ here instead of silently no-op'ing in CI.
 
 from __future__ import annotations
 
+import io
 import subprocess
 from unittest import mock
 
@@ -147,38 +148,33 @@ def test_apply_no_selection_removes_all_severity() -> None:
     assert not any("POST" in c.args for c in m.call_args_list)
 
 
-def test_main_rejects_non_numeric_issue_number(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_rejects_non_numeric_issue_number() -> None:
     """A non-numeric (injection-shaped) issue number exits 1 without API calls."""
-    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-    monkeypatch.setenv("ISSUE_NUMBER", "7; rm -rf /")
-    monkeypatch.setenv("ISSUE_BODY", "### Severity\n\nmajor\n")
-    assert sl.main([]) == 1
+    with pytest.raises(SystemExit):
+        sl.main(["--repo", "o/r", "--issue-number", "7; rm -rf /", "--body-file", "-"])
 
 
-def test_main_rejects_missing_github_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_rejects_missing_github_repository() -> None:
     """Missing GITHUB_REPOSITORY exits 1 with a descriptive error."""
-    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
-    monkeypatch.setenv("ISSUE_NUMBER", "42")
-    monkeypatch.setenv("ISSUE_BODY", "### Severity\n\nmajor\n")
-    assert sl.main([]) == 1
+    with pytest.raises(SystemExit):
+        sl.main(["--issue-number", "42", "--body-file", "-"])
 
 
 def test_main_rejects_malformed_github_repository(monkeypatch: pytest.MonkeyPatch) -> None:
     """A GITHUB_REPOSITORY value without '/' exits 1 with a descriptive error."""
-    monkeypatch.setenv("GITHUB_REPOSITORY", "no-slash-here")
-    monkeypatch.setenv("ISSUE_NUMBER", "42")
-    monkeypatch.setenv("ISSUE_BODY", "### Severity\n\nmajor\n")
-    assert sl.main([]) == 1
+    monkeypatch.setattr("sys.stdin", io.StringIO(RENDERED_BODY))
+    assert sl.main(["--repo", "no-slash-here", "--issue-number", "42", "--body-file", "-"]) == 1
 
 
 def test_main_reconciles_on_valid_input(monkeypatch: pytest.MonkeyPatch) -> None:
     """Valid input parses the severity and reconciles the label."""
-    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
-    monkeypatch.setenv("ISSUE_NUMBER", "42")
-    monkeypatch.setenv("ISSUE_BODY", "### Severity\n\nmajor\n")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "poison/ignored")
+    monkeypatch.setenv("ISSUE_NUMBER", "999")
+    monkeypatch.setenv("ISSUE_BODY", "### Severity\n\ncritical\n")
+    monkeypatch.setattr("sys.stdin", io.StringIO("### Severity\n\nmajor\n"))
     with mock.patch.object(sl, "apply_severity_label") as applied:
-        assert sl.main([]) == 0
-    applied.assert_called_once_with("o/r", 42, "major")
+        assert sl.main(["--repo", "o/r", "--issue-number", "42", "--body-file", "-"]) == 0
+    applied.assert_called_once_with("o/r", 42, "major", gh_timeout=120)
 
 
 def test_main_help_does_not_touch_env() -> None:

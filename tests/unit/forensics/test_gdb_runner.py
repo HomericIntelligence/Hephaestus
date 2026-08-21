@@ -118,13 +118,14 @@ class TestRunUnderGdb:
 
 
 class TestGdbCmdPrefixParsing:
-    """Regression tests for GDB_CMD_PREFIX shell-quote parsing (issue #756)."""
+    """Regression tests for gdb-prefix shell-quote parsing (issue #756)."""
 
     @staticmethod
     def _capture_argv(monkeypatch) -> list[list[str]]:
         captured: list[list[str]] = []
 
-        def fake_run(argv, check=False):
+        def fake_run(argv, check=False, env=None):
+            assert env is not None
             captured.append(list(argv))
 
             class _R:
@@ -197,24 +198,24 @@ class TestGdbCmdPrefixParsing:
 class TestMain:
     """Tests for the CLI entry point."""
 
-    def test_run_under_gdb_0_bypasses_gdb(self, monkeypatch) -> None:
-        """RUN_UNDER_GDB=0 execs the command directly and returns its code."""
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        rc = main(["/tmp/unused-core-dir", "sh", "-c", "exit 0"])
+    def test_direct_option_bypasses_gdb(self, monkeypatch) -> None:
+        """--direct executes the command directly and returns its code."""
+        monkeypatch.setenv("RUN_UNDER_GDB", "1")
+        rc = main(["--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
         assert rc == 0
 
-    def test_run_under_gdb_0_propagates_nonzero(self, monkeypatch) -> None:
-        """RUN_UNDER_GDB=0 propagates the command's non-zero exit code."""
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        rc = main(["/tmp/unused-core-dir", "sh", "-c", "exit 3"])
+    def test_direct_option_propagates_nonzero(self, monkeypatch) -> None:
+        """--direct propagates the command's non-zero exit code."""
+        monkeypatch.setenv("RUN_UNDER_GDB", "1")
+        rc = main(["--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 3"])
         assert rc == 3
 
-    def test_run_under_gdb_0_json_envelope(self, monkeypatch, capsys) -> None:
-        """RUN_UNDER_GDB=0 with --json emits a status envelope."""
+    def test_direct_option_json_envelope(self, monkeypatch, capsys) -> None:
+        """--direct with --json emits a status envelope."""
         import json
 
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        rc = main(["--json", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
+        monkeypatch.setenv("RUN_UNDER_GDB", "1")
+        rc = main(["--json", "--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -245,7 +246,7 @@ class TestMain:
 
 
 class TestValidateGdbCmdPrefix:
-    """Tests for GDB_CMD_PREFIX whitelist validation."""
+    """Tests for explicit gdb command-prefix whitelist validation."""
 
     @pytest.mark.parametrize("raw", [None, "", "   ", "\t\n  "])
     def test_empty_input_returns_empty_list(self, raw: str | None) -> None:
@@ -294,11 +295,11 @@ class TestValidateGdbCmdPrefix:
 
         After issue #756 the value is tokenized with ``shlex.split`` before the
         per-token whitelist runs. Unbalanced-quote cases (e.g. ``foo'bar``) are
-        rejected by shlex itself (re-raised with a ``GDB_CMD_PREFIX`` message);
+        rejected by shlex itself (re-raised with an option-named message);
         the remaining cases survive tokenization but carry shell metacharacters
         outside the whitelist.
         """
-        with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
+        with pytest.raises(ValueError, match="gdb-cmd-prefix"):
             _validate_gdb_cmd_prefix(raw)
 
 
@@ -307,7 +308,7 @@ class TestRunUnderGdbPrefixValidation:
 
     def test_unsafe_prefix_raises_before_subprocess(self, tmp_path: Path) -> None:
         """Hoisted validation fires before resolve_command for unsafe prefix."""
-        with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
+        with pytest.raises(ValueError, match="gdb-cmd-prefix"):
             run_under_gdb(
                 str(tmp_path / "cores"),
                 _UNRESOLVABLE_CMD,
@@ -329,33 +330,46 @@ class TestRunUnderGdbPrefixValidation:
 class TestMainPrefixValidation:
     """main() converts validation errors into a clean CLI error + exit 2."""
 
-    def test_main_returns_2_on_unsafe_env_var(self, monkeypatch, capsys, tmp_path: Path) -> None:
-        """main() returns 2 and prints ERROR to stderr for invalid GDB_CMD_PREFIX."""
-        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=run")
-        rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+    def test_main_returns_2_on_unsafe_prefix_option(self, capsys, tmp_path: Path) -> None:
+        """main() returns 2 and prints ERROR for an invalid prefix option."""
+        rc = main(
+            [
+                "--gdb-cmd-prefix=--init-eval-command=run",
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 2
         assert "[run-under-gdb] ERROR:" in captured.err
-        assert "GDB_CMD_PREFIX" in captured.err
+        assert "gdb-cmd-prefix" in captured.err
 
-    def test_main_json_envelope_on_unsafe_env_var(
-        self, monkeypatch, capsys, tmp_path: Path
-    ) -> None:
+    def test_main_json_envelope_on_unsafe_prefix_option(self, capsys, tmp_path: Path) -> None:
         """main() emits a JSON status envelope with status != ok on invalid prefix."""
         import json
 
-        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=run")
-        rc = main(["--json", str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+        rc = main(
+            [
+                "--json",
+                "--gdb-cmd-prefix=--init-eval-command=run",
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+            ]
+        )
         assert rc == 2
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] != "ok"
-        assert "GDB_CMD_PREFIX" in payload["message"]
+        assert "gdb-cmd-prefix" in payload["message"]
 
-    def test_main_safe_env_var_unchanged(self, monkeypatch, tmp_path: Path) -> None:
-        """Safe prefix + unresolvable command: validation passes, returns 127."""
-        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "uv run --")
-        rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+    def test_main_safe_prefix_option_unchanged(self, monkeypatch, tmp_path: Path) -> None:
+        """The explicit prefix wins while a poison environment value is ignored."""
+        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=poison")
+        rc = main(
+            [
+                "--gdb-cmd-prefix",
+                "uv run --",
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+            ]
+        )
         assert rc == 127

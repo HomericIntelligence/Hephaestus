@@ -16,20 +16,14 @@ exact-head/label admission is repeated before every request.
 
 ### Summary
 
-**Version 1.0 will introduce no breaking changes to the documented public API.**
+Version 1.0 intentionally removes ambient Hephaestus environment configuration.
+Every `HEPH_*` and `HEPHAESTUS_*` runtime setting is replaced by an explicit
+command-line option, typed configuration field, or internal job value. Old
+variables are not read for compatibility or warnings; setting one has no effect.
 
-The 1.0 release will not change the public API — it will *commit* to it. Every symbol
-listed in [`COMPATIBILITY.md`](../COMPATIBILITY.md) keeps the same name, signature,
-and behavior it had in the 0.x series. Code that uses only the documented public API
-will need **no changes** to move from a recent 0.x release to 1.0.
-
-What 1.0 will mean for consumers:
-
-- The public API surface in `COMPATIBILITY.md` is now covered by the
-  [Semantic Versioning](https://semver.org/) guarantees and the deprecation policy —
-  it will not change incompatibly without a 2.0 release.
-- Non-public API (anything not in `COMPATIBILITY.md`: underscore-prefixed names,
-  internal modules, non-`__all__` symbols) remains unguaranteed, as before.
+The stable `merge_with_env()` and `get_proj_root()` APIs are also removed. This
+is a major-version break: configuration is now resolved once at a CLI boundary
+and passed explicitly through library and automation calls.
 
 ### Upgrade checklist
 
@@ -41,9 +35,24 @@ What 1.0 will mean for consumers:
    "homericintelligence-hephaestus>=1.0,<2"
    ```
 
-2. **No code changes are required** for code that uses the documented public API.
+2. Replace `merge_with_env()` with `load_config()` plus `merge_configs()` using
+   explicitly parsed command-line overrides.
 
-3. Re-run your test suite as you would for any dependency upgrade.
+3. Replace `get_proj_root(name)` with `get_repo_root()` for the current checkout,
+   an owning command's `--repo-root` option, or an explicit `Path` argument.
+
+4. Replace every `HEPH_*` or `HEPHAESTUS_*` setting with the corresponding CLI
+   option where the operation still has an owning CLI boundary. There is no
+   compatibility precedence: every old variable is ignored. The former advise,
+   learn, follow-up, and outer plan-stage model/timeout variables have no modern
+   queue replacement: advise/learn are host-owned Mnemosyne operations, while
+   the follow-up and outer-plan subprocess paths are disconnected legacy code.
+
+5. If you invoke live contract tests, pass `--run-contract-tests`,
+   `--run-contract-agent`, `--contract-repo`, and `--contract-model` to pytest.
+   CI enforcement uses `--require-cli` and `--require-pi-package-smoke`.
+
+6. Re-run your test suite and the environment-policy validator.
 
 ### Behavioral changes to be aware of
 
@@ -67,7 +76,9 @@ will now raise `ImportError`/`AttributeError`. Migrate to the canonical replacem
 
 | Removed symbol | Replacement |
 |----------------|-------------|
-| `get_config_value` | `load_config()`, `merge_with_env()`, then `get_setting()` |
+| `get_config_value` | `load_config()`, `merge_configs()`, then `get_setting()` |
+| `merge_with_env` | `load_config()` plus `merge_configs()` with explicit CLI values |
+| `get_proj_root` | `get_repo_root()`, `--repo-root`, or an explicit `Path` |
 | `retry_with_jitter` | `retry_with_backoff(jitter=True, max_delay=...)` |
 
 ### Questions

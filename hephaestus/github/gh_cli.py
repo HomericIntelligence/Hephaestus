@@ -15,10 +15,12 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.github.client import (
+    DEFAULT_GH_TIMEOUT,
     ClaudeUsageCapError,
     GitHubRateLimitError,
     GitHubUnavailableError,
     gh_call,
+    positive_timeout,
 )
 
 
@@ -41,6 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_github_throttle_args(parser)
     add_json_arg(parser)
     add_version_arg(parser)
+    parser.add_argument(
+        "--gh-timeout",
+        type=positive_timeout,
+        default=DEFAULT_GH_TIMEOUT,
+        metavar="SECONDS",
+        help=f"per-call gh timeout in seconds (default: {DEFAULT_GH_TIMEOUT})",
+    )
     parser.add_argument(
         "gh_args",
         nargs=argparse.REMAINDER,
@@ -126,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_github_throttle_from_args(args)
     try:
-        result = gh_call(gh_args)
+        result = gh_call(gh_args, timeout=args.gh_timeout)
     except subprocess.CalledProcessError as exc:
         return _handle_called_process_error(exc, json_out=args.json)
     except subprocess.TimeoutExpired as exc:

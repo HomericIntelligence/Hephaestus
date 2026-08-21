@@ -549,7 +549,7 @@ def gh_issue_create(title: str, body: str, labels: list[str] | None = None) -> i
         raise RuntimeError(f"Failed to create issue: {e}") from e
 
 
-def gh_list_open_issues(limit: int = 500) -> list[int]:
+def gh_list_open_issues(limit: int = 500, *, timeout: int = 120) -> list[int]:
     """Return issue numbers for all open issues in the current repository, ascending.
 
     Args:
@@ -573,7 +573,8 @@ def gh_list_open_issues(limit: int = 500) -> list[int]:
                 str(limit),
                 "--json",
                 "number",
-            ]
+            ],
+            timeout=timeout,
         )
         data = json.loads(result.stdout)
         return sorted(item["number"] for item in data)

@@ -11,32 +11,28 @@ The lane is opt-in and skipped by normal unit, integration, and required CI
 runs. Run the GitHub contract checks with:
 
 ```bash
-HEPHAESTUS_CONTRACT_TESTS=1 just test-contract
-```
-
-The `just` recipe sets `HEPHAESTUS_CONTRACT_TESTS=1` itself, so the shorter
-form is normally sufficient:
-
-```bash
 just test-contract
 ```
+
+The recipe passes the registered `--run-contract-tests` pytest option. Ambient
+environment variables do not enable collection.
 
 The agent check spends model tokens and requires a separate opt-in:
 
 ```bash
-HEPHAESTUS_CONTRACT_TESTS=1 HEPHAESTUS_CONTRACT_AGENT=1 \
-  uv run pytest tests/integration/contract/test_agent_contract.py \
+uv run pytest tests/integration/contract/test_agent_contract.py \
+  --run-contract-tests --run-contract-agent \
   --override-ini="addopts=" -v --strict-markers
 ```
 
-Environment variables:
+Pytest options:
 
-- `HEPHAESTUS_CONTRACT_TESTS=1` enables collection of the contract marker.
-- `HEPHAESTUS_CONTRACT_AGENT=1` enables the real Claude invocation test.
-- `HEPHAESTUS_CONTRACT_REPO=OWNER/REPOSITORY` pins GitHub calls to a target
+- `--run-contract-tests` enables collection of the contract marker.
+- `--run-contract-agent` enables the real Claude invocation test.
+- `--contract-repo OWNER/REPOSITORY` pins GitHub calls to a target
   repository. If omitted, the repository is resolved once from the checkout
   root with an explicit working directory.
-- `HEPHAESTUS_CONTRACT_MODEL` selects the Claude model for the agent lane; the
+- `--contract-model MODEL` selects the Claude model for the agent lane; the
   default is `haiku`.
 
 The GitHub lane only calls read endpoints (`rate_limit`, `repo view`, and

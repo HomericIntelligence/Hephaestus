@@ -3,14 +3,12 @@
 import json
 import subprocess
 import threading
-from collections.abc import Generator
 from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 
 import hephaestus.automation.github_api as _github_api_module
-import hephaestus.github.client as client_module
 from hephaestus.automation.github_api import (
     GitHubRateLimitError,
     _check_graphql_errors,
@@ -39,7 +37,6 @@ from hephaestus.automation.github_api import (
 )
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER
-from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.io import utils as io_utils
 
 # Circuit-breaker reset is now an autouse package-scope fixture in
@@ -1245,7 +1242,7 @@ class TestGhListLabelsRepoKeyedConcurrency:
 
             return threading.current_thread().name
 
-        def mock_gh_call(argv: Any) -> Any:
+        def mock_gh_call(argv: Any, **_kwargs: Any) -> Any:
             """Return label payload based on the calling thread's repo slug."""
             slug = mock_key_fn()
             payload = {"t1": [{"name": "state:skip"}], "t2": [{"name": "bug"}]}[slug]
@@ -2239,84 +2236,6 @@ class TestWriteSecureCompatibility:
         """The historical named import should resolve to the canonical helper."""
         module = __import__("hephaestus.automation.github_api", fromlist=["write_secure"])
         assert module.write_secure is io_utils.write_secure
-
-
-class TestGhCallThrottle:
-    """Tests for the per-thread `gh` call throttle inside _gh_call."""
-
-    @pytest.fixture(autouse=True)
-    def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
-        # Reset the per-thread throttle state and force a known rate so tests
-        # don't inherit clock state from earlier suite calls.
-        client_module._GH_THROTTLE = threading.local()
-        monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "5")
-        configure_gh_global_throttle(rate=0, burst=10)
-        yield
-        configure_gh_global_throttle(rate=10.0, burst=30.0)
-
-    @patch("hephaestus.github.client.run_subprocess")
-    def test_consecutive_calls_are_paced_to_min_interval(self, mock_run: Any) -> None:
-        """Pace consecutive calls to the configured min interval.
-
-        At 5 calls/sec, two back-to-back calls in the same thread must be
-        separated by at least ~0.2s.
-        """
-        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
-
-        import time as _time
-
-        t0 = _time.monotonic()
-        _gh_call(["api", "/rate_limit"])
-        _gh_call(["api", "/rate_limit"])
-        elapsed = _time.monotonic() - t0
-
-        # Allow a small slack below the theoretical 0.2s for clock granularity.
-        assert elapsed >= 0.18, f"throttle did not pace; elapsed={elapsed:.3f}s"
-
-    @patch("hephaestus.github.client.run_subprocess")
-    def test_throttle_disabled_when_rate_zero(
-        self, mock_run: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """GH_RATE_LIMIT_PER_SEC=0 disables pacing entirely."""
-        monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "0")
-        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
-
-        with patch("hephaestus.github.client.time.sleep") as mock_sleep:
-            for _ in range(5):
-                _gh_call(["api", "/rate_limit"])
-
-        assert mock_run.call_count == 5
-        mock_sleep.assert_not_called()
-
-    @patch("hephaestus.github.client.run_subprocess")
-    def test_buckets_are_per_thread(self, mock_run: Any) -> None:
-        """Each thread has its own bucket.
-
-        Two threads each making one call should not block each other.
-        """
-        import threading as _t
-        import time as _time
-
-        mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
-
-        # Pre-warm thread A's bucket so a second call from A would block.
-        _gh_call(["api", "/rate_limit"])
-
-        elapsed_b: list[float] = []
-
-        def thread_b() -> None:
-            t0 = _time.monotonic()
-            _gh_call(["api", "/rate_limit"])
-            elapsed_b.append(_time.monotonic() - t0)
-
-        worker = _t.Thread(target=thread_b)
-        worker.start()
-        worker.join()
-
-        # Thread B has its own bucket and should not have been throttled.
-        assert elapsed_b[0] < 0.05, (
-            f"per-thread isolation broken; thread B waited {elapsed_b[0]:.3f}s"
-        )
 
 
 class TestGraphQLRateLimitDetection:

@@ -6,7 +6,7 @@ import importlib
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -207,6 +207,7 @@ def test_run_gh_tidy_rebases_and_auto_deletes_merged_branches(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=ANY,
     )
     process.wait.assert_called_once_with()
 
@@ -611,6 +612,52 @@ class TestMain:
         monkeypatch.setattr("sys.argv", ["hephaestus-tidy", "--agent", "claude"])
         assert tidy_module.main() == 1
 
+    def test_main_threads_explicit_pi_policy_to_agent_resolution(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Provider resolution receives the CLI-owned Pi policy and auth budget."""
+        captured: dict[str, object] = {}
+
+        def fake_resolve(
+            agent,
+            *,
+            disable_pi_automation,
+            auth_status_timeout,
+            pi_isolation_adapter,
+            pi_dir,
+        ):
+            captured.update(
+                agent=agent,
+                disable_pi_automation=disable_pi_automation,
+                auth_status_timeout=auth_status_timeout,
+                pi_isolation_adapter=pi_isolation_adapter,
+                pi_dir=pi_dir,
+            )
+            return "codex"
+
+        monkeypatch.setattr(tidy_module, "resolve_agent", fake_resolve)
+        monkeypatch.setattr(tidy_module, "_validate_environment", lambda: None)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-tidy",
+                "--agent",
+                "codex",
+                "--disable-pi-automation",
+                "--auth-status-timeout",
+                "19",
+            ],
+        )
+
+        assert tidy_module.main() == 1
+        assert captured == {
+            "agent": "codex",
+            "disable_pi_automation": True,
+            "auth_status_timeout": 19,
+            "pi_isolation_adapter": None,
+            "pi_dir": None,
+        }
+
 
 class TestTimeoutHandling:
     """Tests for subprocess timeout handling in tidy helpers."""
@@ -675,17 +722,20 @@ class TestTimeoutHandling:
             assert _repo_root() == Path("/path/to/repo")
             shared_repo_root.assert_called_once_with()
 
-    def test_direct_rebase_agent_uses_env_configured_timeout(
+    def test_direct_rebase_agent_uses_explicit_timeout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Direct tidy conflict agents honor HEPH_AGENT_REBASE_TIMEOUT (#1417)."""
+        """Removed HEPH_AGENT_REBASE_TIMEOUT is inert; explicit timeout wins."""
         monkeypatch.setenv("HEPH_AGENT_REBASE_TIMEOUT", "1234")
         with patch("hephaestus.github.tidy.run_agent_text") as run_agent:
             run_agent.return_value = MagicMock(stdout="rebased")
 
-            tidy_module._run_direct_rebase_agent("codex", "prompt", "feature/a", Path("/repo"))
+            tidy_module._run_direct_rebase_agent(
+                "codex", "prompt", "feature/a", Path("/repo"), timeout=37
+            )
 
-        assert run_agent.call_args.kwargs["timeout"] == 1234
+        assert run_agent.call_args.kwargs["timeout"] == 37
+        assert run_agent.call_args.kwargs["model"] == tidy_module._TIDY_SWARM_MODEL
 
     def test_direct_rebase_agent_default_timeout(self) -> None:
         """Default rebase-agent timeout is AGENT_REBASE_TIMEOUT (2400)."""
@@ -695,3 +745,19 @@ class TestTimeoutHandling:
             tidy_module._run_direct_rebase_agent("codex", "prompt", "feature/a", Path("/repo"))
 
         assert run_agent.call_args.kwargs["timeout"] == 2400
+
+
+def test_tidy_parser_accepts_explicit_log_format() -> None:
+    """Tidy logging is selected explicitly and remains separate from --json."""
+    args = tidy_module._build_arg_parser().parse_args(["--log-format", "json"])
+
+    assert args.log_format == "json"
+    assert args.json is False
+
+
+def test_tidy_configure_logging_forwards_explicit_format() -> None:
+    """The tidy adapter forwards the selected format to shared CLI logging."""
+    with patch.object(tidy_module, "configure_cli_logging") as configure:
+        tidy_module._configure_logging(True, "json")
+
+    configure.assert_called_once_with(verbose=True, log_format="json")

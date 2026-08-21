@@ -33,12 +33,14 @@ from hephaestus.agents.runtime import (
 from hephaestus.cli.utils import (
     add_github_throttle_args,
     add_json_arg,
+    add_logging_args,
+    configure_cli_logging,
     configure_github_throttle_from_args,
     create_parser,
     emit_json_status,
 )
-from hephaestus.constants import agent_rebase_timeout
-from hephaestus.github.client import gh_call
+from hephaestus.config.child_environments import build_gh_child_env
+from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
 from hephaestus.github.git_ops import (
     in_git_repo as _shared_in_git_repo,
     repo_root as _shared_repo_root,
@@ -46,7 +48,6 @@ from hephaestus.github.git_ops import (
     working_tree_clean as _shared_working_tree_clean,
 )
 from hephaestus.github.pr_merge import detect_repo_from_remote
-from hephaestus.logging.utils import setup_logging
 from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)
@@ -66,13 +67,14 @@ _PROBLEM_HEADER = re.compile(r"WARNING:\s*Unable to auto-rebase the following br
 _PROBLEM_BULLET = re.compile(r"^\s*\*\s+(\S+)")
 
 
-def _detect_default_branch(override: str | None) -> str:
+def _detect_default_branch(override: str | None, *, gh_timeout: int = DEFAULT_GH_TIMEOUT) -> str:
     """Return the repo's default branch, using override if supplied."""
     if override:
         return override
     try:
         result = gh_call(
             ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
+            timeout=gh_timeout,
         )
         branch = result.stdout.strip()
         if branch:
@@ -138,12 +140,13 @@ def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]
     return worktrees
 
 
-def _issue_is_closed(issue: int) -> bool:
+def _issue_is_closed(issue: int, *, gh_timeout: int = DEFAULT_GH_TIMEOUT) -> bool:
     """Return whether *issue* is closed, treating lookup failures as unsafe."""
     try:
         return (
             gh_call(
                 ["issue", "view", str(issue), "--json", "state", "--jq", ".state"],
+                timeout=gh_timeout,
             ).stdout.strip()
             == "CLOSED"
         )
@@ -188,7 +191,13 @@ def _remove_worktree(path: Path, branch: str) -> None:
     run_git(["branch", "-d", branch], check=False, log_on_error=False)
 
 
-def _cleanup_stale_worktrees(root: Path, trunk: str, dry_run: bool) -> int:
+def _cleanup_stale_worktrees(
+    root: Path,
+    trunk: str,
+    dry_run: bool,
+    *,
+    gh_timeout: int = DEFAULT_GH_TIMEOUT,
+) -> int:
     """Interactively remove clean worktrees for closed issues or merged branches."""
     porcelain = _worktree_porcelain()
     candidates = _parse_worktree_porcelain(porcelain, root)
@@ -196,7 +205,11 @@ def _cleanup_stale_worktrees(root: Path, trunk: str, dry_run: bool) -> int:
     for path, branch in candidates:
         match = re.match(r"(\d+)", branch)
         issue = int(match.group(1)) if match else None
-        closed_issue = issue is not None and _issue_is_closed(issue)
+        closed_issue = issue is not None and (
+            _issue_is_closed(issue)
+            if gh_timeout == DEFAULT_GH_TIMEOUT
+            else _issue_is_closed(issue, gh_timeout=gh_timeout)
+        )
         merged_branch = _branch_is_merged(branch, trunk)
         if not closed_issue and not merged_branch:
             continue
@@ -281,6 +294,7 @@ def _run_gh_tidy(trunk: str, dry_run: bool) -> tuple[int, str]:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=build_gh_child_env(),
     ) as proc:
         assert proc.stdout is not None  # noqa: S101 — Popen with PIPE always sets this
         for line in proc.stdout:
@@ -343,6 +357,7 @@ async def _dispatch_swarm(
     max_concurrent: int,
     dry_run: bool,
     agent: str,
+    rebase_timeout: int = 2400,
 ) -> dict[str, str]:
     """Spawn the selected coding agent per branch (capped at max_concurrent).
 
@@ -371,6 +386,7 @@ async def _dispatch_swarm(
                     prompt,
                     branch,
                     repo_path,
+                    rebase_timeout,
                 )
                 return
 
@@ -382,7 +398,13 @@ async def _dispatch_swarm(
     return results
 
 
-def _run_direct_rebase_agent(agent: str, prompt: str, branch: str, repo_path: Path) -> str:
+def _run_direct_rebase_agent(
+    agent: str,
+    prompt: str,
+    branch: str,
+    repo_path: Path,
+    timeout: int = 2400,
+) -> str:
     """Run one direct rebase-fix agent and return its status marker."""
     try:
         reject_pi_unsupported_surface(
@@ -393,8 +415,12 @@ def _run_direct_rebase_agent(agent: str, prompt: str, branch: str, repo_path: Pa
             agent=agent,
             prompt=prompt,
             cwd=repo_path,
-            timeout=agent_rebase_timeout(),
-            model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
+            timeout=timeout,
+            model=direct_agent_model(
+                agent,
+                _TIDY_SWARM_MODEL,
+                codex_default=_TIDY_SWARM_MODEL,
+            ),
             sandbox="workspace-write",
         )
         text = result.stdout or ""
@@ -465,7 +491,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     add_agent_argument(parser)
     add_prompt_dir_argument(parser)
-    parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--gh-timeout",
+        type=positive_timeout,
+        default=DEFAULT_GH_TIMEOUT,
+        metavar="SECONDS",
+        help=f"per-call GitHub CLI timeout (default: {DEFAULT_GH_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--rebase-timeout",
+        type=positive_timeout,
+        default=2400,
+        metavar="SECONDS",
+        help="direct rebase-agent timeout (default: 2400)",
+    )
+    add_logging_args(parser)
     add_github_throttle_args(parser)
     add_json_arg(parser)
     return parser
@@ -523,14 +563,9 @@ def _print_summary(results: dict[str, str]) -> int:
     return 0 if not failed else 1
 
 
-def _configure_logging(verbose: bool) -> None:
+def _configure_logging(verbose: bool, log_format: str = "text") -> None:
     """Configure CLI logging for tidy output."""
-    setup_logging(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format_string="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-        primary_stream="stderr",
-    )
+    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def _emit_tidy_environment_failure(json_output: bool) -> int:
@@ -602,6 +637,7 @@ def _dispatch_tidy_swarm(
             args.max_concurrent,
             dry_run=args.dry_run,
             agent=agent,
+            **({"rebase_timeout": args.rebase_timeout} if args.rebase_timeout != 2400 else {}),
         )
     )
     exit_code = _print_summary(results)
@@ -655,19 +691,34 @@ def main() -> int:
     """Entry point for hephaestus-tidy."""
     args = _build_arg_parser().parse_args()
     configure_github_throttle_from_args(args)
-    agent = resolve_agent(args.agent)
-    _configure_logging(args.verbose)
+    agent = resolve_agent(
+        args.agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
+    )
+    _configure_logging(args.verbose, args.log_format)
 
     env = _validate_environment()
     if env is None:
         return _emit_tidy_environment_failure(args.json)
     repo_slug, _, repo_path = env
-    trunk = _detect_default_branch(args.trunk)
+    trunk = (
+        _detect_default_branch(args.trunk)
+        if args.gh_timeout == DEFAULT_GH_TIMEOUT
+        else _detect_default_branch(args.trunk, gh_timeout=args.gh_timeout)
+    )
 
     logger.info("Repo: %s  |  Trunk: %s  |  Path: %s", repo_slug, trunk, repo_path)
 
     if args.cleanup_stale_worktrees:
-        return _cleanup_stale_worktrees(repo_path, trunk, args.dry_run)
+        return _cleanup_stale_worktrees(
+            repo_path,
+            trunk,
+            args.dry_run,
+            **({"gh_timeout": args.gh_timeout} if args.gh_timeout != DEFAULT_GH_TIMEOUT else {}),
+        )
 
     try:
         problem_branches = _run_tidy_and_find_problem_branches(trunk, args.dry_run)

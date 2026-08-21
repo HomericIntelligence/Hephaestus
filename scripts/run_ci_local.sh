@@ -379,7 +379,7 @@ run_unit() {
 run_integration() {
     log_step "Integration tests"
     run_in_container bash -c '\
-        HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly and not artifact"'
+        uv run pytest tests/integration --require-cli --override-ini="addopts=" -v --strict-markers -m "not nightly and not artifact"'
 }
 
 run_cli() {
@@ -391,7 +391,7 @@ run_cli() {
         WHEEL=(dist/*.whl) && \
         uv pip install --python build/cli-venv/bin/python "${WHEEL[0]}[automation]" pytest pyyaml && \
         export PATH="$PWD/build/cli-venv/bin:$PATH" && \
-        HEPHAESTUS_REQUIRE_CLI=1 build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py \
+        build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py --require-cli \
             --override-ini="addopts=" -v --strict-markers'
 }
 

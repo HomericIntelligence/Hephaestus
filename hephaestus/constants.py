@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-import os
 from pathlib import Path
-
-_logger = logging.getLogger(__name__)
 
 # Default directories to exclude when scanning files recursively.
 # Used across markdown, validation, and other file-traversal utilities.
@@ -84,105 +80,67 @@ PRE_PR_TEST_TIMEOUT: int = 600
 _REPO_ROOT_MARKER = "pyproject.toml"
 
 
-def read_timeout_env(env_name: str, default: int) -> int:
-    """Read a timeout env var at call time, falling back to ``default``."""
-    raw = os.environ.get(env_name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        _logger.warning(
-            "Ignoring non-integer %s=%r; using default %ds",
-            env_name,
-            raw,
-            default,
-        )
-        return default
-
-
 def agent_impl_timeout() -> int:
     """Return the implementation-agent timeout in seconds."""
-    return read_timeout_env("HEPH_AGENT_IMPL_TIMEOUT", AGENT_IMPL_TIMEOUT)
+    return AGENT_IMPL_TIMEOUT
 
 
 def agent_review_timeout() -> int:
     """Return the review-agent timeout in seconds."""
-    return read_timeout_env("HEPH_AGENT_REVIEW_TIMEOUT", AGENT_REVIEW_TIMEOUT)
+    return AGENT_REVIEW_TIMEOUT
 
 
 def agent_plan_timeout() -> int:
     """Return the planning-agent timeout in seconds."""
-    return read_timeout_env("HEPH_AGENT_PLAN_TIMEOUT", AGENT_PLAN_TIMEOUT)
+    return AGENT_PLAN_TIMEOUT
 
 
 def agent_learn_timeout() -> int:
     """Return the learn-agent timeout in seconds."""
-    return read_timeout_env("HEPH_AGENT_LEARN_TIMEOUT", AGENT_LEARN_TIMEOUT)
+    return AGENT_LEARN_TIMEOUT
 
 
 def agent_git_timeout() -> int:
     """Return the timeout for short agent-adjacent git commands in seconds."""
-    return read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", AGENT_GIT_TIMEOUT)
+    return AGENT_GIT_TIMEOUT
 
 
 def agent_clone_timeout() -> int:
     """Return the timeout for Mnemosyne clone setup in seconds."""
-    return read_timeout_env("HEPH_AGENT_CLONE_TIMEOUT", AGENT_CLONE_TIMEOUT)
+    return AGENT_CLONE_TIMEOUT
 
 
 def agent_auth_status_timeout() -> int:
     """Return the timeout for agent authentication status probes in seconds."""
-    return read_timeout_env("HEPH_AGENT_AUTH_STATUS_TIMEOUT", AGENT_AUTH_STATUS_TIMEOUT)
+    return AGENT_AUTH_STATUS_TIMEOUT
 
 
 def agent_rebase_timeout() -> int:
     """Return the timeout for direct-agent rebase/conflict work in seconds."""
-    return read_timeout_env("HEPH_AGENT_REBASE_TIMEOUT", AGENT_REBASE_TIMEOUT)
+    return AGENT_REBASE_TIMEOUT
 
 
 def diff_collect_timeout() -> int:
     """Return the timeout for implementation-review diff collection in seconds."""
-    return read_timeout_env("HEPH_DIFF_COLLECT_TIMEOUT", DIFF_COLLECT_TIMEOUT)
+    return DIFF_COLLECT_TIMEOUT
 
 
 def pre_pr_test_timeout() -> int:
     """Return the timeout for the optional pre-PR test gate in seconds."""
-    return read_timeout_env("HEPH_PRE_PR_TEST_TIMEOUT", PRE_PR_TEST_TIMEOUT)
+    return PRE_PR_TEST_TIMEOUT
 
 
 def repo_root() -> Path:
     """Resolve the Hephaestus repo root.
 
-    Priority:
-      1. ``$HEPHAESTUS_REPO_ROOT`` env var, IFF that directory contains a
-         ``pyproject.toml`` marker.
-      2. Walk upward from this module's ``__file__`` until a directory
-         containing ``pyproject.toml`` is found.
-
-    The env-var override exists so editable installs (where ``__file__``
-    resolves under ``site-packages``) and CI containers can pin the
-    location explicitly without coupling to package layout.
+    Walk upward from this module's ``__file__`` until a directory containing
+    ``pyproject.toml`` is found.
     """
-    env = os.environ.get("HEPHAESTUS_REPO_ROOT")
-    if env:
-        candidate = Path(env)
-        if (candidate / _REPO_ROOT_MARKER).is_file():
-            return candidate
-        _logger.warning(
-            "HEPHAESTUS_REPO_ROOT=%s missing %s; falling back to __file__ walk",
-            env,
-            _REPO_ROOT_MARKER,
-        )
-
     here = Path(__file__).resolve()
     for parent in here.parents:
         if (parent / _REPO_ROOT_MARKER).is_file():
             return parent
-    raise RuntimeError(
-        f"Could not locate repo root: no {_REPO_ROOT_MARKER} above {here}. "
-        "Set $HEPHAESTUS_REPO_ROOT to pin the location explicitly."
-    )
+    raise RuntimeError(f"Could not locate repo root: no {_REPO_ROOT_MARKER} above {here}.")
 
 
 def scripts_dir() -> Path:

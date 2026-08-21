@@ -106,6 +106,8 @@ OPTION_FIELD_CASES: tuple[tuple[type[BaseModel], frozenset[str]], ...] = (
                 "enable_ui",
                 "verbose",
                 "agent_timeout",
+                "reviewer_model",
+                "fallback_model",
             }
         ),
     ),

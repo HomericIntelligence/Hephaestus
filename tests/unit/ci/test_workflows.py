@@ -399,7 +399,7 @@ class TestPiCliSetup:
 
         assert "pi_package_catalog.json" in container
         assert "@earendil-works/pi-coding-agent@0.80.2" not in container
-        assert "HEPHAESTUS_REQUIRE_PI_PACKAGE_SMOKE" in nightly
+        assert "--require-pi-package-smoke" in nightly
 
     def test_setup_pi_action_pins_setup_node_by_full_sha(self) -> None:
         """The composite action must not use a mutable setup-node tag."""

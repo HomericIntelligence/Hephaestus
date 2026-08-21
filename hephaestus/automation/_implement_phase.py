@@ -102,7 +102,7 @@ class ImplementPhase(StageMixin):
                     ),
                     model=direct_agent_model(
                         self.options.agent,
-                        "HEPH_ADVISE_MODEL",
+                        model_value=getattr(self.options, "advise_model", "") or advise_model(),
                         codex_default=codex_advise_model(),
                     ),
                     sandbox="read-only",
@@ -114,7 +114,7 @@ class ImplementPhase(StageMixin):
                 issue=issue_number,
                 agent=AGENT_ADVISE,
                 prompt=prompt,
-                model=advise_model(),
+                model=getattr(self.options, "advise_model", "") or advise_model(),
                 cwd=self.repo_root,
                 timeout=self.options.advise_timeout,
                 output_format="text",
@@ -127,6 +127,8 @@ class ImplementPhase(StageMixin):
             issue_body=issue_body,
             invoke=_invoke,
             build_prompt=get_advise_prompt_builder(self.options.agent),
+            git_timeout_s=getattr(self.options, "git_timeout", None),
+            clone_timeout_s=getattr(self.options, "clone_timeout", None),
         )
 
     def _run_advise_as_implementer_turn(
@@ -153,7 +155,7 @@ class ImplementPhase(StageMixin):
             issue=issue_number,
             agent=AGENT_IMPLEMENTER,
             cwd=worktree_path,
-            model=implementer_model(),
+            model=getattr(self.options, "implementer_model", "") or implementer_model(),
         )
 
     def _run_claude_code(
@@ -189,7 +191,7 @@ class ImplementPhase(StageMixin):
                 issue=issue_number,
                 agent=AGENT_IMPLEMENTER,
                 prompt=prompt,
-                model=implementer_model(),
+                model=getattr(self.options, "implementer_model", "") or implementer_model(),
                 cwd=worktree_path,
                 timeout=self.options.agent_timeout,
                 output_format="json",
@@ -289,7 +291,11 @@ class ImplementPhase(StageMixin):
                 execution_request=ExecutionRequest(
                     AgentRole.IMPLEMENTER, AgentOperation.IMPLEMENT, SessionLifecycle.START_NEW
                 ),
-                model=direct_agent_model(agent, "HEPH_IMPLEMENTER_MODEL"),
+                model=direct_agent_model(
+                    agent,
+                    model_value=getattr(self.options, "implementer_model", "")
+                    or implementer_model(),
+                ),
                 sandbox="workspace-write",
             )
             write_secure(log_file, result.stdout or "")

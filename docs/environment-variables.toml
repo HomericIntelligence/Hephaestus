@@ -1,0 +1,354 @@
+# Ambient-reader projection of hephaestus/config/environment_registry.py for
+# hephaestus/**/*.py. Names and reader identities are exact; dynamic access,
+# bulk access, and wildcards are forbidden.
+schema_version = 1
+
+[[variables]]
+name = "APPDATA"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows application configuration"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "COMSPEC"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows command processor alias"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "ComSpec"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows command processor"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "GH_TOKEN"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "GitHub CLI authentication bridge"
+sensitivity = "secret"
+validation = "non-empty"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_gh_child_env", access = "read" },
+]
+
+[[variables]]
+name = "GITHUB_STEP_SUMMARY"
+category = "workflow-input"
+owner = "ci/workflow helpers"
+purpose = "GitHub step summary file"
+sensitivity = "sensitive"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/ci/precommit.py", reader = "write_step_summary", access = "read" },
+]
+
+[[variables]]
+name = "GITHUB_TOKEN"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "GitHub authentication bridge"
+sensitivity = "secret"
+validation = "non-empty"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_gh_child_env", access = "read" },
+]
+
+[[variables]]
+name = "GPG_TTY"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "GPG signing terminal bridge"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_git_signing_env", access = "read" },
+]
+
+[[variables]]
+name = "HOME"
+category = "platform"
+owner = "config.child_environments"
+purpose = "CLI home and configuration lookup"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "LANG"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Locale stability"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "LC_ALL"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Locale override"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "LC_CTYPE"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Character encoding"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "LOCALAPPDATA"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows application cache"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "LOGNAME"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Host identity hint"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "PATH"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Command discovery"
+sensitivity = "public"
+validation = "non-empty"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "PATHEXT"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows executable suffixes"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "SHELL"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Interactive shell hint"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "SSH_AUTH_SOCK"
+category = "child-process"
+owner = "config.child_environments"
+purpose = "Git SSH authentication and signing bridge"
+sensitivity = "secret"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "build_git_signing_env", access = "read" },
+]
+
+[[variables]]
+name = "SYSTEMROOT"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows system root"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "SystemRoot"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows system root alias"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "TEMP"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows temporary directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "TMP"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows temporary directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "TMPDIR"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Temporary and runtime directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+  { path = "hephaestus/github/rate_limit.py", reader = "_runtime_base_dir", access = "read" },
+]
+
+[[variables]]
+name = "TZ"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Timezone stability"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "USER"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Host identity hint"
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "USERPROFILE"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows home directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "WINDIR"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Windows system directory"
+sensitivity = "public"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "XDG_CACHE_HOME"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Unix cache directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "XDG_CONFIG_HOME"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Unix configuration directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+
+[[variables]]
+name = "XDG_DATA_HOME"
+category = "platform"
+owner = "config.child_environments"
+purpose = "Unix data directory"
+sensitivity = "sensitive"
+validation = "path"
+direction = "input"
+readers = [
+  { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
+]
+

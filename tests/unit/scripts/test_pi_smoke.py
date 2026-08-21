@@ -19,13 +19,20 @@ _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 
-def test_provider_and_model_aliases_are_required_from_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The smoke harness must require aliases from operator-local env vars."""
-    monkeypatch.delenv("HEPH_PI_PROVIDER", raising=False)
-    monkeypatch.delenv("HEPH_PI_MODEL", raising=False)
+def _alias_args(
+    tmp_path: Path,
+    *,
+    provider: str = "private-provider-alias",
+    model: str = "private-model-alias",
+) -> list[str]:
+    config = tmp_path / "pi-aliases.toml"
+    config.write_text(f'provider = "{provider}"\nmodel = "{model}"\n', encoding="utf-8")
+    config.chmod(0o600)
+    return ["--pi-alias-config", str(config)]
 
+
+def test_provider_and_model_alias_config_is_required(tmp_path: Path) -> None:
+    """The smoke harness requires an explicit operator-owned alias file."""
     assert _mod.main([]) == 2
 
 
@@ -35,8 +42,6 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The smoke harness passes the alias for redaction, never as process argv."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr="", session_id="pi-smoke"))
     assert hasattr(_mod, "run_pi_smoke_session")
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
@@ -44,6 +49,7 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     assert (
         _mod.main(
             [
+                *_alias_args(tmp_path),
                 "--cwd",
                 str(tmp_path),
                 "--prompt",
@@ -58,7 +64,7 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     kwargs = run_pi.call_args.kwargs
     assert kwargs["cwd"] == tmp_path
     assert kwargs["model"] == "private-model-alias"
-    assert "provider" not in kwargs
+    assert kwargs["provider"] == "private-provider-alias"
     assert run_pi.call_args.args == ("Say OK",)
     captured = capsys.readouterr()
     assert captured.out.strip() == "OK"
@@ -75,12 +81,38 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     assert "private-model-alias" not in log_text
 
 
+def test_explicit_pi_directory_reaches_the_smoke_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The package directory is threaded from CLI input, never ambient state."""
+    run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr="", session_id=None))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "poison"))
+    monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
+    pi_dir = tmp_path / "explicit-pi"
+
+    assert (
+        _mod.main(
+            [
+                *_alias_args(tmp_path),
+                "--cwd",
+                str(tmp_path),
+                "--log-dir",
+                str(tmp_path),
+                "--pi-dir",
+                str(pi_dir),
+            ]
+        )
+        == 0
+    )
+
+    assert run_pi.call_args.kwargs["pi_dir"] == pi_dir
+
+
 def test_failure_output_redacts_private_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Smoke failures should redact the local alias and denylist tokens."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\nPRIVATE_SESSION_TOKEN\n",
         encoding="utf-8",
@@ -93,7 +125,9 @@ def test_failure_output_redacts_private_values(
     )
     monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=err))
 
-    assert _mod.main(["--cwd", str(tmp_path)]) == 9
+    assert (
+        _mod.main([*_alias_args(tmp_path, model="private-test-alias"), "--cwd", str(tmp_path)]) == 9
+    )
 
     output = capsys.readouterr().err
     assert "private-provider-alias" not in output
@@ -108,13 +142,11 @@ def test_unicode_pi_failure_is_a_sanitized_smoke_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Prompt encoding failures must be rendered as sanitized CLI diagnostics."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     error = UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
     monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=error))
 
     try:
-        result: int | UnicodeError = _mod.main(["--cwd", str(tmp_path)])
+        result: int | UnicodeError = _mod.main([*_alias_args(tmp_path), "--cwd", str(tmp_path)])
     except UnicodeError as exc:
         result = exc
 
@@ -129,8 +161,6 @@ def test_success_output_redacts_private_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Smoke success output should also be safe for publication."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\nPRIVATE_SESSION_TOKEN\n",
         encoding="utf-8",
@@ -144,7 +174,9 @@ def test_success_output_redacts_private_values(
     )
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
 
-    assert _mod.main(["--cwd", str(tmp_path)]) == 0
+    assert (
+        _mod.main([*_alias_args(tmp_path, model="private-test-alias"), "--cwd", str(tmp_path)]) == 0
+    )
 
     captured = capsys.readouterr()
     output = captured.out
@@ -171,15 +203,15 @@ def test_sessionless_smoke_success_does_not_print_a_session_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The ``--no-session`` smoke path must remain successful without an ID."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     monkeypatch.setattr(
         _mod,
         "run_pi_smoke_session",
         Mock(return_value=AgentRunResult(stdout="OK", stderr="", session_id=None)),
     )
 
-    assert _mod.main(["--cwd", str(tmp_path), "--log-dir", str(tmp_path)]) == 0
+    assert (
+        _mod.main([*_alias_args(tmp_path), "--cwd", str(tmp_path), "--log-dir", str(tmp_path)]) == 0
+    )
 
     captured = capsys.readouterr()
     assert captured.out.strip() == "OK"
@@ -202,8 +234,6 @@ def test_repository_denylist_redacts_values_when_cwd_is_outside_checkout(
     outside_cwd.mkdir()
     log_dir = outside_cwd / "private-log-directory"
     monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     monkeypatch.setattr(
         _mod,
         "run_pi_smoke_session",
@@ -216,7 +246,10 @@ def test_repository_denylist_redacts_values_when_cwd_is_outside_checkout(
         ),
     )
 
-    assert _mod.main(["--cwd", str(outside_cwd), "--log-dir", str(log_dir)]) == 0
+    assert (
+        _mod.main([*_alias_args(tmp_path), "--cwd", str(outside_cwd), "--log-dir", str(log_dir)])
+        == 0
+    )
 
     captured = capsys.readouterr()
     diagnostics = f"{captured.out}\n{captured.err}"
@@ -244,8 +277,6 @@ def test_repository_project_denylist_redacts_values_when_cwd_is_outside_checkout
     outside_cwd.mkdir()
     log_dir = outside_cwd / "logs"
     monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     monkeypatch.setattr(
         _mod,
         "run_pi_smoke_session",
@@ -257,7 +288,10 @@ def test_repository_project_denylist_redacts_values_when_cwd_is_outside_checkout
         ),
     )
 
-    assert _mod.main(["--cwd", str(outside_cwd), "--log-dir", str(log_dir)]) == 0
+    assert (
+        _mod.main([*_alias_args(tmp_path), "--cwd", str(outside_cwd), "--log-dir", str(log_dir)])
+        == 0
+    )
 
     captured = capsys.readouterr()
     diagnostics = f"{captured.out}\n{captured.err}"
@@ -280,8 +314,6 @@ def test_unreadable_repository_denylist_fails_closed(
     outside_cwd = tmp_path / "outside"
     outside_cwd.mkdir()
     monkeypatch.setattr(_mod, "REPOSITORY_ROOT", repository_root, raising=False)
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     original_read_text = Path.read_text
 
     def fail_denylist_read(
@@ -301,7 +333,7 @@ def test_unreadable_repository_denylist_fails_closed(
     run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr=""))
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
 
-    assert _mod.main(["--cwd", str(outside_cwd)]) == 1
+    assert _mod.main([*_alias_args(tmp_path), "--cwd", str(outside_cwd)]) == 1
 
     run_pi.assert_not_called()
     assert "unable to load Pi private denylist safely" in capsys.readouterr().err
@@ -313,13 +345,13 @@ def test_rejects_smoke_when_user_only_log_permissions_are_unavailable(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The smoke seam must fail before execution if it cannot protect its log artifact."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr=""))
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
     monkeypatch.setattr(_mod, "_private_smoke_log_permissions_supported", lambda: False)
 
-    assert _mod.main(["--cwd", str(tmp_path)]) == 1
+    assert (
+        _mod.main([*_alias_args(tmp_path, model="private-test-alias"), "--cwd", str(tmp_path)]) == 1
+    )
 
     run_pi.assert_not_called()
     assert "user-only log permissions" in capsys.readouterr().err
@@ -332,8 +364,6 @@ def test_rejects_smoke_before_execution_when_private_log_directory_is_unsafe(
 ) -> None:
     """The smoke request must not run if its artifact directory cannot be secured."""
     assert hasattr(_mod, "_prepare_private_log_dir")
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-model-alias")
     run_pi = Mock(return_value=AgentRunResult(stdout="OK", stderr=""))
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
     monkeypatch.setattr(
@@ -342,7 +372,18 @@ def test_rejects_smoke_before_execution_when_private_log_directory_is_unsafe(
         Mock(side_effect=OSError("unsafe artifact directory")),
     )
 
-    assert _mod.main(["--cwd", str(tmp_path), "--log-dir", str(tmp_path / "logs")]) == 1
+    assert (
+        _mod.main(
+            [
+                *_alias_args(tmp_path),
+                "--cwd",
+                str(tmp_path),
+                "--log-dir",
+                str(tmp_path / "logs"),
+            ]
+        )
+        == 1
+    )
 
     run_pi.assert_not_called()
     assert "unsafe artifact directory" in capsys.readouterr().err
@@ -354,8 +395,6 @@ def test_missing_pi_binary_is_a_sanitized_smoke_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A missing Pi executable must be a deterministic redacted CLI failure."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     (tmp_path / ".heph-private-denylist").write_text(
         "PRIVATE_ENDPOINT_TOKEN\n",
         encoding="utf-8",
@@ -368,7 +407,9 @@ def test_missing_pi_binary_is_a_sanitized_smoke_failure(
     monkeypatch.setattr(_mod, "run_pi_smoke_session", Mock(side_effect=missing_pi))
 
     try:
-        result = _mod.main(["--cwd", str(tmp_path)])
+        result = _mod.main(
+            [*_alias_args(tmp_path, model="private-test-alias"), "--cwd", str(tmp_path)]
+        )
     except OSError:
         pytest.fail("Pi startup errors must be converted to a smoke CLI failure")
 
@@ -387,10 +428,10 @@ def test_reports_pi_runtime_contract_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Pi JSON contract failures should produce an actionable smoke error."""
-    monkeypatch.setenv("HEPH_PI_PROVIDER", "private-provider-alias")
-    monkeypatch.setenv("HEPH_PI_MODEL", "private-test-alias")
     run_pi = Mock(side_effect=RuntimeError("missing session id"))
     monkeypatch.setattr(_mod, "run_pi_smoke_session", run_pi)
 
-    assert _mod.main(["--cwd", str(tmp_path)]) == 1
+    assert (
+        _mod.main([*_alias_args(tmp_path, model="private-test-alias"), "--cwd", str(tmp_path)]) == 1
+    )
     assert "missing session id" in capsys.readouterr().err

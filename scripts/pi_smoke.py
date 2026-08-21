@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Run a sanitized Pi smoke prompt against operator-local Pi aliases.
-
-The model/provider configuration must live outside the repository in Pi's local
-configuration. This script accepts provider and model aliases only from
-``HEPH_PI_PROVIDER`` and ``HEPH_PI_MODEL`` and never stores private endpoints,
-hostnames, or model identifiers in source.
-
-Usage:
-    HEPH_PI_PROVIDER=<provider-alias> HEPH_PI_MODEL=<model-alias> python scripts/pi_smoke.py
-"""
+"""Run a sanitized Pi smoke prompt against an operator-owned alias file."""
 
 from __future__ import annotations
 
@@ -21,9 +12,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from hephaestus.agents.runtime import (
-    PI_MODEL_ENV,
     AgentRunResult,
-    missing_pi_alias_env,
+    load_pi_alias_config,
     pi_private_redaction_tokens,
     prepare_pi_private_log_dir,
     redact_pi_private_values,
@@ -59,6 +49,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", type=Path, default=Path.cwd(), help="Working directory for Pi")
     parser.add_argument("--timeout", type=int, default=300, help="Pi subprocess timeout")
     parser.add_argument(
+        "--pi-alias-config",
+        type=Path,
+        help="Owner-only mode-0600 TOML file containing provider and model aliases",
+    )
+    parser.add_argument(
+        "--pi-dir",
+        type=Path,
+        default=None,
+        help="Explicit Pi coding-agent configuration directory",
+    )
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=DEFAULT_LOG_DIR,
@@ -93,18 +94,22 @@ def _write_smoke_log(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the smoke prompt against aliases in operator-local env vars."""
+    """Run the smoke prompt against aliases in an operator-owned TOML file."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    missing = missing_pi_alias_env()
-    if missing:
-        print(f"ERROR: missing required env vars: {', '.join(missing)}", file=sys.stderr)
+    if args.pi_alias_config is None:
+        print("ERROR: --pi-alias-config is required", file=sys.stderr)
         return 2
-    model = os.environ.get(PI_MODEL_ENV, "").strip()
+    try:
+        aliases = load_pi_alias_config(args.pi_alias_config)
+    except (OSError, ValueError):
+        print("ERROR: unable to load Pi alias config safely", file=sys.stderr)
+        return 2
     try:
         redaction_tokens = pi_private_redaction_tokens(
             args.cwd,
-            model,
+            aliases.model,
+            provider=aliases.provider,
             additional_roots=(REPOSITORY_ROOT,),
             require_readable=True,
         )
@@ -118,12 +123,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {detail}", file=sys.stderr)
         return 1
     try:
-        result = run_pi_smoke_session(
-            args.prompt,
-            cwd=args.cwd,
-            timeout=args.timeout,
-            model=model,
-        )
+        if args.pi_dir is None:
+            result = run_pi_smoke_session(
+                args.prompt,
+                cwd=args.cwd,
+                timeout=args.timeout,
+                model=aliases.model,
+                provider=aliases.provider,
+            )
+        else:
+            result = run_pi_smoke_session(
+                args.prompt,
+                cwd=args.cwd,
+                timeout=args.timeout,
+                model=aliases.model,
+                provider=aliases.provider,
+                pi_dir=args.pi_dir,
+            )
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr or exc.stdout or f"Pi smoke failed with exit {exc.returncode}"
         print(redact_pi_private_values(detail, redaction_tokens), file=sys.stderr)

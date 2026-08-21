@@ -17,15 +17,15 @@ nats:
   tls_hostname: "nats.example.com"
 ```
 
-Equivalent environment overrides:
+Load the file at the owning application boundary and pass its `nats` mapping to
+`load_nats_config`; ambient NATS settings are not read:
 
-```bash
-export NATS_URL=tls://nats.example.com:4222
-export NATS_TLS=true
-export NATS_TLS_CA_FILE=/run/secrets/nats/ca.pem
-export NATS_TLS_CERT_FILE=/run/secrets/nats/client.pem
-export NATS_TLS_KEY_FILE=/run/secrets/nats/client.key
-export NATS_TLS_HOSTNAME=nats.example.com
+```python
+from hephaestus.config import load_yaml_config
+from hephaestus.nats import load_nats_config
+
+document = load_yaml_config("/run/hephaestus/config.yml")
+nats_config = load_nats_config(document.get("nats", {}))
 ```
 
 Certificate and key files are runtime secrets. Do not commit certificate or
@@ -35,8 +35,9 @@ private-key contents to this repository.
 
 Some NATS deployments require TLS before the INFO protocol handshake:
 
-```bash
-export NATS_TLS_HANDSHAKE_FIRST=true
+```yaml
+nats:
+  tls_handshake_first: true
 ```
 
 ## Plaintext Exception
@@ -55,15 +56,18 @@ nats:
 
 For a local broker without TLS, use a loopback URL and disable TLS:
 
-```bash
-export NATS_URL=nats://127.0.0.1:4222
-export NATS_TLS=false
+```yaml
+nats:
+  enabled: true
+  url: "nats://127.0.0.1:4222"
+  tls: false
 ```
 
-If a deployment breaks after adopting the TLS default, the short-term rollback is
-to point `NATS_URL` at a loopback development broker and set `NATS_TLS=false`, or
-to set `NATS_ALLOW_PLAINTEXT=true` only for an explicitly isolated non-production
-broker while certificate provisioning is repaired.
+If a deployment breaks after adopting the TLS default, the short-term rollback
+is to select a prior configuration file or explicitly configure a loopback
+development broker with `tls: false`. A non-local plaintext exception requires
+`allow_plaintext: true` in the same operator-owned YAML while certificate
+provisioning is repaired.
 
 ## Failed-message retention
 
