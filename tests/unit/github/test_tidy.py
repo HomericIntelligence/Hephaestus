@@ -421,6 +421,56 @@ class TestTidyHandlers:
 class TestMain:
     """Smoke tests for hephaestus.github.tidy.main() covering --json branches."""
 
+    def test_cleanup_from_linked_worktree_never_targets_primary(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup invoked from a linked worktree excludes the primary checkout."""
+        repo = tmp_path / "repo"
+        linked_root = tmp_path / "topic-linked"
+        stale_root = tmp_path / "123-finished"
+
+        def git(*args: str) -> None:
+            subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        git("init", "--initial-branch=main", str(repo))
+        git("-C", str(repo), "config", "user.name", "Test User")
+        git("-C", str(repo), "config", "user.email", "test@example.com")
+        (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        git("-C", str(repo), "add", "tracked.txt")
+        git("-C", str(repo), "commit", "-m", "test fixture")
+        git("-C", str(repo), "worktree", "add", "-b", "topic", str(linked_root))
+        git("-C", str(repo), "worktree", "add", "-b", "123-finished", str(stale_root))
+
+        monkeypatch.chdir(linked_root)
+        monkeypatch.setattr(tidy_module, "detect_repo_from_remote", lambda: "owner/repo")
+        monkeypatch.setattr(tidy_module, "_working_tree_clean", lambda: True)
+        monkeypatch.setattr(tidy_module, "_in_git_repo", lambda: True)
+        monkeypatch.setattr(tidy_module, "_worktree_is_dirty", lambda _path: False)
+        monkeypatch.setattr(tidy_module, "_issue_is_closed", lambda _issue: False)
+        monkeypatch.setattr(tidy_module, "_detect_default_branch", lambda _x: "main")
+        branch_is_merged = MagicMock(return_value=True)
+        monkeypatch.setattr(tidy_module, "_branch_is_merged", branch_is_merged)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "hephaestus-tidy",
+                "--cleanup-stale-worktrees",
+                "--dry-run",
+                "--agent",
+                "claude",
+            ],
+        )
+
+        assert tidy_module.main() == 0
+        assert [call.args[0] for call in branch_is_merged.call_args_list] == ["123-finished"]
+
     def test_env_validation_failure_json(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
