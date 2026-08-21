@@ -75,8 +75,10 @@ class TestGhIssueJson:
         assert data["bodyDigest"] == hashlib.sha256(b"Test body").hexdigest()
 
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_body_digest_is_bound_to_the_sanitized_fetched_body(self, mock_gh_call: Any) -> None:
-        """Recovery provenance and exposed body use one canonical representation."""
+    def test_body_digest_preserves_authority_when_fetched_body_is_sanitized(
+        self, mock_gh_call: Any
+    ) -> None:
+        """Prompt sanitization cannot collapse distinct authority-bearing bodies."""
         raw_body = "bad\x00body"
         mock_gh_call.return_value = Mock(
             stdout=json.dumps(
@@ -93,7 +95,8 @@ class TestGhIssueJson:
         data = gh_issue_json(123)
 
         assert data["body"] == "badbody"
-        assert data["bodyDigest"] == hashlib.sha256(b"badbody").hexdigest()
+        assert data["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
+        assert data["authoritySanitized"] is True
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_malformed_issue_json_is_normalized_to_runtime_error(self, mock_gh_call: Any) -> None:

@@ -5605,7 +5605,8 @@ class TestReadSurface:
         result = adapter.gh_issue_json(4)
 
         assert result["body"] == "rawbody"
-        assert result["bodyDigest"] == hashlib.sha256(b"rawbody").hexdigest()
+        assert result["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
+        assert result["authoritySanitized"] is True
 
     def test_gh_issue_json(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

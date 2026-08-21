@@ -420,6 +420,32 @@ class TestPlanningStageEnter:
         assert restarted is None
         assert item.payload["athena_finalized_plan_invalidated"] is True
 
+    def test_sanitized_finalized_body_fails_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A sanitized projection cannot authenticate the complete issue body."""
+
+        class SanitizedAuthorityGitHub(FakeStageGitHub):
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                snapshot = super().gh_issue_json(issue_number)
+                snapshot["authoritySanitized"] = True
+                return snapshot
+
+        github = SanitizedAuthorityGitHub(
+            labels=[STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL],
+            issue_body=_finalized_body(),
+        )
+        item = make_work_item(issue=128)
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=github, budget_fn=lambda _name: 2),
+        )
+
+        assert outcome is not None and outcome.disposition is Disposition.RETRY
+        assert "authority-bearing issue text required sanitization" in outcome.note
+        assert "finalized-plan-reused" not in item.payload.get("summary_actions", [])
+
     @pytest.mark.parametrize(
         ("body", "owned_by_viewer"),
         [

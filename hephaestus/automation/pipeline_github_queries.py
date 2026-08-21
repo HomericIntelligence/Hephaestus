@@ -323,13 +323,18 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
             if not isinstance(data, dict):
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
+            raw_body = data.get("body")
+            authority_sanitized = False
             for field in ("title", "body"):
                 value = data.get(field)
                 if isinstance(value, str):
-                    data[field] = github_api.strip_null_bytes(value)
-            body = data.get("body")
-            if isinstance(body, str):
-                data["bodyDigest"] = github_api.issue_body_digest(body)
+                    cleaned = github_api.strip_null_bytes(value)
+                    authority_sanitized = authority_sanitized or cleaned != value
+                    data[field] = cleaned
+            if authority_sanitized:
+                data["authoritySanitized"] = True
+            if isinstance(raw_body, str):
+                data["bodyDigest"] = github_api.issue_body_digest(raw_body)
             return data
         return github_api.gh_issue_json(issue_number)
 

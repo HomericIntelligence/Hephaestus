@@ -230,6 +230,8 @@ def _refresh_requirements_recovery_context(
     """Refresh exact issue evidence and return whether semantic recovery is needed."""
     assert item.issue is not None  # noqa: S101 - planning entry validates this
     snapshot = ctx.github.gh_issue_json(item.issue)
+    if snapshot.get("authoritySanitized") is True:
+        raise RuntimeError("authority-bearing issue text required sanitization")
     title = snapshot.get("title")
     body = snapshot.get("body")
     body_digest = snapshot.get("bodyDigest")
@@ -566,6 +568,8 @@ def _finalized_plan_snapshot_matches_bound_authority(
 ) -> bool:
     """Match one fresh issue snapshot to the authenticated finalized body."""
     if item.issue is None or not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("authoritySanitized") is True:
         return False
     body = snapshot.get("body")
     body_digest = snapshot.get("bodyDigest")

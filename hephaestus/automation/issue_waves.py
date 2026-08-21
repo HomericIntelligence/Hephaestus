@@ -562,21 +562,26 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
         )
         if len(receipts) != len(receipts_raw):
             raise IssueWaveValidationError("checkpoint merge receipt must be an object")
+        for item in intents_raw:
+            if not isinstance(item, dict):
+                raise IssueWaveValidationError("checkpoint non-code intent must be an object")
+            if not isinstance(item.get("extra_labels", []), list):
+                raise IssueWaveValidationError(
+                    "checkpoint non-code intent extra_labels must be a list"
+                )
         intents = tuple(
             WaveNonCodeIntent(
                 issue_number=cast(int, item.get("issue_number")),
                 reason=cast(str, item.get("reason")),
                 evidence_digest=cast(str, item.get("evidence_digest")),
                 repository_revision=cast(str, item.get("repository_revision")),
-                extra_labels=tuple(item.get("extra_labels", ())),
+                extra_labels=tuple(item.get("extra_labels", [])),
                 explanation=cast(str, item.get("explanation", "")),
                 retired=cast(bool, item.get("retired", False)),
             )
             for item in intents_raw
             if isinstance(item, dict)
         )
-        if len(intents) != len(intents_raw):
-            raise IssueWaveValidationError("checkpoint non-code intent must be an object")
         waves.append(
             WaveRecord(
                 wave_index=cast(int, value.get("wave_index")),

@@ -113,22 +113,29 @@ def gh_issue_json(
         if not isinstance(parsed, dict):
             raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
         data = cast(dict[str, Any], parsed)
+        raw_body = data.get("body")
+        authority_sanitized = False
         # Strip stray NUL bytes at the source so downstream prompt assembly never
         # feeds an embedded null into a subprocess argv (#1661). Title/body are the
         # free-text fields consumed by the planner/implementer prompts; warn on a
         # strip so the (rare) mutation of a user-visible field is never silent.
+        # Keep the digest bound to the raw GitHub body and mark any sanitized
+        # projection so planning can fail closed instead of treating it as exact
+        # recovery or finalized-plan authority.
         for field in ("title", "body"):
             value = data.get(field)
             if isinstance(value, str):
                 cleaned = strip_null_bytes(value)
                 if cleaned != value:
+                    authority_sanitized = True
                     _api.logger.warning(
                         "Stripped NUL byte(s) from issue #%s %s field", issue_number, field
                     )
                     data[field] = cleaned
-        body = data.get("body")
-        if isinstance(body, str):
-            data["bodyDigest"] = issue_body_digest(body)
+        if authority_sanitized:
+            data["authoritySanitized"] = True
+        if isinstance(raw_body, str):
+            data["bodyDigest"] = issue_body_digest(raw_body)
     except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as e:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
     return data

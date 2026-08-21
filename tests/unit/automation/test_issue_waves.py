@@ -333,6 +333,13 @@ def test_non_code_intent_retired_field_is_backward_compatible_and_strict(
     with pytest.raises(IssueWaveValidationError, match="retired must be boolean"):
         IssueWaveStore(tmp_path, "acme", "hephaestus").load()
 
+    intent["retired"] = False
+    for malformed_labels in ("epic", {"epic": True}, 1, None):
+        intent["extra_labels"] = malformed_labels
+        checkpoint_path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(IssueWaveValidationError, match="extra_labels must be a list"):
+            IssueWaveStore(tmp_path, "acme", "hephaestus").load()
+
 
 def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None:
     """Fresh GitHub facts and ancestry callbacks gate durable advancement."""

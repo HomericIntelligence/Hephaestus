@@ -612,10 +612,12 @@ absolute operator state:
 
 Every **stage-issued** `state:skip` write uses the label as its durable
 authority and emits the reason to structured run logs. It does not add an
-issue comment. Both seeding paths are read-only for tracker and epic
-candidates. Only [`planning`](../hephaestus/automation/pipeline/stages/planning.py)
-may add the skip and supplemental semantic labels after two independent model
-decisions and exact label readback.
+issue comment, except that a confirmed obsolete disposition retains one
+bounded actor-owned explanation comment as audit context. Both seeding paths
+are read-only for tracker and epic candidates. Only
+[`planning`](../hephaestus/automation/pipeline/stages/planning.py) may add the
+skip and supplemental semantic labels after two independent model decisions
+and exact label readback.
 
 Label colors per [`STATE_LABEL_SPECS`](../hephaestus/automation/state_labels.py).
 Provisioning script
