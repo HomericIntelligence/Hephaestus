@@ -10,7 +10,7 @@
 #   ./scripts/run_ci_local.sh unit         # unit tests + structure/coverage checks
 #   ./scripts/run_ci_local.sh integration  # integration tests
 #   ./scripts/run_ci_local.sh cli          # installed-CLI entry-point tests
-#   ./scripts/run_ci_local.sh build        # sdist + wheel build
+#   ./scripts/run_ci_local.sh build        # artifact + package lifecycle checks
 #   ./scripts/run_ci_local.sh audit        # pip-audit dependency scan
 #   ./scripts/run_ci_local.sh sast         # bandit static analysis
 #   ./scripts/run_ci_local.sh workflow-scan # zizmor workflow security scan
@@ -350,7 +350,7 @@ run_unit() {
 run_integration() {
     log_step "Integration tests"
     run_in_container bash -c '\
-        HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"'
+        HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly and not artifact"'
 }
 
 run_cli() {

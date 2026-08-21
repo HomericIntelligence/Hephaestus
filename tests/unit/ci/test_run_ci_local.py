@@ -379,6 +379,15 @@ def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:
     assert "python -m build --no-isolation" not in log
 
 
+def test_all_separates_general_integration_from_artifact_lane(tmp_path: Path) -> None:
+    """The serialized local gate must not execute artifact tests twice."""
+    result, log = _run_runner(tmp_path, "all")
+
+    assert result.returncode == 0, result.stderr
+    assert '-m "not nightly and not artifact"' in log
+    assert log.count("-m artifact") == 1
+
+
 def test_missing_ci_image_is_built_automatically(tmp_path: Path) -> None:
     """The autonomous queue must not require a manual ``just ci-build`` step."""
     result, log = _run_runner(tmp_path, "unit", image_exists=False)
