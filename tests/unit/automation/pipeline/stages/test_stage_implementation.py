@@ -1994,7 +1994,7 @@ class TestTestsAndFix:
         ctx = make_ctx(org="HomericIntelligence")
         item = make_work_item(
             issue=1,
-            repo="HomericIntelligence/Hephaestus",
+            repo="Hephaestus",
             state="TEST_WAIT",
         )
 
@@ -2024,7 +2024,7 @@ class TestTestsAndFix:
         ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
         item = make_work_item(
             issue=1,
-            repo="HomericIntelligence/Hephaestus",
+            repo="Hephaestus",
             state="TEST_WAIT",
         )
 
@@ -2045,12 +2045,12 @@ class TestTestsAndFix:
     ) -> None:
         """Only the configured canonical Hephaestus repo gets its fixed gate."""
         stage = ImplementationStage()
-        ctx = make_ctx(org="HomericIntelligence")
+        ctx = make_ctx(org="OtherOrg")
         ctx.config.run_pre_pr_tests = True
         ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
         item = make_work_item(
             issue=1,
-            repo="OtherOrg/Hephaestus",
+            repo="Hephaestus",
             state="TEST_WAIT",
         )
 
@@ -2069,7 +2069,7 @@ class TestTestsAndFix:
         item = make_work_item(
             issue=1,
             pr=1001,
-            repo="HomericIntelligence/Hephaestus",
+            repo="Hephaestus",
             state="TEST_WAIT",
         )
         item.payload["existing_pr"] = True
@@ -2191,7 +2191,7 @@ class TestTestsAndFix:
         """A red one-shot gate is fixed and rerun before commit, push, or PR creation."""
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence")
-        item = make_work_item(issue=1, repo="HomericIntelligence/Hephaestus", state="TEST_WAIT")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
 
         first_gate = stage.step(item, ctx)
         assert isinstance(first_gate, JobRequest)

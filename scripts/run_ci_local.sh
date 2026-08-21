@@ -58,6 +58,9 @@ log_step()  { echo -e "\n${BLUE}==>${NC} $*"; }
 CANDIDATE_ROOT=""
 CANDIDATE_TREE=""
 CANDIDATE_INDEX_CONTAINER=""
+CANDIDATE_OBJECTS_CONTAINER=""
+CI_BUILD_ROOT=""
+CI_RUN_IMAGE=""
 
 cleanup_candidate_snapshot() {
     if [ -z "${CANDIDATE_ROOT}" ]; then
@@ -74,29 +77,78 @@ cleanup_candidate_snapshot() {
     CANDIDATE_ROOT=""
     CANDIDATE_TREE=""
     CANDIDATE_INDEX_CONTAINER=""
+    CANDIDATE_OBJECTS_CONTAINER=""
+}
+
+cleanup_ci_build() {
+    if [ -n "${CI_RUN_IMAGE}" ]; then
+        case "${CI_RUN_IMAGE}" in
+            hephaestus-ci:run-*)
+                if ! "${CONTAINER_ENGINE}" image rm "${CI_RUN_IMAGE}" >/dev/null 2>&1; then
+                    log_warn "Unable to remove temporary CI image tag: ${CI_RUN_IMAGE}"
+                fi
+                ;;
+            *)
+                log_error "Refusing to remove unexpected CI image tag: ${CI_RUN_IMAGE}"
+                ;;
+        esac
+        CI_RUN_IMAGE=""
+    fi
+    if [ -n "${CI_BUILD_ROOT}" ]; then
+        case "${CI_BUILD_ROOT}" in
+            "${PROJECT_ROOT}"/build/ci-build.*)
+                rm -rf -- "${CI_BUILD_ROOT}"
+                ;;
+            *)
+                log_error "Refusing to remove unexpected CI build path: ${CI_BUILD_ROOT}"
+                ;;
+        esac
+        CI_BUILD_ROOT=""
+    fi
+}
+
+cleanup() {
+    cleanup_candidate_snapshot
+    cleanup_ci_build
 }
 
 prepare_candidate_snapshot() {
     local candidate_relative
+    local repository_objects
 
     cleanup_candidate_snapshot
     mkdir -p "${PROJECT_ROOT}/build"
     CANDIDATE_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-candidate.XXXXXX")"
     CANDIDATE_TREE="${CANDIDATE_ROOT}/tree"
-    mkdir -p "${CANDIDATE_TREE}"
+    mkdir -p "${CANDIDATE_TREE}" "${CANDIDATE_ROOT}/objects"
+
+    repository_objects="$(
+        git -C "${PROJECT_ROOT}" rev-parse --path-format=absolute --git-path objects
+    )"
 
     # Mirror the bytes that a later `git add -A` and commit would publish,
-    # including non-ignored untracked files, without touching the real index.
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" git -C "${PROJECT_ROOT}" read-tree HEAD
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" git -C "${PROJECT_ROOT}" add -A -- .
-    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" git -C "${PROJECT_ROOT}" \
+    # including non-ignored untracked files, without touching the real index or
+    # object database.
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" read-tree HEAD
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" add -A -- .
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" \
         checkout-index --all --prefix="${CANDIDATE_TREE}/"
 
     candidate_relative="${CANDIDATE_ROOT#"${PROJECT_ROOT}/"}"
     CANDIDATE_INDEX_CONTAINER="/workspace/${candidate_relative}/index"
+    CANDIDATE_OBJECTS_CONTAINER="/workspace/${candidate_relative}/objects"
 }
 
-trap cleanup_candidate_snapshot EXIT
+trap cleanup EXIT
 
 # ============================================================================
 # Container engine detection
@@ -131,15 +183,63 @@ detect_engine() {
 # ============================================================================
 
 build_ci_image() {
+    local build_context
+    local image_id_file
+
+    # Build from the exact publishable candidate bytes. The alternate index
+    # excludes ignored local files without mutating the implementer's index.
+    prepare_candidate_snapshot
+    mkdir -p "${PROJECT_ROOT}/build"
+    CI_BUILD_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-build.XXXXXX")"
+    build_context="${CI_BUILD_ROOT}/context"
+    image_id_file="${CI_BUILD_ROOT}/image-id"
+    CI_RUN_IMAGE="hephaestus-ci:run-$$-${RANDOM}"
+    mkdir -p "${build_context}/ci"
+
+    # Do not send the checkout as build context. In particular, ignored local
+    # credentials, Git metadata, and unrelated build artifacts must never be
+    # readable by the container engine. Keep this allowlist aligned with COPY
+    # instructions in ci/Containerfile.
+    cp "${CANDIDATE_TREE}/ci/Containerfile" "${build_context}/ci/Containerfile"
+    cp "${CANDIDATE_TREE}/uv.lock" \
+        "${CANDIDATE_TREE}/pyproject.toml" \
+        "${CANDIDATE_TREE}/.pre-commit-config.yaml" \
+        "${CANDIDATE_TREE}/README.md" \
+        "${build_context}/"
+    cp -R "${CANDIDATE_TREE}/hephaestus" "${build_context}/hephaestus"
+
     (
-        cd "${PROJECT_ROOT}"
-        "${CONTAINER_ENGINE}" build -f ci/Containerfile -t "${LOCAL_IMAGE}" .
+        cd "${build_context}"
+        "${CONTAINER_ENGINE}" build \
+            --iidfile "${image_id_file}" \
+            -f ci/Containerfile \
+            -t "${CI_RUN_IMAGE}" \
+            -t "${LOCAL_IMAGE}" \
+            .
     ) || {
         log_error "Failed to build local CI image '${LOCAL_IMAGE}'."
         exit 1
     }
-    CI_IMAGE="${LOCAL_IMAGE}"
+    CI_IMAGE="$(tr -d '\r\n' < "${image_id_file}")"
+    if [[ ! "${CI_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        log_error "Container engine returned an invalid image ID."
+        exit 1
+    fi
     log_info "Built local CI image: ${CI_IMAGE}"
+}
+
+resolve_image_id() {
+    CI_IMAGE="$(
+        "${CONTAINER_ENGINE}" image inspect --format '{{.Id}}' "${LOCAL_IMAGE}"
+    )" || {
+        log_error "Unable to resolve immutable ID for '${LOCAL_IMAGE}'."
+        exit 1
+    }
+    CI_IMAGE="$(printf '%s' "${CI_IMAGE}" | tr -d '\r\n')"
+    if [[ ! "${CI_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        log_error "Container engine returned an invalid image ID."
+        exit 1
+    fi
 }
 
 resolve_image() {
@@ -148,7 +248,7 @@ resolve_image() {
         build_ci_image
     elif "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \
        "${CONTAINER_ENGINE}" images -q "${LOCAL_IMAGE}" 2>/dev/null | grep -q .; then
-        CI_IMAGE="${LOCAL_IMAGE}"
+        resolve_image_id
         log_info "Using local CI image: ${CI_IMAGE}"
     else
         log_warn "Local image '${LOCAL_IMAGE}' not found; building it now."
@@ -227,7 +327,9 @@ run_in_container() {
 run_lint() {
     log_step "Lint (pre-commit + doc-link validation)"
     prepare_candidate_snapshot
-    run_in_container env "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
+    run_in_container env \
+        "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES=${CANDIDATE_OBJECTS_CONTAINER}" \
         uv run pre-commit run --all-files --show-diff-on-failure || return 1
     run_in_container uv run hephaestus-validate-links docs --repo-root . || return 1
 }

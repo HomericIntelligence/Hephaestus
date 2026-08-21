@@ -11,6 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNNER = REPO_ROOT / "scripts" / "run_ci_local.sh"
+FAKE_IMAGE_ID = f"sha256:{'a' * 64}"
 
 
 def _fake_engine(
@@ -40,22 +41,63 @@ def _fake_engine(
             "set -euo pipefail\n"
             'if [[ "$1" == "image" && "$2" == "exists" ]]; then '
             f"exit {0 if image_exists else 1}; fi\n"
+            'if [[ "$1" == "image" && "$2" == "inspect" ]]; then '
+            f'printf "%s\\n" "{FAKE_IMAGE_ID}"; exit 0; fi\n'
+            'if [[ "$1" == "image" && "$2" == "rm" ]]; then exit 0; fi\n'
             'if [[ "$1" == "images" ]]; then exit 0; fi\n'
             'if [[ "$1" == "build" ]]; then\n'
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
+            '  previous=""\n'
+            '  for arg in "$@"; do\n'
+            '    if [[ "$previous" == "--iidfile" ]]; then\n'
+            f'      printf "%s\\n" "{FAKE_IMAGE_ID}" > "$arg"\n'
+            "    fi\n"
+            '    previous="$arg"\n'
+            "  done\n"
+            '  find . -type f -print | sed "s|^|BUILD_CONTEXT_FILE:|" '
+            '>> "$FAKE_ENGINE_LOG"\n'
             "fi\n"
             'if [[ "$1" == "run" ]]; then\n'
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
+            '  workspace_root=""\n'
+            '  candidate_root=""\n'
+            '  candidate_index=""\n'
+            '  candidate_objects=""\n'
             '  for arg in "$@"; do\n'
             '    case "$arg" in\n'
+            "      *:/workspace:Z)\n"
+            '        workspace_root="${arg%:/workspace:Z}"\n'
+            "        ;;\n"
             "      *:/candidate:ro)\n"
             '        candidate_root="${arg%:/candidate:ro}"\n'
-            '        find "$candidate_root" -type f -print >> "$FAKE_ENGINE_LOG"\n'
+            "        ;;\n"
+            "      GIT_INDEX_FILE=/workspace/*)\n"
+            '        candidate_index="${arg#GIT_INDEX_FILE=/workspace/}"\n'
+            "        ;;\n"
+            "      GIT_ALTERNATE_OBJECT_DIRECTORIES=/workspace/*)\n"
+            '        candidate_objects="${arg#GIT_ALTERNATE_OBJECT_DIRECTORIES=/workspace/}"\n'
             "        ;;\n"
             "    esac\n"
-            "  done\n" + failure_clause + license_violation_clause + "fi\n" + "exit 0\n"
+            "  done\n"
+            '  if [[ -n "$candidate_index" ]] && '
+            'GIT_INDEX_FILE="$workspace_root/$candidate_index" '
+            'GIT_ALTERNATE_OBJECT_DIRECTORIES="$workspace_root/$candidate_objects" '
+            '/usr/bin/git -C "$workspace_root" cat-file -e :new_source.py; then\n'
+            '    printf "CANDIDATE_INDEX_BYTES:" >> "$FAKE_ENGINE_LOG"\n'
+            '    GIT_INDEX_FILE="$workspace_root/$candidate_index" '
+            'GIT_ALTERNATE_OBJECT_DIRECTORIES="$workspace_root/$candidate_objects" '
+            '/usr/bin/git -C "$workspace_root" show :new_source.py '
+            '>> "$FAKE_ENGINE_LOG"\n'
+            "  fi\n"
+            '  if [[ "$*" == *"gitleaks"* && -n "$candidate_root" && '
+            '-f "$candidate_root/new_secret_source.txt" ]]; then\n'
+            '    printf "CANDIDATE_SECRET_BYTES:" >> "$FAKE_ENGINE_LOG"\n'
+            '    cat "$candidate_root/new_secret_source.txt" >> "$FAKE_ENGINE_LOG"\n'
+            '    if grep -q "fixture-secret-value" '
+            '"$candidate_root/new_secret_source.txt"; then exit 42; fi\n'
+            "  fi\n" + failure_clause + license_violation_clause + "fi\n" + "exit 0\n"
         ),
         encoding="utf-8",
     )
@@ -138,7 +180,7 @@ def _run_runner(
         capture_output=True,
         check=False,
     )
-    return result, log.read_text(encoding="utf-8")
+    return result, log.read_text(encoding="utf-8") if log.exists() else ""
 
 
 def _candidate_repo(tmp_path: Path) -> Path:
@@ -168,6 +210,25 @@ def _candidate_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _buildable_candidate_repo(tmp_path: Path) -> Path:
+    """Create the minimal publishable source set consumed by the image build."""
+    repo = _candidate_repo(tmp_path)
+    (repo / "ci").mkdir()
+    (repo / "hephaestus").mkdir()
+    for relative_path in (
+        "ci/Containerfile",
+        "uv.lock",
+        "pyproject.toml",
+        ".pre-commit-config.yaml",
+        "README.md",
+        "hephaestus/module.py",
+    ):
+        (repo / relative_path).write_text(f"fixture: {relative_path}\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("ignored.env\n", encoding="utf-8")
+    (repo / "ignored.env").write_text("must not enter build context\n", encoding="utf-8")
+    return repo
+
+
 @pytest.mark.parametrize(
     ("failing_command", "failed_step"),
     [
@@ -194,6 +255,7 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
     assert "All locally executable CI checks passed." in result.stdout
     for command in (
         "GIT_INDEX_FILE=/workspace/build/ci-candidate.",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES=/workspace/build/ci-candidate.",
         "uv run pre-commit run --all-files --show-diff-on-failure",
         "uv run hephaestus-validate-links docs --repo-root .",
         "uv run pytest tests/unit",
@@ -225,33 +287,52 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
 def test_lint_candidate_index_includes_untracked_source(tmp_path: Path) -> None:
     """New source files are visible to every pre-commit hook before publication."""
     repo = _candidate_repo(tmp_path)
-    (repo / "new_source.py").write_text("NEW = True\n", encoding="utf-8")
-
-    result, log = _run_runner(tmp_path, "lint", repo_root=repo)
-
-    assert result.returncode == 0, result.stderr
-    assert "new_source.py" in log
-    assert "GIT_INDEX_FILE=/workspace/build/ci-candidate." in log
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
+    candidate_bytes = "NEW = True\n"
+    (repo / "new_source.py").write_text(candidate_bytes, encoding="utf-8")
+    candidate_blob = subprocess.run(
+        ["git", "hash-object", "--stdin"],
         cwd=repo,
+        input=candidate_bytes,
         text=True,
         capture_output=True,
         check=True,
+    ).stdout.strip()
+    assert (
+        subprocess.run(["git", "cat-file", "-e", candidate_blob], cwd=repo, check=False).returncode
+        != 0
     )
-    assert staged.stdout == ""
+
+    before_index = subprocess.run(
+        ["git", "write-tree"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout
+    result, log = _run_runner(tmp_path, "lint", repo_root=repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "CANDIDATE_INDEX_BYTES:NEW = True" in log
+    assert "GIT_INDEX_FILE=/workspace/build/ci-candidate." in log
+    after_index = subprocess.run(
+        ["git", "write-tree"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout
+    assert after_index == before_index
+    assert (
+        subprocess.run(["git", "cat-file", "-e", candidate_blob], cwd=repo, check=False).returncode
+        != 0
+    )
+    assert not list((repo / "build").glob("ci-candidate.*"))
 
 
 def test_secrets_candidate_tree_includes_untracked_source(tmp_path: Path) -> None:
     """The filesystem scanner receives the exact uncommitted candidate tree."""
     repo = _candidate_repo(tmp_path)
-    (repo / "new_secret_source.txt").write_text("candidate bytes\n", encoding="utf-8")
+    fixture_content = "fixture-secret-value\n"
+    (repo / "new_secret_source.txt").write_text(fixture_content, encoding="utf-8")
 
     result, log = _run_runner(tmp_path, "secrets", repo_root=repo)
 
-    assert result.returncode == 0, result.stderr
-    assert "new_secret_source.txt" in log
+    assert result.returncode != 0
+    assert f"CANDIDATE_SECRET_BYTES:{fixture_content}" in log
     assert "dir --verbose --exit-code=1 ." in log
+    assert not list((repo / "build").glob("ci-candidate.*"))
 
 
 def test_all_fails_for_an_injected_license_violation(tmp_path: Path) -> None:
@@ -300,8 +381,14 @@ def test_missing_ci_image_is_built_automatically(tmp_path: Path) -> None:
     result, log = _run_runner(tmp_path, "unit", image_exists=False)
 
     assert result.returncode == 0, result.stderr
-    assert "build -f ci/Containerfile -t hephaestus-ci:local ." in log
+    assert "build --iidfile" in log
+    assert "-t hephaestus-ci:run-" in log
+    assert "-t hephaestus-ci:local ." in log
+    assert FAKE_IMAGE_ID in log
     assert "uv run pytest tests/unit" in log
+    assert "BUILD_CONTEXT_FILE:./ci/Containerfile" in log
+    assert "BUILD_CONTEXT_FILE:./.git/" not in log
+    assert "BUILD_CONTEXT_FILE:./build/" not in log
 
 
 def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
@@ -309,8 +396,23 @@ def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
     result, log = _run_runner(tmp_path, "unit", rebuild_image=True)
 
     assert result.returncode == 0, result.stderr
-    assert "build -f ci/Containerfile -t hephaestus-ci:local ." in log
+    assert "build --iidfile" in log
+    assert "-t hephaestus-ci:run-" in log
+    assert "-t hephaestus-ci:local ." in log
+    assert FAKE_IMAGE_ID in log
     assert "uv run pytest tests/unit" in log
+
+
+def test_image_build_context_excludes_ignored_checkout_files(tmp_path: Path) -> None:
+    """Only publishable allowlisted files are sent to either container engine."""
+    repo = _buildable_candidate_repo(tmp_path)
+
+    result, log = _run_runner(tmp_path, "unit", image_exists=False, repo_root=repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "BUILD_CONTEXT_FILE:./hephaestus/module.py" in log
+    assert "BUILD_CONTEXT_FILE:./ignored.env" not in log
+    assert "BUILD_CONTEXT_FILE:./.git/" not in log
 
 
 def test_linked_worktree_git_metadata_is_mounted_read_only(tmp_path: Path) -> None:
@@ -331,9 +433,9 @@ def test_linked_worktree_git_metadata_is_mounted_read_only(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("subset", "command"),
     [
-        ("justfile", "hephaestus-ci:local just --evaluate"),
-        ("shellcheck", "hephaestus-ci:local shellcheck --severity=error"),
-        ("shell-tests", "hephaestus-ci:local bats --recursive tests/shell"),
+        ("justfile", f"{FAKE_IMAGE_ID} just --evaluate"),
+        ("shellcheck", f"{FAKE_IMAGE_ID} shellcheck --severity=error"),
+        ("shell-tests", f"{FAKE_IMAGE_ID} bats --recursive tests/shell"),
     ],
 )
 def test_shell_gates_run_in_ci_image(tmp_path: Path, subset: str, command: str) -> None:
@@ -369,3 +471,11 @@ def test_docker_uses_the_invoking_user_for_writable_mounts(tmp_path: Path) -> No
     assert "--env UV_NO_SYNC=1" in log
     assert "--env PYTHONPATH=/workspace" in log
     assert "UV_PROJECT_ENVIRONMENT" not in log
+
+
+def test_podman_maps_the_ci_user_to_the_invoking_user(tmp_path: Path) -> None:
+    """Podman prevents Git dubious-ownership failures on the mounted checkout."""
+    result, log = _run_runner(tmp_path, "shell-tests")
+
+    assert result.returncode == 0, result.stderr
+    assert "--userns=keep-id:uid=1000\\,gid=1000" in log

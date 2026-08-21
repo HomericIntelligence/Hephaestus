@@ -66,15 +66,29 @@ def test_required_context_names_and_aggregate_membership_are_exact() -> None:
 
 
 def test_merge_group_pr_policy_revalidates_the_source_pr_check() -> None:
-    """HEADGREEN groups must inherit a successful source-PR policy result."""
+    """HEADGREEN groups must inherit every source PR's exact policy result."""
     required = _load_workflow(REQUIRED_WORKFLOW)
-    steps = required["jobs"]["pr-policy"]["steps"]
+    policy = required["jobs"]["pr-policy"]
+    assert policy["permissions"]["checks"] == "read"
+    steps = policy["steps"]
     merge_steps = [step for step in steps if step.get("if") == "github.event_name == 'merge_group'"]
 
     assert len(merge_steps) == 1
     run = merge_steps[0]["run"]
-    assert "pulls/${PR_NUMBER}" in run
+    assert "mergeQueueEntry" in run
+    assert "entries(first:100, after:$endCursor)" in run
+    assert "after:$endCursor" in run
+    assert "pageInfo { hasNextPage endCursor }" in run
+    assert "totalCount" in run
+    assert "$target.headRefOid == $target_head" in run
+    assert "$target_entry.headCommit.oid == $group_head" in run
+    assert "$members[.].baseCommit.oid == $members[. - 1].headCommit.oid" in run
+    assert "$counts[0] == ($entries | length)" in run
+    assert "queue-members.tsv" in run
+    assert "while IFS=$'\\t' read -r source_pr source_head" in run
     assert "commits/${source_head}/check-runs" in run
+    assert run.count("--paginate --slurp") == 2
+    assert "total_count" in run
     assert 'select(.name == "pr-policy")' in run
     assert "select(.app.id == 15368)" in run
     assert '.status == "completed"' in run
@@ -82,6 +96,8 @@ def test_merge_group_pr_policy_revalidates_the_source_pr_check() -> None:
     assert "($policy | length) > 0" in run
     assert "all($policy[];" in run
     assert "source_head" in run
+    assert 'queued_head="${BASH_REMATCH[2]}"' in run
+    assert "MERGE_GROUP_SHA" in run
     assert 'echo "PR policy applies' not in run
 
 

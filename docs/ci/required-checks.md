@@ -23,7 +23,11 @@ or validates authorization.
 Before publishing a Hephaestus implementation, the queue runs the fixed command
 `env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
 CI image prevents a prior checkout's dependency environment from weakening the
-gate. The command runs once after each implementation or test-fix turn and
+gate. Each invocation builds from an explicit allowlisted context, captures its
+own immutable image ID, and runs every container step against that ID; parallel
+workers therefore cannot retag one another's dependencies, and ignored local
+credentials, Git metadata, and unrelated artifacts never enter the build
+context. The command runs once after each implementation or test-fix turn and
 immediately before commit, push, and PR creation. A passing run advances
 directly to publication; a failing run returns the item to the implementer and
 must pass on the next attempt before publication. For linked implementation
@@ -84,10 +88,12 @@ the aggregate `required-checks-gate`, every direct ruleset context, and the two
 classic matrix-test contexts. A separate smoke workflow cannot replace those
 required names and is not part of the queue contract. Because the live queue's
 `HEADGREEN` grouping strategy evaluates the synthetic group head, the
-merge-group `pr-policy` job additionally resolves the source PR encoded in the
-queue ref and requires a successful GitHub-Actions-owned `pr-policy` check on
-that PR's exact current head SHA. Missing, malformed, stale, pending, or failed
-source-PR evidence fails closed.
+merge-group `pr-policy` job binds the queue ref to the live GraphQL merge-queue
+entry and exact synthetic group head, enumerates every source PR represented by
+that head, and requires a successful GitHub-Actions-owned `pr-policy` check on
+each PR's exact current head SHA. Both queue entries and check runs are fully
+paginated and cardinality-checked. Missing, malformed, stale, pending, failed,
+or incomplete source-PR evidence fails closed.
 
 ## Maintenance
 

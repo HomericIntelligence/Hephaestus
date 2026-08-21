@@ -295,8 +295,9 @@ jobs:
     #   3. Every branch commit carries a DCO Signed-off-by trailer.
     # Push events are skipped because there is no PR to inspect. On HEADGREEN
     # merge queues, the synthetic group head alone is checked, so merge-group
-    # events fail closed unless the named source PR's current head has a
-    # successful GitHub-Actions-owned pr-policy check.
+    # events fail closed unless every source PR represented by the exact
+    # synthetic group head has a successful GitHub-Actions-owned pr-policy
+    # check on its current head.
     #
     # This gate intentionally has NO `needs:` — it runs immediately so the
     # policy checks report without depending on another job's timing.
@@ -307,18 +308,22 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      checks: read
       contents: read
       pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: Revalidate the source PR policy result
+      - name: Revalidate source PR policy results
         if: github.event_name == 'merge_group'
         env:
           BASE_REF: ${{ github.event.merge_group.base_ref }}
           HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
           REPOSITORY: ${{ github.repository }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           base_branch="${BASE_REF#refs/heads/}"
@@ -334,36 +339,106 @@ jobs:
             exit 1
           fi
           PR_NUMBER="${BASH_REMATCH[1]}"
+          queued_head="${BASH_REMATCH[2]}"
 
-          gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" > source-pr.json
-          source_head="$(
-            jq -er --argjson number "$PR_NUMBER" --arg base "$base_branch" '
-              select(
-                .number == $number and
-                .state == "open" and
-                .base.ref == $base
+          query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                number
+                state
+                headRefOid
+                mergeQueueEntry {
+                  position
+                  headCommit { oid }
+                  mergeQueue {
+                    entries(first:100, after:$endCursor) {
+                      totalCount
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        position
+                        baseCommit { oid }
+                        headCommit { oid }
+                        pullRequest { number state headRefOid }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }'
+          gh api graphql --paginate --slurp -f query="$query" \
+            -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+            > queue.json
+          jq -er \
+            --argjson target_number "$PR_NUMBER" \
+            --arg target_head "$queued_head" \
+            --arg group_head "$MERGE_GROUP_SHA" '
+            . as $pages
+            | $pages[0].data.repository.pullRequest as $target
+            | select(
+                $target.number == $target_number and
+                $target.state == "OPEN" and
+                $target.headRefOid == $target_head
               )
-              | .head.sha
-              | select(test("^[0-9a-f]{40}$"))
-            ' source-pr.json
-          )"
+            | $target.mergeQueueEntry as $target_entry
+            | ([
+                $pages[].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.totalCount
+              ] | unique) as $counts
+            | ([
+                $pages[].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.nodes[]
+              ] | sort_by(.position)) as $entries
+            | select($target_entry.headCommit.oid == $group_head)
+            | select(($counts | length) == 1 and $counts[0] == ($entries | length))
+            | ([
+                $entries[]
+                | select(.position <= $target_entry.position)
+              ] | sort_by(.position)) as $members
+            | select(($members | length) > 0)
+            | select(
+                $members[-1].pullRequest.number == $target_number and
+                $members[-1].headCommit.oid == $group_head
+              )
+            | select(all($members[];
+                .pullRequest != null and
+                .pullRequest.state == "OPEN" and
+                (.pullRequest.headRefOid | test("^[0-9a-f]{40}$"))
+              ))
+            | select(all(range(1; $members | length);
+                $members[.].baseCommit.oid == $members[. - 1].headCommit.oid
+              ))
+            | $members[]
+            | [.pullRequest.number, .pullRequest.headRefOid]
+            | @tsv
+          ' queue.json > queue-members.tsv
+          test -s queue-members.tsv
 
-          gh api \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${REPOSITORY}/commits/${source_head}/check-runs?check_name=pr-policy&filter=latest&per_page=100" \
-            > source-checks.json
-          jq -e --arg head "$source_head" '
-            [
-              .check_runs[]
-              | select(.name == "pr-policy")
-              | select(.app.id == 15368)
-              | select(.head_sha == $head)
-            ] as $policy
-            | ($policy | length) > 0 and
-              all($policy[];
-                .status == "completed" and .conclusion == "success"
-              )
-          ' source-checks.json > /dev/null
+          while IFS=$'\t' read -r source_pr source_head; do
+            checks_file="source-checks-${source_pr}.json"
+            gh api --paginate --slurp \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${REPOSITORY}/commits/${source_head}/check-runs?check_name=pr-policy&filter=latest&per_page=100" \
+              > "$checks_file"
+            jq -e --arg head "$source_head" '
+              select(type == "array" and length > 0)
+              | ([.[].total_count] | unique) as $counts
+              | [.[].check_runs[]] as $runs
+              | [
+                  $runs[]
+                  | select(.name == "pr-policy")
+                  | select(.app.id == 15368)
+                  | select(.head_sha == $head)
+                ] as $policy
+              | ($counts | length) == 1 and
+                $counts[0] == ($runs | length) and
+                ($policy | length) == ($runs | length) and
+                ($policy | length) > 0 and
+                all($policy[];
+                  .status == "completed" and .conclusion == "success"
+                )
+            ' "$checks_file" > /dev/null
+          done < queue-members.tsv
 
       # The policy validator must come from the trusted base revision, never
       # from the PR head. The base checkout also provides the bootstrap path for

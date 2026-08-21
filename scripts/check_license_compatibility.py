@@ -22,7 +22,7 @@ FAILS LOUDLY (never silently passes):
 Stdlib only (importlib.metadata + packaging, both already runtime deps); runs
 under plain `python3` once the package + extras are pip-installed.
 
-Advisory on main/schedule (exit 0), blocking on pull_request (exit 1).
+Advisory on main/schedule (exit 0), blocking on pull_request/merge_group (exit 1).
 
 Usage:
     python3 scripts/check_license_compatibility.py
