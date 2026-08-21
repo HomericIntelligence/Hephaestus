@@ -383,6 +383,43 @@ class TestPlanningStageEnter:
         assert outcome is not None and outcome.disposition is Disposition.ADVANCE
         assert item.attempts.get("plan", 0) == 0
 
+    def test_finalized_plan_body_drift_during_normalization_cannot_advance(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Fresh body/editor rebinding defeats labels normalized for stale authority."""
+
+        class BodyDriftsDuringNormalizationGitHub(FakeStageGitHub):
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                super().edit_labels(issue_number, add=add, remove=remove)
+                self._issue_body = "Human replacement requirements"
+                self._issue_body_owned_by_viewer = False
+
+        github = BodyDriftsDuringNormalizationGitHub(
+            labels=[STATE_PLAN_NO_GO],
+            issue_body=_finalized_body(),
+        )
+        item = make_work_item(issue=127)
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(github=github, budget_fn=lambda _name: 2),
+        )
+
+        assert outcome is not None and outcome.disposition is Disposition.RETRY
+        assert item.attempts["plan"] == 1
+        assert "finalized-plan-reused" not in item.payload.get("summary_actions", [])
+
+        restarted = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert restarted is None
+        assert item.payload["athena_finalized_plan_invalidated"] is True
+
     @pytest.mark.parametrize(
         ("body", "owned_by_viewer"),
         [
@@ -1734,6 +1771,65 @@ class TestPlanningStageStep:
         assert outcome is not None and outcome.disposition is Disposition.RETRY
         assert github.labels[124] == {"epic"}
         assert store.non_code_intent_for(lease, 124) is None
+
+    def test_retired_intent_resumes_after_skip_removal_before_tombstone_cleanup(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A second cleanup crash window resumes without repeating label mutation."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [126])
+        store.record_non_code_intent(
+            lease,
+            issue_number=126,
+            reason="independently confirmed tracker",
+            evidence_digest=_recovery_binding("Old tracker body", issue=126),
+            repository_revision=_RECOVERY_REVISION,
+            extra_labels=("epic",),
+        )
+        active = store.non_code_intent_for(lease, 126)
+        assert active is not None
+        store.retire_non_code_intent(lease, active)
+        retired = store.non_code_intent_for(lease, 126)
+        assert retired is not None and retired.retired
+        github = FakeStageGitHub(
+            labels=["epic"],
+            issue_body="Implement the new worker behavior.",
+        )
+        ctx = make_ctx(
+            github=github,
+            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+        )
+        item = make_work_item(
+            issue=126,
+            payload={
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": retired.reason,
+                    "extra_labels": list(retired.extra_labels),
+                    "evidence_digest": retired.evidence_digest,
+                    "repository_revision": retired.repository_revision,
+                    "explanation": retired.explanation,
+                    "retired": True,
+                },
+            },
+        )
+
+        cleanup = PlanningStage().on_enter(item, ctx)
+
+        assert cleanup is not None and cleanup.disposition is Disposition.RETRY
+        assert github.labels[126] == {"epic"}
+        assert github.mutation_log == []
+        assert store.non_code_intent_for(lease, 126) is None
+
+        restarted = make_work_item(issue=126, payload={WAVE_LEASE_PAYLOAD: lease})
+        entry = PlanningStage().on_enter(restarted, ctx)
+
+        assert entry is None
+        assert restarted.payload["requirements_recovery_required"] is True
+        assert github.mutation_log == []
 
     def test_retired_intent_preserves_nonmatching_operator_skip(
         self,

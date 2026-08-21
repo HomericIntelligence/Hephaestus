@@ -56,9 +56,9 @@ Optimization"), file paths are repo-relative.
 - **Durable journals.** GitHub labels, comments, and PR state are the normal
  crash-resistant truth. `LearningJournalStore` records auxiliary intent
  claims and terminal results. The repository-scoped issue-wave checkpoint
- records only immutable selected issue identifiers, terminal outcomes, merge
- receipts, and verified main revisions. Stages may not persist any other
- state. Restart =
+ records only immutable selected issue identifiers, pending or retired
+ reviewed non-code intents, terminal outcomes, merge receipts, and verified
+ main revisions. Stages may not persist any other state. Restart =
 re-run: queue reconstruction reads the journal
 ([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
 [`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
@@ -612,10 +612,10 @@ absolute operator state:
 
 Every **stage-issued** `state:skip` write uses the label as its durable
 authority and emits the reason to structured run logs. It does not add an
-issue comment. Epic tagging in
-[`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py) remains
-the sole sanctioned seeding write and adds only the skip label before
-excluding the epic from the rest of the pipeline.
+issue comment. Both seeding paths are read-only for tracker and epic
+candidates. Only [`planning`](../hephaestus/automation/pipeline/stages/planning.py)
+may add the skip and supplemental semantic labels after two independent model
+decisions and exact label readback.
 
 Label colors per [`STATE_LABEL_SPECS`](../hephaestus/automation/state_labels.py).
 Provisioning script

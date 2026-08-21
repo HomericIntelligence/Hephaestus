@@ -320,6 +320,19 @@ def _reenter_planning(item: WorkItem) -> None:
     item.payload["_enter_pending"] = True
 
 
+def _try_rebind_finalized_authority(
+    item: WorkItem,
+    ctx: StageContext,
+    snapshot: object,
+    reason: str,
+) -> tuple[bool, str]:
+    """Return a fail-closed finalized-authority rebind and diagnostic."""
+    try:
+        return _finalized_plan_authority_is_current(item, ctx, snapshot), reason
+    except RuntimeError as exc:
+        return False, f"{reason}; finalized authority rebind failed: {exc}"
+
+
 def _retry_incomplete_requirements_snapshot(
     item: WorkItem,
     ctx: StageContext,
@@ -339,12 +352,19 @@ def _retry_incomplete_requirements_snapshot(
         if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
             return issue_outcome
         live_labels = _issue_snapshot_labels(live)
-        if preserve_finalized_authority and _finalized_plan_state_is_current(live_labels):
-            record_summary_action(item, "finalized-plan-reused")
-            return StageOutcome(
-                Disposition.ADVANCE,
-                "Athena finalized plan normalization confirmed by retry readback",
+        if preserve_finalized_authority:
+            finalized_authority_current, reason = _try_rebind_finalized_authority(
+                item,
+                ctx,
+                live,
+                reason,
             )
+            if finalized_authority_current:
+                record_summary_action(item, "finalized-plan-reused")
+                return StageOutcome(
+                    Disposition.ADVANCE,
+                    "Athena finalized plan normalization confirmed by retry readback",
+                )
         if is_skipped(live_labels):
             return StageOutcome(Disposition.SKIP, "state:skip")
         if honor_blocked and STATE_PLAN_BLOCKED in live_labels:
@@ -535,6 +555,67 @@ def _finalized_plan_state_is_current(labels: Sequence[str]) -> bool:
         and ATHENA_FINALIZED_PLAN_LABEL in label_set
         and STATE_SKIP not in label_set
         and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+    )
+
+
+def _finalized_plan_snapshot_matches_bound_authority(
+    item: WorkItem,
+    snapshot: object,
+    *,
+    require_current_labels: bool,
+) -> bool:
+    """Match one fresh issue snapshot to the authenticated finalized body."""
+    if item.issue is None or not isinstance(snapshot, dict):
+        return False
+    body = snapshot.get("body")
+    body_digest = snapshot.get("bodyDigest")
+    expected_body = item.payload.get("issue_body")
+    expected_body_digest = item.payload.get("issue_body_digest")
+    expected_final_digest = item.payload.get("athena_finalized_plan_digest")
+    finalized = verified_finalized_plan(body) if isinstance(body, str) else None
+    if not (
+        snapshot.get("number") == item.issue
+        and isinstance(snapshot.get("state"), str)
+        and str(snapshot["state"]).upper() == "OPEN"
+        and isinstance(expected_body, str)
+        and body == expected_body
+        and isinstance(expected_body_digest, str)
+        and body_digest == expected_body_digest
+        and isinstance(expected_final_digest, str)
+        and finalized is not None
+        and finalized.final_body_digest == expected_final_digest
+    ):
+        return False
+    return not require_current_labels or _finalized_plan_state_is_current(
+        _issue_snapshot_labels(snapshot)
+    )
+
+
+def _finalized_plan_authority_is_current(
+    item: WorkItem,
+    ctx: StageContext,
+    initial_snapshot: object,
+    *,
+    require_current_labels: bool = True,
+) -> bool:
+    """Rebind body, seal, editor, and labels immediately before advancement."""
+    if not _finalized_plan_snapshot_matches_bound_authority(
+        item,
+        initial_snapshot,
+        require_current_labels=require_current_labels,
+    ):
+        return False
+    assert item.issue is not None  # noqa: S101 - snapshot matching proves this
+    if not ctx.github.issue_body_edited_by_viewer(item.issue):
+        return False
+    # Editor authentication and issue reads are separate GitHub operations.
+    # Repeat the complete snapshot after the editor query so body drift during
+    # that interval cannot authorize stale finalized-plan labels.
+    confirmed = ctx.github.gh_issue_json(item.issue)
+    return _finalized_plan_snapshot_matches_bound_authority(
+        item,
+        confirmed,
+        require_current_labels=require_current_labels,
     )
 
 
@@ -1731,6 +1812,29 @@ class PlanningStage(Stage):
                         honor_blocked=False,
                         preserve_finalized_authority=True,
                     )
+            try:
+                finalized_authority_current = _finalized_plan_authority_is_current(
+                    item,
+                    ctx,
+                    ctx.github.gh_issue_json(item.issue),
+                    require_current_labels=not ctx.dry_run,
+                )
+            except RuntimeError as exc:
+                return _retry_incomplete_requirements_snapshot(
+                    item,
+                    ctx,
+                    f"finalized authority rebind failed: {exc}",
+                    honor_blocked=False,
+                    preserve_finalized_authority=True,
+                )
+            if not finalized_authority_current:
+                return _retry_incomplete_requirements_snapshot(
+                    item,
+                    ctx,
+                    "finalized body, editor, or labels drifted during normalization",
+                    honor_blocked=False,
+                    preserve_finalized_authority=True,
+                )
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")

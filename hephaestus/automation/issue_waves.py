@@ -263,13 +263,9 @@ def _require_reviewed_non_code_skip(
     repository: str,
 ) -> None:
     """Require the durable skip label that proves a reviewed non-code outcome."""
-    if (
-        not (
-            _non_code_intent_matches_facts(intent, facts, repository)
-            and _non_code_intent_is_applied(intent, facts)
-        )
-        if intent is not None
-        else facts is None or STATE_SKIP not in set(getattr(facts, "labels", set()))
+    if intent is None or not (
+        _non_code_intent_matches_facts(intent, facts, repository)
+        and _non_code_intent_is_applied(intent, facts)
     ):
         raise IssueWaveBlockedError(f"issue #{outcome.issue_number} {drift}")
 
@@ -373,6 +369,15 @@ class WaveRecord:
             set(self.issue_numbers)
         ):
             raise IssueWaveValidationError("wave non-code intents do not match the selection")
+        intents_by_issue = {intent.issue_number: intent for intent in self.non_code_intents}
+        for outcome in self.outcomes:
+            if not outcome.non_code:
+                continue
+            intent = intents_by_issue.get(outcome.issue_number)
+            if intent is None or intent.retired or intent.reason != outcome.reason:
+                raise IssueWaveValidationError(
+                    "wave non-code outcome requires one matching active intent"
+                )
         if self.verified_main_sha is not None and not is_full_commit_sha(self.verified_main_sha):
             raise IssueWaveValidationError("wave verified_main_sha is invalid")
 
@@ -1426,11 +1431,9 @@ def wave_entry_from_facts(
     outcome = store.outcome_for(lease, facts.number)
     if outcome is not None and outcome.non_code:
         intent = store.non_code_intent_for(lease, facts.number)
-        exact_skip = (
+        exact_skip = intent is not None and (
             _non_code_intent_matches_facts(intent, facts, repo)
             and _non_code_intent_is_applied(intent, facts)
-            if intent is not None
-            else "state:skip" in set(facts.labels)
         )
         if exact_skip:
             return replace(

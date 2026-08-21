@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,6 +262,9 @@ def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
         WaveRecord(0, 1, (1,), BASE, "nonce", outcomes=(outcome, outcome))
     with pytest.raises(IssueWaveValidationError):
         WaveRecord(0, 1, (1,), BASE, "nonce", merge_receipts=(receipt, receipt))
+    orphaned_non_code = WaveIssueOutcome(1, True, "reviewed tracker", non_code=True)
+    with pytest.raises(IssueWaveValidationError, match="matching active intent"):
+        WaveRecord(0, 1, (1,), BASE, "nonce", outcomes=(orphaned_non_code,))
     with pytest.raises(IssueWaveValidationError):
         WaveRecord(0, 1, (1,), BASE, "nonce", verified_main_sha="bad")
     record = WaveRecord(0, 1, (1,), BASE, "nonce")
@@ -298,6 +302,36 @@ def test_wave_store_rejects_bad_selectors_and_malformed_checkpoint(tmp_path: Pat
     )
     with pytest.raises(IssueWaveValidationError, match="waves"):
         store.load()
+
+
+def test_non_code_intent_retired_field_is_backward_compatible_and_strict(
+    tmp_path: Path,
+) -> None:
+    """Legacy omission stays active while malformed retirement fails closed."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission(BASE, 1), [19])
+    store.record_non_code_intent(
+        lease,
+        issue_number=19,
+        reason="independently confirmed tracker",
+        evidence_digest=evidence_digest("hephaestus", 19, BASE, "A task", ""),
+        repository_revision=BASE,
+        extra_labels=("epic",),
+    )
+    checkpoint_path = tmp_path / DEFAULT_STATE_DIR / "issue-wave-checkpoint.json"
+    raw = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    intent = raw["waves"][0]["non_code_intents"][0]
+    intent.pop("retired")
+    checkpoint_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    legacy = IssueWaveStore(tmp_path, "acme", "hephaestus").non_code_intent_for(lease, 19)
+
+    assert legacy is not None and not legacy.retired
+
+    intent["retired"] = 1
+    checkpoint_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(IssueWaveValidationError, match="retired must be boolean"):
+        IssueWaveStore(tmp_path, "acme", "hephaestus").load()
 
 
 def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None:
