@@ -1261,7 +1261,8 @@ class TestWorkerPoolSubmitComplete:
         pi_smoke_logs_entry = f'(subpath "{pi_smoke_logs.resolve()}")'
         assert '(import "system.sb")' in profile
         assert "(deny network*)" in profile
-        assert "(allow signal (target children))" in profile
+        assert "(allow signal (target same-sandbox))" in profile
+        assert "(allow signal)" not in profile
         assert '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))' in profile
         assert f'(subpath "{Path("/bin").resolve()}")' in profile
         assert f'  (literal "{Path("/tmp").resolve()}")' not in profile

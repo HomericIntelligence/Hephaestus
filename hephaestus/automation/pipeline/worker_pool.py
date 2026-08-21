@@ -579,9 +579,10 @@ def _host_verification_profile(
             # writes only to the disposable scratch directory below.
             '(import "system.sb")',
             "(allow process*)",
-            # Tests may stop only child processes they created; no signals to
-            # unrelated host processes are allowed.
-            "(allow signal (target children))",
+            # Every process in this one-off sandbox instance belongs to the
+            # verifier command. Permit process-group cleanup across descendants
+            # without granting signals to unrelated host processes.
+            "(allow signal (target same-sandbox))",
             # Python multiprocessing names its spawned semaphores ``/mp-``.
             # Limit cross-process synchronization to that private namespace.
             '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))',
