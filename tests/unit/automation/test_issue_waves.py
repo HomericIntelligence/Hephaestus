@@ -441,6 +441,54 @@ def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: 
         )
 
 
+def test_retired_non_code_intent_reopens_only_for_cleanup(tmp_path: Path) -> None:
+    """A revoked intent survives restart as cleanup provenance, never skip authority."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission(BASE, 1), [21])
+    store.record_non_code_intent(
+        lease,
+        issue_number=21,
+        reason="independently confirmed tracker",
+        evidence_digest=evidence_digest("hephaestus", 21, BASE, "A task", "Old body"),
+        repository_revision=BASE,
+        extra_labels=("epic",),
+    )
+    active = store.non_code_intent_for(lease, 21)
+    assert active is not None
+
+    store.retire_non_code_intent(lease, active)
+    store.retire_non_code_intent(lease, active)
+
+    reopened = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    retired = reopened.non_code_intent_for(lease, 21)
+    assert retired is not None and retired.retired
+    facts = SimpleNamespace(
+        number=21,
+        title="A task",
+        body="Implement the worker.",
+        labels={"state:skip", "epic"},
+        is_epic=True,
+        pr_number=None,
+        pr_is_merged=False,
+        issue_is_closed=False,
+    )
+
+    entry = wave_entry_from_facts(
+        lease,
+        facts,
+        SeedEntry("issue", 21, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+
+    assert entry.stage is StageName.PLANNING
+    assert entry.non_code and entry.non_code_retired
+    reopened.complete_non_code_intent_retirement(lease, retired)
+    reopened.complete_non_code_intent_retirement(lease, retired)
+    assert reopened.non_code_intent_for(lease, 21) is None
+
+
 def test_wave_entry_reconciles_post_seal_drift_without_mutation(tmp_path: Path) -> None:
     """A sealed issue becomes terminally failed unless its receipt proves merge."""
     entry = SeedEntry("issue", 19, StageName.PLANNING, "pending")

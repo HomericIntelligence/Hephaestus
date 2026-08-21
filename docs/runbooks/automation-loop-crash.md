@@ -103,7 +103,10 @@ automatically resumes explanation/label repair or terminal recording after a
 crash only while its reviewed title, body, and repository-revision evidence
 still matches. If the issue changed, the loop re-enters normal semantic review;
 an authenticated Athena-finalized body advances as completed planning instead
-of inheriting the stale skip decision:
+of inheriting the stale skip decision. The checkpoint retains a retired intent
+until any exact loop-owned `state:skip` is removed and freshly confirmed, so a
+second crash resumes cleanup. An unrelated operator-applied `state:skip` has no
+matching retired intent and remains authoritative:
 
 ```bash
 hephaestus-automation-loop --repos <REPO> --issue-limit 1

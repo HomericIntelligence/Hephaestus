@@ -161,6 +161,7 @@ class SourceCoordinator(_CoordinatorHost):
                                 "evidence_digest": entry.non_code_evidence_digest,
                                 "repository_revision": entry.non_code_repository_revision,
                                 "explanation": entry.non_code_explanation,
+                                "retired": entry.non_code_retired,
                             }
                 if source.base_main_sha is not None:
                     new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
@@ -493,6 +494,7 @@ class SourceCoordinator(_CoordinatorHost):
                         "evidence_digest": entry.non_code_evidence_digest,
                         "repository_revision": entry.non_code_repository_revision,
                         "explanation": entry.non_code_explanation,
+                        "retired": entry.non_code_retired,
                     }
         if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
             repo = (self.config.org, item.repo)

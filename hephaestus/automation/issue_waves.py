@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import stat
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -204,6 +204,7 @@ class WaveNonCodeIntent:
     repository_revision: str
     extra_labels: tuple[str, ...] = ()
     explanation: str = ""
+    retired: bool = False
 
     def __post_init__(self) -> None:
         """Validate the reviewed semantic-disposition intent."""
@@ -228,6 +229,8 @@ class WaveNonCodeIntent:
             raise IssueWaveValidationError("non-code intent extra labels contain duplicates")
         if not isinstance(self.explanation, str):
             raise IssueWaveValidationError("non-code intent explanation must be text")
+        if not isinstance(self.retired, bool):
+            raise IssueWaveValidationError("non-code intent retired must be boolean")
 
 
 def _non_code_intent_matches_facts(
@@ -236,7 +239,7 @@ def _non_code_intent_matches_facts(
     repository: str,
 ) -> bool:
     """Return whether fresh issue text matches the independently reviewed evidence."""
-    if facts is None:
+    if intent.retired or facts is None:
         return False
     title = getattr(facts, "title", None)
     body = getattr(facts, "body", None)
@@ -271,16 +274,25 @@ def _require_reviewed_non_code_skip(
         raise IssueWaveBlockedError(f"issue #{outcome.issue_number} {drift}")
 
 
-def _non_code_intent_is_applied(intent: WaveNonCodeIntent, facts: Any) -> bool:
-    """Return whether fresh facts exactly confirm a pending non-code transition."""
-    labels = set(getattr(facts, "labels", set())) if facts is not None else set()
+def non_code_intent_skip_is_applied(
+    intent: WaveNonCodeIntent,
+    labels: Collection[str],
+) -> bool:
+    """Return whether labels confirm the skip written for one durable intent."""
+    label_set = set(labels)
     return (
-        STATE_SKIP in labels
-        and set(intent.extra_labels).issubset(labels)
-        and not labels.intersection(ALL_STATE_LABELS)
-        and not labels.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
-        and ATHENA_FINALIZED_PLAN_LABEL not in labels
+        STATE_SKIP in label_set
+        and set(intent.extra_labels).issubset(label_set)
+        and not label_set.intersection(ALL_STATE_LABELS)
+        and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+        and ATHENA_FINALIZED_PLAN_LABEL not in label_set
     )
+
+
+def _non_code_intent_is_applied(intent: WaveNonCodeIntent, facts: Any) -> bool:
+    """Return whether fresh facts exactly confirm an active non-code transition."""
+    labels = set(getattr(facts, "labels", set())) if facts is not None else set()
+    return not intent.retired and non_code_intent_skip_is_applied(intent, labels)
 
 
 def _validate_verified_outcome_facts(
@@ -472,6 +484,7 @@ def _non_code_intent_to_json(intent: WaveNonCodeIntent) -> dict[str, Any]:
         "repository_revision": intent.repository_revision,
         "extra_labels": list(intent.extra_labels),
         "explanation": intent.explanation,
+        "retired": intent.retired,
     }
 
 
@@ -552,6 +565,7 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
                 repository_revision=cast(str, item.get("repository_revision")),
                 extra_labels=tuple(item.get("extra_labels", ())),
                 explanation=cast(str, item.get("explanation", "")),
+                retired=cast(bool, item.get("retired", False)),
             )
             for item in intents_raw
             if isinstance(item, dict)
@@ -1023,6 +1037,99 @@ class IssueWaveStore:
             )
             return lease
 
+    def retire_non_code_intent(
+        self,
+        lease: WaveLease,
+        intent: WaveNonCodeIntent,
+    ) -> WaveLease:
+        """Durably revoke one drifted intent while retaining cleanup provenance."""
+        if intent.retired:
+            expected_active = replace(intent, retired=False)
+            retired = intent
+        else:
+            expected_active = intent
+            retired = replace(intent, retired=True)
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveConflictError("cannot retire an intent without a checkpoint")
+            record = self._current_record(checkpoint, lease)
+            existing = next(
+                (
+                    item
+                    for item in record.non_code_intents
+                    if item.issue_number == intent.issue_number
+                ),
+                None,
+            )
+            if existing == retired:
+                return lease
+            if existing != expected_active:
+                raise IssueWaveConflictError(
+                    "non-code intent changed before its retirement was recorded"
+                )
+            if any(
+                outcome.issue_number == intent.issue_number and outcome.passed
+                for outcome in record.outcomes
+            ):
+                raise IssueWaveConflictError("a completed non-code intent cannot be retired")
+            intents = tuple(
+                retired if item.issue_number == intent.issue_number else item
+                for item in record.non_code_intents
+            )
+            updated = replace(record, non_code_intents=intents)
+            waves = (
+                *checkpoint.waves[: record.wave_index],
+                updated,
+                *checkpoint.waves[record.wave_index + 1 :],
+            )
+            self._write_unlocked(
+                replace(checkpoint, generation=checkpoint.generation + 1, waves=waves)
+            )
+            return lease
+
+    def complete_non_code_intent_retirement(
+        self,
+        lease: WaveLease,
+        intent: WaveNonCodeIntent,
+    ) -> WaveLease:
+        """Remove retired cleanup provenance after exact GitHub readback."""
+        expected = intent if intent.retired else replace(intent, retired=True)
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveConflictError(
+                    "cannot complete intent retirement without a checkpoint"
+                )
+            record = self._current_record(checkpoint, lease)
+            existing = next(
+                (
+                    item
+                    for item in record.non_code_intents
+                    if item.issue_number == intent.issue_number
+                ),
+                None,
+            )
+            if existing is None:
+                return lease
+            if existing != expected:
+                raise IssueWaveConflictError(
+                    "non-code intent changed before its retirement completed"
+                )
+            intents = tuple(
+                item for item in record.non_code_intents if item.issue_number != intent.issue_number
+            )
+            updated = replace(record, non_code_intents=intents)
+            waves = (
+                *checkpoint.waves[: record.wave_index],
+                updated,
+                *checkpoint.waves[record.wave_index + 1 :],
+            )
+            self._write_unlocked(
+                replace(checkpoint, generation=checkpoint.generation + 1, waves=waves)
+            )
+            return lease
+
     def record_merge_receipt(
         self,
         lease: WaveLease,
@@ -1080,7 +1187,7 @@ class IssueWaveStore:
                 (item for item in record.non_code_intents if item.issue_number == issue_number),
                 None,
             )
-            if non_code and (intent is None or intent.reason != reason):
+            if non_code and (intent is None or intent.retired or intent.reason != reason):
                 raise IssueWaveBlockedError(
                     f"cannot record non-code outcome for #{issue_number} without matching intent"
                 )
@@ -1341,6 +1448,19 @@ def wave_entry_from_facts(
         )
     intent = store.non_code_intent_for(lease, facts.number)
     if intent is not None:
+        if intent.retired:
+            return replace(
+                entry,
+                stage=StageName.PLANNING,
+                reason="retired non-code intent requires cleanup",
+                passed=True,
+                non_code=True,
+                non_code_labels=intent.extra_labels,
+                non_code_evidence_digest=intent.evidence_digest,
+                non_code_repository_revision=intent.repository_revision,
+                non_code_explanation=intent.explanation,
+                non_code_retired=True,
+            )
         evidence_matches = _non_code_intent_matches_facts(intent, facts, repo)
         if evidence_matches and _non_code_intent_is_applied(intent, facts):
             return replace(
@@ -1403,4 +1523,5 @@ __all__ = [
     "WaveNonCodeIntent",
     "WaveRecord",
     "is_full_commit_sha",
+    "non_code_intent_skip_is_applied",
 ]

@@ -30,7 +30,12 @@ obsolete disposition, retains the actor-owned explanation. A restart first
 revalidates that evidence, restores the explanation, repairs the label, and
 records the terminal outcome after exact readback. Evidence drift returns to
 normal semantic or finalized-plan authentication instead of replaying the stale
-skip decision.
+skip decision. Before touching GitHub, the store durably retires the stale
+intent while retaining it as cleanup provenance. Only an exact skip-label set
+matching that retired intent may be removed; readback is confirmed before the
+retired intent is deleted. A crash at either boundary resumes cleanup, while a
+`state:skip` without matching durable provenance remains an absolute operator
+override.
 
 Wave admission is performed after synchronized checkout and before label setup.
 The only selectors are 1, 2, 4, 8, and all eligible issues. A later wave needs

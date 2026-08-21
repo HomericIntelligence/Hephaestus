@@ -239,7 +239,6 @@ class TestPlanningStageEnter:
                         STATE_IMPLEMENTATION_NO_GO,
                         STATE_IMPLEMENTATION_GO,
                         STATE_PLAN_BLOCKED,
-                        STATE_SKIP,
                     ),
                 ),
             )
@@ -263,6 +262,25 @@ class TestPlanningStageEnter:
         assert outcome.disposition is Disposition.ADVANCE
         assert github.labels[108] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
         assert github.comments.get(108, []) == []
+
+    def test_verified_finalized_plan_preserves_unrelated_operator_skip(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Finalization cannot revive an issue without skip-transition provenance."""
+        github = FakeStageGitHub(
+            labels=[STATE_SKIP],
+            issue_body=_finalized_body(),
+        )
+
+        outcome = PlanningStage().on_enter(
+            make_work_item(issue=122),
+            make_ctx(github=github),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.SKIP
+        assert github.labels[122] == {STATE_SKIP}
+        assert github.mutation_log == []
 
     def test_finalized_plan_label_failure_exhausts_without_poisoning_coordinator(
         self, make_ctx: Any, make_work_item: Any
@@ -472,7 +490,6 @@ class TestPlanningStageEnter:
                         STATE_IMPLEMENTATION_NO_GO,
                         STATE_IMPLEMENTATION_GO,
                         STATE_PLAN_BLOCKED,
-                        STATE_SKIP,
                     ),
                 ),
             )
@@ -1589,6 +1606,188 @@ class TestPlanningStageStep:
         assert stale is not None and stale.disposition is Disposition.RETRY
         assert finalized is not None and finalized.disposition is Disposition.ADVANCE
         assert github.labels[120] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL, "epic"}
+
+    def test_applied_stale_non_code_intent_restarts_as_ordinary_code(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Evidence drift retires durable skip authority before a real restart."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [123])
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=123,
+            reason=reason,
+            evidence_digest=_recovery_binding("Old tracker body", issue=123),
+            repository_revision=_RECOVERY_REVISION,
+            extra_labels=("epic",),
+        )
+        first_item = make_work_item(issue=123)
+        first_item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": reason,
+                    "extra_labels": ["epic"],
+                    "evidence_digest": _recovery_binding("Old tracker body", issue=123),
+                    "repository_revision": _RECOVERY_REVISION,
+                    "explanation": "",
+                },
+            }
+        )
+        github = FakeStageGitHub(
+            labels=[STATE_SKIP, "epic"],
+            issue_body="Implement the new worker behavior.",
+        )
+        ctx = make_ctx(
+            github=github,
+            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+        )
+
+        drift = PlanningStage().on_enter(first_item, ctx)
+
+        assert drift is not None and drift.disposition is Disposition.RETRY
+        assert github.labels[123] == {"epic"}
+        assert store.non_code_intent_for(lease, 123) is None
+
+        restarted = make_work_item(issue=123, payload={WAVE_LEASE_PAYLOAD: lease})
+        entry = PlanningStage().on_enter(restarted, ctx)
+
+        assert entry is None
+        assert restarted.payload["requirements_recovery_required"] is True
+        restarted.state = "REQUIREMENTS_RECOVERY_APPLY"
+        restarted.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "",
+                    "Ordinary implementation issue.",
+                    "The edited body requests code changes.",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Confirmed ordinary code work.",
+                ),
+            }
+        )
+
+        resumed = PlanningStage().step(restarted, ctx)
+
+        assert isinstance(resumed, Continue)
+        assert resumed.next_state == "ADVISE_WAIT"
+        assert STATE_SKIP not in github.labels[123]
+
+    def test_retired_non_code_intent_resumes_skip_cleanup_after_crash(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A crash after durable retirement cannot strand the old skip."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [124])
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=124,
+            reason=reason,
+            evidence_digest=_recovery_binding("Old tracker body", issue=124),
+            repository_revision=_RECOVERY_REVISION,
+            extra_labels=("epic",),
+        )
+        active = store.non_code_intent_for(lease, 124)
+        assert active is not None
+        store.retire_non_code_intent(lease, active)
+        retired = store.non_code_intent_for(lease, 124)
+        assert retired is not None and retired.retired
+        item = make_work_item(issue=124)
+        item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": retired.reason,
+                    "extra_labels": list(retired.extra_labels),
+                    "evidence_digest": retired.evidence_digest,
+                    "repository_revision": retired.repository_revision,
+                    "explanation": retired.explanation,
+                    "retired": True,
+                },
+            }
+        )
+        github = FakeStageGitHub(
+            labels=[STATE_SKIP, "epic"],
+            issue_body="Implement the new worker behavior.",
+        )
+
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(
+                github=github,
+                paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+            ),
+        )
+
+        assert outcome is not None and outcome.disposition is Disposition.RETRY
+        assert github.labels[124] == {"epic"}
+        assert store.non_code_intent_for(lease, 124) is None
+
+    def test_retired_intent_preserves_nonmatching_operator_skip(
+        self,
+        tmp_path: Path,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Cleanup cannot claim a skip missing the intent's expected labels."""
+        store = IssueWaveStore(tmp_path, "test-org", "test-repo")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [125])
+        store.record_non_code_intent(
+            lease,
+            issue_number=125,
+            reason="independently confirmed tracker",
+            evidence_digest=_recovery_binding("Old tracker body", issue=125),
+            repository_revision=_RECOVERY_REVISION,
+            extra_labels=("epic",),
+        )
+        active = store.non_code_intent_for(lease, 125)
+        assert active is not None
+        store.retire_non_code_intent(lease, active)
+        retired = store.non_code_intent_for(lease, 125)
+        assert retired is not None
+        item = make_work_item(issue=125)
+        item.payload.update(
+            {
+                WAVE_LEASE_PAYLOAD: lease,
+                WAVE_NON_CODE_INTENT_PAYLOAD: {
+                    "reason": retired.reason,
+                    "extra_labels": list(retired.extra_labels),
+                    "evidence_digest": retired.evidence_digest,
+                    "repository_revision": retired.repository_revision,
+                    "explanation": retired.explanation,
+                    "retired": True,
+                },
+            }
+        )
+        github = FakeStageGitHub(
+            labels=[STATE_SKIP],
+            issue_body="Implement the new worker behavior.",
+        )
+        ctx = make_ctx(
+            github=github,
+            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+        )
+
+        cleanup = PlanningStage().on_enter(item, ctx)
+        operator_skip = PlanningStage().on_enter(item, ctx)
+
+        assert cleanup is not None and cleanup.disposition is Disposition.RETRY
+        assert operator_skip is not None and operator_skip.disposition is Disposition.SKIP
+        assert github.labels[125] == {STATE_SKIP}
+        assert github.mutation_log == []
+        assert store.non_code_intent_for(lease, 125) is None
 
     def test_pending_obsolete_intent_restores_explanation_before_skip(
         self,

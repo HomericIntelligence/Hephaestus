@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from hephaestus.agents.execution_policy import (
@@ -54,6 +55,7 @@ from hephaestus.automation.issue_waves import (
     IssueWaveStore,
     WaveLease,
     WaveNonCodeIntent,
+    non_code_intent_skip_is_applied,
 )
 from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
@@ -453,6 +455,7 @@ def _persist_wave_non_code_intent(
         "evidence_digest": evidence,
         "repository_revision": revision,
         "explanation": explanation,
+        "retired": False,
     }
 
 
@@ -489,6 +492,7 @@ def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
     evidence = raw.get("evidence_digest")
     revision = raw.get("repository_revision")
     explanation = raw.get("explanation", "")
+    retired = raw.get("retired", False)
     if (
         item.issue is None
         or not isinstance(reason, str)
@@ -497,6 +501,7 @@ def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
         or not isinstance(evidence, str)
         or not isinstance(revision, str)
         or not isinstance(explanation, str)
+        or not isinstance(retired, bool)
     ):
         return None
     if any(not isinstance(label, str) for label in extra_labels):
@@ -509,6 +514,7 @@ def _pending_wave_non_code_intent(item: WorkItem) -> WaveNonCodeIntent | None:
             repository_revision=revision,
             extra_labels=tuple(extra_labels),
             explanation=explanation,
+            retired=retired,
         )
     except IssueWaveError:
         return None
@@ -539,7 +545,6 @@ def _apply_recovery_state_label(
     *,
     extra: Sequence[str] = (),
     clear_blocked: bool = False,
-    clear_skip: bool = False,
 ) -> bool:
     """Atomically write and confirm one recovery-owned issue state.
 
@@ -561,8 +566,6 @@ def _apply_recovery_state_label(
         removals = [*removals, *ALL_IMPLEMENTATION_STATE_LABELS]
     if clear_blocked:
         removals = [*removals, STATE_PLAN_BLOCKED]
-    if clear_skip:
-        removals = [*removals, STATE_SKIP]
     if ATHENA_FINALIZED_PLAN_LABEL not in extra:
         removals = [*removals, ATHENA_FINALIZED_PLAN_LABEL]
     ctx.github.edit_labels(
@@ -640,13 +643,58 @@ def _resume_wave_non_code_intent(
         if isinstance(title, str) and isinstance(body, str)
         else None
     )
-    if current_evidence != intent.evidence_digest:
+    if intent.retired or current_evidence != intent.evidence_digest:
+        binding = _wave_non_code_binding(item, ctx)
+        if binding is None:
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                "pending non-code intent lost its durable wave binding",
+            )
+        store, lease = binding
+        retired = intent if intent.retired else replace(intent, retired=True)
+        try:
+            store.retire_non_code_intent(lease, intent)
+            item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                "reason": retired.reason,
+                "extra_labels": list(retired.extra_labels),
+                "evidence_digest": retired.evidence_digest,
+                "repository_revision": retired.repository_revision,
+                "explanation": retired.explanation,
+                "retired": True,
+            }
+            live_labels = _issue_snapshot_labels(live)
+            if non_code_intent_skip_is_applied(retired, live_labels):
+                # GitHub does not expose label-writer provenance. The retired
+                # intent plus its exact expected state is the strongest proof
+                # that this skip belongs to the interrupted loop transition.
+                # A same-label human edit between this read and the atomic edit
+                # remains an accepted external race; fresh readback fails
+                # closed, and unrelated skips without this proof are preserved.
+                ctx.github.edit_labels(
+                    intent.issue_number,
+                    add=[],
+                    remove=[STATE_SKIP],
+                )
+                confirmed_labels = _open_issue_labels_for_transition(
+                    intent.issue_number,
+                    ctx,
+                    allow_skip=True,
+                )
+                if confirmed_labels is None or STATE_SKIP in confirmed_labels:
+                    return _retry_pending_non_code_intent(
+                        item,
+                        ctx,
+                        "retired non-code skip removal was not confirmed",
+                    )
+            store.complete_non_code_intent_retirement(lease, retired)
+        except (IssueWaveError, RuntimeError) as exc:
+            return _retry_pending_non_code_intent(item, ctx, str(exc))
         item.payload.pop(WAVE_NON_CODE_INTENT_PAYLOAD, None)
         _clear_recovery_results(item)
         _reenter_planning(item)
         return StageOutcome(
             Disposition.RETRY,
-            "non-code intent evidence changed; re-entering finalized/semantic review",
+            "non-code intent evidence changed; retired before finalized/semantic review",
         )
     try:
         if intent.explanation:
@@ -1637,6 +1685,20 @@ class PlanningStage(Stage):
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         force_replan = force_replan or bool(item.payload.get("athena_finalized_plan_invalidated"))
 
+        # A skip with no pending wave intent is operator-owned and absolute.
+        # A drifted loop-owned skip is removed only by the provenance-bound
+        # retirement path above, before finalization can be considered.
+        if is_skipped(labels):
+            if is_plan_go(labels):
+                logger.warning(
+                    "planning:%d: state:skip AND state:plan-go both present — "
+                    "skip wins; see docs/runbooks/state-skip-revival.md if "
+                    "this issue should be revived",
+                    item.issue,
+                )
+            logger.info("planning:%d: state:skip; skipping", item.issue)
+            return StageOutcome(Disposition.SKIP, "state:skip")
+
         # Athena finalization seals one exact GO-reviewed planning epoch into
         # the issue body. Its self-verifying F digest is durable planning
         # authority even after the intermediate plan/review comments are
@@ -1652,7 +1714,6 @@ class PlanningStage(Stage):
                         STATE_PLAN_GO,
                         extra=(ATHENA_FINALIZED_PLAN_LABEL,),
                         clear_blocked=True,
-                        clear_skip=True,
                     )
                 except RuntimeError as exc:
                     return _retry_incomplete_requirements_snapshot(
@@ -1673,21 +1734,6 @@ class PlanningStage(Stage):
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")
-
-        # Operator state:skip remains authoritative for ordinary issues. The
-        # authenticated finalized-plan case above is the sole exception: its
-        # self-verifying body proves planning completed and repairs a stale
-        # loop-owned skip left by an interrupted non-code transition.
-        if is_skipped(labels):
-            if is_plan_go(labels):
-                logger.warning(
-                    "planning:%d: state:skip AND state:plan-go both present — "
-                    "skip wins; see docs/runbooks/state-skip-revival.md if "
-                    "this issue should be revived",
-                    item.issue,
-                )
-            logger.info("planning:%d: state:skip; skipping", item.issue)
-            return StageOutcome(Disposition.SKIP, "state:skip")
 
         # BLOCKED is an operator-owned hold for ordinary planning. The one
         # exception is an authenticated Athena finalization above: that body

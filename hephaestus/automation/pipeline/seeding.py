@@ -180,6 +180,8 @@ class SeedEntry:
             the pending non-code evidence binding.
         non_code_explanation: Actor-owned rationale that must be restored
             before an obsolete disposition may apply ``state:skip``.
+        non_code_retired: Whether the durable intent has been revoked and is
+            retained only to finish provenance-bound skip cleanup.
 
     """
 
@@ -201,6 +203,7 @@ class SeedEntry:
     non_code_evidence_digest: str = ""
     non_code_repository_revision: str = ""
     non_code_explanation: str = ""
+    non_code_retired: bool = False
 
 
 def _get_state_label(labels: set[str]) -> str | None:
