@@ -452,6 +452,22 @@ def test_image_build_rejects_allowlisted_symlink_sources(tmp_path: Path) -> None
     assert "build --iidfile" not in log
 
 
+def test_image_build_rejects_allowlisted_symlink_ancestors(tmp_path: Path) -> None:
+    """An allowlisted directory cannot redirect the build recipe outside the candidate tree."""
+    repo = _buildable_candidate_repo(tmp_path)
+    shutil.rmtree(repo / "ci")
+    external_ci = tmp_path / "ignored-ci"
+    external_ci.mkdir()
+    (external_ci / "Containerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (repo / "ci").symlink_to(external_ci.resolve(), target_is_directory=True)
+
+    result, log = _run_runner(tmp_path, "unit", image_exists=False, repo_root=repo)
+
+    assert result.returncode != 0
+    assert "Candidate build source must be a regular file" in result.stderr
+    assert "build --iidfile" not in log
+
+
 def test_schema_validator_is_part_of_the_locked_dev_environment() -> None:
     """Schema validation must not download mutable executable code at gate runtime."""
     config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))

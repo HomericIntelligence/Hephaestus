@@ -151,16 +151,18 @@ prepare_candidate_snapshot() {
     GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
-        git -C "${PROJECT_ROOT}" ls-files --stage -z -- \
-            ci/Containerfile uv.lock pyproject.toml .pre-commit-config.yaml \
-            README.md hephaestus > "${candidate_sources}"
+        git -C "${PROJECT_ROOT}" ls-files --stage -z -- > "${candidate_sources}"
     while IFS=$'\t' read -r -d '' metadata path; do
         mode="${metadata%% *}"
-        case "${mode}" in
-            100644|100755) ;;
-            *)
-                log_error "Candidate build source must be a regular file: ${path} (mode ${mode})"
-                return 1
+        case "${path}" in
+            ci|ci/Containerfile|uv.lock|pyproject.toml|.pre-commit-config.yaml|README.md|hephaestus|hephaestus/*)
+                case "${mode}" in
+                    100644|100755) ;;
+                    *)
+                        log_error "Candidate build source must be a regular file: ${path} (mode ${mode})"
+                        return 1
+                        ;;
+                esac
                 ;;
         esac
     done < "${candidate_sources}"
@@ -418,7 +420,7 @@ run_workflow_scan() {
 
 run_schema() {
     log_step "Workflow YAML schema validation"
-    run_in_container env UV_OFFLINE=1 uv run check-jsonschema \
+    run_in_container env UV_NO_SYNC=1 UV_OFFLINE=1 uv run check-jsonschema \
         --builtin-schema vendor.github-workflows \
         .github/workflows/*.yml
 }

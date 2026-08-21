@@ -69,51 +69,62 @@ def test_required_context_names_and_aggregate_membership_are_exact() -> None:
     assert expanded == CLASSIC_REQUIRED_CONTEXTS - {"required-checks-gate"}
 
 
-def _merge_group_policy_step() -> dict[str, Any]:
-    """Return the merge-group policy step from the required workflow."""
+def _merge_group_policy_steps() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the queue-resolution and source-validation workflow steps."""
     required = _load_workflow(REQUIRED_WORKFLOW)
     policy = required["jobs"]["pr-policy"]
-    steps = policy["steps"]
-    merge_steps = [
-        step
-        for step in steps
+    merge_steps = {
+        step["name"]: step
+        for step in policy["steps"]
         if step.get("if") == "github.event_name == 'merge_group'" and "run" in step
-    ]
-    assert len(merge_steps) == 1
-    return cast(dict[str, Any], merge_steps[0])
+    }
+    assert set(merge_steps) == {
+        "Resolve complete merge-group membership",
+        "Revalidate source PR policy",
+    }
+    return (
+        cast(dict[str, Any], merge_steps["Resolve complete merge-group membership"]),
+        cast(dict[str, Any], merge_steps["Revalidate source PR policy"]),
+    )
 
 
 def test_merge_group_pr_policy_revalidates_source_metadata_from_trusted_base() -> None:
     """HEADGREEN groups must re-run policy instead of trusting spoofable check names."""
     required = _load_workflow(REQUIRED_WORKFLOW)
     policy = required["jobs"]["pr-policy"]
-    assert policy["permissions"]["checks"] == "read"
-    run = str(_merge_group_policy_step()["run"])
+    assert "checks" not in policy["permissions"]
+    resolve, revalidate = _merge_group_policy_steps()
+    resolve_run = str(resolve["run"])
+    revalidate_run = str(revalidate["run"])
 
-    assert "mergeQueueEntry" in run
-    assert "entries(first:100, after:$endCursor)" in run
-    assert "after:$endCursor" in run
-    assert "pageInfo { hasNextPage endCursor }" in run
-    assert "totalCount" in run
-    assert "$target_entry.baseCommit.oid == $queued_base" in run
-    assert "$target_entry.headCommit.oid == $group_head" in run
-    assert "$members[.].baseCommit.oid == $members[. - 1].headCommit.oid" in run
-    assert "$counts[0] == ($entries | length)" in run
-    assert "queue-members.tsv" in run
-    assert "while IFS=$'\\t' read -r source_pr source_head" in run
-    assert "/check-runs" not in run
-    assert "policy-base/scripts/check_conventional_commit.py" in run
-    assert "policy-base/scripts/check_dco_signoff.py" in run
-    assert "source_head" in run
-    assert 'queued_base="${BASH_REMATCH[2]}"' in run
-    assert "MERGE_GROUP_SHA" in run
+    assert "mergeQueueEntry" in resolve_run
+    assert "entries(first:100, after:$endCursor)" in resolve_run
+    assert "pageInfo { hasNextPage endCursor }" in resolve_run
+    assert "totalCount" in resolve_run
+    assert "$target_entry.baseCommit.oid == $queued_base" in resolve_run
+    assert "$target_entry.headCommit.oid == $group_head" in resolve_run
+    assert "$members[.].baseCommit.oid == $members[. - 1].headCommit.oid" in resolve_run
+    assert "$counts[0] == ($entries | length)" in resolve_run
+    assert "queue-members.tsv" in resolve_run
+    assert "queue_root: $members[0].baseCommit.oid" in resolve_run
+    assert 'queued_base="${BASH_REMATCH[2]}"' in resolve_run
+    assert "MERGE_GROUP_SHA" in resolve_run
+
+    assert "while IFS=$'\\t' read -r source_pr source_head" in revalidate_run
+    assert "/check-runs" not in revalidate_run
+    assert "policy-base/scripts/check_conventional_commit.py" in revalidate_run
+    assert "policy-base/scripts/check_dco_signoff.py" in revalidate_run
+    assert "totalCount" in revalidate_run
+    assert "commit { oid message }" in revalidate_run
+    assert "headRefOid" in revalidate_run
+    assert "cmp -s" in revalidate_run
 
     checkout = next(
         step
         for step in policy["steps"]
         if step.get("if") == "github.event_name == 'merge_group'" and "uses" in step
     )
-    assert checkout["with"]["ref"] == "${{ github.event.merge_group.base_sha }}"
+    assert checkout["with"]["ref"] == "${{ steps.resolve_queue.outputs.queue_root }}"
     assert checkout["with"]["path"] == "policy-base"
 
 
@@ -124,33 +135,57 @@ def _run_merge_group_policy(
     entry_base: str,
     event_head: str,
     entry_head: str,
-) -> subprocess.CompletedProcess[str]:
+    invalid_second_commit: bool = False,
+    mutate_final_metadata: bool = False,
+    duplicate_commit_oid: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], str]:
     """Execute the actual workflow script against deterministic GitHub fixtures."""
-    tmp_path.mkdir()
+    tmp_path.mkdir(exist_ok=True)
     source_head = "3" * 40
-    queue_entry = {
+    root_base = "1" * 40
+    first_entry = {
         "position": 1,
+        "baseCommit": {"oid": root_base},
+        "headCommit": {"oid": entry_base},
+        "pullRequest": {"number": 41, "state": "OPEN", "headRefOid": source_head},
+    }
+    target_entry = {
+        "position": 2,
         "baseCommit": {"oid": entry_base},
         "headCommit": {"oid": entry_head},
         "pullRequest": {"number": 42, "state": "OPEN", "headRefOid": source_head},
     }
-    queue = [
-        {
+    target: dict[str, Any] = {
+        "number": 42,
+        "state": "OPEN",
+        "headRefOid": source_head,
+        "mergeQueueEntry": {
+            "position": 2,
+            "baseCommit": {"oid": entry_base},
+            "headCommit": {"oid": entry_head},
+        },
+    }
+
+    def queue_page(
+        node: dict[str, Any], *, has_next_page: bool, end_cursor: str | None
+    ) -> dict[str, Any]:
+        """Build one deterministic page of the target queue connection."""
+        target_queue_entry = cast(dict[str, Any], target["mergeQueueEntry"])
+        return {
             "data": {
                 "repository": {
                     "pullRequest": {
-                        "number": 42,
-                        "state": "OPEN",
-                        "headRefOid": source_head,
+                        **target,
                         "mergeQueueEntry": {
-                            "position": 1,
-                            "baseCommit": {"oid": entry_base},
-                            "headCommit": {"oid": entry_head},
+                            **target_queue_entry,
                             "mergeQueue": {
                                 "entries": {
-                                    "totalCount": 1,
-                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                                    "nodes": [queue_entry],
+                                    "totalCount": 2,
+                                    "pageInfo": {
+                                        "hasNextPage": has_next_page,
+                                        "endCursor": end_cursor,
+                                    },
+                                    "nodes": [node],
                                 }
                             },
                         },
@@ -158,6 +193,10 @@ def _run_merge_group_policy(
                 }
             }
         }
+
+    queue = [
+        queue_page(first_entry, has_next_page=True, end_cursor="queue-page-1"),
+        queue_page(target_entry, has_next_page=False, end_cursor=None),
     ]
     pr = {
         "author": {"login": "octocat"},
@@ -166,21 +205,55 @@ def _run_merge_group_policy(
         "state": "OPEN",
         "title": "fix(ci): validate queue policy",
     }
-    commits = {
+    first_commit_oid = "7" * 40
+    commits_first = {
         "data": {
             "repository": {
                 "pullRequest": {
+                    "number": 42,
+                    "state": "OPEN",
+                    "headRefOid": source_head,
                     "commits": {
+                        "totalCount": 2,
                         "nodes": [
                             {
                                 "commit": {
+                                    "oid": first_commit_oid,
                                     "message": "fix(ci): validate queue policy\n\n"
-                                    "Signed-off-by: Octo Cat <octo@example.com>"
+                                    "Signed-off-by: Octo Cat <octo@example.com>",
+                                }
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": True, "endCursor": "commit-page-1"},
+                    },
+                }
+            }
+        }
+    }
+    second_message = "fix(ci): validate final queue page"
+    if not invalid_second_commit:
+        second_message += "\n\nSigned-off-by: Octo Cat <octo@example.com>"
+    commits_second = {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "number": 42,
+                    "state": "OPEN",
+                    "headRefOid": source_head,
+                    "commits": {
+                        "totalCount": 2,
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "oid": first_commit_oid
+                                    if duplicate_commit_oid
+                                    else source_head,
+                                    "message": second_message,
                                 }
                             }
                         ],
                         "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
+                    },
                 }
             }
         }
@@ -188,7 +261,8 @@ def _run_merge_group_policy(
     for name, value in (
         ("queue-fixture.json", queue),
         ("pr-fixture.json", pr),
-        ("commits-fixture.json", commits),
+        ("commits-first-fixture.json", commits_first),
+        ("commits-second-fixture.json", commits_second),
     ):
         (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
 
@@ -199,12 +273,25 @@ def _run_merge_group_policy(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'if [[ "$*" == *"--paginate --slurp"* ]]; then cat "$QUEUE_FIXTURE"; '
-        'elif [[ "$1 $2" == "pr view" ]]; then cat "$PR_FIXTURE"; '
-        'elif [[ "$1 $2" == "api graphql" ]]; then cat "$COMMITS_FIXTURE"; '
+        'elif [[ "$1 $2" == "pr view" ]]; then '
+        'count=$(cat "$PR_VIEW_COUNT"); count=$((count + 1)); '
+        'printf "%s" "$count" > "$PR_VIEW_COUNT"; '
+        'if [[ "$MUTATE_FINAL_METADATA" == "1" && $((count % 2)) -eq 0 ]]; '
+        'then jq \'.title = "fix(ci): changed while validating"\' "$PR_FIXTURE"; '
+        'else cat "$PR_FIXTURE"; fi; '
+        'elif [[ "$1 $2" == "api graphql" ]]; then '
+        'source_pr=42; for argument in "$@"; do case "$argument" in '
+        'pr=*) source_pr="${argument#pr=}" ;; esac; done; '
+        'if [[ "$*" == *"after=commit-page-1"* ]]; then fixture="$COMMITS_SECOND_FIXTURE"; '
+        'else fixture="$COMMITS_FIRST_FIXTURE"; fi; '
+        'jq --argjson number "$source_pr" '
+        "'.data.repository.pullRequest.number = $number' \"$fixture\"; "
         "else exit 64; fi\n",
         encoding="utf-8",
     )
     fake_gh.chmod(0o755)
+    pr_view_count = tmp_path / "pr-view-count"
+    pr_view_count.write_text("0", encoding="utf-8")
     policy_scripts = tmp_path / "policy-base" / "scripts"
     policy_scripts.mkdir(parents=True)
     for name in ("check_conventional_commit.py", "check_dco_signoff.py"):
@@ -220,30 +307,49 @@ def _run_merge_group_policy(
         "RUNNER_TEMP": str(tmp_path),
         "QUEUE_FIXTURE": str(tmp_path / "queue-fixture.json"),
         "PR_FIXTURE": str(tmp_path / "pr-fixture.json"),
-        "COMMITS_FIXTURE": str(tmp_path / "commits-fixture.json"),
+        "COMMITS_FIRST_FIXTURE": str(tmp_path / "commits-first-fixture.json"),
+        "COMMITS_SECOND_FIXTURE": str(tmp_path / "commits-second-fixture.json"),
+        "MUTATE_FINAL_METADATA": "1" if mutate_final_metadata else "0",
+        "PR_VIEW_COUNT": str(pr_view_count),
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
     }
-    return subprocess.run(
-        ["bash", "-c", str(_merge_group_policy_step()["run"])],
+    resolve, revalidate = _merge_group_policy_steps()
+    github_output = tmp_path / "github-output"
+    env["GITHUB_OUTPUT"] = str(github_output)
+    resolved = subprocess.run(
+        ["bash", "-c", str(resolve["run"])],
         cwd=tmp_path,
         env=env,
         text=True,
         capture_output=True,
         check=False,
     )
+    output = github_output.read_text(encoding="utf-8") if github_output.exists() else ""
+    if resolved.returncode != 0:
+        return resolved, output
+    validated = subprocess.run(
+        ["bash", "-c", str(revalidate["run"])],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return validated, output
 
 
 def test_merge_group_policy_binds_queue_base_and_synthetic_head(tmp_path: Path) -> None:
     """The live queue-ref shape succeeds and either SHA mismatch fails closed."""
-    base = "1" * 40
+    base = "6" * 40
     head = "2" * 40
 
-    valid = _run_merge_group_policy(
+    valid, output = _run_merge_group_policy(
         tmp_path / "valid", ref_base=base, entry_base=base, event_head=head, entry_head=head
     )
     assert valid.returncode == 0, valid.stderr
+    assert f"queue_root={'1' * 40}" in output
 
-    wrong_base = _run_merge_group_policy(
+    wrong_base, _ = _run_merge_group_policy(
         tmp_path / "wrong-base",
         ref_base="4" * 40,
         entry_base=base,
@@ -252,7 +358,7 @@ def test_merge_group_policy_binds_queue_base_and_synthetic_head(tmp_path: Path) 
     )
     assert wrong_base.returncode != 0
 
-    wrong_head = _run_merge_group_policy(
+    wrong_head, _ = _run_merge_group_policy(
         tmp_path / "wrong-head",
         ref_base=base,
         entry_base=base,
@@ -260,6 +366,48 @@ def test_merge_group_policy_binds_queue_base_and_synthetic_head(tmp_path: Path) 
         entry_head=head,
     )
     assert wrong_head.returncode != 0
+
+
+def test_merge_group_policy_rejects_invalid_later_commit_page(tmp_path: Path) -> None:
+    """A policy violation on page two must not be hidden by a clean first page."""
+    result, _ = _run_merge_group_policy(
+        tmp_path,
+        ref_base="6" * 40,
+        entry_base="6" * 40,
+        event_head="2" * 40,
+        entry_head="2" * 40,
+        invalid_second_commit=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_merge_group_policy_rejects_metadata_drift(tmp_path: Path) -> None:
+    """Mutable title/body/author facts must remain identical through validation."""
+    result, _ = _run_merge_group_policy(
+        tmp_path,
+        ref_base="6" * 40,
+        entry_base="6" * 40,
+        event_head="2" * 40,
+        entry_head="2" * 40,
+        mutate_final_metadata=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_merge_group_policy_rejects_duplicate_commit_identity(tmp_path: Path) -> None:
+    """Mixed or overlapping pages cannot satisfy the exact commit-set contract."""
+    result, _ = _run_merge_group_policy(
+        tmp_path,
+        ref_base="6" * 40,
+        entry_base="6" * 40,
+        event_head="2" * 40,
+        entry_head="2" * 40,
+        duplicate_commit_oid=True,
+    )
+
+    assert result.returncode != 0
 
 
 def test_shell_jobs_use_the_same_versioned_ci_image_as_local_checks() -> None:
