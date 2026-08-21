@@ -20,6 +20,7 @@ def _fake_engine(
     failing_command: str = "",
     license_violation: bool = False,
     image_exists: bool = True,
+    image_id: str = FAKE_IMAGE_ID,
     external_git_common_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     """Create a controlled container-engine boundary that records invocations."""
@@ -42,7 +43,7 @@ def _fake_engine(
             'if [[ "$1" == "image" && "$2" == "exists" ]]; then '
             f"exit {0 if image_exists else 1}; fi\n"
             'if [[ "$1" == "image" && "$2" == "inspect" ]]; then '
-            f'printf "%s\\n" "{FAKE_IMAGE_ID}"; exit 0; fi\n'
+            f'printf "%s\\n" "{image_id}"; exit 0; fi\n'
             'if [[ "$1" == "image" && "$2" == "rm" ]]; then exit 0; fi\n'
             'if [[ "$1" == "images" ]]; then exit 0; fi\n'
             'if [[ "$1" == "build" ]]; then\n'
@@ -51,7 +52,7 @@ def _fake_engine(
             '  previous=""\n'
             '  for arg in "$@"; do\n'
             '    if [[ "$previous" == "--iidfile" ]]; then\n'
-            f'      printf "%s\\n" "{FAKE_IMAGE_ID}" > "$arg"\n'
+            f'      printf "%s\\n" "{image_id}" > "$arg"\n'
             "    fi\n"
             '    previous="$arg"\n'
             "  done\n"
@@ -136,6 +137,7 @@ def _run_runner(
     host_uid: int | None = None,
     host_gid: int | None = None,
     image_exists: bool = True,
+    image_id: str = FAKE_IMAGE_ID,
     rebuild_image: bool = False,
     external_git_common_dir: Path | None = None,
     repo_root: Path = REPO_ROOT,
@@ -146,6 +148,7 @@ def _run_runner(
         failing_command=failing_command,
         license_violation=license_violation,
         image_exists=image_exists,
+        image_id=image_id,
         external_git_common_dir=external_git_common_dir,
     )
     if engine_name != "podman":
@@ -401,6 +404,16 @@ def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
     assert "-t hephaestus-ci:local ." in log
     assert FAKE_IMAGE_ID in log
     assert "uv run pytest tests/unit" in log
+
+
+def test_podman_bare_image_id_is_accepted_as_immutable(tmp_path: Path) -> None:
+    """Podman may omit Docker's ``sha256:`` prefix from a full image ID."""
+    podman_image_id = "b" * 64
+
+    result, log = _run_runner(tmp_path, "unit", image_id=podman_image_id)
+
+    assert result.returncode == 0, result.stderr
+    assert f"{podman_image_id} bash" in log
 
 
 def test_image_build_context_excludes_ignored_checkout_files(tmp_path: Path) -> None:

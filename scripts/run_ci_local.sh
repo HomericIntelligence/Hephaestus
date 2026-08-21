@@ -182,6 +182,10 @@ detect_engine() {
 # Image resolution
 # ============================================================================
 
+is_immutable_image_id() {
+    [[ "$1" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
+}
+
 build_ci_image() {
     local build_context
     local image_id_file
@@ -221,7 +225,7 @@ build_ci_image() {
         exit 1
     }
     CI_IMAGE="$(tr -d '\r\n' < "${image_id_file}")"
-    if [[ ! "${CI_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    if ! is_immutable_image_id "${CI_IMAGE}"; then
         log_error "Container engine returned an invalid image ID."
         exit 1
     fi
@@ -236,7 +240,7 @@ resolve_image_id() {
         exit 1
     }
     CI_IMAGE="$(printf '%s' "${CI_IMAGE}" | tr -d '\r\n')"
-    if [[ ! "${CI_IMAGE}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    if ! is_immutable_image_id "${CI_IMAGE}"; then
         log_error "Container engine returned an invalid image ID."
         exit 1
     fi
