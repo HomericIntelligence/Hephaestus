@@ -114,6 +114,10 @@ cleanup() {
 
 prepare_candidate_snapshot() {
     local candidate_relative
+    local candidate_sources
+    local metadata
+    local mode
+    local path
     local repository_objects
 
     cleanup_candidate_snapshot
@@ -137,6 +141,29 @@ prepare_candidate_snapshot() {
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
         git -C "${PROJECT_ROOT}" add -A -- .
+
+    # The image allowlist must contain regular files only. checkout-index
+    # preserves staged symlinks and ordinary cp would dereference their host
+    # targets into the container build context before the later repository-wide
+    # symlink gate runs. Reject symlinks and gitlinks at the alternate-index
+    # boundary, before materializing or copying any candidate path.
+    candidate_sources="${CANDIDATE_ROOT}/build-sources"
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" ls-files --stage -z -- \
+            ci/Containerfile uv.lock pyproject.toml .pre-commit-config.yaml \
+            README.md hephaestus > "${candidate_sources}"
+    while IFS=$'\t' read -r -d '' metadata path; do
+        mode="${metadata%% *}"
+        case "${mode}" in
+            100644|100755) ;;
+            *)
+                log_error "Candidate build source must be a regular file: ${path} (mode ${mode})"
+                return 1
+                ;;
+        esac
+    done < "${candidate_sources}"
     GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
         GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
         GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
@@ -391,7 +418,7 @@ run_workflow_scan() {
 
 run_schema() {
     log_step "Workflow YAML schema validation"
-    run_in_container uvx check-jsonschema \
+    run_in_container env UV_OFFLINE=1 uv run check-jsonschema \
         --builtin-schema vendor.github-workflows \
         .github/workflows/*.yml
 }

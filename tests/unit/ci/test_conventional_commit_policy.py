@@ -35,7 +35,9 @@ def test_pr_policy_validates_title_and_commit_subjects() -> None:
 
     assert "--json body,title" in fetch
     checkout = next(
-        step for step in _yaml(REQUIRED_WORKFLOW)["jobs"]["pr-policy"]["steps"] if "uses" in step
+        step
+        for step in _yaml(REQUIRED_WORKFLOW)["jobs"]["pr-policy"]["steps"]
+        if "uses" in step and step.get("if") == "github.event_name == 'pull_request'"
     )
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert checkout["with"]["path"] == "policy-base"

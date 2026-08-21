@@ -315,6 +315,13 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: github.event_name == 'merge_group'
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          path: policy-base
+          persist-credentials: false
+
       - name: Revalidate source PR policy results
         if: github.event_name == 'merge_group'
         env:
@@ -339,7 +346,7 @@ jobs:
             exit 1
           fi
           PR_NUMBER="${BASH_REMATCH[1]}"
-          queued_head="${BASH_REMATCH[2]}"
+          queued_base="${BASH_REMATCH[2]}"
 
           query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String) {
             repository(owner:$owner, name:$name) {
@@ -349,6 +356,7 @@ jobs:
                 headRefOid
                 mergeQueueEntry {
                   position
+                  baseCommit { oid }
                   headCommit { oid }
                   mergeQueue {
                     entries(first:100, after:$endCursor) {
@@ -371,14 +379,13 @@ jobs:
             > queue.json
           jq -er \
             --argjson target_number "$PR_NUMBER" \
-            --arg target_head "$queued_head" \
+            --arg queued_base "$queued_base" \
             --arg group_head "$MERGE_GROUP_SHA" '
             . as $pages
             | $pages[0].data.repository.pullRequest as $target
             | select(
                 $target.number == $target_number and
-                $target.state == "OPEN" and
-                $target.headRefOid == $target_head
+                $target.state == "OPEN"
               )
             | $target.mergeQueueEntry as $target_entry
             | ([
@@ -389,6 +396,7 @@ jobs:
                 $pages[].data.repository.pullRequest.mergeQueueEntry
                   .mergeQueue.entries.nodes[]
               ] | sort_by(.position)) as $entries
+            | select($target_entry.baseCommit.oid == $queued_base)
             | select($target_entry.headCommit.oid == $group_head)
             | select(($counts | length) == 1 and $counts[0] == ($entries | length))
             | ([
@@ -414,30 +422,87 @@ jobs:
           ' queue.json > queue-members.tsv
           test -s queue-members.tsv
 
+          commit_query='query($owner:String!,$name:String!,$pr:Int!,$after:String) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                commits(first:100, after:$after) {
+                  nodes { commit { message } }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }'
+
           while IFS=$'\t' read -r source_pr source_head; do
-            checks_file="source-checks-${source_pr}.json"
-            gh api --paginate --slurp \
-              -H "Accept: application/vnd.github+json" \
-              "repos/${REPOSITORY}/commits/${source_head}/check-runs?check_name=pr-policy&filter=latest&per_page=100" \
-              > "$checks_file"
+            source_prefix="$RUNNER_TEMP/source-pr-${source_pr}"
+            source_metadata="${source_prefix}-metadata.json"
+            source_nodes="${source_prefix}-commit-nodes.jsonl"
+            source_page="${source_prefix}-commit-page.json"
+            source_commits="${source_prefix}-commits.json"
+
+            gh pr view "$source_pr" --repo "$REPOSITORY" \
+              --json author,body,headRefOid,state,title > "$source_metadata"
             jq -e --arg head "$source_head" '
-              select(type == "array" and length > 0)
-              | ([.[].total_count] | unique) as $counts
-              | [.[].check_runs[]] as $runs
-              | [
-                  $runs[]
-                  | select(.name == "pr-policy")
-                  | select(.app.id == 15368)
-                  | select(.head_sha == $head)
-                ] as $policy
-              | ($counts | length) == 1 and
-                $counts[0] == ($runs | length) and
-                ($policy | length) == ($runs | length) and
-                ($policy | length) > 0 and
-                all($policy[];
-                  .status == "completed" and .conclusion == "success"
-                )
-            ' "$checks_file" > /dev/null
+              .state == "OPEN" and .headRefOid == $head
+            ' "$source_metadata" > /dev/null
+
+            : > "$source_nodes"
+            cursor=""
+            while true; do
+              if [ -n "$cursor" ]; then
+                gh api graphql -f query="$commit_query" \
+                  -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$source_pr" \
+                  -F after="$cursor" > "$source_page"
+              else
+                gh api graphql -f query="$commit_query" \
+                  -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$source_pr" \
+                  > "$source_page"
+              fi
+              jq -c '.data.repository.pullRequest.commits.nodes[]' "$source_page" \
+                >> "$source_nodes"
+              has_next=$(jq -r \
+                '.data.repository.pullRequest.commits.pageInfo.hasNextPage' "$source_page")
+              case "$has_next" in
+                false) break ;;
+                true)
+                  cursor=$(jq -r \
+                    '.data.repository.pullRequest.commits.pageInfo.endCursor // empty' \
+                    "$source_page")
+                  test -n "$cursor"
+                  ;;
+                *) exit 1 ;;
+              esac
+            done
+            test -s "$source_nodes"
+            jq -n --slurpfile nodes "$source_nodes" \
+              '{data:{repository:{pullRequest:{commits:{nodes:$nodes}}}}}' \
+              > "$source_commits"
+
+            author=$(jq -r '.author.login // ""' "$source_metadata")
+            body=$(jq -r '.body // ""' "$source_metadata")
+            if [ "$author" != "dependabot[bot]" ]; then
+              printf '%s\n' "$body" | grep -qE '^Closes #[0-9]+[[:space:]]*$'
+            fi
+
+            title=$(jq -r '.title // ""' "$source_metadata")
+            [[ "$title" != *$'\n'* && "$title" != *$'\r'* ]]
+            printf '%s\n' "$title" \
+              | python3 policy-base/scripts/check_conventional_commit.py -
+            printf '%s\n' "$title" | grep -qE \
+              '^(feat|fix|docs|refactor|test|chore|ci|build|perf|style|revert)(\([^()]+\))?!?: .+$'
+            jq -r '.data.repository.pullRequest.commits.nodes[]
+                   | .commit.message | split("\n")[0]' "$source_commits" \
+              | python3 policy-base/scripts/check_conventional_commit.py -
+            if [ "$author" != "dependabot[bot]" ]; then
+              jq -j '.data.repository.pullRequest.commits.nodes[]
+                     | .commit.message + "\u0000"' "$source_commits" \
+                | python3 policy-base/scripts/check_dco_signoff.py -
+            fi
+            gh pr view "$source_pr" --repo "$REPOSITORY" \
+              --json headRefOid,state > "${source_prefix}-final.json"
+            jq -e --arg head "$source_head" '
+              .state == "OPEN" and .headRefOid == $head
+            ' "${source_prefix}-final.json" > /dev/null
           done < queue-members.tsv
 
       # The policy validator must come from the trusted base revision, never
@@ -1037,7 +1102,7 @@ jobs:
               echo "No workflow files to validate"
               exit 0
             fi
-            uvx check-jsonschema \
+            UV_OFFLINE=1 uv run check-jsonschema \
               --builtin-schema vendor.github-workflows \
               "${wf_files[@]}"
           '

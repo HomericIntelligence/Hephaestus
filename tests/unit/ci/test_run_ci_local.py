@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -272,7 +273,7 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
         "uv run pip-audit",
         "uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium",
         "uv run zizmor --no-online-audits --min-severity medium .github/workflows/",
-        "uvx check-jsonschema --builtin-schema vendor.github-workflows",
+        "uv run check-jsonschema --builtin-schema vendor.github-workflows",
         "hephaestus.scripts_lib.check_version_single_source",
         "uv lock --check",
         "bash scripts/check-symlinks.sh",
@@ -435,6 +436,40 @@ def test_image_build_context_excludes_ignored_checkout_files(tmp_path: Path) -> 
     assert "BUILD_CONTEXT_FILE:./hephaestus/module.py" in log
     assert "BUILD_CONTEXT_FILE:./ignored.env" not in log
     assert "BUILD_CONTEXT_FILE:./.git/" not in log
+
+
+def test_image_build_rejects_allowlisted_symlink_sources(tmp_path: Path) -> None:
+    """A staged symlink must not dereference ignored host bytes into the build context."""
+    repo = _buildable_candidate_repo(tmp_path)
+    pyproject = repo / "pyproject.toml"
+    pyproject.unlink()
+    pyproject.symlink_to((repo / "ignored.env").resolve())
+
+    result, log = _run_runner(tmp_path, "unit", image_exists=False, repo_root=repo)
+
+    assert result.returncode != 0
+    assert "Candidate build source must be a regular file" in result.stderr
+    assert "build --iidfile" not in log
+
+
+def test_schema_validator_is_part_of_the_locked_dev_environment() -> None:
+    """Schema validation must not download mutable executable code at gate runtime."""
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev_dependencies = config["dependency-groups"]["dev"]
+
+    assert any(dependency.startswith("check-jsonschema>=") for dependency in dev_dependencies)
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = lock["package"]
+    assert any(package["name"] == "check-jsonschema" for package in packages)
+    root = next(
+        package for package in packages if package["name"] == "homericintelligence-hephaestus"
+    )
+    assert any(
+        dependency["name"] == "check-jsonschema" for dependency in root["dev-dependencies"]["dev"]
+    )
+    workflow = (REPO_ROOT / ".github/workflows/_required.yml").read_text(encoding="utf-8")
+    assert "uv run check-jsonschema" in workflow
+    assert "uvx check-jsonschema" not in workflow
 
 
 def test_linked_worktree_git_metadata_is_mounted_read_only(tmp_path: Path) -> None:
