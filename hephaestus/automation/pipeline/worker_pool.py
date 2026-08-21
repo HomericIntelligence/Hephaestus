@@ -3291,13 +3291,6 @@ class WorkerPool:
         ).stdout.strip()
         if not default_branch:
             return JobResult(ok=False, error=f"repository has no default branch: {expected_repo}")
-        if branch != default_branch:
-            return JobResult(
-                ok=False,
-                error=(
-                    f"checkout is not on its default branch {default_branch}: currently on {branch}"
-                ),
-            )
         return self._fast_forward_checkout(
             checkout=checkout,
             default_branch=default_branch,
@@ -3306,8 +3299,11 @@ class WorkerPool:
         )
 
     @staticmethod
-    def _checkout_state_error(*, checkout: Path, default_branch: str, timeout_s: int) -> str | None:
-        """Return the clean-default-branch validation error, if any."""
+    def _checkout_state_error(
+        *, checkout: Path, timeout_s: int, default_branch: str | None = None
+    ) -> str | None:
+        """Return the clean, attached-checkout validation error, if any."""
+        del default_branch
         status = git_utils.run(
             [
                 "git",
@@ -3334,8 +3330,6 @@ class WorkerPool:
         branch = branch_result.stdout.strip()
         if branch_result.returncode != 0 or not branch:
             return f"checkout is detached: {checkout}"
-        if branch != default_branch:
-            return f"checkout is not on its default branch {default_branch}: currently on {branch}"
         return None
 
     @staticmethod
@@ -3394,7 +3388,6 @@ class WorkerPool:
         )
         if validation_error := WorkerPool._checkout_state_error(
             checkout=checkout,
-            default_branch=default_branch,
             timeout_s=timeout_s,
         ):
             return JobResult(ok=False, error=validation_error)
@@ -3446,7 +3439,6 @@ class WorkerPool:
             )
         if validation_error := WorkerPool._checkout_state_error(
             checkout=checkout,
-            default_branch=default_branch,
             timeout_s=timeout_s,
         ):
             return JobResult(ok=False, error=validation_error)
