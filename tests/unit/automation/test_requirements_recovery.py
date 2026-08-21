@@ -101,6 +101,28 @@ def test_self_checksummed_role_names_are_not_comment_identities() -> None:
     assert has_contaminated_issue_body(body) is True
 
 
+@pytest.mark.parametrize("indent", [" ", "  ", "   "])
+def test_indented_finalized_claim_fails_closed(indent: str) -> None:
+    """Top-level Markdown indentation cannot hide an invalid finalization claim."""
+    body = _finalized_body().replace(
+        ATHENA_FINALIZED_PLAN_PREFIX,
+        indent + ATHENA_FINALIZED_PLAN_PREFIX,
+    )
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
+
+
+def test_four_space_indented_finalized_example_is_not_top_level_authority() -> None:
+    body = _finalized_body().replace(
+        ATHENA_FINALIZED_PLAN_PREFIX,
+        "    " + ATHENA_FINALIZED_PLAN_PREFIX,
+    )
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is False
+
+
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
     source = "Original requirements"
     revision = "d" * 40

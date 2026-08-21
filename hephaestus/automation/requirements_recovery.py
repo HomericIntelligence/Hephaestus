@@ -44,6 +44,12 @@ _FINALIZED_PLAN_RE = re.compile(
     rf"V=(?P<review>{_FINALIZED_ARTIFACT_IDENTITY_RE}) "
     rf"F=(?P<final>{_DIGEST_RE}) -->$",
 )
+# CommonMark still treats an HTML comment with up to three leading spaces as
+# top-level content. Keep the raw line as the candidate so any indentation
+# fails exact seal verification instead of hiding a malformed authority claim.
+_FINALIZED_PLAN_CANDIDATE_RE = re.compile(
+    rf"^ {{0,3}}{re.escape(ATHENA_FINALIZED_PLAN_PREFIX.rstrip())}"
+)
 _MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
 _OBSOLETE_BODY_RE = re.compile(
@@ -117,7 +123,6 @@ def _sha256(text: str) -> str:
 
 def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
     """Return offsets and lines for top-level Athena finalization claims."""
-    marker_start = ATHENA_FINALIZED_PLAN_PREFIX.rstrip()
     candidates: list[tuple[int, str]] = []
     fence_character: str | None = None
     fence_length = 0
@@ -137,7 +142,7 @@ def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
             ):
                 fence_character = None
                 fence_length = 0
-        elif fence_character is None and line.startswith(marker_start):
+        elif fence_character is None and _FINALIZED_PLAN_CANDIDATE_RE.match(line):
             candidates.append((offset, line))
         offset += len(raw_line)
     return candidates

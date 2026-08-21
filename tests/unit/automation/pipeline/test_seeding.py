@@ -127,6 +127,17 @@ class TestClassifyIssue:
         assert stage is StageName.PLANNING
         assert "authentication" in reason
 
+    def test_indented_invalid_finalization_cannot_use_stale_plan_go(self) -> None:
+        body = _finalized_body().replace(
+            "<!-- athena:finalize-plan ",
+            "  <!-- athena:finalize-plan ",
+        )
+
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
     def test_finalized_plan_with_evidence_routes_to_no_model_authentication(self) -> None:
         stage, reason = classify_issue(
             _facts(
