@@ -131,6 +131,22 @@ def test_invalid_backtick_fence_info_cannot_hide_finalized_claim() -> None:
     assert has_contaminated_issue_body(body) is True
 
 
+def test_list_child_fence_cannot_hide_dedented_finalized_claim() -> None:
+    marker = _finalized_body().splitlines()[-1]
+    body = f"- example\n\n  ```text\n  fenced text\n{marker}"
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
+
+
+def test_finalized_marker_inside_list_is_not_top_level_authority() -> None:
+    marker = _finalized_body().splitlines()[-1]
+    body = f"- example\n\n  {marker}"
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is False
+
+
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
     source = "Original requirements"
     revision = "d" * 40

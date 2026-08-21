@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Final
 
+from markdown_it import MarkdownIt
+
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
@@ -50,7 +52,6 @@ _FINALIZED_PLAN_RE = re.compile(
 _FINALIZED_PLAN_CANDIDATE_RE = re.compile(
     rf"^ {{0,3}}{re.escape(ATHENA_FINALIZED_PLAN_PREFIX.rstrip())}"
 )
-_MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
 _OBSOLETE_BODY_RE = re.compile(
     r"\b(?:already (?:resolved|implemented|fixed)|no longer (?:needed|applicable)|"
@@ -123,33 +124,27 @@ def _sha256(text: str) -> str:
 
 def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
     """Return offsets and lines for top-level Athena finalization claims."""
-    candidates: list[tuple[int, str]] = []
-    fence_character: str | None = None
-    fence_length = 0
+    raw_lines = body.splitlines(keepends=True)
+    line_offsets: list[int] = []
     offset = 0
-    for raw_line in body.splitlines(keepends=True):
-        line = raw_line.rstrip("\r\n")
-        fence = _MARKDOWN_FENCE_RE.match(line)
-        if fence is not None:
-            token = fence.group("fence")
-            if fence_character is None:
-                info_string = line[fence.end() :]
-                # CommonMark rejects backtick-fence openers whose info string
-                # contains a backtick. Treating one as a fence could hide a
-                # following top-level authority claim from fail-closed parsing.
-                if token[0] != "`" or "`" not in info_string:
-                    fence_character = token[0]
-                    fence_length = len(token)
-            elif (
-                token[0] == fence_character
-                and len(token) >= fence_length
-                and line[fence.end() :].strip() == ""
-            ):
-                fence_character = None
-                fence_length = 0
-        elif fence_character is None and _FINALIZED_PLAN_CANDIDATE_RE.match(line):
-            candidates.append((offset, line))
+    for raw_line in raw_lines:
+        line_offsets.append(offset)
         offset += len(raw_line)
+
+    candidates: list[tuple[int, str]] = []
+    # Token levels distinguish document-level HTML comments from examples in
+    # fences, indented code, block quotes, and list containers. Delegating that
+    # block structure to a CommonMark parser also honors implicit container
+    # closure instead of maintaining a partial fence state machine here.
+    for token in MarkdownIt("commonmark").parse(body):
+        if token.type != "html_block" or token.level != 0 or token.map is None:
+            continue
+        start_line, end_line = token.map
+        for line_number in range(start_line, end_line):
+            raw_line = raw_lines[line_number]
+            line = raw_line.rstrip("\r\n")
+            if _FINALIZED_PLAN_CANDIDATE_RE.match(line):
+                candidates.append((line_offsets[line_number], line))
     return candidates
 
 
