@@ -36,8 +36,8 @@ def _finalized_body(content: str = "## Why\n\nPreserve the approved behavior.") 
     """Return a body carrying a correctly self-bound Athena final marker."""
     placeholder = (
         f"{content}\n\n{ATHENA_FINALIZED_PLAN_PREFIX}"
-        f"R={'a' * 64} P=plan-comment:{'b' * 64} "
-        f"V=review-comment:{'c' * 64} F=<F> -->"
+        f"R={'a' * 64} P=123456789:{'b' * 64} "
+        f"V=987654321:{'c' * 64} F=<F> -->"
     )
     digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
     return placeholder.replace("F=<F>", f"F={digest}")
@@ -76,8 +76,8 @@ def test_verified_athena_finalized_body_is_not_recovered_as_generated_requiremen
 
     assert identity is not None
     assert identity.requirements_identity == "a" * 64
-    assert identity.plan_identity == f"plan-comment:{'b' * 64}"
-    assert identity.review_identity == f"review-comment:{'c' * 64}"
+    assert identity.plan_identity == f"123456789:{'b' * 64}"
+    assert identity.review_identity == f"987654321:{'c' * 64}"
     assert (
         identity.final_body_digest
         == hashlib.sha256(
@@ -85,6 +85,20 @@ def test_verified_athena_finalized_body_is_not_recovered_as_generated_requiremen
         ).hexdigest()
     )
     assert has_contaminated_issue_body(body) is False
+
+
+def test_self_checksummed_role_names_are_not_comment_identities() -> None:
+    """Artifact roles cannot stand in for exact GitHub issue-comment IDs."""
+    placeholder = (
+        "## Why\n\nPreserve the approved behavior.\n\n"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} "
+        f"P=plan-comment:{'b' * 64} V=review-comment:{'c' * 64} F=<F> -->"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    body = placeholder.replace("F=<F>", f"F={digest}")
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
 
 
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
@@ -139,10 +153,10 @@ def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> Non
     [
         lambda body: body + "\nLater material edit.",
         lambda body: body.replace("R=" + "a" * 64, "R=malformed identity"),
-        lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=<P>"),
-        lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=" + "b" * 64),
-        lambda body: body.replace("P=plan-comment:", "P=plan/comment:"),
-        lambda body: body.replace("P=plan-comment:" + "b" * 64, "P=plan-comment:x"),
+        lambda body: body.replace("P=123456789:" + "b" * 64, "P=<P>"),
+        lambda body: body.replace("P=123456789:" + "b" * 64, "P=" + "b" * 64),
+        lambda body: body.replace("P=123456789:", "P=plan-comment:"),
+        lambda body: body.replace("P=123456789:" + "b" * 64, "P=123456789:x"),
         lambda body: body + "\n" + body.splitlines()[-1],
         lambda body: body.replace("F=", "F=0", 1),
     ],

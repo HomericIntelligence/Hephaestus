@@ -120,8 +120,8 @@ def _finalized_body(content: str = "## Why\n\nUse the reviewed implementation pl
     """Return a self-verifying finalized planning body fixture."""
     placeholder = (
         f"{content}\n\n"
-        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=plan-comment:{'b' * 64} "
-        f"V=review-comment:{'c' * 64} F=<F> -->"
+        f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=123456789:{'b' * 64} "
+        f"V=987654321:{'c' * 64} F=<F> -->"
     )
     digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
     return placeholder.replace("F=<F>", f"F={digest}")

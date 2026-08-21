@@ -45,8 +45,8 @@ from hephaestus.automation.state_labels import (
 def _finalized_body() -> str:
     placeholder = (
         "## Why\n\nUse the reviewed implementation plan.\n\n"
-        f"<!-- athena:finalize-plan R={'a' * 64} P=plan-comment:{'b' * 64} "
-        f"V=review-comment:{'c' * 64} F=<F> -->"
+        f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
+        f"V=987654321:{'c' * 64} F=<F> -->"
     )
     digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
     return placeholder.replace("F=<F>", f"F={digest}")

@@ -24,7 +24,10 @@ OBSOLETE_EXPLANATION_MARKER: Final[str] = "<!-- hephaestus-obsolete-explanation:
 ATHENA_FINALIZED_PLAN_PREFIX: Final[str] = "<!-- athena:finalize-plan "
 
 _DIGEST_RE = r"[0-9a-f]{64}"
-_FINALIZED_COMMENT_ID_RE = r"[A-Za-z0-9_-]+"
+# GitHub issue comments expose a positive REST ``id`` and an ``IC_`` GraphQL
+# node ID. Artifact role names such as ``plan-comment`` are not identities and
+# cannot bind Athena's sealed source comments.
+_FINALIZED_COMMENT_ID_RE = r"(?:[1-9][0-9]*|IC_[A-Za-z0-9_-]+)"
 _FINALIZED_ARTIFACT_IDENTITY_RE = rf"{_FINALIZED_COMMENT_ID_RE}:{_DIGEST_RE}"
 _PROVENANCE_RE = re.compile(
     rf"^<!-- hephaestus-recovered-requirements:v=(?P<version>\d+):"
