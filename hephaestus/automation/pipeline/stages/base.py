@@ -396,6 +396,10 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def publish_implementation_go_audit(self, pr_number: int, head_sha: str, audit: Any) -> None:
+        """Publish the public audit, then remove exact-head reply journals."""
+        ...
+
     # -- merge_wait surface (#1816) ------------------------------------------
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:

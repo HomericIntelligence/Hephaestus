@@ -337,6 +337,20 @@ class PrReviewGate(_PrReviewHost):
             item.pr,
         )
         outcome = self._write_go(item, ctx)
+        if isinstance(outcome, StageOutcome) and outcome.disposition is Disposition.ADVANCE:
+            audit = item.payload.get("review_audit")
+            head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
+            if not isinstance(audit, ReviewAudit) or not is_full_commit_sha(head_sha):
+                return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
+            try:
+                ctx.github.publish_implementation_go_audit(item.pr, head_sha, audit)
+            except Exception as error:
+                logger.warning(
+                    "pr_review:%d: failed to publish implementation-go audit (%s)",
+                    item.issue,
+                    type(error).__name__,
+                )
+                return StageOutcome(Disposition.RETRY, "implementation_go_audit_retry")
         if isinstance(outcome, StageOutcome):
             return self._cleanup_review_worktree_then(item, outcome)
         return outcome

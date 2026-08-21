@@ -1,3 +1,6 @@
+from hephaestus.automation.issue_timeline import _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE
+from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
+
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -133,6 +136,33 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             PLAN_CANONICAL_MARKER,
             body,
         )
+
+    def publish_implementation_go_audit(
+        self, pr_number: int, head_sha: str, audit: ReviewAudit
+    ) -> None:
+        """Publish the public audit, then remove only matching recovery journals."""
+        marker, body = render_implementation_go_audit(audit, pr_number=pr_number, head_sha=head_sha)
+        self.upsert_issue_comment(pr_number, marker, body)
+        comments = self._repo_issue_comments(pr_number)
+        published = any(
+            self._comment_owned_by_viewer(comment) and str(comment.get("body", "")) == body
+            for comment in comments
+        )
+        if not published:
+            raise RuntimeError("implementation-go audit comment was not visible after write")
+        for comment in comments:
+            if not self._comment_owned_by_viewer(comment):
+                continue
+            first_line = str(comment.get("body", "")).split("\n", 1)[0]
+            if (
+                _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE.fullmatch(first_line) is None
+                or f"pr={pr_number}:head={head_sha}:" not in first_line
+            ):
+                continue
+            comment_id = comment.get("databaseId")
+            if comment_id is None:
+                raise RuntimeError("owned implementation reply handoff has no database id")
+            self._delete_issue_comment(int(comment_id))
 
     def upsert_issue_comment(
         self,
@@ -397,9 +427,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         Repo-stage step 1 [M] (doc section 1): idempotent
         ``_ensure_labels_exist`` over the full ``state_labels`` vocabulary.
         """
-        # Keep provisioning driven by the one shared vocabulary.  In
-        # particular, the orthogonal issue-work guard must be created without
-        # accidentally joining the plan-state routing groups.
+        # The shared vocabulary includes the orthogonal issue-work guard.
         wanted = list(STATE_LABEL_SPECS)
         if self._skip(f"ensure state labels exist: {wanted}"):
             return

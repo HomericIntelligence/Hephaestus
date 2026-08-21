@@ -31,6 +31,7 @@ from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
 )
+from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -569,6 +570,24 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
         self._pr_impl_state = (True, False)
         self._log("mark_pr_implementation_go", pr_number)
+
+    def publish_implementation_go_audit(
+        self, pr_number: int, head_sha: str, audit: ReviewAudit
+    ) -> None:
+        """Mirror public audit publication and exact-head handoff cleanup."""
+        marker, body = render_implementation_go_audit(audit, pr_number=pr_number, head_sha=head_sha)
+        self.upsert_issue_comment(pr_number, marker, body)
+        handoff_prefix = (
+            f"<!-- hephaestus-implementation-reply-handoff:pr={pr_number}:head={head_sha}:"
+        )
+        self.comments[pr_number] = [
+            comment
+            for comment in self.comments.get(pr_number, [])
+            if not (
+                isinstance(comment, str) and comment.split("\n", 1)[0].startswith(handoff_prefix)
+            )
+        ]
+        self._log("publish_implementation_go_audit", pr_number, head_sha)
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""
