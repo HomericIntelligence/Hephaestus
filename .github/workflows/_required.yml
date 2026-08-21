@@ -280,19 +280,10 @@ jobs:
           persist-credentials: false
       - name: Build the shared CI image
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
-      - name: Run ShellCheck in the shared CI image
-        run: |
-          podman run --rm -v "$PWD:/workspace:Z" --workdir /workspace \
-            hephaestus-ci:local bash -c '
-              set -euo pipefail
-              shopt -s nullglob globstar
-              files=(scripts/**/*.sh scripts/**/*.sbatch)
-              if [[ ${#files[@]} -eq 0 ]]; then
-                echo "No shell scripts found — nothing to lint."
-                exit 0
-              fi
-              shellcheck --severity=error "${files[@]}"
-            '
+      - name: Run ShellCheck through the local CI runner
+        env:
+          CONTAINER_ENGINE: podman
+        run: bash scripts/run_ci_local.sh shellcheck
 
   pr-policy:
     name: pr-policy
@@ -714,10 +705,10 @@ jobs:
       - name: Build the shared CI image
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run Bats in the shared CI image
-        run: >-
-          podman run --rm -v "$PWD:/workspace:Z" --workdir /workspace
-          hephaestus-ci:local bats --recursive tests/shell
+      - name: Run Bats through the local CI runner
+        env:
+          CONTAINER_ENGINE: podman
+        run: bash scripts/run_ci_local.sh shell-tests
 
   build:
     name: build

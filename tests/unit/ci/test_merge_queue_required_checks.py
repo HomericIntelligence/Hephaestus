@@ -95,3 +95,7 @@ def test_shell_jobs_use_the_same_versioned_ci_image_as_local_checks() -> None:
     assert "apt-get" not in shell_tests
     assert "hephaestus-ci:local" in shellcheck
     assert "hephaestus-ci:local" in shell_tests
+    assert "scripts/run_ci_local.sh shellcheck" in shellcheck
+    assert "scripts/run_ci_local.sh shell-tests" in shell_tests
+    assert "CONTAINER_ENGINE" in shellcheck
+    assert "CONTAINER_ENGINE" in shell_tests
