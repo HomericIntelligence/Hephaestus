@@ -128,8 +128,8 @@ def _history_has_canonical_pointer(
     Legacy archives are recovery evidence, not merely redundant copies of an
     arbitrary current pointer.  A plan archive can disappear only after the
     canonical plan at the archive's immediate successor revision contains the
-    archived recovery payload.  A review archive needs that same verified plan
-    successor and its own immediate canonical review successor.
+    archived recovery payload.  When a same-revision review archive exists,
+    retain the pair until the immediate canonical review successor is durable.
     """
     history_match = HISTORY_RE.match(comment.body)
     if history_match is None:
@@ -142,7 +142,18 @@ def _history_has_canonical_pointer(
         and extract_current_plan(target_plan.body) == archived_new_plan(comment.body)
     )
     if history_match.group("kind") == "plan":
-        return plan_is_exact_successor
+        has_paired_review_archive = any(
+            (match := HISTORY_RE.match(candidate.body)) is not None
+            and match.group("kind") == "review"
+            and int(match.group("revision")) == revision
+            for candidate in owned
+        )
+        review_is_exact_successor = bool(
+            target_review is not None and comment_revision(target_review.body) == successor_revision
+        )
+        return bool(
+            plan_is_exact_successor and (not has_paired_review_archive or review_is_exact_successor)
+        )
 
     # A review archive does not carry a future review payload.  It therefore
     # needs a same-revision plan archive whose recovery payload reconstructs

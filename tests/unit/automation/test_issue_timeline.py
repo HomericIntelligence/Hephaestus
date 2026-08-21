@@ -154,8 +154,8 @@ def test_compaction_retains_plan_archive_until_its_exact_successor_is_canonical(
     assert result.delete_comment_ids == ()
 
 
-def test_compaction_retains_review_archive_until_verified_revision_successor_exists() -> None:
-    """A stale review pointer cannot replace its archive after a plan recovery crash."""
+def test_compaction_retains_archive_pair_until_both_revision_successors_exist() -> None:
+    """A first pass cannot strand review history by deleting its plan evidence."""
     comments = [
         _comment(1, render_current_plan("Plan v2", revision=2)),
         _comment(2, render_current_review("Review v1", revision=1)),
@@ -165,7 +165,13 @@ def test_compaction_retains_review_archive_until_verified_revision_successor_exi
 
     result = plan_issue_timeline_compaction(comments)
 
-    assert result.delete_comment_ids == (3,)
+    assert result.delete_comment_ids == ()
+
+    comments[1] = _comment(2, render_current_review("Review v2", revision=2))
+
+    recovered = plan_issue_timeline_compaction(comments)
+
+    assert recovered.delete_comment_ids == (3, 4)
 
 
 def test_compaction_deletes_verified_plan_and_review_history_together() -> None:
