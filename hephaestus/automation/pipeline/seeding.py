@@ -283,6 +283,12 @@ def _requirements_recovery_reason(
     facts: IssueFacts,
 ) -> str | None:
     """Return the planning-admission reason for semantic recovery, if any."""
+    if facts.authority_sanitized:
+        # GitHub transport normalization may make the body safe to pass to
+        # subprocesses, but that projection is not planning authority. Route
+        # through planning's fresh fail-closed snapshot before a stale
+        # plan-GO or PR verdict can select implementation or merge-wait.
+        return f"#{facts.number} requires unsanitized authority authentication"
     issue_body = facts.body if isinstance(facts.body, str) else ""
     issue_title = facts.title if isinstance(facts.title, str) else ""
     finalized = verified_finalized_plan(issue_body)

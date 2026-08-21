@@ -65,6 +65,7 @@ def _facts(
     issue_is_closed: bool = False,
     pr_has_implementation_go: bool = False,
     pr_has_implementation_no_go: bool = False,
+    authority_sanitized: bool = False,
 ) -> IssueFacts:
     """Build IssueFacts with defaults for classifier-matrix tests."""
     return IssueFacts(
@@ -79,6 +80,7 @@ def _facts(
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         body=body,
+        authority_sanitized=authority_sanitized,
     )
 
 
@@ -190,6 +192,34 @@ class TestClassifyIssue:
 
         assert stage is StageName.PLANNING
         assert "finalized planning epoch changed" in reason
+
+    @pytest.mark.parametrize(
+        ("pr_number", "pr_is_open", "pr_has_implementation_go"),
+        [
+            (None, False, False),
+            (88, True, True),
+        ],
+    )
+    def test_sanitized_plan_go_authority_always_reenters_planning(
+        self,
+        pr_number: int | None,
+        pr_is_open: bool,
+        pr_has_implementation_go: bool,
+    ) -> None:
+        """Sanitized issue text cannot authorize implementation or merge-wait."""
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO},
+                body="Human requirements with a stripped transport byte",
+                authority_sanitized=True,
+                pr_number=pr_number,
+                pr_is_open=pr_is_open,
+                pr_has_implementation_go=pr_has_implementation_go,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "sanitized authority" in reason
 
     def test_epic_already_tagged_skip_needs_no_retag(self) -> None:
         """An epic that already carries state:skip excludes via skip — no tag flag."""
