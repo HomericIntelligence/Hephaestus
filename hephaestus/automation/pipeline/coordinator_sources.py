@@ -149,6 +149,8 @@ class SourceCoordinator(_CoordinatorHost):
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+                    if entry.non_code:
+                        new_item.payload[WAVE_NON_CODE_PAYLOAD] = True
                 if source.base_main_sha is not None:
                     new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
                 if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
@@ -470,6 +472,8 @@ class SourceCoordinator(_CoordinatorHost):
             item.branch = branch
         if source.wave_lease is not None:
             item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+            if entry.non_code:
+                item.payload[WAVE_NON_CODE_PAYLOAD] = True
         if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
             repo = (self.config.org, item.repo)
             planned = _admission._fetch_planned_files(issue, repo=repo)

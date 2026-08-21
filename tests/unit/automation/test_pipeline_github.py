@@ -198,12 +198,17 @@ def test_issue_body_editor_must_match_authenticated_viewer(
 
 @pytest.mark.parametrize(
     "failure",
-    [subprocess.CalledProcessError(1, "gh"), None],
+    [
+        subprocess.CalledProcessError(1, "gh"),
+        subprocess.TimeoutExpired("gh", 1),
+        OSError("transport unavailable"),
+        None,
+    ],
 )
 def test_repo_scoped_editor_auth_normalizes_transport_and_json_failures(
     adapter: pg.PipelineGitHub,
     monkeypatch: pytest.MonkeyPatch,
-    failure: subprocess.CalledProcessError | None,
+    failure: subprocess.SubprocessError | OSError | None,
 ) -> None:
     """The repo-scoped adapter normalizes transport and decoding failures."""
     adapter.repo = "repo"

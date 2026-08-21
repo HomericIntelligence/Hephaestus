@@ -297,8 +297,8 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             argv.extend(["-F" if isinstance(value, int) else "-f", f"{key}={value}"])
         try:
             data = json.loads(gh_call(argv).stdout or "{}")
-        except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise RuntimeError("repo-scoped pipeline GraphQL request failed") from exc
+        except (subprocess.SubprocessError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"repo-scoped pipeline GraphQL request failed: {exc}") from exc
         if not isinstance(data, dict):
             raise RuntimeError("GraphQL response was not an object")
         github_api._check_graphql_errors(data, "repo-scoped pipeline GraphQL")

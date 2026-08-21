@@ -96,7 +96,9 @@ from the crashed turn is discarded; this is by design. Issue work happens in
 For a staged rollout, the repository-local checkpoint is
 `build/.issue_implementer/issue-wave-checkpoint.json`. Run the selectors in
 order; the next invocation is blocked until the prior wave's exact issues have
-passing terminal outcomes and loop-owned normal merge receipts:
+passing terminal outcomes. Implementation outcomes require loop-owned normal
+merge receipts; independently reviewed tracker/obsolete outcomes instead require
+their durable `state:skip` label:
 
 ```bash
 hephaestus-automation-loop --repos <REPO> --issue-limit 1
@@ -119,10 +121,10 @@ when the file is malformed or the repository checkout was restored.
 ## When `state:skip` applies
 
 `state:skip` is the only label that takes an issue out of the loop entirely. It
-is operator-applied, applied when the review loop exhausts its budget without a
-GO, or applied to epics before exclusion from the issue queue. A crash alone
-does **not** apply `state:skip`; re-running the loop is the correct first
-response to a crash. Apply `state:skip` yourself only when an issue is genuinely
+is operator-applied or applied after independent planner/reviewer agreement that
+an issue is a non-code tracker or obsolete request. A crash alone does **not**
+apply `state:skip`; re-running the loop is the correct first response to a crash.
+Apply `state:skip` yourself only when an issue is genuinely
 stuck after repeated attempts (for a stuck-but-green PR, see the
 [drive-green stall runbook](ci-driver-stall.md)).
 

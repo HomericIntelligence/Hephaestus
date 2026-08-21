@@ -12,6 +12,7 @@ import pytest
 
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
+from hephaestus.automation.issue_waves import WAVE_NON_CODE_PAYLOAD
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillJob, AthenaSkillResult
 from hephaestus.automation.pipeline.jobs import AgentJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition
@@ -256,6 +257,38 @@ class TestPlanningStageEnter:
         assert outcome.disposition is Disposition.ADVANCE
         assert github.labels[108] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
         assert github.comments.get(108, []) == []
+
+    def test_finalized_plan_label_failure_exhausts_without_poisoning_coordinator(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Finalization normalization consumes the bounded plan budget."""
+
+        class FailingLabelsGitHub(FakeStageGitHub):
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                raise RuntimeError("label mutation unavailable")
+
+        item = make_work_item(issue=115)
+        outcome = PlanningStage().on_enter(
+            item,
+            make_ctx(
+                github=FailingLabelsGitHub(
+                    labels=[STATE_PLAN_NO_GO],
+                    issue_body=_finalized_body(),
+                ),
+                budget_fn=lambda _name: 1,
+            ),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 1
+        assert "fail-closed label unavailable" in outcome.note
 
     @pytest.mark.parametrize(
         ("body", "owned_by_viewer"),
@@ -1199,6 +1232,63 @@ class TestPlanningStageStep:
         assert result.disposition is Disposition.FINISH_FAIL
         assert item.attempts["plan"] == 1
 
+    @pytest.mark.parametrize("first_read_fails", [False, True])
+    def test_exhausted_recovery_never_retries_unconfirmed_no_go_forever(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        first_read_fails: bool,
+    ) -> None:
+        """The final label-confirmation attempt is terminal even on conflict."""
+
+        class DropsNoGoGitHub(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(labels=[STATE_NEEDS_PLAN])
+                self.reads = 0
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                self.reads += 1
+                if first_read_fails and self.reads == 1:
+                    raise RuntimeError("initial snapshot unavailable")
+                return super().gh_issue_json(issue_number)
+
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                return None
+
+        github = DropsNoGoGitHub()
+        item = make_work_item(issue=114, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Guess.",
+                    "Weak.",
+                    "evidence",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.NOGO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Insufficient.",
+                ),
+            }
+        )
+
+        result = PlanningStage().step(
+            item,
+            make_ctx(github=github, budget_fn=lambda _name: 1),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 1
+        assert STATE_PLAN_NO_GO not in github.labels[114]
+
     def test_recovery_results_are_rejected_when_issue_evidence_changed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1227,6 +1317,78 @@ class TestPlanningStageStep:
         assert item.payload["_enter_pending"] is True
         assert STATE_SKIP not in github.labels[46]
 
+    @pytest.mark.parametrize("failure", ["label", "provenance"])
+    def test_confirmed_recovery_write_failure_exhausts_without_poisoning_coordinator(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        failure: str,
+    ) -> None:
+        """Recovery-owned GitHub writes are converted to bounded outcomes."""
+
+        class FailingRecoveryWriteGitHub(FakeStageGitHub):
+            def edit_labels(
+                self,
+                issue_number: int,
+                *,
+                add: list[str],
+                remove: list[str],
+            ) -> None:
+                if failure == "label":
+                    raise RuntimeError("label mutation unavailable")
+                super().edit_labels(issue_number, add=add, remove=remove)
+
+            def upsert_issue_comment(
+                self,
+                issue_number: int,
+                marker: str,
+                body: str,
+                *,
+                legacy_marker: str | None = None,
+            ) -> None:
+                if failure == "provenance" and marker == RECOVERY_PROVENANCE_PREFIX:
+                    raise RuntimeError("provenance publication unavailable")
+                super().upsert_issue_comment(
+                    issue_number,
+                    marker,
+                    body,
+                    legacy_marker=legacy_marker,
+                )
+
+        item = make_work_item(issue=116, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "requirements_recovery_contaminated": True,
+                "issue_source_body": "<!-- hephaestus-plan:canonical -->\nOld plan",
+                "issue_body_digest": "a" * 64,
+                "requirements_evidence_digest": "c" * 64,
+                "requirements_repository_revision": "b" * 40,
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Use the original user requirements.",
+                    "Repository evidence.",
+                    "c" * 64,
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Confirmed.",
+                ),
+            }
+        )
+
+        result = PlanningStage().step(
+            item,
+            make_ctx(
+                github=FailingRecoveryWriteGitHub(labels=[STATE_NEEDS_PLAN]),
+                budget_fn=lambda _name: 1,
+            ),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 1
+
     def test_tracker_skip_requires_matching_independent_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1247,7 +1409,8 @@ class TestPlanningStageStep:
         result = stage.step(item, make_ctx(github=github))
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.SKIP
+        assert result.disposition == Disposition.FINISH_PASS
+        assert item.payload[WAVE_NON_CODE_PAYLOAD] is True
         assert github.labels[2] == {STATE_SKIP, "epic"}
 
     def test_tracker_skip_requires_epic_label_readback(
@@ -1362,7 +1525,8 @@ class TestPlanningStageStep:
         )
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.RETRY
+        assert result.disposition == Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 1
 
     def test_obsolete_skip_records_reason_in_one_actor_owned_comment(
         self, make_ctx: Any, make_work_item: Any, caplog: pytest.LogCaptureFixture
@@ -1385,7 +1549,7 @@ class TestPlanningStageStep:
             result = stage.step(item, make_ctx(github=github))
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.SKIP
+        assert result.disposition == Disposition.FINISH_PASS
         assert github.labels[3] == {STATE_SKIP}
         assert (
             sum(action == "gh_issue_upsert_comment" for action, _args in github.mutation_log) == 1
@@ -1991,7 +2155,7 @@ class TestPlanningStageStep:
         retry = stage.step(item, make_ctx(github=github))
 
         assert isinstance(result, StageOutcome)
-        assert result.disposition == Disposition.SKIP
+        assert result.disposition == Disposition.FINISH_PASS
         assert isinstance(retry, StageOutcome)
         explanations = [
             comment

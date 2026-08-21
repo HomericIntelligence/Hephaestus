@@ -139,7 +139,6 @@ def gh_issue_body_edited_by_viewer(
     repo: tuple[str, str] | None = None,
 ) -> bool:
     """Return whether the authenticated actor made the latest issue-body edit."""
-    owner, name = repo if repo is not None else _api.get_repo_info()
     query = (
         "query($owner:String!,$name:String!,$number:Int!){"
         " viewer{ login }"
@@ -149,6 +148,7 @@ def gh_issue_body_edited_by_viewer(
         "}"
     )
     try:
+        owner, name = repo if repo is not None else _api.get_repo_info()
         result = _api._gh_call(
             [
                 "api",
@@ -164,7 +164,7 @@ def gh_issue_body_edited_by_viewer(
             ]
         )
         data = json.loads(result.stdout or "{}")
-    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (subprocess.SubprocessError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeError(
             f"Failed to authenticate issue body editor for #{issue_number}: {exc}"
         ) from exc

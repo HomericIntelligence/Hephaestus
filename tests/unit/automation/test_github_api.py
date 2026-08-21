@@ -186,12 +186,17 @@ def test_issue_body_editor_matches_authenticated_viewer(
 
 @pytest.mark.parametrize(
     "failure",
-    [subprocess.CalledProcessError(1, "gh"), None],
+    [
+        subprocess.CalledProcessError(1, "gh"),
+        subprocess.TimeoutExpired("gh", 1),
+        OSError("transport unavailable"),
+        None,
+    ],
 )
 @patch("hephaestus.automation.github_api._gh_call")
 def test_issue_body_editor_normalizes_transport_and_json_failures(
     mock_gh_call: Any,
-    failure: subprocess.CalledProcessError | None,
+    failure: subprocess.SubprocessError | OSError | None,
 ) -> None:
     """Editor authentication exposes transport and decoding failures uniformly."""
     if failure is not None:
@@ -201,6 +206,13 @@ def test_issue_body_editor_normalizes_transport_and_json_failures(
 
     with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
         gh_issue_body_edited_by_viewer(2795, ("owner", "repo"))
+
+
+@patch("hephaestus.automation.github_api.get_repo_info", side_effect=OSError("no repository"))
+def test_issue_body_editor_normalizes_repository_resolution_failure(_repo_info: Any) -> None:
+    """Ambient repository lookup failures enter the same bounded error path."""
+    with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
+        gh_issue_body_edited_by_viewer(2795)
 
 
 class TestParseIssueDependencies:

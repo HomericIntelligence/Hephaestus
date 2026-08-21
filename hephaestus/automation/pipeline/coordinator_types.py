@@ -100,6 +100,7 @@ from hephaestus.automation.direct_review_recovery import (
 )
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
+    WAVE_NON_CODE_PAYLOAD,
     IssueWaveError,
     IssueWaveStore,
     WaveLease,
@@ -488,7 +489,7 @@ def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
 # Keep this compact so mypy sees the exports without exceeding the file budget.
 # fmt: off
 __all__ = [
-    'DIRECT_SCOPE_BASE_SHA_KEY', 'DIRECT_SCOPE_BOOTSTRAP_KEY', 'DIRECT_SCOPE_WORKTREE_NONCE_KEY', 'PIPELINE_ORDER', 'PRE_PR_TEST_ARGV', 'ROUTES', 'STATE_IMPLEMENTATION_GO', 'STATE_PLAN_BLOCKED', 'WAVE_LEASE_PAYLOAD', 'WORKTREE_MATERIALIZED_KEY',  # noqa: E501
+    'DIRECT_SCOPE_BASE_SHA_KEY', 'DIRECT_SCOPE_BOOTSTRAP_KEY', 'DIRECT_SCOPE_WORKTREE_NONCE_KEY', 'PIPELINE_ORDER', 'PRE_PR_TEST_ARGV', 'ROUTES', 'STATE_IMPLEMENTATION_GO', 'STATE_PLAN_BLOCKED', 'WAVE_LEASE_PAYLOAD', 'WAVE_NON_CODE_PAYLOAD', 'WORKTREE_MATERIALIZED_KEY',  # noqa: E501
     '_DEFAULT_EVENT_LOG_CAPACITY', '_DEFAULT_GRACE_S', '_DEFAULT_TERMINAL_DETAIL_CAPACITY', '_DIRECT_ISSUE_ENTRY_STAGES', '_DRAIN_ORDER', '_FAIL_BACK_CAP', '_FILE_CLAIM_STAGES', '_FILE_OVERLAP_BLOCKED_CLAIMS_KEY', '_FILE_OVERLAP_DEFERRALS_KEY', '_FILE_OVERLAP_WARNING_THRESHOLD',  # noqa: E501
     '_IDLE_POLL_S', '_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD', '_MAX_STEPS_PER_TICK', '_PROMPT_PREFLIGHT_ERROR', '_PROMPT_PREFLIGHT_TEMPLATE', '_REALIZED_DIFF_CLAIM_STAGES', '_SOURCE_REGISTRY_RETRY_DELAY_S', '_STALL_TICKS_BEFORE_FORCE', '_STEP_WATCHDOG_S', 'AgentJob', 'Any', 'BranchWorktreeOwnerStatus', 'Callable',  # noqa: E501
     'CompletionQueue', 'Continue', 'Counter', 'Disposition', 'FinishedStage', 'GitJob', 'ImplementationStage', 'IssueInfo', 'IssueWaveError', 'IssueWaveStore', 'ItemKind', 'ItemResult', 'Iterable', 'Iterator', 'JobHandle', 'JobRequest', 'JobResult', 'LearningStage', 'MergeWaitStage',  # noqa: E501

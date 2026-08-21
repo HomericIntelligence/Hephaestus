@@ -163,6 +163,8 @@ class SeedEntry:
             planner/reviewer/implementer prompts.
         pr_description: PR body copied into a direct PR review payload.
         passed: Terminal result for entries clamped directly to ``finished``.
+        non_code: Whether a passing terminal entry was semantically confirmed
+            as non-code and therefore needs no merge receipt.
 
     """
 
@@ -179,6 +181,7 @@ class SeedEntry:
     skip_tag_obligation: EpicSkipTagObligation | None = None
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
+    non_code: bool = False
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -302,6 +305,12 @@ def classify_issue(facts: IssueFacts) -> Classification:
     if reason := _issue_exclusion_reason(facts):
         LOG.info("issue excluded: %s", reason)
         return None, reason
+
+    if verified_finalized_plan(facts.body) is not None:
+        # A self-verifying finalized body must reach planning's authenticated
+        # no-model path even when a stale sibling label survived an earlier
+        # interrupted normalization. Planning owns the atomic label repair.
+        return StageName.PLANNING, f"#{facts.number} requires finalized-plan authentication"
 
     active_states = sorted(label for label in facts.labels if label in _ISSUE_PLAN_STATE_LABELS)
     if len(active_states) > 1:

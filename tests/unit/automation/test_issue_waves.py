@@ -243,6 +243,10 @@ def test_wave_value_objects_fail_closed_on_invalid_data() -> None:
         WaveIssueOutcome(1, True, "")
     with pytest.raises(IssueWaveValidationError):
         WaveIssueOutcome(1, True, "done", 0)
+    with pytest.raises(IssueWaveValidationError):
+        WaveIssueOutcome(1, False, "failed", non_code=True)
+    with pytest.raises(IssueWaveValidationError):
+        WaveIssueOutcome(1, True, "done", 2, non_code=True)
 
 
 def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
@@ -331,6 +335,55 @@ def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None
     with pytest.raises(IssueWaveBlockedError, match="skip/block"):
         store.validate_prior_wave_facts(
             lease, {19: SimpleNamespace(**{**vars(facts), "labels": {"state:skip"}})}
+        )
+
+
+def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: Path) -> None:
+    """A model-confirmed tracker is durable success, not a poisoned wave."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission(BASE, 1), [19])
+    reason = "independently confirmed tracker"
+    store.record_terminal_outcome(
+        lease,
+        issue_number=19,
+        passed=True,
+        reason=reason,
+        non_code=True,
+    )
+    facts = SimpleNamespace(
+        number=19,
+        labels={"state:skip", "epic"},
+        is_epic=True,
+        pr_number=None,
+        pr_is_merged=False,
+        issue_is_closed=False,
+    )
+
+    store.validate_prior_wave_facts(lease, {19: facts})
+    verified = store.verify_prior_wave(
+        lease,
+        current_main_sha=BASE,
+        ancestry_verified=True,
+        facts_by_issue={19: facts},
+    )
+    assert verified.current_wave.verified_main_sha == BASE
+    assert store.plan_admission(BASE, 2).mode == "select"
+
+    resumed = wave_entry_from_facts(
+        lease,
+        facts,
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert resumed.stage is StageName.FINISHED
+    assert resumed.passed and resumed.non_code and resumed.reason == reason
+
+    with pytest.raises(IssueWaveBlockedError, match="non-code skip"):
+        store.validate_prior_wave_facts(
+            lease,
+            {19: SimpleNamespace(**{**vars(facts), "labels": {"epic"}})},
         )
 
 

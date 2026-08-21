@@ -31,6 +31,7 @@ _LOCK_NAME = "issue-wave-checkpoint.lock"
 _SHA_LENGTHS = (40, 64)
 
 WAVE_LEASE_PAYLOAD = "_issue_wave_lease"
+WAVE_NON_CODE_PAYLOAD = "_issue_wave_non_code"
 
 
 class IssueWaveError(RuntimeError):
@@ -161,6 +162,7 @@ class WaveIssueOutcome:
     passed: bool
     reason: str
     pr_number: int | None = None
+    non_code: bool = False
 
     def __post_init__(self) -> None:
         """Validate the terminal issue result."""
@@ -170,12 +172,54 @@ class WaveIssueOutcome:
             raise IssueWaveValidationError("wave outcome passed must be boolean")
         if not isinstance(self.reason, str) or not self.reason:
             raise IssueWaveValidationError("wave outcome reason must be non-empty")
+        if not isinstance(self.non_code, bool) or (self.non_code and not self.passed):
+            raise IssueWaveValidationError("non-code wave outcome must be a passing boolean")
+        if self.non_code and self.pr_number is not None:
+            raise IssueWaveValidationError("non-code wave outcome cannot reference a PR")
         if self.pr_number is not None and (
             isinstance(self.pr_number, bool)
             or not isinstance(self.pr_number, int)
             or self.pr_number <= 0
         ):
             raise IssueWaveValidationError("wave outcome pr_number must be positive or null")
+
+
+def _require_reviewed_non_code_skip(
+    outcome: WaveIssueOutcome,
+    facts: Any,
+    *,
+    drift: str,
+) -> None:
+    """Require the durable skip label that proves a reviewed non-code outcome."""
+    if facts is None or "state:skip" not in set(getattr(facts, "labels", set())):
+        raise IssueWaveBlockedError(f"issue #{outcome.issue_number} {drift}")
+
+
+def _validate_verified_outcome_facts(
+    record: WaveRecord,
+    facts_by_issue: Mapping[int, Any],
+) -> None:
+    """Validate GitHub facts for a complete passing wave under the caller's lock."""
+    for outcome in record.outcomes:
+        facts = facts_by_issue.get(outcome.issue_number)
+        if outcome.non_code:
+            _require_reviewed_non_code_skip(
+                outcome,
+                facts,
+                drift="lost its reviewed non-code skip",
+            )
+            continue
+        receipt = next(
+            item for item in record.merge_receipts if item.issue_number == outcome.issue_number
+        )
+        if (
+            facts is None
+            or getattr(facts, "pr_number", None) != receipt.pr_number
+            or not bool(getattr(facts, "pr_is_merged", False))
+        ):
+            raise IssueWaveBlockedError(
+                f"issue #{outcome.issue_number} is closed/unmerged or externally changed"
+            )
 
 
 @dataclass(frozen=True)
@@ -302,6 +346,7 @@ def _outcome_to_json(outcome: WaveIssueOutcome) -> dict[str, Any]:
         "passed": outcome.passed,
         "reason": outcome.reason,
         "pr_number": outcome.pr_number,
+        "non_code": outcome.non_code,
     }
 
 
@@ -360,6 +405,7 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
                 passed=cast(bool, item.get("passed")),
                 reason=cast(str, item.get("reason")),
                 pr_number=cast(int | None, item.get("pr_number")),
+                non_code=cast(bool, item.get("non_code", False)),
             )
             for item in outcomes_raw
             if isinstance(item, dict)
@@ -758,6 +804,17 @@ class IssueWaveStore:
                 (item for item in record.merge_receipts if item.issue_number == issue_number), None
             )
 
+    def outcome_for(self, lease: WaveLease, issue_number: int) -> WaveIssueOutcome | None:
+        """Return a recorded terminal outcome for an issue, if one exists."""
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                return None
+            record = self._current_record(checkpoint, lease)
+            return next(
+                (item for item in record.outcomes if item.issue_number == issue_number), None
+            )
+
     def record_merge_receipt(
         self,
         lease: WaveLease,
@@ -802,16 +859,19 @@ class IssueWaveStore:
         passed: bool,
         reason: str,
         pr_number: int | None = None,
+        non_code: bool = False,
     ) -> WaveLease:
         """Persist a terminal issue outcome before it reaches the ledger."""
-        outcome = WaveIssueOutcome(issue_number, passed, reason, pr_number)
+        outcome = WaveIssueOutcome(issue_number, passed, reason, pr_number, non_code)
         with self._locked():
             checkpoint = self._read_unlocked()
             if checkpoint is None:
                 raise IssueWaveConflictError("cannot record an outcome without a checkpoint")
             record = self._current_record(checkpoint, lease)
-            if passed and not any(
-                item.issue_number == issue_number for item in record.merge_receipts
+            if (
+                passed
+                and not non_code
+                and not any(item.issue_number == issue_number for item in record.merge_receipts)
             ):
                 raise IssueWaveBlockedError(
                     "cannot record passed outcome for "
@@ -897,6 +957,14 @@ class IssueWaveStore:
                     raise IssueWaveBlockedError(
                         f"issue #{outcome.issue_number} failed in prior wave: {outcome.reason}"
                     )
+                if outcome.non_code:
+                    facts = facts_by_issue.get(outcome.issue_number)
+                    _require_reviewed_non_code_skip(
+                        outcome,
+                        facts,
+                        drift="no longer has its reviewed non-code skip",
+                    )
+                    continue
                 receipt = next(
                     (
                         item
@@ -934,7 +1002,8 @@ class IssueWaveStore:
                 )
             if not record.passed:
                 raise IssueWaveBlockedError("prior wave contains failed terminal outcomes")
-            if len(record.merge_receipts) != len(record.issue_numbers):
+            merge_outcomes = [outcome for outcome in record.outcomes if not outcome.non_code]
+            if len(record.merge_receipts) != len(merge_outcomes):
                 raise IssueWaveBlockedError(
                     "prior wave is missing one or more loop-owned merge receipts"
                 )
@@ -950,22 +1019,7 @@ class IssueWaveStore:
             if facts_by_issue is not None:
                 # The lock is already held; validate the facts inline to avoid
                 # recursively acquiring the stable sibling lock.
-                for outcome in record.outcomes:
-                    facts = facts_by_issue.get(outcome.issue_number)
-                    receipt = next(
-                        item
-                        for item in record.merge_receipts
-                        if item.issue_number == outcome.issue_number
-                    )
-                    if (
-                        facts is None
-                        or getattr(facts, "pr_number", None) != receipt.pr_number
-                        or not bool(getattr(facts, "pr_is_merged", False))
-                    ):
-                        raise IssueWaveBlockedError(
-                            f"issue #{outcome.issue_number} is closed/unmerged or "
-                            "externally changed"
-                        )
+                _validate_verified_outcome_facts(record, facts_by_issue)
             if not ancestry_verified and record.issue_numbers:
                 raise IssueWaveBlockedError(
                     "prior-wave merge ancestry was not verified against synchronized main"
@@ -1034,7 +1088,24 @@ def wave_entry_from_facts(
             reason=f"issue #{facts.number} is outside the sealed issue wave",
             passed=False,
         )
-    receipt = IssueWaveStore(repo_root, org, repo).receipt_for(lease, facts.number)
+    store = IssueWaveStore(repo_root, org, repo)
+    receipt = store.receipt_for(lease, facts.number)
+    outcome = store.outcome_for(lease, facts.number)
+    if outcome is not None and outcome.non_code:
+        if "state:skip" in set(facts.labels):
+            return replace(
+                entry,
+                stage=StageName.FINISHED,
+                reason=outcome.reason,
+                passed=True,
+                non_code=True,
+            )
+        return replace(
+            entry,
+            stage=StageName.FINISHED,
+            reason=f"issue #{facts.number} lost its reviewed non-code skip",
+            passed=False,
+        )
     if facts.pr_is_merged and receipt is not None and facts.pr_number == receipt.pr_number:
         return replace(
             entry,
@@ -1057,6 +1128,7 @@ def wave_entry_from_facts(
 __all__ = [
     "WAVE_LEASE_PAYLOAD",
     "WAVE_LIMITS",
+    "WAVE_NON_CODE_PAYLOAD",
     "IssueWaveBlockedError",
     "IssueWaveConflictError",
     "IssueWaveError",

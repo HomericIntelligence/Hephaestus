@@ -30,6 +30,7 @@ from hephaestus.automation.direct_review_recovery import (
 )
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
+    WAVE_NON_CODE_PAYLOAD,
     IssueWaveError,
     IssueWaveStore,
     WaveLease,
@@ -138,6 +139,7 @@ class FinishedStage(Stage):
                         passed=item.result.passed,
                         reason=item.result.reason,
                         pr_number=item.pr,
+                        non_code=bool(item.payload.get(WAVE_NON_CODE_PAYLOAD, False)),
                     )
                 except IssueWaveError as exc:
                     # The checkpoint is authoritative for wave advancement.
@@ -157,6 +159,7 @@ class FinishedStage(Stage):
                             passed=False,
                             reason=item.result.reason,
                             pr_number=item.pr,
+                            non_code=False,
                         )
                     except IssueWaveError:
                         logger.exception("finished:%s: failed to persist wave failure", item.issue)

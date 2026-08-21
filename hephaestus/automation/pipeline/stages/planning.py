@@ -45,6 +45,7 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
+from hephaestus.automation.issue_waves import WAVE_NON_CODE_PAYLOAD
 from hephaestus.automation.pipeline.summary import record_summary_action
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import get_plan_prompt
@@ -347,7 +348,10 @@ def _retry_incomplete_requirements_snapshot(
             f"requirements snapshot exhausted; fail-closed label unavailable: {exc}",
         )
     if not no_go_confirmed:
-        return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            "requirements snapshot exhausted; plan-no-go label was not confirmed",
+        )
     return StageOutcome(
         Disposition.FINISH_FAIL,
         f"requirements snapshot exhausted with plan-no-go: {reason}",
@@ -454,6 +458,8 @@ def _retry_requirements_recovery(
     item: WorkItem,
     ctx: StageContext,
     reason: str,
+    *,
+    honor_skip: bool = True,
 ) -> StageOutcome:
     """Retry a correctable recovery once, then preserve plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
@@ -464,7 +470,7 @@ def _retry_requirements_recovery(
     if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
         return issue_outcome
     live_labels = _issue_snapshot_labels(live)
-    if is_skipped(live_labels):
+    if honor_skip and is_skipped(live_labels):
         return StageOutcome(Disposition.SKIP, "state:skip")
     if STATE_PLAN_BLOCKED in live_labels:
         return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
@@ -477,8 +483,18 @@ def _retry_requirements_recovery(
             Disposition.RETRY,
             f"requirements recovery retry {attempt}/{ctx.budget('plan')}: {reason}",
         )
-    if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
-        return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
+    try:
+        no_go_confirmed = _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO)
+    except RuntimeError as exc:
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"requirements recovery exhausted; fail-closed label unavailable: {exc}",
+        )
+    if not no_go_confirmed:
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            "requirements recovery exhausted; plan-no-go label was not confirmed",
+        )
     return StageOutcome(
         Disposition.FINISH_FAIL,
         f"requirements recovery exhausted with plan-no-go: {reason}",
@@ -494,27 +510,57 @@ def _apply_confirmed_semantic_skip(
     """Apply a tracker/obsolete skip only after matching independent GO."""
     assert item.issue is not None  # noqa: S101 - caller validates this
     if proposal.disposition is RecoveryDisposition.TRACKER:
-        if not _apply_recovery_state_label(item, ctx, STATE_SKIP, extra=("epic",)):
-            return StageOutcome(Disposition.RETRY, "tracker skip label was not confirmed")
+        try:
+            skip_confirmed = _apply_recovery_state_label(item, ctx, STATE_SKIP, extra=("epic",))
+        except RuntimeError as exc:
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                f"tracker skip failed: {exc}",
+                honor_skip=False,
+            )
+        if not skip_confirmed:
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                "tracker skip was not confirmed",
+                honor_skip=False,
+            )
         record_summary_action(item, "tracker-skipped")
         _finish_recovery(item)
-        return StageOutcome(Disposition.SKIP, "skip: independently confirmed tracker")
+        item.payload[WAVE_NON_CODE_PAYLOAD] = True
+        return StageOutcome(Disposition.FINISH_PASS, "independently confirmed tracker")
     if proposal.disposition is RecoveryDisposition.OBSOLETE:
         logger.info(
             "planning:%d: independently confirmed obsolete issue; applying state:skip: %s",
             item.issue,
             review.reason,
         )
-        ctx.github.upsert_issue_comment(
-            item.issue,
-            OBSOLETE_EXPLANATION_MARKER,
-            render_obsolete_explanation(review.reason),
-        )
-        if not _apply_recovery_state_label(item, ctx, STATE_SKIP):
-            return StageOutcome(Disposition.RETRY, "obsolete skip label was not confirmed")
+        try:
+            ctx.github.upsert_issue_comment(
+                item.issue,
+                OBSOLETE_EXPLANATION_MARKER,
+                render_obsolete_explanation(review.reason),
+            )
+            skip_confirmed = _apply_recovery_state_label(item, ctx, STATE_SKIP)
+        except RuntimeError as exc:
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                f"obsolete skip failed: {exc}",
+                honor_skip=False,
+            )
+        if not skip_confirmed:
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                "obsolete skip was not confirmed",
+                honor_skip=False,
+            )
         record_summary_action(item, "obsolete-skipped")
         _finish_recovery(item)
-        return StageOutcome(Disposition.SKIP, "skip: independently confirmed obsolete")
+        item.payload[WAVE_NON_CODE_PAYLOAD] = True
+        return StageOutcome(Disposition.FINISH_PASS, "independently confirmed obsolete")
     return None
 
 
@@ -551,15 +597,26 @@ def _apply_confirmed_requirements(
         _finish_recovery(item)
         if force_outcome := _pending_force_after_semantic_clear(item, ctx, source_digest):
             return force_outcome
-        labels = _require_issue_labels_for_transition(item.issue, ctx)
+        try:
+            labels = _require_issue_labels_for_transition(item.issue, ctx)
+        except RuntimeError as exc:
+            return _retry_requirements_recovery(
+                item,
+                ctx,
+                f"semantic-clear label readback failed: {exc}",
+            )
         if is_exclusive_plan_state(labels, STATE_PLAN_GO):
             return StageOutcome(Disposition.ADVANCE, "existing plan remains approved")
         return Continue(next_state="ADVISE_WAIT" if ctx.config.enable_advise else "PLAN_WAIT")
 
     # A recovered comment is actor-owned; the source issue body is never edited
     # because GitHub has no compare-and-swap primitive for body replacement.
-    if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
-        return StageOutcome(Disposition.RETRY, "recovery plan-no-go was not confirmed")
+    try:
+        no_go_confirmed = _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO)
+    except RuntimeError as exc:
+        return _retry_requirements_recovery(item, ctx, f"recovery plan-no-go failed: {exc}")
+    if not no_go_confirmed:
+        return _retry_requirements_recovery(item, ctx, "recovery plan-no-go was not confirmed")
     source_body = str(item.payload.get("issue_source_body", item.payload.get("issue_body")) or "")
     source_digest = str(item.payload.get("issue_body_digest") or "")
     recovered_body = render_recovered_requirements(
@@ -570,7 +627,14 @@ def _apply_confirmed_requirements(
         issue_title=str(item.payload.get("issue_title") or ""),
         repository_revision=str(item.payload.get("requirements_repository_revision") or ""),
     )
-    ctx.github.upsert_issue_comment(item.issue, RECOVERY_PROVENANCE_PREFIX, recovered_body)
+    try:
+        ctx.github.upsert_issue_comment(item.issue, RECOVERY_PROVENANCE_PREFIX, recovered_body)
+    except RuntimeError as exc:
+        return _retry_requirements_recovery(
+            item,
+            ctx,
+            f"recovery provenance publication failed: {exc}",
+        )
     item.payload["issue_body"] = proposal.requirements
     item.payload["requirements_recovered_comment"] = True
     item.payload["requirements_recovery_source_digest"] = source_digest
@@ -1358,20 +1422,27 @@ class PlanningStage(Stage):
                 is_exclusive_plan_state(labels, STATE_PLAN_GO)
                 and ATHENA_FINALIZED_PLAN_LABEL in labels
             )
-            if not finalized_state_current and not (
-                ctx.dry_run
-                or _apply_recovery_state_label(
-                    item,
-                    ctx,
-                    STATE_PLAN_GO,
-                    extra=(ATHENA_FINALIZED_PLAN_LABEL,),
-                    clear_blocked=True,
-                )
-            ):
-                return StageOutcome(
-                    Disposition.RETRY,
-                    "finalized plan-go label was not confirmed",
-                )
+            if not finalized_state_current:
+                try:
+                    finalized_state_confirmed = ctx.dry_run or _apply_recovery_state_label(
+                        item,
+                        ctx,
+                        STATE_PLAN_GO,
+                        extra=(ATHENA_FINALIZED_PLAN_LABEL,),
+                        clear_blocked=True,
+                    )
+                except RuntimeError as exc:
+                    return _retry_incomplete_requirements_snapshot(
+                        item,
+                        ctx,
+                        f"finalized plan-go normalization failed: {exc}",
+                    )
+                if not finalized_state_confirmed:
+                    return _retry_incomplete_requirements_snapshot(
+                        item,
+                        ctx,
+                        "finalized plan-go label was not confirmed",
+                    )
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")

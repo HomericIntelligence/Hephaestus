@@ -156,6 +156,17 @@ class TestClassifyIssue:
         assert stage is StageName.PLANNING
         assert "authentication" in reason
 
+    def test_finalized_plan_with_stale_sibling_labels_routes_to_authentication(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_NEEDS_PLAN, STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=_finalized_body(),
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
     def test_removed_finalized_marker_invalidates_stale_plan_go(self) -> None:
         stage, reason = classify_issue(
             _facts(
