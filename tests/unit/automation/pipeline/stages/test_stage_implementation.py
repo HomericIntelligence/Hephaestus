@@ -1984,7 +1984,57 @@ class TestImplementBudget:
 
 
 class TestTestsAndFix:
-    """TEST_WAIT / TESTFIX_WAIT: optional pre-PR tests bounded by test_fix."""
+    """TEST_WAIT / TESTFIX_WAIT: repository validation bounded by test_fix."""
+
+    def test_hephaestus_runs_required_checks_without_opt_in(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Hephaestus always runs its repository-owned required-check suite."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == (
+            "env",
+            "HEPHAESTUS_CI_REBUILD=1",
+            "bash",
+            "scripts/run_ci_local.sh",
+            "all",
+        )
+        assert (
+            item.payload["test_command"]
+            == "env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all"
+        )
+
+    def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Programmatic generic-test overrides cannot weaken Hephaestus's gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        ctx.config.run_pre_pr_tests = True
+        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        item = make_work_item(
+            issue=1,
+            repo="HomericIntelligence/Hephaestus",
+            state="TEST_WAIT",
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == (
+            "env",
+            "HEPHAESTUS_CI_REBUILD=1",
+            "bash",
+            "scripts/run_ci_local.sh",
+            "all",
+        )
 
     def test_tests_disabled_skip_to_commit_push(self, make_ctx: Any, make_work_item: Any) -> None:
         """run_pre_pr_tests=False (the default) skips the test leg."""

@@ -18,6 +18,27 @@ label with its process-local reviewed-head proof and conditionally merges only
 that SHA; restarted labels re-enter review. CI/CD never independently produces
 or validates authorization.
 
+## Queue pre-PR source checks
+
+Before publishing a Hephaestus implementation, the queue runs the fixed command
+`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
+CI image prevents a prior checkout's dependency environment from weakening the
+gate. For linked implementation worktrees, the runner mounts the shared Git
+metadata read-only so hatch-vcs and Git-aware checks operate on the candidate
+commit. The entry point mirrors the locally
+executable source-validation jobs in `_required.yml`, including lint, unit and
+integration tests, installed-CLI tests, artifact lifecycle validation,
+security scans, schema and version checks, license policy, shell checks, and
+repository structure checks. A failure returns to the bounded implementation
+test-fix loop instead of publishing a knowingly red branch.
+
+This local pass cannot run checks whose inputs do not exist until GitHub creates
+the PR. `pr-policy` still validates the live PR body, title, commit subjects,
+and DCO trailers in Actions. The classic matrix contexts and
+`required-checks-gate` also remain authoritative merge requirements. The local
+run is early failure feedback only; it does not grant
+`state:implementation-go` and does not replace GitHub's exact-head checks.
+
 ## Current required contexts
 
 Classic branch protection requires:

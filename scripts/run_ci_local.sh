@@ -26,7 +26,10 @@
 # Container engine: auto-detected (podman first, docker fallback).
 # Override: CONTAINER_ENGINE=docker ./scripts/run_ci_local.sh
 #
-# Image: built locally from ci/Containerfile — run `just ci-build` first.
+# Image: built locally from ci/Containerfile when it is not already present.
+# Set HEPHAESTUS_CI_REBUILD=1 to rebuild from the current checkout even when
+# the local tag exists. The autonomous queue uses this mode.
+# `just ci-build` remains available for an explicit warm-up.
 
 set -euo pipefail
 
@@ -84,18 +87,52 @@ detect_engine() {
 # Image resolution
 # ============================================================================
 
+build_ci_image() {
+    (
+        cd "${PROJECT_ROOT}"
+        "${CONTAINER_ENGINE}" build -f ci/Containerfile -t "${LOCAL_IMAGE}" .
+    ) || {
+        log_error "Failed to build local CI image '${LOCAL_IMAGE}'."
+        exit 1
+    }
+    CI_IMAGE="${LOCAL_IMAGE}"
+    log_info "Built local CI image: ${CI_IMAGE}"
+}
+
 resolve_image() {
-    if "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \
+    if [ "${HEPHAESTUS_CI_REBUILD:-0}" = "1" ]; then
+        log_info "Rebuilding CI image from the current checkout."
+        build_ci_image
+    elif "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \
        "${CONTAINER_ENGINE}" images -q "${LOCAL_IMAGE}" 2>/dev/null | grep -q .; then
         CI_IMAGE="${LOCAL_IMAGE}"
         log_info "Using local CI image: ${CI_IMAGE}"
     else
-        log_error "Local image '${LOCAL_IMAGE}' not found."
-        log_error "Build it first: just ci-build"
-        log_error "  (podman build -f ci/Containerfile -t ${LOCAL_IMAGE} .)"
-        exit 1
+        log_warn "Local image '${LOCAL_IMAGE}' not found; building it now."
+        build_ci_image
     fi
     export CI_IMAGE
+}
+
+resolve_git_metadata_mount() {
+    local common_dir
+    common_dir="$(
+        git -C "${PROJECT_ROOT}" rev-parse --path-format=absolute --git-common-dir
+    )" || {
+        log_error "Unable to resolve repository Git metadata."
+        exit 1
+    }
+    GIT_METADATA_MOUNT=()
+    case "${common_dir}" in
+        "${PROJECT_ROOT}"|"${PROJECT_ROOT}"/*)
+            ;;
+        *)
+            # A linked worktree's .git file points into the primary checkout.
+            # Preserve that absolute target inside the container, read-only, so
+            # hatch-vcs, Git-aware tests, and scanners see the candidate commit.
+            GIT_METADATA_MOUNT+=(--volume "${common_dir}:${common_dir}:ro")
+            ;;
+    esac
 }
 
 # ============================================================================
@@ -126,6 +163,7 @@ run_in_container() {
 
     "${CONTAINER_ENGINE}" run --rm \
         "${engine_flags[@]}" \
+        "${GIT_METADATA_MOUNT[@]}" \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
         --volume "${PROJECT_ROOT}:/workspace:Z" \
         --workdir /workspace \
@@ -172,8 +210,11 @@ run_cli() {
 }
 
 run_build() {
-    log_step "Package build (sdist + wheel)"
-    run_in_container uv run python -m build --no-isolation
+    log_step "Reproducible artifact and package lifecycle validation"
+    run_in_container uv run pytest tests/integration \
+        --override-ini="addopts=" \
+        --basetemp=build/pytest-artifacts \
+        -v --strict-markers -m artifact
 }
 
 run_audit() {
@@ -222,36 +263,24 @@ run_symlinks() {
 
 run_justfile() {
     log_step "Justfile evaluation"
-    command -v just >/dev/null || {
-        log_error "just is required for the justfile check"
-        return 1
-    }
-    just --evaluate >/dev/null || return 1
-    just --list >/dev/null
+    run_in_container just --evaluate >/dev/null || return 1
+    run_in_container just --list >/dev/null
 }
 
 run_shellcheck() {
     log_step "ShellCheck"
-    command -v shellcheck >/dev/null || {
-        log_error "shellcheck is required for shell static analysis"
-        return 1
-    }
     shopt -s nullglob globstar
     local files=(scripts/**/*.sh scripts/**/*.sbatch)
     if [ "${#files[@]}" -eq 0 ]; then
         log_info "No shell scripts found — nothing to lint."
         return 0
     fi
-    shellcheck --severity=error "${files[@]}"
+    run_in_container shellcheck --severity=error "${files[@]}"
 }
 
 run_shell_tests() {
     log_step "Bats shell tests"
-    command -v bats >/dev/null || {
-        log_error "bats is required for shell tests"
-        return 1
-    }
-    bats --recursive tests/shell
+    run_in_container bats --recursive tests/shell
 }
 
 run_secrets() {
@@ -261,6 +290,7 @@ run_secrets() {
         args+=(--config=.gitleaks.toml)
     fi
     "${CONTAINER_ENGINE}" run --rm \
+        "${GIT_METADATA_MOUNT[@]}" \
         --volume "${PROJECT_ROOT}:/repo:Z" \
         --workdir /repo \
         "${GITLEAKS_IMAGE}" \
@@ -287,6 +317,7 @@ run_step() {
 
 detect_engine
 resolve_image
+resolve_git_metadata_mount
 
 log_info "CI subset: ${SUBSET}"
 log_info "Project root: ${PROJECT_ROOT}"

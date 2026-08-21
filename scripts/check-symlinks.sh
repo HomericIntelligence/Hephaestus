@@ -20,6 +20,13 @@ while IFS= read -r -d '' link; do
   if [ ! -e "$link" ]; then
     echo "ERROR: broken symlink: $link -> $target"; fail=1
   fi
-done < <(find "$ROOT" -path "$ROOT/.git" -prune -o -type l -print0)
+done < <(
+  find "$ROOT" \
+    \( -path "$ROOT/.git" \
+       -o -path "$ROOT/.venv" \
+       -o -path "$ROOT/build/cli-venv" \
+       -o -path "$ROOT/build/pytest-artifacts" \) -prune \
+    -o -type l -print0
+)
 
 [ "$fail" -eq 0 ] && echo "symlink-check: OK" || exit 1

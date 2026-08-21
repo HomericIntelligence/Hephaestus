@@ -13,7 +13,12 @@ RUNNER = REPO_ROOT / "scripts" / "run_ci_local.sh"
 
 
 def _fake_engine(
-    tmp_path: Path, *, failing_command: str = "", license_violation: bool = False
+    tmp_path: Path,
+    *,
+    failing_command: str = "",
+    license_violation: bool = False,
+    image_exists: bool = True,
+    external_git_common_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     """Create a controlled container-engine boundary that records invocations."""
     engine_path = tmp_path / "podman"
@@ -32,8 +37,13 @@ def _fake_engine(
         (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            'if [[ "$1" == "image" && "$2" == "exists" ]]; then exit 0; fi\n'
+            'if [[ "$1" == "image" && "$2" == "exists" ]]; then '
+            f"exit {0 if image_exists else 1}; fi\n"
             'if [[ "$1" == "images" ]]; then exit 0; fi\n'
+            'if [[ "$1" == "build" ]]; then\n'
+            '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
+            '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
+            "fi\n"
             'if [[ "$1" == "run" ]]; then\n'
             '  printf "%q " "$@" >> "$FAKE_ENGINE_LOG"\n'
             '  printf "\\n" >> "$FAKE_ENGINE_LOG"\n'
@@ -55,6 +65,17 @@ def _fake_engine(
             encoding="utf-8",
         )
         executable.chmod(0o755)
+    if external_git_common_dir is not None:
+        git = tmp_path / "git"
+        git.write_text(
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'printf "%s\\n" "{external_git_common_dir}"\n'
+            ),
+            encoding="utf-8",
+        )
+        git.chmod(0o755)
     return engine_path, log
 
 
@@ -67,12 +88,17 @@ def _run_runner(
     license_violation: bool = False,
     host_uid: int | None = None,
     host_gid: int | None = None,
+    image_exists: bool = True,
+    rebuild_image: bool = False,
+    external_git_common_dir: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
         tmp_path,
         failing_command=failing_command,
         license_violation=license_violation,
+        image_exists=image_exists,
+        external_git_common_dir=external_git_common_dir,
     )
     if engine_name != "podman":
         docker = engine_path.with_name(engine_name)
@@ -95,6 +121,7 @@ def _run_runner(
         "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
         "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
+        "HEPHAESTUS_CI_REBUILD": "1" if rebuild_image else "0",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
     result = subprocess.run(
@@ -133,6 +160,22 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "All locally executable CI checks passed." in result.stdout
     for command in (
+        "uv run pre-commit run --all-files --show-diff-on-failure",
+        "uv run hephaestus-validate-links docs --repo-root .",
+        "uv run pytest tests/unit",
+        "uv run hephaestus-check-test-structure",
+        "uv run hephaestus-check-coverage --coverage-file coverage.xml --config coverage.toml",
+        "HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration",
+        "uv build --wheel",
+        "HEPHAESTUS_REQUIRE_CLI=1 build/cli-venv/bin/pytest",
+        "uv run pytest tests/integration --override-ini=addopts= "
+        "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact",
+        "uv run pip-audit",
+        "uv run bandit -c pyproject.toml -r hephaestus scripts --severity-level medium",
+        "uv run zizmor --no-online-audits --min-severity medium .github/workflows/",
+        "uvx check-jsonschema --builtin-schema vendor.github-workflows",
+        "hephaestus.scripts_lib.check_version_single_source",
+        "uv lock --check",
         "bash scripts/check-symlinks.sh",
         "just --evaluate",
         "shellcheck --severity=error",
@@ -171,6 +214,67 @@ def test_integration_requires_installed_cli_entry_points(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     assert "HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration" in log
+
+
+def test_build_matches_required_artifact_lane(tmp_path: Path) -> None:
+    """The local build subset must execute the required workflow's artifact gate."""
+    result, log = _run_runner(tmp_path, "build")
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "uv run pytest tests/integration --override-ini=addopts= "
+        "--basetemp=build/pytest-artifacts -v --strict-markers -m artifact"
+    ) in log
+    assert "python -m build --no-isolation" not in log
+
+
+def test_missing_ci_image_is_built_automatically(tmp_path: Path) -> None:
+    """The autonomous queue must not require a manual ``just ci-build`` step."""
+    result, log = _run_runner(tmp_path, "unit", image_exists=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "build -f ci/Containerfile -t hephaestus-ci:local ." in log
+    assert "uv run pytest tests/unit" in log
+
+
+def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
+    """Queue execution must test with dependencies built from the current checkout."""
+    result, log = _run_runner(tmp_path, "unit", rebuild_image=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "build -f ci/Containerfile -t hephaestus-ci:local ." in log
+    assert "uv run pytest tests/unit" in log
+
+
+def test_linked_worktree_git_metadata_is_mounted_read_only(tmp_path: Path) -> None:
+    """Container checks must resolve linked-worktree Git metadata."""
+    common_dir = tmp_path / "outside" / "repo.git"
+    common_dir.mkdir(parents=True)
+
+    result, log = _run_runner(
+        tmp_path,
+        "unit",
+        external_git_common_dir=common_dir,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"--volume {common_dir}:{common_dir}:ro" in log
+
+
+@pytest.mark.parametrize(
+    ("subset", "command"),
+    [
+        ("justfile", "hephaestus-ci:local just --evaluate"),
+        ("shellcheck", "hephaestus-ci:local shellcheck --severity=error"),
+        ("shell-tests", "hephaestus-ci:local bats --recursive tests/shell"),
+    ],
+)
+def test_shell_gates_run_in_ci_image(tmp_path: Path, subset: str, command: str) -> None:
+    """Required shell tools must not depend on machine-local installations."""
+    result, log = _run_runner(tmp_path, subset)
+
+    assert result.returncode == 0, result.stderr
+    assert command in log
 
 
 def test_subset_success_message_names_only_the_requested_subset(tmp_path: Path) -> None:
