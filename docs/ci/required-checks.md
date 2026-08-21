@@ -23,7 +23,11 @@ or validates authorization.
 Before publishing a Hephaestus implementation, the queue runs the fixed command
 `env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
 CI image prevents a prior checkout's dependency environment from weakening the
-gate. For linked implementation worktrees, the runner mounts the shared Git
+gate. The command runs once after each implementation or test-fix turn and
+immediately before commit, push, and PR creation. A passing run advances
+directly to publication; a failing run returns the item to the implementer and
+must pass on the next attempt before publication. For linked implementation
+worktrees, the runner mounts the shared Git
 metadata read-only so hatch-vcs and Git-aware checks operate on the candidate
 commit. The entry point mirrors the locally
 executable source-validation jobs in `_required.yml`, including lint, unit and
@@ -66,6 +70,15 @@ The active ruleset requires these direct contexts:
 The active `homeric-main-baseline` branch ruleset also applies
 `required_signatures` to `main`. Signature enforcement is repository policy,
 not a duplicate GitHub Actions context.
+
+## Merge queue execution
+
+Both workflow sources of required contexts, `_required.yml` and `test.yml`,
+run on `merge_group: checks_requested`. GitHub therefore evaluates the full
+required suite against each synthetic `gh-readonly-queue/...` commit, including
+the aggregate `required-checks-gate`, every direct ruleset context, and the two
+classic matrix-test contexts. A separate smoke workflow cannot replace those
+required names and is not part of the queue contract.
 
 ## Maintenance
 

@@ -954,7 +954,7 @@ def test_loop_runner_pre_pr_tests_help_describes_the_test_gate() -> None:
     assert (
         action.help
         == "Run the configurable pre-PR test gate for repositories without an automatic "
-        "required-check profile; Hephaestus always runs its required checks."
+        "required-check profile; Hephaestus runs its required checks before initial PR creation."
     )
 
 

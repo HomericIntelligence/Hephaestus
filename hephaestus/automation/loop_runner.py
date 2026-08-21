@@ -429,7 +429,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Run the configurable pre-PR test gate for repositories without an automatic "
-            "required-check profile; Hephaestus always runs its required checks."
+            "required-check profile; Hephaestus runs its required checks before initial "
+            "PR creation."
         ),
     )
     p.add_argument(

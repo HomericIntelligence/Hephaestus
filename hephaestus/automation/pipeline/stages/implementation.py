@@ -1010,7 +1010,13 @@ class ImplementationStage(Stage):
             # budget); RETRY re-enters the stage for the next attempt.
             return StageOutcome(Disposition.RETRY, "agent_error")
         is_hephaestus = item.repo.rsplit("/", 1)[-1].casefold() == "hephaestus"
-        if not is_hephaestus and not getattr(ctx.config, "run_pre_pr_tests", False):
+        run_hephaestus_pre_pr_checks = (
+            is_hephaestus and item.pr is None and not bool(item.payload.get("existing_pr"))
+        )
+        run_configured_pre_pr_checks = not is_hephaestus and bool(
+            getattr(ctx.config, "run_pre_pr_tests", False)
+        )
+        if not (run_hephaestus_pre_pr_checks or run_configured_pre_pr_checks):
             return Continue(next_state=COMMIT_PUSH_WAIT)
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
@@ -1018,7 +1024,7 @@ class ImplementationStage(Stage):
         logger.info("implementation:%d: requesting pre-PR test job", issue)
         test_argv = (
             HEPHAESTUS_REQUIRED_CHECK_ARGV
-            if is_hephaestus
+            if run_hephaestus_pre_pr_checks
             else tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
         )
         item.payload["test_command"] = shlex.join(test_argv)
@@ -1027,7 +1033,9 @@ class ImplementationStage(Stage):
             cwd=_worktree_path(item, ctx),
             argv=test_argv,
             timeout_s=(
-                HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S if is_hephaestus else PRE_PR_TEST_TIMEOUT_S
+                HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S
+                if run_hephaestus_pre_pr_checks
+                else PRE_PR_TEST_TIMEOUT_S
             ),
             descr="pre_pr_tests",
         )
