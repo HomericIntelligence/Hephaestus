@@ -55,15 +55,20 @@ latest issue-body edit. A checksum alone is integrity evidence, not
 authorization. That verified body already contains a GO-reviewed plan, so the
 stage does not invoke recovery or reopen it under `--force`; it atomically
 normalizes the issue to exclusive `state:plan-go` and records the independent
-`athena:finalized-plan` evidence label for restart routing. The evidence label
-is metadata, never a third plan state or implementation gate. An intact marker
-with that evidence bypasses planning on every restart. If a later body rewrite
-removes the marker, seeding sends the issue through a fresh planning epoch and
-clears both the stale evidence and stale GO; malformed, duplicated, or
-mismatched markers enter autonomous requirements recovery. GitHub offers no
-historical signal when a finalized body is replaced before Hephaestus first
-observes it, so the durable drift guarantee begins with that first verified
-observation.
+`athena:finalized-plan` evidence label for observability. The evidence label is
+metadata, never a third plan state or implementation gate. On every restart,
+seeding routes an intact finalized marker through planning's no-model editor
+authentication fast path. A successful check advances without planner or
+plan-review calls. If a later body rewrite removes or replaces the marker, the
+stage clears stale evidence and stale GO and enters a fresh planning or
+recovery epoch; malformed, duplicated, mismatched, or foreign-edited markers
+enter autonomous requirements recovery.
+
+`state:plan-blocked` remains an operator-owned latch for ordinary planning.
+An authenticated Athena finalized body is the narrow terminal exception: it
+proves that the external planning decision completed, so Hephaestus atomically
+replaces a stale blocked latch with exclusive `state:plan-go` plus finalized
+evidence. Foreign or invalid finalization leaves the blocked latch untouched.
 
 Tracker labels and title patterns are candidates, not skip authority.
 Repository discovery routes them through independent semantic planning review;

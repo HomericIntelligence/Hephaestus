@@ -75,8 +75,8 @@ class TestGhIssueJson:
         assert data["bodyDigest"] == hashlib.sha256(b"Test body").hexdigest()
 
     @patch("hephaestus.automation.github_api._gh_call")
-    def test_body_digest_is_bound_to_the_exact_fetched_body(self, mock_gh_call: Any) -> None:
-        """The optimistic-concurrency token covers bytes before prompt sanitization."""
+    def test_body_digest_is_bound_to_the_sanitized_fetched_body(self, mock_gh_call: Any) -> None:
+        """Recovery provenance and exposed body use one canonical representation."""
         raw_body = "bad\x00body"
         mock_gh_call.return_value = Mock(
             stdout=json.dumps(
@@ -93,7 +93,14 @@ class TestGhIssueJson:
         data = gh_issue_json(123)
 
         assert data["body"] == "badbody"
-        assert data["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
+        assert data["bodyDigest"] == hashlib.sha256(b"badbody").hexdigest()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_malformed_issue_json_is_normalized_to_runtime_error(self, mock_gh_call: Any) -> None:
+        mock_gh_call.return_value = Mock(stdout="not-json")
+
+        with pytest.raises(RuntimeError, match="Failed to fetch issue"):
+            gh_issue_json(123)
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_failed_fetch(self, mock_gh_call: Any) -> None:

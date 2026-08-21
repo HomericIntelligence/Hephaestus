@@ -10,7 +10,7 @@ Pure classifier: (labels, PR existence/state) → entry stage, using **ordered l
 Entry routing (the binding contract is the classification table in
 ``docs/architecture.md`` §7 "Seeding and restart reconstruction"):
 
-- ``state:skip`` or epic → excluded (stage ``None``, logged)
+- ``state:skip`` → excluded (stage ``None``, logged)
 - Closed issue + merged PR carrying an exact ``Closes #N`` line → finished
   (pass, idempotent)
 - Open PR without an exclusive issue-level ``state:plan-go`` → planning
@@ -51,7 +51,6 @@ from hephaestus.automation.requirements_recovery import (
 )
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
-    EPIC_LABELS,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -94,7 +93,7 @@ def read_pending_implementation_go_audit(
 
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
-#: issue is EXCLUDED from the pipeline (state:skip / epic) — exclusion is NOT
+#: issue is EXCLUDED from the pipeline (state:skip) — exclusion is NOT
 #: completion, so it is deliberately distinct from ``StageName.FINISHED``.
 Classification = tuple[StageName | None, str]
 
@@ -106,7 +105,7 @@ class IssueFacts:
     Attributes:
         number: GitHub issue number.
         title: Issue title (feeds the epic title-marker signal, #1669).
-        is_epic: Whether this issue is an epic/roadmap (excluded from queuing).
+        is_epic: Whether this issue is an epic/roadmap semantic-review candidate.
         labels: Set of labels currently on this issue.
         body: Issue body used to hydrate downstream task prompts.
         pr_number: GitHub PR number if one exists and is live (open or
@@ -145,13 +144,6 @@ class IssueFacts:
 
 
 @dataclass(frozen=True)
-class EpicSkipTagObligation:
-    """A required durable ``state:skip`` write before an epic is excluded."""
-
-    issue: int
-
-
-@dataclass(frozen=True)
 class SeedEntry:
     """One planned queue push produced by :func:`seed_from_cli`.
 
@@ -171,8 +163,6 @@ class SeedEntry:
             planner/reviewer/implementer prompts.
         pr_description: PR body copied into a direct PR review payload.
         passed: Terminal result for entries clamped directly to ``finished``.
-        skip_tag_obligation: Durable write that must complete before this
-            entry's exclusion can be honored, when it is an untagged epic.
 
     """
 
@@ -263,16 +253,17 @@ def _label_at_or_past(label: str | None, target: str) -> bool:
 
 def _requirements_recovery_reason(
     facts: IssueFacts,
-    *,
-    explicit_tracker: bool,
 ) -> str | None:
     """Return the planning-admission reason for semantic recovery, if any."""
     issue_body = facts.body if isinstance(facts.body, str) else ""
     issue_title = facts.title if isinstance(facts.title, str) else ""
     finalized = verified_finalized_plan(issue_body)
     has_finalized_evidence = ATHENA_FINALIZED_PLAN_LABEL in facts.labels
-    if finalized is not None and not has_finalized_evidence:
-        return f"#{facts.number} requires finalized-plan evidence normalization"
+    if finalized is not None:
+        # Seeding cannot authenticate the latest issue-body editor. Always
+        # enter planning's no-model verification fast path, even after an
+        # earlier observation added the metadata label.
+        return f"#{facts.number} requires finalized-plan authentication"
     if finalized is None and has_finalized_evidence:
         return f"#{facts.number} finalized planning epoch changed"
     if has_contaminated_issue_body(issue_body):
@@ -282,11 +273,11 @@ def _requirements_recovery_reason(
     return None
 
 
-def _issue_exclusion_reason(facts: IssueFacts, *, explicit_tracker: bool) -> str | None:
+def _issue_exclusion_reason(facts: IssueFacts) -> str | None:
     """Return an operator/external exclusion reason before state routing."""
     if STATE_SKIP in facts.labels:
         return f"#{facts.number} tagged {STATE_SKIP}"
-    if STATE_PLAN_BLOCKED in facts.labels:
+    if STATE_PLAN_BLOCKED in facts.labels and verified_finalized_plan(facts.body) is None:
         return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
     return None
 
@@ -294,7 +285,7 @@ def _issue_exclusion_reason(facts: IssueFacts, *, explicit_tracker: bool) -> str
 def classify_issue(facts: IssueFacts) -> Classification:
     """Classify an issue into a single entry stage based on GitHub state.
 
-    Exclusion (``state:skip`` / epic) is distinct from completion: excluded
+    Exclusion (``state:skip``) is distinct from completion: excluded
     issues return ``stage=None`` (and are logged), while genuinely finished
     work (merged PR) returns :attr:`StageName.FINISHED`.
 
@@ -308,8 +299,7 @@ def classify_issue(facts: IssueFacts) -> Classification:
     """
     # Exclusions: skip wins over everything (operator-only, absolute — it
     # carries no rank and never enters the rank comparison).
-    explicit_tracker = bool({label.lower() for label in facts.labels}.intersection(EPIC_LABELS))
-    if reason := _issue_exclusion_reason(facts, explicit_tracker=explicit_tracker):
+    if reason := _issue_exclusion_reason(facts):
         LOG.info("issue excluded: %s", reason)
         return None, reason
 
@@ -325,10 +315,7 @@ def classify_issue(facts: IssueFacts) -> Classification:
     if facts.issue_is_closed and facts.pr_is_merged:
         return StageName.FINISHED, f"#{facts.number} PR merged (idempotent)"
 
-    if recovery_reason := _requirements_recovery_reason(
-        facts,
-        explicit_tracker=explicit_tracker,
-    ):
+    if recovery_reason := _requirements_recovery_reason(facts):
         return StageName.PLANNING, recovery_reason
 
     # Extract the active state label
@@ -521,16 +508,11 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
 def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
     """Build one issue seed entry and its required durable-write obligation.
 
-    Seeding remains pure: it can declare, but never execute, the write that
-    makes an epic exclusion durable.  Callers must discharge the typed
-    obligation before they consume the resulting ``stage=None`` entry.
-
     Args:
         facts: Normalized GitHub state for one issue.
 
     Returns:
-        The classified entry, with an epic skip-tag obligation only when the
-        issue is an untagged epic.
+        The classified entry.
 
     """
     stage, reason = classify_issue(facts)
@@ -671,7 +653,6 @@ def seed_from_cli(
 
 __all__ = [
     "Classification",
-    "EpicSkipTagObligation",
     "IssueFacts",
     "SeedEntry",
     "classify_issue",

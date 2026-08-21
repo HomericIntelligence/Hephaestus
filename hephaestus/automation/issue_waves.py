@@ -1033,7 +1033,6 @@ def wave_entry_from_facts(
             stage=StageName.FINISHED,
             reason=f"issue #{facts.number} is outside the sealed issue wave",
             passed=False,
-            skip_tag_obligation=None,
         )
     receipt = IssueWaveStore(repo_root, org, repo).receipt_for(lease, facts.number)
     if facts.pr_is_merged and receipt is not None and facts.pr_number == receipt.pr_number:
@@ -1043,7 +1042,6 @@ def wave_entry_from_facts(
             reason=f"issue #{facts.number} already has its recorded loop-owned merge",
             passed=True,
             pr_number=receipt.pr_number,
-            skip_tag_obligation=None,
         )
     if facts.issue_is_closed:
         reason = f"issue #{facts.number} closed without its recorded loop-owned merge"
@@ -1053,9 +1051,7 @@ def wave_entry_from_facts(
         reason = f"issue #{facts.number} reached a terminal state without a wave receipt"
     else:
         return entry
-    return replace(
-        entry, stage=StageName.FINISHED, reason=reason, passed=False, skip_tag_obligation=None
-    )
+    return replace(entry, stage=StageName.FINISHED, reason=reason, passed=False)
 
 
 __all__ = [

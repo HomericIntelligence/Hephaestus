@@ -414,22 +414,6 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
                 f"could not verify drive-green learn result for issue #{issue_number}"
             )
 
-    def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
-        """Tag epics ``state:skip`` via the sanctioned chokepoint.
-
-        The ONE seeding write (doc row "Epic tagging is the one seeding
-        write; done BEFORE excluding"), executed by the coordinator through
-        ``github_api.skip_epics``.
-        """
-        if self._skip(f"tag epics {sorted(epics_labels)} {STATE_SKIP}"):
-            return
-        if self._repo_slug is not None:
-            for number, labels in epics_labels.items():
-                if STATE_SKIP not in labels:
-                    self._add_labels(number, [STATE_SKIP])
-            return
-        github_api.skip_epics(epics_labels)
-
     def ensure_state_labels(self) -> None:
         """Ensure the ``state:*`` label vocabulary exists on the repo.
 

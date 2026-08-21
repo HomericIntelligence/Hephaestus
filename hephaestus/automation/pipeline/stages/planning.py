@@ -94,6 +94,7 @@ from hephaestus.automation.state_labels import (
     STATE_SKIP,
     apply_plan_state,
     enter_planning_transition,
+    is_epic,
     is_exclusive_plan_state,
     is_plan_go,
     is_skipped,
@@ -229,10 +230,10 @@ def _refresh_requirements_recovery_context(
         raise RuntimeError("issue requirements snapshot is incomplete")
     contaminated = has_contaminated_issue_body(body)
     finalized = verified_finalized_plan(body)
+    labels = _issue_snapshot_labels(snapshot)
     if finalized is not None and not ctx.github.issue_body_edited_by_viewer(item.issue):
         finalized = None
         contaminated = True
-    labels = _issue_snapshot_labels(snapshot)
     finalized_invalidated = ATHENA_FINALIZED_PLAN_LABEL in labels and finalized is None
     recovered = (
         next(
@@ -282,7 +283,9 @@ def _refresh_requirements_recovery_context(
         else:
             item.payload.pop("athena_finalized_plan_invalidated", None)
     semantic_candidate = (
-        finalized is None and recovered is None and is_semantic_disposition_candidate(title, body)
+        finalized is None
+        and recovered is None
+        and (is_epic(labels, title="") or is_semantic_disposition_candidate(title, body))
     )
     semantic_already_cleared = item.payload.get("requirements_semantic_clear_digest") == body_digest
     required = contaminated or (semantic_candidate and not semantic_already_cleared)
@@ -312,14 +315,22 @@ def _retry_incomplete_requirements_snapshot(
 ) -> StageOutcome:
     """Bound incomplete entry reads and fail closed with plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
-    live = ctx.github.gh_issue_json(item.issue)
-    if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
-        return issue_outcome
-    live_labels = _issue_snapshot_labels(live)
-    if is_skipped(live_labels):
-        return StageOutcome(Disposition.SKIP, "state:skip")
-    if STATE_PLAN_BLOCKED in live_labels:
-        return StageOutcome(Disposition.BLOCKED, "plan was blocked during requirements recovery")
+    try:
+        live = ctx.github.gh_issue_json(item.issue)
+    except RuntimeError as exc:
+        live = None
+        reason = f"{reason}; retry read failed: {exc}"
+    if live is not None:
+        if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
+            return issue_outcome
+        live_labels = _issue_snapshot_labels(live)
+        if is_skipped(live_labels):
+            return StageOutcome(Disposition.SKIP, "state:skip")
+        if STATE_PLAN_BLOCKED in live_labels:
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "plan was blocked during requirements recovery",
+            )
     attempt = item.attempts.get("plan", 0) + 1
     item.attempts["plan"] = attempt
     if attempt < ctx.budget("plan"):
@@ -328,7 +339,14 @@ def _retry_incomplete_requirements_snapshot(
             Disposition.RETRY,
             f"requirements snapshot retry {attempt}/{ctx.budget('plan')}: {reason}",
         )
-    if not _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO):
+    try:
+        no_go_confirmed = _apply_recovery_state_label(item, ctx, STATE_PLAN_NO_GO)
+    except RuntimeError as exc:
+        return StageOutcome(
+            Disposition.FINISH_FAIL,
+            f"requirements snapshot exhausted; fail-closed label unavailable: {exc}",
+        )
+    if not no_go_confirmed:
         return StageOutcome(Disposition.RETRY, "plan-no-go label was not confirmed")
     return StageOutcome(
         Disposition.FINISH_FAIL,
@@ -377,6 +395,7 @@ def _apply_recovery_state_label(
     target: str,
     *,
     extra: Sequence[str] = (),
+    clear_blocked: bool = False,
 ) -> bool:
     """Atomically write and confirm one recovery-owned issue state.
 
@@ -396,6 +415,8 @@ def _apply_recovery_state_label(
     else:
         _add, removals = apply_plan_state(target)
         removals = [*removals, *ALL_IMPLEMENTATION_STATE_LABELS]
+    if clear_blocked:
+        removals = [*removals, STATE_PLAN_BLOCKED]
     if ATHENA_FINALIZED_PLAN_LABEL not in extra:
         removals = [*removals, ATHENA_FINALIZED_PLAN_LABEL]
     ctx.github.edit_labels(
@@ -1285,10 +1306,12 @@ class PlanningStage(Stage):
             logger.warning("planning: work item has no issue number")
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
 
-        if issue_outcome := _closed_issue_entry_outcome(item, ctx):
-            return issue_outcome
-
-        labels = _require_issue_labels(item, ctx)
+        try:
+            if issue_outcome := _closed_issue_entry_outcome(item, ctx):
+                return issue_outcome
+            labels = _require_issue_labels(item, ctx)
+        except RuntimeError as exc:
+            return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         force_replan = bool(getattr(ctx.config, "force", False)) and not bool(
             item.payload.get("forced_planning_epoch_started")
         )
@@ -1307,14 +1330,6 @@ class PlanningStage(Stage):
             logger.info("planning:%d: state:skip; skipping", item.issue)
             return StageOutcome(Disposition.SKIP, "state:skip")
 
-        # BLOCKED is an operator-owned hold. Automation never clears or
-        # replaces it, even when later comments supply the missing decision.
-        # An external actor must resolve the dependency and set exactly one
-        # next state label before the issue becomes eligible again.
-        if STATE_PLAN_BLOCKED in labels:
-            ctx.github.ensure_blocked_audit(item.issue)
-            return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
-
         # Derived automation artifacts in the issue body are not requirements.
         # Semantic tracker/obsolete candidates use the same two-model gate.
         # This check precedes plan-GO so stale approval cannot authorize a body
@@ -1325,9 +1340,6 @@ class PlanningStage(Stage):
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
         except RuntimeError as exc:
             return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
-        if recovery_required:
-            logger.info("planning:%d: requirements recovery required", item.issue)
-            return None
         force_replan = force_replan or bool(item.payload.get("athena_finalized_plan_invalidated"))
 
         # Athena finalization seals one exact GO-reviewed planning epoch into
@@ -1347,6 +1359,7 @@ class PlanningStage(Stage):
                     ctx,
                     STATE_PLAN_GO,
                     extra=(ATHENA_FINALIZED_PLAN_LABEL,),
+                    clear_blocked=True,
                 )
             ):
                 return StageOutcome(
@@ -1356,6 +1369,18 @@ class PlanningStage(Stage):
             record_summary_action(item, "finalized-plan-reused")
             logger.info("planning:%d: verified Athena finalized plan; advancing", item.issue)
             return StageOutcome(Disposition.ADVANCE, "Athena finalized plan already approved")
+
+        # BLOCKED is an operator-owned hold for ordinary planning. The one
+        # exception is an authenticated Athena finalization above: that body
+        # proves the external planning decision has already completed, so its
+        # stale hold is replaced atomically by exclusive plan-GO.
+        if STATE_PLAN_BLOCKED in labels:
+            ctx.github.ensure_blocked_audit(item.issue)
+            return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
+
+        if recovery_required:
+            logger.info("planning:%d: requirements recovery required", item.issue)
+            return None
 
         # Fast-forward only from the sole confirmed plan state. A stale sibling
         # makes the label set contradictory and must never authorize work.

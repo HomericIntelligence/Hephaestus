@@ -1,6 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 import json
+import subprocess
 from urllib.parse import quote
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -304,19 +305,31 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (``github_api.issues.gh_issue_json``)."""
         if self._repo_slug is not None:
-            result = self._gh(
-                ["issue", "view", str(issue_number), "--json", "number,title,state,labels,body"]
-            )
-            data = json.loads(result.stdout or "{}")
+            try:
+                result = self._gh(
+                    [
+                        "issue",
+                        "view",
+                        str(issue_number),
+                        "--json",
+                        "number,title,state,labels,body",
+                    ]
+                )
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
+            try:
+                data = json.loads(result.stdout or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
             if not isinstance(data, dict):
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
-            raw_body = data.get("body")
-            if isinstance(raw_body, str):
-                data["bodyDigest"] = github_api.issue_body_digest(raw_body)
             for field in ("title", "body"):
                 value = data.get(field)
                 if isinstance(value, str):
                     data[field] = github_api.strip_null_bytes(value)
+            body = data.get("body")
+            if isinstance(body, str):
+                data["bodyDigest"] = github_api.issue_body_digest(body)
             return data
         return github_api.gh_issue_json(issue_number)
 

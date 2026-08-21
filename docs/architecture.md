@@ -63,7 +63,8 @@ re-run: queue reconstruction reads the journal
 ([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
 [`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
 the per-repo seed-side [`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py)
-in §5.1, which tags `state:skip` on epics before any other durable mutation.
+in §5.1. Both paths classify tracker labels as semantic-review candidates;
+neither writes `state:skip` during seeding.
 - **Interrupt = resumable, never failed.** A SIGINT/SIGTERM/SIGHUP during a
  run parks the touched item with `ItemResult(passed=False,
  reason="resumable at <stage>", …)`. A subsequent restart seeds it back
@@ -810,7 +811,7 @@ stateDiagram-v2
     ReviewRecovery --> Failed: unavailable evidence; state:plan-no-go retained
     ReviewRecovery --> Skipped: independently confirmed tracker or obsolete issue
     ReviewRecovery --> BuildContext: requirements GO; digest/readback confirmed
-    Eligibility --> Skipped: state:skip or explicit tracker label
+    Eligibility --> Skipped: state:skip
     Eligibility --> Ready: approved plan exists
     Eligibility --> AwaitOperator: state:plan-blocked present
     Eligibility --> BuildContext: eligible plan-state label
@@ -862,7 +863,9 @@ Architectural contract:
   third ordinary review outcome.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
-- `state:plan-blocked` is never removed or replaced by automation. Comments do
+- `state:plan-blocked` is never removed or replaced by ordinary planning. An
+  authenticated Athena-finalized body is the narrow exception because it
+  proves the planning decision already completed. Comments otherwise do
   not revive it. After resolving the dependency, an external actor sets exactly
   one next state: ordinarily `state:plan-no-go` to request amendment,
   `state:plan-go` to approve, or `state:needs-plan` only when no canonical plan
@@ -1388,27 +1391,23 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 
 | GitHub state | Entry stage |
 |-------------------------------------------------------|----------------------------------|
-| `state:skip` or explicit `epic`/`roadmap` label | excluded (`stage = None`) |
+| `state:skip` | excluded (`stage = None`) |
 | Closed issue with a merged PR carrying exact `Closes #N` | `FINISHED` (pass, idempotent) |
 | Open/reopened issue with a historic merged PR | Treat as no open PR; route by current state label |
 | Direct PR already closed | excluded |
-| Exact derived marker at issue-body start | `PLANNING` requirements recovery, regardless of plan/PR state |
-| Title-inferred tracker or narrow obsolete candidate | `PLANNING` independent semantic review |
+| Valid Athena-finalized issue body | `PLANNING` no-model editor authentication, then normal downstream routing without replanning |
+| Exact derived marker, explicit tracker label, title-inferred tracker, or narrow obsolete candidate | `PLANNING` independent recovery/semantic review |
 | Open PR without exclusive issue-level `state:plan-go` | `PLANNING` |
 | Open PR with plan-GO and PR-level `state:implementation-go` | `MERGE_WAIT` |
 | Any other open PR with plan-GO | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
-| No PR, `state:plan-blocked` | excluded until an external actor resolves the block and replaces the label; comments alone are inert |
+| No PR, `state:plan-blocked` | excluded until an external actor resolves the block; an authenticated Athena-finalized body is the sole automatic exception |
 | No state label / `state:needs-plan` | `PLANNING` |
 
-Epic tagging is the **ONE sanctioned seeding write**. GitHub mutations are
-forbidden in `seeding.py`, so
-[`EpicSkipTagObligation`](../hephaestus/automation/pipeline/seeding.py)
-is discharged by the coordinator through
-[`ctx.github.skip_epics`](../hephaestus/automation/pipeline/stages/base.py)
-BEFORE the exclusion is honored
-([`_seed_pass`](../hephaestus/automation/pipeline/coordinator.py)).
+Seeding is read-only. Explicit tracker labels are semantic candidates rather
+than exclusion authority; only the independently reviewed planning disposition
+may add `state:skip`.
 
 ### Seeding and re-seed scope
 

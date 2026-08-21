@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from multiprocessing import get_context
@@ -3077,7 +3078,6 @@ _MUTATOR_CASES = [
     ("add_labels", (5, ["x"]), "github_api", "gh_issue_add_labels"),
     ("remove_labels", (5, ["x"]), "github_api", "gh_issue_remove_labels"),
     ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
-    ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
 ]
 
@@ -5555,7 +5555,7 @@ class TestReadSurface:
         result = adapter.gh_issue_json(4)
 
         assert result["body"] == "rawbody"
-        assert result["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
+        assert result["bodyDigest"] == hashlib.sha256(b"rawbody").hexdigest()
 
     def test_gh_issue_json(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -5563,6 +5563,32 @@ class TestReadSurface:
         monkeypatch.setattr(github_api_mod, "gh_issue_json", lambda n: {"number": n})
 
         assert adapter.gh_issue_json(4) == {"number": 4}
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.CalledProcessError(1, "gh"),
+            None,
+        ],
+    )
+    def test_repo_scoped_issue_read_normalizes_transport_and_json_failures(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: subprocess.CalledProcessError | None,
+    ) -> None:
+        adapter.repo = "repo-a"
+        if failure is not None:
+            monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=failure))
+        else:
+            monkeypatch.setattr(
+                adapter,
+                "_gh",
+                MagicMock(return_value=SimpleNamespace(stdout="not-json")),
+            )
+
+        with pytest.raises(RuntimeError, match="Failed to fetch issue"):
+            adapter.gh_issue_json(4)
 
     def test_module_bound_reads(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

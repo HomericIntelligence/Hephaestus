@@ -133,8 +133,6 @@ class SourceCoordinator(_CoordinatorHost):
                     )
                     entry = replace(entry, stage=stage, reason=reason, passed=passed)
                 if entry.stage is None:
-                    if source.wave_lease is None and entry.skip_tag_obligation is not None:
-                        github.skip_epics({entry.skip_tag_obligation.issue: []})
                     logger.info("[%s] excluded: %s", repo, entry.reason)
                     source.pending = None
                     self._progress = True
@@ -318,12 +316,6 @@ class SourceCoordinator(_CoordinatorHost):
         pushed = 0
         for entry in entries:
             if entry.stage is None:
-                # Epic tagging is the ONE sanctioned seeding write, executed
-                # here through the skip_epics chokepoint BEFORE the exclusion
-                # is honored (seeding.py write-path boundary).
-                if entry.skip_tag_obligation is not None:
-                    issue = entry.skip_tag_obligation.issue
-                    self._ctx_for_repo(default_repo).github.skip_epics({issue: []})
                 logger.info("seed excluded: %s", entry.reason)
                 continue
             item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
@@ -470,8 +462,6 @@ class SourceCoordinator(_CoordinatorHost):
                 repo=source.repo,
             )
         if entry.stage is None:
-            if entry.skip_tag_obligation is not None:
-                github.skip_epics({entry.skip_tag_obligation.issue: []})
             logger.info("seed excluded: %s", entry.reason)
             return None, False
         item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
@@ -621,7 +611,7 @@ class SourceCoordinator(_CoordinatorHost):
           push it into an out-of-scope stage the trimmed route table has no row
           for. In-scope classifications (e.g. PLANNING/PLAN_REVIEW) are kept.
 
-        Exclusions (``stage is None``: ``state:skip`` / epic) are never
+        Exclusions (``stage is None``: ``state:skip``) are never
         overridden — force is a re-plan knob, not a skip bypass.
 
         Args:

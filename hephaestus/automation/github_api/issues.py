@@ -109,10 +109,10 @@ def gh_issue_json(
                 *_repo_args(repo),
             ],
         )
-        data = cast(dict[str, Any], json.loads(result.stdout))
-        raw_body = data.get("body")
-        if isinstance(raw_body, str):
-            data["bodyDigest"] = issue_body_digest(raw_body)
+        parsed = json.loads(result.stdout)
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
+        data = cast(dict[str, Any], parsed)
         # Strip stray NUL bytes at the source so downstream prompt assembly never
         # feeds an embedded null into a subprocess argv (#1661). Title/body are the
         # free-text fields consumed by the planner/implementer prompts; warn on a
@@ -126,7 +126,10 @@ def gh_issue_json(
                         "Stripped NUL byte(s) from issue #%s %s field", issue_number, field
                     )
                     data[field] = cleaned
-    except subprocess.CalledProcessError as e:
+        body = data.get("body")
+        if isinstance(body, str):
+            data["bodyDigest"] = issue_body_digest(body)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as e:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
     return data
 

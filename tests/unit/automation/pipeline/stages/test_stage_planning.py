@@ -110,10 +110,10 @@ def _fence_present(prompt: str, label: str) -> bool:
     )
 
 
-def _finalized_body() -> str:
+def _finalized_body(content: str = "## Why\n\nUse the reviewed implementation plan.") -> str:
     """Return a self-verifying finalized planning body fixture."""
     placeholder = (
-        "## Why\n\nUse the reviewed implementation plan.\n\n"
+        f"{content}\n\n"
         f"{ATHENA_FINALIZED_PLAN_PREFIX}R={'a' * 64} P=plan-comment:{'b' * 64} "
         f"V=review-comment:{'c' * 64} F=<F> -->"
     )
@@ -232,10 +232,61 @@ class TestPlanningStageEnter:
                         STATE_NEEDS_PLAN,
                         STATE_IMPLEMENTATION_NO_GO,
                         STATE_IMPLEMENTATION_GO,
+                        STATE_PLAN_BLOCKED,
                     ),
                 ),
             )
         ]
+
+    def test_verified_finalized_plan_replaces_stale_blocked_latch(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Authenticated finalization completes planning despite a stale hold."""
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_BLOCKED],
+            issue_body=_finalized_body(),
+        )
+
+        outcome = PlanningStage().on_enter(
+            make_work_item(issue=108),
+            make_ctx(github=github),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.ADVANCE
+        assert github.labels[108] == {STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL}
+        assert github.comments.get(108, []) == []
+
+    @pytest.mark.parametrize(
+        ("body", "owned_by_viewer"),
+        [
+            (_finalized_body(), False),
+            (f"{_finalized_body()}\nmaterial drift", True),
+        ],
+    )
+    def test_invalid_finalized_plan_preserves_blocked_latch(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        body: str,
+        owned_by_viewer: bool,
+    ) -> None:
+        """Only authenticated, intact finalization may supersede an operator hold."""
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_BLOCKED],
+            issue_body=body,
+            issue_body_owned_by_viewer=owned_by_viewer,
+        )
+
+        outcome = PlanningStage().on_enter(
+            make_work_item(issue=109),
+            make_ctx(github=github),
+        )
+
+        assert outcome is not None
+        assert outcome.disposition is Disposition.BLOCKED
+        assert github.labels[109] == {STATE_PLAN_BLOCKED}
+        assert len(github.comments[109]) == 1
 
     def test_removed_finalized_marker_reenters_planning_and_clears_evidence(
         self, make_ctx: Any, make_work_item: Any
@@ -270,6 +321,24 @@ class TestPlanningStageEnter:
         assert outcome.disposition is Disposition.ADVANCE
         assert github.mutation_log == []
 
+    def test_foreign_replacement_cannot_reuse_observed_finalized_metadata(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        github = FakeStageGitHub(
+            labels=[STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL],
+            issue_body=_finalized_body("## Different valid finalized plan"),
+            issue_body_owned_by_viewer=False,
+            open_pr=88,
+        )
+        item = make_work_item(issue=110)
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.payload["requirements_recovery_required"] is True
+        assert item.payload["athena_finalized_plan_invalidated"] is True
+        assert "athena_finalized_plan_digest" not in item.payload
+
     def test_plan_go_without_finalized_evidence_is_normalized(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -294,6 +363,7 @@ class TestPlanningStageEnter:
                         STATE_NEEDS_PLAN,
                         STATE_IMPLEMENTATION_NO_GO,
                         STATE_IMPLEMENTATION_GO,
+                        STATE_PLAN_BLOCKED,
                     ),
                 ),
             )
@@ -630,7 +700,7 @@ class TestPlanningStageEnter:
         assert STATE_NEEDS_PLAN in item.labels_cache
         assert "stale:label" not in item.labels_cache
 
-    def test_label_refresh_failure_cannot_advance_from_cache(
+    def test_label_refresh_failure_is_bounded_and_cannot_advance_from_cache(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
         """Cached label text cannot authorize a stage transition."""
@@ -641,11 +711,29 @@ class TestPlanningStageEnter:
 
         stage = PlanningStage()
         github = BrokenGitHub()
-        ctx = make_ctx(github=github)
+        ctx = make_ctx(github=github, budget_fn=lambda _name: 2)
         item = make_work_item(issue=8, labels=[STATE_PLAN_GO])
 
-        with pytest.raises(RuntimeError, match="gh unavailable"):
-            stage.on_enter(item, ctx)
+        first = stage.on_enter(item, ctx)
+        second = stage.on_enter(item, ctx)
+
+        assert isinstance(first, StageOutcome)
+        assert first.disposition is Disposition.RETRY
+        assert isinstance(second, StageOutcome)
+        assert second.disposition is Disposition.FINISH_FAIL
+        assert "fail-closed label unavailable" in second.note
+
+    def test_explicit_tracker_label_enters_semantic_review(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN, "roadmap"])
+        item = make_work_item(issue=111)
+
+        outcome = PlanningStage().on_enter(item, make_ctx(github=github))
+
+        assert outcome is None
+        assert item.payload["requirements_recovery_required"] is True
+        assert item.payload["requirements_recovery_contaminated"] is False
 
     def test_no_issue_number_fails(self, make_ctx: Any, make_work_item: Any) -> None:
         """A work item without an issue number finishes failed."""

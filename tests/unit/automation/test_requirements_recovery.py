@@ -255,6 +255,7 @@ def test_prompts_bind_evidence_and_minimize_repeated_code() -> None:
     )
 
     assert "b" * 64 in recovery and "a" * 40 in recovery
+    assert f"The `evidence` value MUST be exactly `{'b' * 64}`" in recovery
     assert "Do not include diffs" in recovery
     assert "minimal" in recovery.lower()
     assert "independent" in review.lower()

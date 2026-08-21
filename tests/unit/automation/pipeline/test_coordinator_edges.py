@@ -47,7 +47,6 @@ StageName = routing_mod.StageName
 StageOutcome = routing_mod.StageOutcome
 
 SeedEntry = seeding_mod.SeedEntry
-EpicSkipTagObligation = seeding_mod.EpicSkipTagObligation
 
 Continue = stage_base_mod.Continue
 JobRequest = stage_base_mod.JobRequest
@@ -636,29 +635,6 @@ class TestSubmitEdges:
 
 class TestSeedingEdges:
     """CLI-scope seeding: epic chokepoint, --prs entries, finished entries."""
-
-    def test_epic_skip_tag_obligation_executes_chokepoint_write(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The explicit seeding obligation is discharged before exclusion."""
-        seed = [
-            SeedEntry(
-                kind="issue",
-                identifier=44,
-                stage=None,
-                reason="unrelated exclusion reason",
-                skip_tag_obligation=EpicSkipTagObligation(issue=44),
-            )
-        ]
-        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed)
-        gh = coordinator.github
-        assert isinstance(gh, FakeStageGitHub)
-
-        pushed = coordinator._seed_pass()
-
-        assert pushed == 0
-        assert ("skip_epics", ((44,),)) in gh.mutation_log
-        assert "state:skip" in gh.labels[44]
 
     def test_plain_exclusion_writes_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

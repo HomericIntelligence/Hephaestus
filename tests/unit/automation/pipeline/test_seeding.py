@@ -25,7 +25,6 @@ from hephaestus.automation.pipeline.seeding import (
     SeedEntry,
     _label_at_or_past,
     classify_issue,
-    seed_entry_from_facts,
     seed_from_cli,
     seed_issue,
     seed_issue_from_github,
@@ -120,21 +119,42 @@ class TestClassifyIssue:
         assert stage is StageName.PLANNING
         assert "requirements recovery" in reason
 
-    def test_finalized_plan_without_evidence_routes_once_to_label_normalization(self) -> None:
+    def test_finalized_plan_without_evidence_routes_to_authentication(self) -> None:
         stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=_finalized_body()))
 
         assert stage is StageName.PLANNING
-        assert "finalized-plan evidence" in reason
+        assert "authentication" in reason
 
-    def test_finalized_plan_with_evidence_keeps_plan_go_authoritative(self) -> None:
-        stage, _reason = classify_issue(
+    def test_finalized_plan_with_evidence_routes_to_no_model_authentication(self) -> None:
+        stage, reason = classify_issue(
             _facts(
                 labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
                 body=_finalized_body(),
             )
         )
 
-        assert stage is StageName.IMPLEMENTATION
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_finalized_plan_with_open_pr_still_routes_to_authentication(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=_finalized_body(),
+                pr_number=88,
+                pr_is_open=True,
+                pr_has_implementation_go=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_finalized_plan_supersedes_blocked_only_after_planning_authentication(self) -> None:
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_BLOCKED}, body=_finalized_body()))
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
 
     def test_removed_finalized_marker_invalidates_stale_plan_go(self) -> None:
         stage, reason = classify_issue(
@@ -166,7 +186,6 @@ class TestClassifyIssue:
         stage, reason = classify_issue(facts)
         assert stage is None
         assert STATE_SKIP in reason
-        assert seed_entry_from_facts(facts).skip_tag_obligation is None
 
     def test_skip_wins_over_plan_go(self) -> None:
         """state:skip + state:plan-go → excluded; skip is absolute and never ranked."""
@@ -771,7 +790,6 @@ class TestSeedFromCli:
             entry = seed_from_cli([], [10], [])[0]
 
         assert entry.stage is StageName.PLANNING
-        assert entry.skip_tag_obligation is None
 
     def test_title_inferred_epic_has_no_skip_obligation_before_model_review(self) -> None:
         facts = _facts(number=10, title="Epic: queue work", is_epic=True)
@@ -779,7 +797,6 @@ class TestSeedFromCli:
             entry = seed_from_cli([], [10], [])[0]
 
         assert entry.stage is StageName.PLANNING
-        assert entry.skip_tag_obligation is None
 
     def test_prs_with_impl_go_route_to_merge_wait_for_fresh_admission(self) -> None:
         """The durable label routes work; merge_wait still requires both proofs."""

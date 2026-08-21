@@ -27,10 +27,12 @@ State machine
                                                              re-plans or re-reviews)
 
 At most one of the four labels should be present on an issue at any time.
-Automation removes ordinary siblings while changing state, but it never
-removes ``state:plan-blocked``. If that operator-owned latch appears during a
-concurrent transition, exclusive-state confirmation fails and automation
-stops until an external actor resolves the block and replaces the label.
+Automation removes ordinary siblings while changing state, but ordinary
+transitions never remove ``state:plan-blocked``. If that operator-owned latch
+appears during a concurrent transition, exclusive-state confirmation fails and
+automation stops until an external actor resolves the block. An authenticated
+Athena finalized-plan body is that external resolution: planning may atomically
+replace the stale latch with exclusive ``state:plan-go``.
 """
 
 from __future__ import annotations
