@@ -147,6 +147,20 @@ def test_finalized_marker_inside_list_is_not_top_level_authority() -> None:
     assert has_contaminated_issue_body(body) is False
 
 
+@pytest.mark.parametrize(
+    "unicode_separator",
+    ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
+)
+def test_unicode_separator_cannot_desynchronize_commonmark_line_mapping(
+    unicode_separator: str,
+) -> None:
+    marker = _finalized_body().splitlines()[-1]
+    body = f"prefix{unicode_separator}same CommonMark line\n{marker}"
+
+    assert verified_finalized_plan(body) is None
+    assert has_contaminated_issue_body(body) is True
+
+
 def test_recovered_requirements_bind_title_body_issue_repo_and_revision() -> None:
     source = "Original requirements"
     revision = "d" * 40

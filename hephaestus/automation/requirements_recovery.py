@@ -52,6 +52,7 @@ _FINALIZED_PLAN_RE = re.compile(
 _FINALIZED_PLAN_CANDIDATE_RE = re.compile(
     rf"^ {{0,3}}{re.escape(ATHENA_FINALIZED_PLAN_PREFIX.rstrip())}"
 )
+_COMMONMARK_LINE_END_RE = re.compile(r"\r\n|\r|\n")
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
 _OBSOLETE_BODY_RE = re.compile(
     r"\b(?:already (?:resolved|implemented|fixed)|no longer (?:needed|applicable)|"
@@ -124,12 +125,19 @@ def _sha256(text: str) -> str:
 
 def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
     """Return offsets and lines for top-level Athena finalization claims."""
-    raw_lines = body.splitlines(keepends=True)
+    # CommonMark recognizes CR, LF, and CRLF as line endings. ``splitlines``
+    # recognizes additional Unicode separators and would desynchronize these
+    # raw indexes from markdown-it-py's token ``map`` line numbers.
+    raw_lines: list[str] = []
     line_offsets: list[int] = []
-    offset = 0
-    for raw_line in raw_lines:
-        line_offsets.append(offset)
-        offset += len(raw_line)
+    line_start = 0
+    for line_end in _COMMONMARK_LINE_END_RE.finditer(body):
+        line_offsets.append(line_start)
+        raw_lines.append(body[line_start : line_end.end()])
+        line_start = line_end.end()
+    if line_start < len(body):
+        line_offsets.append(line_start)
+        raw_lines.append(body[line_start:])
 
     candidates: list[tuple[int, str]] = []
     # Token levels distinguish document-level HTML comments from examples in
