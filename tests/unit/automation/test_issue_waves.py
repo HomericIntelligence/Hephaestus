@@ -375,6 +375,17 @@ def test_wave_entry_reconciles_post_seal_drift_without_mutation(tmp_path: Path) 
         repo="hephaestus",
     )
     assert pending.stage is StageName.PLANNING
+    tracker = wave_entry_from_facts(
+        lease,
+        SimpleNamespace(
+            number=19, pr_is_merged=False, pr_number=None, issue_is_closed=False, is_epic=True
+        ),
+        entry,
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert tracker.stage is StageName.PLANNING
     closed = wave_entry_from_facts(
         lease,
         SimpleNamespace(

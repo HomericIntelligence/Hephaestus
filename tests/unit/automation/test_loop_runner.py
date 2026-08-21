@@ -502,7 +502,7 @@ def test_resolve_org_and_repos_accepts_single_repo_numeric_scope(
     assert (org, repos, err) == ("ExplicitOrg", ["target"], None)
 
 
-def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
+def test_resolve_org_and_repos_dry_run_keeps_discovery_read_only() -> None:
     """Organization discovery stays read-only when the loop is a dry run."""
     args = loop_runner._parse_args(["--org", "ExplicitOrg", "--dry-run"])
     epic = {"number": 81, "title": "Epic: roadmap", "labels": ["epic"]}
@@ -512,7 +512,6 @@ def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
             "hephaestus.automation.loop_repo_manager._list_open_issue_meta",
             return_value=[epic],
         ),
-        patch("hephaestus.automation.loop_repo_manager.skip_epics") as mock_skip,
     ):
         org, repos, err = loop_runner._resolve_org_and_repos(args)
 
@@ -520,7 +519,6 @@ def test_resolve_org_and_repos_dry_run_never_tags_discovered_epics() -> None:
     assert org == "ExplicitOrg"
     assert repos == []
     mock_list.assert_not_called()
-    mock_skip.assert_not_called()
 
 
 def test_resolve_org_and_repos_repos_flag_uses_cwd_org() -> None:

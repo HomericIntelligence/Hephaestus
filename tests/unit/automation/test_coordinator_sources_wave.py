@@ -52,7 +52,7 @@ def test_lease_backed_direct_exclusion_reaches_finished_and_records_failure(
     item = coordinator.queues[StageName.FINISHED].snapshot()[0]
     assert item.result is not None
     assert item.result.passed is False
-    assert "became skipped, blocked, or epic" in item.result.reason
+    assert "became skipped or blocked" in item.result.reason
     assert github.mutation_log == []
 
     coordinator._drain_queues()

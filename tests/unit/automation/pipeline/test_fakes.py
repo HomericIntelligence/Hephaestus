@@ -149,17 +149,14 @@ class TestFakeGitHub:
         fake_github.gh_issue_add_labels(7, ["state:needs-plan"])
         fake_github.gh_issue_comment(7, "planning started")
         fake_github.gh_issue_remove_labels(7, ["state:needs-plan"])
-        fake_github.skip_epics({9: ["epic"]})
 
         assert fake_github.labels[7] == set()
-        assert fake_github.labels[9] == {"state:skip"}
         assert fake_github.comments[7] == ["planning started"]
         assert [name for name, _ in fake_github.mutation_log] == [
             "gh_create_label",
             "gh_issue_add_labels",
             "gh_issue_comment",
             "gh_issue_remove_labels",
-            "skip_epics",
         ]
 
     def test_pr_and_review_mutators(self) -> None:

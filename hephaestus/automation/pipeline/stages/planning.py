@@ -457,7 +457,10 @@ def _retry_requirements_recovery(
 ) -> StageOutcome:
     """Retry a correctable recovery once, then preserve plan-no-go."""
     assert item.issue is not None  # noqa: S101 - caller validates this
-    live = ctx.github.gh_issue_json(item.issue)
+    try:
+        live = ctx.github.gh_issue_json(item.issue)
+    except RuntimeError as exc:
+        return _retry_incomplete_requirements_snapshot(item, ctx, f"{reason}; {exc}")
     if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
         return issue_outcome
     live_labels = _issue_snapshot_labels(live)
@@ -590,7 +593,10 @@ def _apply_requirements_recovery(
     assert item.issue is not None  # noqa: S101 - caller validates this
     proposal = item.payload.get("recovered_requirements")
     review = item.payload.get("requirements_recovery_review")
-    live = ctx.github.gh_issue_json(item.issue)
+    try:
+        live = ctx.github.gh_issue_json(item.issue)
+    except RuntimeError as exc:
+        return _retry_incomplete_requirements_snapshot(item, ctx, str(exc))
     if issue_outcome := _closed_issue_snapshot_outcome(item, ctx, live):
         return issue_outcome
     live_labels = _issue_snapshot_labels(live)

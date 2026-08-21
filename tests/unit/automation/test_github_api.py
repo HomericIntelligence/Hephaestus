@@ -184,6 +184,25 @@ def test_issue_body_editor_matches_authenticated_viewer(
     assert gh_issue_body_edited_by_viewer(2795, ("owner", "repo")) is expected
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [subprocess.CalledProcessError(1, "gh"), None],
+)
+@patch("hephaestus.automation.github_api._gh_call")
+def test_issue_body_editor_normalizes_transport_and_json_failures(
+    mock_gh_call: Any,
+    failure: subprocess.CalledProcessError | None,
+) -> None:
+    """Editor authentication exposes transport and decoding failures uniformly."""
+    if failure is not None:
+        mock_gh_call.side_effect = failure
+    else:
+        mock_gh_call.return_value = Mock(stdout="not-json")
+
+    with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
+        gh_issue_body_edited_by_viewer(2795, ("owner", "repo"))
+
+
 class TestParseIssueDependencies:
     """Tests for parse_issue_dependencies function."""
 

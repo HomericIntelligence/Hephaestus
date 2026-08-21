@@ -504,32 +504,23 @@ class TestEnsureClone:
             _ensure_clone("MyOrg", "MyRepo", tmp_path)
 
 
-class TestListOpenIssueNumbersEpicTagging:
-    """Epic skip-tagging must target the owning repo, never the ambient cwd (#2245)."""
+class TestListOpenIssueNumbers:
+    """All issues remain eligible for queue-owned semantic review."""
 
-    def test_skip_epics_receives_owning_repo(self) -> None:
-        """The (org, repo) being discovered is threaded to the label write."""
+    def test_tracker_candidates_remain_in_scope_without_label_writes(self) -> None:
         meta = [
             {"number": 81, "title": "Epic: roadmap", "labels": ["epic"]},
             {"number": 82, "title": "Fix bug", "labels": ["bug"]},
         ]
-        with (
-            patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=iter(meta)),
-            patch.object(loop_repo_manager, "skip_epics") as mock_skip,
-        ):
+        with patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=iter(meta)):
             kept = loop_repo_manager._list_open_issue_numbers("MyOrg", "Proteus")
-        assert kept == [82]
-        mock_skip.assert_called_once_with({81: ["epic"]}, repo=("MyOrg", "Proteus"))
+        assert kept == [81, 82]
 
-    def test_no_epics_means_no_label_write(self) -> None:
+    def test_ordinary_issues_remain_in_scope(self) -> None:
         meta = [{"number": 82, "title": "Fix bug", "labels": ["bug"]}]
-        with (
-            patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=iter(meta)),
-            patch.object(loop_repo_manager, "skip_epics") as mock_skip,
-        ):
+        with patch.object(loop_repo_manager, "_list_open_issue_meta", return_value=iter(meta)):
             kept = loop_repo_manager._list_open_issue_numbers("MyOrg", "Proteus")
         assert kept == [82]
-        mock_skip.assert_not_called()
 
 
 class TestCountOpenIssues:

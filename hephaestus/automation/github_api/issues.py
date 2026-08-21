@@ -148,21 +148,26 @@ def gh_issue_body_edited_by_viewer(
         " }"
         "}"
     )
-    result = _api._gh_call(
-        [
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={name}",
-            "-F",
-            f"number={issue_number}",
-        ]
-    )
-    data = json.loads(result.stdout or "{}")
+    try:
+        result = _api._gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={issue_number}",
+            ]
+        )
+        data = json.loads(result.stdout or "{}")
+    except (subprocess.CalledProcessError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Failed to authenticate issue body editor for #{issue_number}: {exc}"
+        ) from exc
     if not isinstance(data, dict):
         raise RuntimeError("issue body editor GraphQL response was not an object")
     _check_graphql_errors(data, f"issue body editor for #{issue_number}")

@@ -216,10 +216,10 @@ class FakeWorkerPool:
 class FakeGitHub:
     """Dict-backed GitHub state with an append-only ``mutation_log``.
 
-    Method names and signatures mirror the 12 real
+    Method names and signatures mirror the real
     ``hephaestus.automation.github_api`` mutators the pipeline stages call
     (``gh_issue_add_labels``, ``gh_issue_remove_labels``, ``gh_create_label``,
-    ``skip_epics``, ``gh_issue_comment``, ``gh_issue_upsert_comment``,
+    ``gh_issue_comment``, ``gh_issue_upsert_comment``,
     ``gh_issue_create``, ``gh_issue_delete_comment``, ``gh_pr_create``,
     ``gh_pr_review_post``, ``gh_pr_update_review_comment``), so coordinator
     tests can inject this double without adapting call sites.
@@ -255,12 +255,6 @@ class FakeGitHub:
         """Mirror github_api.gh_issue_remove_labels."""
         self.labels.setdefault(issue_number, set()).difference_update(labels)
         self._log("gh_issue_remove_labels", issue_number, tuple(labels))
-
-    def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
-        """Mirror github_api.skip_epics (tags each epic state:skip)."""
-        for issue_number in epics_labels:
-            self.labels.setdefault(issue_number, set()).add("state:skip")
-        self._log("skip_epics", tuple(sorted(epics_labels)))
 
     # -- issue/comment mutators --------------------------------------------
     def gh_issue_comment(self, issue_number: int, body: str) -> None:

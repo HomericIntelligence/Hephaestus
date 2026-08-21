@@ -196,6 +196,30 @@ def test_issue_body_editor_must_match_authenticated_viewer(
     assert adapter.issue_body_edited_by_viewer(2795) is expected
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [subprocess.CalledProcessError(1, "gh"), None],
+)
+def test_repo_scoped_editor_auth_normalizes_transport_and_json_failures(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: subprocess.CalledProcessError | None,
+) -> None:
+    """The repo-scoped adapter normalizes transport and decoding failures."""
+    adapter.repo = "repo"
+    if failure is not None:
+        monkeypatch.setattr(transport_mod, "gh_call", MagicMock(side_effect=failure))
+    else:
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(return_value=SimpleNamespace(stdout="not-json")),
+        )
+
+    with pytest.raises(RuntimeError, match="repo-scoped pipeline GraphQL request failed"):
+        adapter.issue_body_edited_by_viewer(2795)
+
+
 def _external_reviewer_thread(thread_id: str = "reviewer-thread") -> dict[str, Any]:
     """Return an arbitrary reviewer-owned thread eligible for the new protocol."""
     return {

@@ -1045,8 +1045,8 @@ def wave_entry_from_facts(
         )
     if facts.issue_is_closed:
         reason = f"issue #{facts.number} closed without its recorded loop-owned merge"
-    elif facts.is_epic or entry.stage is None:
-        reason = f"issue #{facts.number} became skipped, blocked, or epic after wave selection"
+    elif entry.stage is None:
+        reason = f"issue #{facts.number} became skipped or blocked after wave selection"
     elif entry.stage is StageName.FINISHED:
         reason = f"issue #{facts.number} reached a terminal state without a wave receipt"
     else:

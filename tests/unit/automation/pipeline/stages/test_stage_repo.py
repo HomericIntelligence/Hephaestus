@@ -1,9 +1,9 @@
-"""RepoStage tests: label ensure, clone, discovery walk, epic-tag order (#1817).
+"""RepoStage tests: label ensure, clone, and discovery walk (#1817).
 
 Doc section "1. repo" is the binding contract: ENTER -> CLONE_WAIT ->
 DISCOVER -> SOURCE; budget clone=2.  The stage initializes only a bounded
-metadata cursor; the coordinator owns one-at-a-time classification, epic
-tagging, and terminal completion.
+metadata cursor; the coordinator owns one-at-a-time classification, semantic
+planning review, and terminal completion.
 """
 
 from __future__ import annotations
@@ -433,13 +433,13 @@ class TestDiscover:
         assert classified == []
         assert "products" not in repo_item.payload
 
-    def test_discover_defers_epic_tag_failure_to_source_consumption(
+    def test_discover_has_no_epic_tag_write_path(
         self,
         repo_item: WorkItem,
         repo_ctx: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Source setup is read-only, even when the eventual write would fail."""
+        """Tracker candidates remain read-only until semantic planning review."""
         meta = [
             {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
             {"number": 6, "labels": [], "title": "real work"},
@@ -451,12 +451,7 @@ class TestDiscover:
             classifications={6: (StageName.PLANNING, "needs plan")},
         )
         gh: FakeStageGitHub = repo_ctx.github
-        original_skip_epics = gh.skip_epics
-        monkeypatch.setattr(
-            gh,
-            "skip_epics",
-            lambda _epics_labels: (_ for _ in ()).throw(RuntimeError("label write failed")),
-        )
+        assert not hasattr(gh, "skip_epics")
         repo_item.state = "DISCOVER"
 
         result = RepoStage().step(repo_item, repo_ctx)
@@ -465,7 +460,6 @@ class TestDiscover:
         assert "products" not in repo_item.payload
         assert classified == []
         assert 5 not in gh.labels
-        monkeypatch.setattr(gh, "skip_epics", original_skip_epics)
 
     def test_drive_green_all_does_not_query_or_exhaust_orphan_pr_pages(
         self,

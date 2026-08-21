@@ -741,12 +741,7 @@ class FakeStageGitHub(FakeGitHub):
         self._log("mark_drive_green_learn_result", issue_number, succeeded)
 
     def ensure_state_labels(self) -> None:
-        """Mirror the repo-stage label-vocabulary ensure (records mutation).
-
-        The canonical ``skip_epics`` recorder is inherited from
-        :class:`FakeGitHub`; this is the only repo-stage (#1817) protocol
-        method without a canonical recorder there.
-        """
+        """Mirror the repo-stage label-vocabulary ensure (records mutation)."""
         self._log("ensure_state_labels")
 
 

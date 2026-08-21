@@ -1124,6 +1124,81 @@ class TestPlanningStageStep:
         assert "requirements_recovery_required" not in item.payload
         assert config.reset_plan_review_sessions == {1}
 
+    def test_post_model_snapshot_failure_exhausts_fail_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        class BrokenGitHub(FakeStageGitHub):
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                raise RuntimeError("snapshot unavailable")
+
+        item = make_work_item(issue=112, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Keep retries bounded.",
+                    "Repository evidence.",
+                    "evidence",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.GO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Confirmed.",
+                ),
+            }
+        )
+
+        result = PlanningStage().step(
+            item,
+            make_ctx(github=BrokenGitHub(), budget_fn=lambda _name: 1),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 1
+        assert "fail-closed label unavailable" in result.note
+
+    def test_recovery_retry_snapshot_failure_exhausts_fail_closed(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        class FailsAfterApplyRead(FakeStageGitHub):
+            def __init__(self) -> None:
+                super().__init__(labels=[STATE_NEEDS_PLAN])
+                self.reads = 0
+
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                self.reads += 1
+                if self.reads > 1:
+                    raise RuntimeError("retry snapshot unavailable")
+                return super().gh_issue_json(issue_number)
+
+        github = FailsAfterApplyRead()
+        item = make_work_item(issue=113, state="REQUIREMENTS_RECOVERY_APPLY")
+        item.payload.update(
+            {
+                "recovered_requirements": RecoveredRequirements(
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Guess.",
+                    "Weak.",
+                    "evidence",
+                ),
+                "requirements_recovery_review": RecoveryReview(
+                    RecoveryVerdict.NOGO,
+                    RecoveryDisposition.REQUIREMENTS,
+                    "Insufficient.",
+                ),
+            }
+        )
+
+        result = PlanningStage().step(
+            item,
+            make_ctx(github=github, budget_fn=lambda _name: 1),
+        )
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition is Disposition.FINISH_FAIL
+        assert item.attempts["plan"] == 1
+
     def test_recovery_results_are_rejected_when_issue_evidence_changed(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

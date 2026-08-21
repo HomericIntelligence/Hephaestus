@@ -19,8 +19,8 @@ Steps:
    materializes a list of classified products.
 4. [M] SOURCE: the coordinator transfers the bounded cursor to its fair
    C-capped registry, then admits one metadata row only when an issue can own
-   a live-work permit. Epics are tagged ``state:skip`` [durable, BEFORE
-   excluding].
+   a live-work permit. Tracker labels and title patterns enter planning as
+   semantic-review candidates; discovery performs no skip mutation.
 
 Discovery seams (``_repo_manager`` / ``_seeding`` module attributes) mirror
 the ``loop_runner._admission`` seam pattern so unit tests patch the reads
