@@ -37,7 +37,7 @@ _STAGE_MODULES: dict[StageName, ModuleType] = {
 #: Reasons each stage is EXPECTED to emit (lock: additions must edit this).
 _EXPECTED_REASONS: dict[StageName, set[str]] = {
     StageName.PLANNING: set(),
-    StageName.PLAN_REVIEW: {"nogo", "plan_cycles_exhausted"},
+    StageName.PLAN_REVIEW: {"nogo", "plan_missing", "plan_cycles_exhausted"},
     StageName.IMPLEMENTATION: {"plan_not_go", "already_implementation_go_pr"},
     StageName.PR_REVIEW: {"agent_error", "implementation_remediation"},
     StageName.MERGE_WAIT: {

@@ -1276,7 +1276,7 @@ budgets. Every `routes.py` row and every doc row MUST agree.
 |-------------------|------------------|-------------------------------------------------------------|----------------------------|
 | `repo` | `FINISHED` | `*` → `FINISHED` | `clone = 2` |
 | `planning` | `PLAN_REVIEW` | `*` → `FINISHED` | `plan = 2` |
-| `plan_review` | `IMPLEMENTATION` | `nogo` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
+| `plan_review` | `IMPLEMENTATION` | `nogo` / `plan_missing` → `PLANNING`; `plan_cycles_exhausted` → `FINISHED`; `*` → `PLANNING` | `plan_review_iter = 3`, `plan_cycles = 2` |
 | `implementation` | `PR_REVIEW` | `plan_not_go` → `PLAN_REVIEW`; `already_implementation_go_pr` → `MERGE_WAIT`; `*` → `FINISHED` | `implement = 2`, `rebase_conflict = 2`, `test_fix = 1` |
 | `pr_review` | `MERGE_WAIT` | `agent_error`, `empty_pr_diff`, or `implementation_remediation` → `IMPLEMENTATION`; `exhaustion` → `FINISHED`; `*` → `PR_REVIEW` | `pr_review_iter = 3`, `pr_review_hard = 6` |
 | `merge_wait` | `FINISHED` | `not_implementation_go`, `reviewed_head_missing`, or `reviewed_head_drift` → `PR_REVIEW`; `closed` → `FINISHED`; `*` → `FINISHED` | `merge = 5` |

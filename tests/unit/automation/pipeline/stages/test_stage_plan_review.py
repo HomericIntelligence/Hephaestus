@@ -35,6 +35,7 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
     render_current_plan,
     render_current_review,
+    render_pending_review,
 )
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
@@ -67,6 +68,14 @@ def _valid_delivery_receipt() -> dict[str, object]:
         "pr_number": 1,
         "local_only": False,
     }
+
+
+def _seed_canonical_plan(github: FakeStageGitHub, issue: int, plan: str = "Durable plan") -> None:
+    """Seed a complete canonical plan-review journal without reconciliation writes."""
+    github.comments[issue] = [
+        render_current_plan(plan),
+        render_pending_review(revision=1),
+    ]
 
 
 def _fence_present(prompt: str, label: str) -> bool:
@@ -156,6 +165,7 @@ class TestPlanReviewStageOnEnter:
         """A restart-reseeded item already state:plan-go advances with no job/writes."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_GO])
+        _seed_canonical_plan(github, 1, "Approved plan")
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="ENTER")
 
@@ -171,6 +181,7 @@ class TestPlanReviewStageOnEnter:
         """An item without state:plan-go is unaffected by the new guard."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        _seed_canonical_plan(github, 1)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="ENTER")
 
@@ -185,10 +196,30 @@ class TestPlanReviewStageOnEnter:
         """on_enter performs no durable writes and always proceeds."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
+        _seed_canonical_plan(github, 1)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="ENTER")
 
         assert stage.on_enter(item, ctx) is None
+        assert github.mutation_log == []
+
+    def test_on_enter_rejects_stale_payload_when_handoff_plan_was_deleted(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Admission requires the canonical plan, not planning's stale payload."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        item = make_work_item(issue=19, state="ENTER")
+        item.payload["plan_text"] = "Deleted plan from planning handoff"
+        item.payload["plan_revision"] = 3
+        item.payload["prior_review"] = "Stale review"
+
+        outcome = stage.on_enter(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+        assert "plan_text" not in item.payload
+        assert "plan_revision" not in item.payload
+        assert "prior_review" not in item.payload
         assert github.mutation_log == []
 
     def test_on_enter_retries_journal_read_error(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -307,7 +338,9 @@ class TestPlanReviewStageOnEnter:
     def test_on_enter_resets_round_for_new_cycle(self, make_ctx: Any, make_work_item: Any) -> None:
         """Entering with a fresh plan_cycles value resets the cycle counter."""
         stage = PlanReviewStage()
-        ctx = make_ctx()
+        github = FakeStageGitHub()
+        _seed_canonical_plan(github, 1)
+        ctx = make_ctx(github=github)
         item = make_work_item(issue=1, state="ENTER")
         item.attempts["plan_cycles"] = 1  # fail-back happened; new cycle
         item.payload["review_cycle"] = 0
@@ -334,6 +367,7 @@ class TestPlanReviewStageOnEnter:
         """A literal double on_enter changes nothing the second time."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
+        _seed_canonical_plan(github, 3)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=3, state="ENTER")
 
@@ -355,7 +389,9 @@ class TestPlanReviewStageOnEnter:
         cycle immediately exceed REVIEW_ERROR_RETRY_CAP.
         """
         stage = PlanReviewStage()
-        ctx = make_ctx()
+        github = FakeStageGitHub()
+        _seed_canonical_plan(github, 4)
+        ctx = make_ctx(github=github)
         item = make_work_item(issue=4, state="ENTER")
         item.attempts["plan_cycles"] = 1  # fail-back happened; new cycle
         item.payload["review_cycle"] = 0
@@ -1598,6 +1634,7 @@ class TestStaleVerdictAndErrorAccounting:
         """
         stage = PlanReviewStage()
         github = FakeStageGitHub()
+        _seed_canonical_plan(github, 31)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=31, state="EVAL")
         assert stage.on_enter(item, ctx) is None
@@ -1675,6 +1712,7 @@ class TestCycleRelativeBudget:
         """
         stage = PlanReviewStage()
         github = FakeStageGitHub()
+        _seed_canonical_plan(github, 33)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=33, state="ENTER")
 
@@ -1732,6 +1770,7 @@ class TestCycleRelativeBudget:
         """
         stage = PlanReviewStage()
         github = FakeStageGitHub()
+        _seed_canonical_plan(github, 36)
         ctx = make_ctx(github=github)
         item = make_work_item(issue=36, state="ENTER")
         item.attempts["plan_cycles"] = 0

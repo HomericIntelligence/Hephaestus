@@ -118,6 +118,7 @@ ROUTES: dict[StageName, Route] = {
         next=StageName.IMPLEMENTATION,
         fail_routes={
             "nogo": StageName.PLANNING,
+            "plan_missing": StageName.PLANNING,
             "plan_cycles_exhausted": StageName.FINISHED,
             "*": StageName.PLANNING,
         },

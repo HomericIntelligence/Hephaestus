@@ -536,10 +536,6 @@ class PlanReviewStage(Stage):
                         f"plan journal read failed: {exc}",
                     )
                 return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
-            if is_exclusive_plan_state(labels, STATE_PLAN_GO):
-                logger.info("plan_review:%d: already plan-go; advancing", item.issue)
-                return StageOutcome(Disposition.ADVANCE, "plan already approved")
-
             try:
                 comments = reconcile_plan_journal(item.issue, ctx.github)
             except CommentJournalReadError as exc:
@@ -553,9 +549,21 @@ class PlanReviewStage(Stage):
                     f"plan journal read failed: {exc}",
                 )
             snapshot = journal_snapshot(comments)
-            if snapshot.current_plan:
-                item.payload["plan_text"] = snapshot.current_plan
-                item.payload["plan_revision"] = snapshot.revision
+            if not snapshot.current_plan:
+                item.payload.pop("plan_text", None)
+                item.payload.pop("plan_revision", None)
+                item.payload.pop("prior_review", None)
+                logger.warning(
+                    "plan_review:%d: canonical plan missing at admission; replanning",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+
+            item.payload["plan_text"] = snapshot.current_plan
+            item.payload["plan_revision"] = snapshot.revision
+            if is_exclusive_plan_state(labels, STATE_PLAN_GO):
+                logger.info("plan_review:%d: already plan-go; advancing", item.issue)
+                return StageOutcome(Disposition.ADVANCE, "plan already approved")
             if snapshot.current_review and snapshot.current_review_revision == snapshot.revision:
                 item.payload["prior_review"] = snapshot.current_review
 
