@@ -14,6 +14,9 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     archived_new_plan,
     archived_old_plan,
+    comment_revision,
+    extract_current_plan,
+    has_exact_leading_marker,
     is_plan_comment,
     is_plan_review_comment,
     journal_snapshot,
@@ -82,12 +85,14 @@ def issue_comments_from_metadata(
 def _validate_legacy_markers(comments: Sequence[IssueComment]) -> None:
     """Reject prefix collisions before planning any destructive mutation."""
     for comment in comments:
-        first_line = comment.body.lstrip().partition("\n")[0].strip()
+        first_line = comment.body.partition("\n")[0]
         if (
             first_line.startswith(HISTORY_MARKER_PREFIX)
             and HISTORY_RE.fullmatch(first_line) is None
         ):
-            raise RuntimeError("malformed legacy automation marker; manual review is required")
+            marker, terminator, _suffix = first_line.partition(" -->")
+            if not terminator or HISTORY_RE.fullmatch(f"{marker}{terminator}") is None:
+                raise RuntimeError("malformed legacy automation marker; manual review is required")
         if (
             first_line.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
             and _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE.fullmatch(first_line) is None
@@ -97,19 +102,92 @@ def _validate_legacy_markers(comments: Sequence[IssueComment]) -> None:
 
 def _is_obsolete_automation_comment(body: str) -> bool:
     """Return whether an owned comment belongs to a removable automation role."""
-    stripped = body.lstrip()
     return bool(
-        is_plan_comment(stripped)
-        or is_plan_review_comment(stripped)
-        or stripped.startswith(HISTORY_MARKER_PREFIX)
-        or stripped.startswith(SKIP_REASON_MARKER)
-        or stripped.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
+        is_plan_comment(body)
+        or is_plan_review_comment(body)
+        or HISTORY_RE.match(body) is not None
+        or has_exact_leading_marker(body, SKIP_REASON_MARKER)
+        or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
     )
 
 
 def _has_exact_leading_marker(body: str, marker: str) -> bool:
-    """Return whether the first non-whitespace line is exactly *marker*."""
-    return body.lstrip().partition("\n")[0].strip() == marker
+    """Return whether *marker* is the exact first raw line of *body*."""
+    return has_exact_leading_marker(body, marker)
+
+
+def _deletable_history_ids(
+    owned: Sequence[IssueComment],
+    *,
+    target_plan: IssueComment | None,
+    target_review: IssueComment | None,
+) -> set[int]:
+    """Return history IDs proven by one contiguous chain to canonical state."""
+    if target_plan is None or (current_revision := comment_revision(target_plan.body)) is None:
+        return set()
+
+    plans: dict[int, IssueComment] = {}
+    reviews: dict[int, IssueComment] = {}
+    for comment in owned:
+        match = HISTORY_RE.match(comment.body)
+        if match is None:
+            continue
+        revision = int(match.group("revision"))
+        (plans if match.group("kind") == "plan" else reviews)[revision] = comment
+
+    proven_revisions: list[int] = []
+    expected_plan = extract_current_plan(target_plan.body)
+    for revision in range(current_revision - 1, 0, -1):
+        archive = plans.get(revision)
+        if archive is None or archived_new_plan(archive.body) != expected_plan:
+            break
+        proven_revisions.append(revision)
+        expected_plan = archived_old_plan(archive.body)
+
+    if not proven_revisions:
+        return set()
+    paired_reviews = [revision for revision in proven_revisions if revision in reviews]
+    if paired_reviews and (
+        target_review is None or comment_revision(target_review.body) != current_revision
+    ):
+        return set()
+
+    deletable: set[int] = set()
+    for revision in proven_revisions:
+        for archive in (plans[revision], reviews.get(revision)):
+            if archive is not None and archive.database_id is not None:
+                deletable.add(archive.database_id)
+    return deletable
+
+
+def _obsolete_comment_ids(
+    owned: Sequence[IssueComment],
+    *,
+    keep_ids: set[int],
+    target_plan: IssueComment | None,
+    target_review: IssueComment | None,
+) -> list[int]:
+    """Return owned obsolete IDs whose canonical replacement is durable."""
+    deletable_history_ids = _deletable_history_ids(
+        owned,
+        target_plan=target_plan,
+        target_review=target_review,
+    )
+    delete_ids: list[int] = []
+    for comment in owned:
+        if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
+            continue
+        if HISTORY_RE.match(comment.body) is not None and (
+            comment.database_id not in deletable_history_ids
+        ):
+            # A legacy archive is the sole recoverable representation of its
+            # artifact until a canonical pointer exists. Retain it rather than
+            # compacting history into data loss.
+            continue
+        if comment.database_id is None:
+            raise RuntimeError("owned obsolete automation comment has no database id")
+        delete_ids.append(comment.database_id)
+    return delete_ids
 
 
 def plan_issue_timeline_compaction(
@@ -183,13 +261,12 @@ def plan_issue_timeline_compaction(
         for comment in (target_plan, target_review)
         if comment is not None and comment.database_id is not None
     }
-    delete_ids: list[int] = []
-    for comment in owned:
-        if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
-            continue
-        if comment.database_id is None:
-            raise RuntimeError("owned obsolete automation comment has no database id")
-        delete_ids.append(comment.database_id)
+    delete_ids = _obsolete_comment_ids(
+        owned,
+        keep_ids=keep_ids,
+        target_plan=target_plan,
+        target_review=target_review,
+    )
 
     # Canonical target bodies are PATCHed in place by the caller. Prefixing is
     # asserted here so a parser regression cannot turn an upsert into a new

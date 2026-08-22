@@ -21,7 +21,7 @@ from hephaestus.automation._implement_phase import ImplementPhase, _prepend_advi
 from hephaestus.automation._plan_phase import PlanPhase, _phase_env
 from hephaestus.automation._pr_create_phase import PRCreatePhase
 from hephaestus.automation._stage_context import StageContext, StageMixin
-from hephaestus.automation.review_journal import PlanDiscoveryStatus
+from hephaestus.automation.review_journal import PlanDiscoveryStatus, render_current_plan
 
 
 def _make_ctx(tmp_path: Path, **option_overrides: Any) -> StageContext:
@@ -87,7 +87,7 @@ def test_plan_phase_discover_plan_found_on_plan_comment(tmp_path: Path) -> None:
     with (
         mock.patch(
             "hephaestus.automation._plan_phase.fetch_issue_comments_metadata",
-            return_value=[{"body": "# Implementation Plan\n\nstep 1", "user": {"login": "bot"}}],
+            return_value=[{"body": render_current_plan("step 1"), "user": {"login": "bot"}}],
         ),
         mock.patch("hephaestus.automation._plan_phase.gh_current_login", return_value="bot"),
     ):

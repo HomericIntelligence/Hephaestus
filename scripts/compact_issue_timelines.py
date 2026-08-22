@@ -22,9 +22,7 @@ from hephaestus.automation.issue_timeline import (
 )
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
-    PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
-    PLAN_REVIEW_PREFIX,
 )
 
 
@@ -92,7 +90,6 @@ def _apply_issue(
             PLAN_CANONICAL_MARKER,
             plan.plan_body,
             repo=repo,
-            legacy_marker=PLAN_COMMENT_MARKER,
         )
     if plan.review_needs_update and plan.review_body is not None:
         github_api.gh_issue_upsert_owned_comment(
@@ -100,7 +97,6 @@ def _apply_issue(
             PLAN_REVIEW_CANONICAL_MARKER,
             plan.review_body,
             repo=repo,
-            legacy_marker=PLAN_REVIEW_PREFIX,
         )
     for comment_id in plan.delete_comment_ids:
         github_api.gh_issue_delete_comment(comment_id, repo=repo, missing_ok=True)

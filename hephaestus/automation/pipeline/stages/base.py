@@ -248,10 +248,8 @@ class StageGitHub(Protocol):
         issue_number: int,
         marker: str,
         body: str,
-        *,
-        legacy_marker: str | None = None,
     ) -> None:
-        """Upsert an automation-owned canonical comment keyed on ``marker``."""
+        """Upsert an automation-owned comment keyed on an opaque marker."""
         pass
 
     def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
@@ -263,9 +261,9 @@ class StageGitHub(Protocol):
 
         Durable plan-comment channel (doc section 2: "plan comment = durable
         artifact"). The coordinator maps this onto
-        The human-readable heading remains for display and legacy migration,
-        but only a comment proved to be authored by the authenticated actor is
-        mutable. Callers pass a body normalized with the opaque marker.
+        The human-readable heading remains for display, but heading-only
+        historical comments are inert. Callers pass a body beginning with the
+        opaque marker.
         """
         ...
 

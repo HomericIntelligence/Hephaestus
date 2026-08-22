@@ -85,8 +85,6 @@ if TYPE_CHECKING:
             issue_number: int,
             marker: str,
             body: str,
-            *,
-            legacy_marker: str | None = None,
         ) -> None:
             pass
 
