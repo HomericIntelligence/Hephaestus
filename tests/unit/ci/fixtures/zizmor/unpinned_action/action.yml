@@ -1,0 +1,7 @@
+name: Unpinned fixture action
+description: Exercise the unpinned-uses audit for composite Actions.
+runs:
+  using: composite
+  steps:
+    - name: Invoke an unpinned action
+      uses: example/action@v1
