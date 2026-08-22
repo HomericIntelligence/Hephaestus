@@ -361,39 +361,34 @@ def test_installed_host_adapter_bootstraps_in_a_fresh_python_process(tmp_path) -
     assert completed.stdout.strip() == "loaded"
 
 
-def test_named_host_adapter_bootstraps_before_direct_policy_dispatch(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("invalid_factory", [True, False])
+def test_named_host_adapter_rejects_initialization_and_protocol_failures(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, invalid_factory: bool
 ) -> None:
-    """Direct library callers load the selected adapter before provider dispatch."""
-    received: dict[str, object] = {}
-
-    class Adapter:
-        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
-            received.update(kwargs)
-            return agent_runtime.AgentRunResult(stdout="reviewed", stderr="")
+    """A selected broker cannot enter automation without a usable adapter."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
 
     class EntryPoint:
         def load(self) -> object:
-            return Adapter
+            if invalid_factory:
+                raise RuntimeError("private adapter diagnostic")
+            return object
 
-    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
-    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setattr(
-        agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+    monkeypatch.setattr(agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),))
     monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
-    request = ExecutionRequest(
-        AgentRole.PR_REVIEWER,
-        AgentOperation.PR_REVIEW,
-        SessionLifecycle.ONE_SHOT,
-    )
 
-    result = agent_runtime.run_agent_text(
-        "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
-    )
+    expected = "could not be initialized" if invalid_factory else "does not implement invoke"
+    with pytest.raises(agent_runtime.PiIsolationUnavailableError, match=expected) as exc_info:
+        agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
-    assert result.stdout == "reviewed"
-    assert received["prompt"] == "review"
+    assert "private adapter diagnostic" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize("match_count", [0, 2])
@@ -466,44 +461,6 @@ def test_named_host_adapter_sanitizes_external_factory_failures(
     with pytest.raises(
         agent_runtime.PiIsolationUnavailableError,
         match="could not be discovered" if failure == "discover" else "could not be initialized",
-    ) as exc_info:
-        agent_runtime.resolve_agent("pi", cwd=tmp_path)
-
-    assert "private" not in str(exc_info.value)
-
-
-def test_named_host_adapter_rejects_an_invalid_protocol(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A factory result without a callable invoke boundary remains unadmitted."""
-def test_named_host_adapter_sanitizes_protocol_attribute_failures(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """External attribute diagnostics never escape protocol validation."""
-    from hephaestus.agents.pi_plugins import PiPreflightResult
-
-    class Adapter:
-        @property
-        def invoke(self) -> object:
-            raise RuntimeError("private validation diagnostic")
-
-    class EntryPoint:
-        def load(self) -> object:
-            return Adapter
-
-    monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
-    )
-    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
-    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
-    monkeypatch.setattr(
-        agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
-    )
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
-
-    with pytest.raises(
-        agent_runtime.PiIsolationUnavailableError,
-        match="could not be initialized",
     ) as exc_info:
         agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
