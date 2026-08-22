@@ -12,6 +12,7 @@ from hephaestus.automation.review_journal import (
     IssueComment,
     PlanDiscoveryResult,
     PlanDiscoveryStatus,
+    render_current_plan,
 )
 from hephaestus.automation.state_labels import (
     STATE_NEEDS_PLAN,
@@ -68,7 +69,7 @@ class TestGetLatestPlan:
         """_get_latest_plan returns plan text from matching comment."""
         comments = [
             {"body": "Some other comment"},
-            {"body": "# Implementation Plan\n\nStep 1: Do something\nStep 2: Do more"},
+            {"body": render_current_plan("Step 1: Do something\nStep 2: Do more")},
         ]
         with patch(
             "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
@@ -83,8 +84,8 @@ class TestGetLatestPlan:
     def test_get_latest_plan_returns_last_plan(self, reviewer: PlanReviewer) -> None:
         """_get_latest_plan returns the LAST plan comment when multiple exist."""
         comments = [
-            {"body": "# Implementation Plan\n\nFirst plan"},
-            {"body": "# Implementation Plan\n\nSecond plan (updated)"},
+            {"body": render_current_plan("First plan")},
+            {"body": render_current_plan("Second plan (updated)")},
         ]
         with patch(
             "hephaestus.automation.plan_reviewer.fetch_issue_comments_metadata",
@@ -102,7 +103,7 @@ class TestGetLatestPlan:
         """Complete journal ingestion preserves an older actor-owned canonical plan."""
         comments = [
             {
-                "body": "# Implementation Plan\n\nOwned plan",
+                "body": render_current_plan("Owned plan"),
                 "user": {"login": "bot"},
             },
             *[
@@ -127,11 +128,11 @@ class TestGetLatestPlan:
         """Only the authenticated actor's canonical plan can be reviewed."""
         comments = [
             {
-                "body": "# Implementation Plan\n\nOwned plan",
+                "body": render_current_plan("Owned plan"),
                 "user": {"login": "bot"},
             },
             {
-                "body": "# Implementation Plan\n\nForeign spoof",
+                "body": render_current_plan("Foreign spoof"),
                 "user": {"login": "other"},
             },
         ]
@@ -182,7 +183,7 @@ class TestGetLatestPlan:
         matching those caused the reviewer to review its own prior review.
         """
         comments = [
-            {"body": "# Implementation Plan\n\n## Objective\nDo the thing."},
+            {"body": render_current_plan("## Objective\nDo the thing.")},
             # A later review comment quoting the plan's headings:
             {
                 "body": (
@@ -200,7 +201,9 @@ class TestGetLatestPlan:
         assert result.status is PlanDiscoveryStatus.FOUND
         assert result.plan_text is not None
         # Must be the actual plan, NOT the review comment.
-        assert result.plan_text.lstrip().startswith("# Implementation Plan")
+        assert result.plan_text.startswith(
+            "<!-- hephaestus-plan:canonical -->\n# Implementation Plan"
+        )
         assert "🔍 Plan Review" not in result.plan_text
 
     def test_get_latest_plan_review_only_issue_returns_none(self, reviewer: PlanReviewer) -> None:

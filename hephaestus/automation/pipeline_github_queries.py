@@ -296,7 +296,6 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
             issue_number,
             PLAN_REVIEW_CANONICAL_MARKER,
             body,
-            legacy_marker=PLAN_REVIEW_PREFIX,
         )
 
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:

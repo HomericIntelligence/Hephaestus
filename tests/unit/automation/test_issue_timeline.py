@@ -75,6 +75,27 @@ def test_compaction_never_claims_or_deletes_foreign_marker_comments() -> None:
     assert plan_issue_timeline_compaction(comments).delete_comment_ids == ()
 
 
+def test_compaction_keeps_same_line_history_marker_lookalikes() -> None:
+    """A valid marker with a same-line suffix is actor-owned prose, not history."""
+    lookalike = archive_plan_body(1, "old", "new").replace(" -->\n", " -->suffix\n", 1)
+    comments = [
+        _comment(1, render_current_plan("Plan", revision=1)),
+        _comment(2, lookalike),
+    ]
+
+    assert 2 not in plan_issue_timeline_compaction(comments).delete_comment_ids
+
+
+def test_compaction_keeps_same_line_skip_marker_lookalikes() -> None:
+    """A skip marker with a same-line suffix is inert operator text."""
+    comments = [
+        _comment(1, render_current_plan("Plan", revision=1)),
+        _comment(2, f"{SKIP_REASON_MARKER}suffix\nkeep me"),
+    ]
+
+    assert 2 not in plan_issue_timeline_compaction(comments).delete_comment_ids
+
+
 def test_metadata_ownership_requires_viewer_proof_or_exact_login() -> None:
     """REST metadata cannot turn a foreign marker into an owned deletion."""
     metadata = [
@@ -100,8 +121,8 @@ def test_malformed_legacy_marker_fails_before_planning_deletion() -> None:
         plan_issue_timeline_compaction(comments)
 
 
-def test_existing_canonical_pointer_is_kept_when_newer_legacy_comment_exists() -> None:
-    """Migration updates the canonical ID then deletes a later legacy source."""
+def test_existing_canonical_pointer_ignores_newer_legacy_comment() -> None:
+    """Historical heading-only text remains inert beside the canonical pointer."""
     comments = [
         _comment(1, render_current_plan("Older canonical", revision=1)),
         _comment(2, f"{PLAN_COMMENT_MARKER}\n\nLatest legacy plan"),
@@ -109,6 +130,85 @@ def test_existing_canonical_pointer_is_kept_when_newer_legacy_comment_exists() -
 
     result = plan_issue_timeline_compaction(comments)
 
-    assert "Latest legacy plan" in (result.plan_body or "")
-    assert result.plan_needs_update
-    assert result.delete_comment_ids == (2,)
+    assert result.plan_body is not None
+    assert "Older canonical" in result.plan_body
+    assert result.plan_needs_update is False
+    assert result.delete_comment_ids == ()
+
+
+def test_compaction_retains_history_without_a_canonical_pointer() -> None:
+    """A sole recoverable archive is never deleted before a pointer exists."""
+    comments = [
+        _comment(1, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(2, f"{PLAN_COMMENT_MARKER}\n\nHeading-only text"),
+        _comment(3, "Unrelated operator note"),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.plan_body is None
+    assert result.review_body is None
+    assert result.delete_comment_ids == ()
+
+
+def test_compaction_retains_plan_archive_until_its_exact_successor_is_canonical() -> None:
+    """A rev-1 pointer cannot replace recovery data for its missing rev-2 successor."""
+    comments = [
+        _comment(1, render_current_plan("Plan v1", revision=1)),
+        _comment(2, render_current_review("Review v1", revision=1)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == ()
+
+
+def test_compaction_retains_archive_pair_until_both_revision_successors_exist() -> None:
+    """A first pass cannot strand review history by deleting its plan evidence."""
+    comments = [
+        _comment(1, render_current_plan("Plan v2", revision=2)),
+        _comment(2, render_current_review("Review v1", revision=1)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(4, archive_review_body(1, "Review v1")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == ()
+
+    comments[1] = _comment(2, render_current_review("Review v2", revision=2))
+
+    recovered = plan_issue_timeline_compaction(comments)
+
+    assert recovered.delete_comment_ids == (3, 4)
+
+
+def test_compaction_deletes_verified_plan_and_review_history_together() -> None:
+    """Both archives compact only after the matching successor pair is durable."""
+    comments = [
+        _comment(1, render_current_plan("Plan v2", revision=2)),
+        _comment(2, render_current_review("Review v2", revision=2)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(4, archive_review_body(1, "Review v1")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == (3, 4)
+
+
+def test_compaction_deletes_complete_three_revision_history_chain() -> None:
+    """A fully proven chain compacts atomically instead of stranding rev 1."""
+    comments = [
+        _comment(1, render_current_plan("Plan v3", revision=3)),
+        _comment(2, render_current_review("Review v3", revision=3)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(4, archive_review_body(1, "Review v1")),
+        _comment(5, archive_plan_body(2, "Plan v2", "Plan v3")),
+        _comment(6, archive_review_body(2, "Review v2")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == (3, 4, 5, 6)

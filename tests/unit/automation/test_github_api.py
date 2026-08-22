@@ -38,6 +38,7 @@ from hephaestus.automation.github_api import (
     skip_epics,
 )
 from hephaestus.automation.models import IssueState
+from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER
 from hephaestus.github.rate_limit import configure_gh_global_throttle
 from hephaestus.io import utils as io_utils
 
@@ -2698,8 +2699,9 @@ class TestUpsertAndDeleteComment:
     def test_upsert_creates_when_absent(
         self, mock_create: Any, _mock_fetch: Any, _mock_repo: Any
     ) -> None:
-        rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nbody")
-        mock_create.assert_called_once_with(5, "# Implementation Plan\nbody", repo=None)
+        body = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nbody"
+        rv = gh_issue_upsert_comment(5, PLAN_CANONICAL_MARKER, body)
+        mock_create.assert_called_once_with(5, body, repo=None)
         assert rv is None  # fresh create: id not parsed
 
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
@@ -2727,6 +2729,44 @@ class TestUpsertAndDeleteComment:
 
         assert result == 10
         mock_create.assert_called_once_with(5, body, repo=None)
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_delete_comment")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_owned_upsert_does_not_migrate_heading_only_comment(
+        self,
+        mock_create: Any,
+        mock_delete: Any,
+        mock_fetch: Any,
+        _mock_login: Any,
+    ) -> None:
+        """A legacy heading-only record stays untouched beside a new pointer."""
+        marker = PLAN_CANONICAL_MARKER
+        body = f"{marker}\n# Implementation Plan\nnew plan"
+        mock_fetch.side_effect = [
+            [
+                {
+                    "databaseId": 7,
+                    "body": "# Implementation Plan\nlegacy plan",
+                    "user": {"login": "hephaestus-bot"},
+                }
+            ],
+            [
+                {
+                    "databaseId": 7,
+                    "body": "# Implementation Plan\nlegacy plan",
+                    "user": {"login": "hephaestus-bot"},
+                },
+                {"databaseId": 8, "body": body, "user": {"login": "hephaestus-bot"}},
+            ],
+        ]
+
+        result = gh_issue_upsert_owned_comment(5, marker, body)
+
+        assert result == 8
+        mock_create.assert_called_once_with(5, body, repo=None)
+        mock_delete.assert_not_called()
 
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
@@ -2894,9 +2934,18 @@ class TestUpsertAndDeleteComment:
     ) -> None:
         with patch(
             "hephaestus.automation.github_api._fetch_issue_comment_ids",
-            return_value=[{"databaseId": 99, "body": "# Implementation Plan\nold"}],
+            return_value=[
+                {
+                    "databaseId": 99,
+                    "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold",
+                }
+            ],
         ):
-            rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nnew")
+            rv = gh_issue_upsert_comment(
+                5,
+                PLAN_CANONICAL_MARKER,
+                f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
+            )
         # No fresh comment created; a PATCH call was issued for id 99.
         mock_create.assert_not_called()
         assert rv == 99
@@ -2912,16 +2961,20 @@ class TestUpsertAndDeleteComment:
     def test_upsert_deletes_older_duplicates(
         self, _mock_create: Any, mock_gh_call: Any, _mock_repo: Any
     ) -> None:
-        # Three legacy plan comments → newest (id 3) patched, 1 and 2 deleted.
+        # Three canonical plan comments → newest (id 3) patched, 1 and 2 deleted.
         with patch(
             "hephaestus.automation.github_api._fetch_issue_comment_ids",
             return_value=[
-                {"databaseId": 1, "body": "# Implementation Plan\na"},
-                {"databaseId": 2, "body": "# Implementation Plan\nb"},
-                {"databaseId": 3, "body": "# Implementation Plan\nc"},
+                {"databaseId": 1, "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\na"},
+                {"databaseId": 2, "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nb"},
+                {"databaseId": 3, "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nc"},
             ],
         ):
-            rv = gh_issue_upsert_comment(5, "# Implementation Plan", "# Implementation Plan\nnew")
+            rv = gh_issue_upsert_comment(
+                5,
+                PLAN_CANONICAL_MARKER,
+                f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
+            )
         assert rv == 3
         calls = [str(c) for c in mock_gh_call.call_args_list]
         assert any("DELETE" in c and "comments/1" in c for c in calls), calls

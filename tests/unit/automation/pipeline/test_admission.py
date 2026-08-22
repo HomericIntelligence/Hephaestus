@@ -21,6 +21,7 @@ from hephaestus.automation.pipeline.admission import (
     _select_non_overlapping,
     order_for_implementation,
 )
+from hephaestus.automation.review_journal import render_current_plan
 
 
 def _info(number: int, dependencies: list[int] | None = None) -> IssueInfo:
@@ -119,9 +120,8 @@ class TestFetchPlannedFiles:
         comments = [
             {"body": "chatter"},
             {
-                "body": (
-                    "# Implementation Plan\n\n## Files to Modify\n\n"
-                    "- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
+                "body": render_current_plan(
+                    "## Files to Modify\n\n- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
                 )
             },
         ]

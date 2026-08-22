@@ -26,7 +26,7 @@ HISTORY_MARKER: Final[str] = "<!-- hephaestus-plan-history:revision={revision}:k
 HISTORY_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-history:"
 HISTORY_RE: Final[re.Pattern[str]] = re.compile(
     r"^<!-- hephaestus-plan-history:revision=(?P<revision>\d+):"
-    r"kind=(?P<kind>plan|review) -->"
+    r"kind=(?P<kind>plan|review) -->(?=\r?\n|\Z)"
 )
 REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\d+) -->")
 PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
@@ -144,17 +144,19 @@ def comment_body(comment: IssueComment | str) -> str:
 
 
 def is_plan_comment(body: str) -> bool:
-    """Recognize current and legacy canonical plan comments."""
-    stripped = body.lstrip()
-    first_line = stripped.splitlines()[0].strip() if stripped else ""
-    return first_line in {PLAN_CANONICAL_MARKER, PLAN_COMMENT_MARKER}
+    """Recognize a plan comment only by its opaque leading marker."""
+    return has_exact_leading_marker(body, PLAN_CANONICAL_MARKER)
 
 
 def is_plan_review_comment(body: str) -> bool:
-    """Recognize current and legacy canonical plan-review comments."""
-    stripped = body.lstrip()
-    return stripped.startswith(PLAN_REVIEW_CANONICAL_MARKER) or stripped.startswith(
-        PLAN_REVIEW_PREFIX
+    """Recognize a plan-review comment only by its opaque leading marker."""
+    return has_exact_leading_marker(body, PLAN_REVIEW_CANONICAL_MARKER)
+
+
+def has_exact_leading_marker(body: str, marker: str) -> bool:
+    """Return whether *marker* occupies the complete first raw line of *body*."""
+    return bool(marker) and (
+        body == marker or body.startswith(f"{marker}\n") or body.startswith(f"{marker}\r\n")
     )
 
 
@@ -235,7 +237,7 @@ def discover_plan_from_comments(
     for comment in reversed(comments):
         if not comment.viewer_did_author:
             continue
-        body = comment.body.lstrip()
+        body = comment.body
         if is_plan_review_comment(body):
             continue
         if is_plan_comment(body):
@@ -245,11 +247,8 @@ def discover_plan_from_comments(
 
 def is_journal_comment(body: str) -> bool:
     """Return whether the body is an automation-owned plan journal artifact."""
-    stripped = body.lstrip()
     return (
-        is_plan_comment(stripped)
-        or is_plan_review_comment(stripped)
-        or stripped.startswith(HISTORY_MARKER_PREFIX)
+        is_plan_comment(body) or is_plan_review_comment(body) or HISTORY_RE.match(body) is not None
     )
 
 
@@ -474,7 +473,10 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     current_plan_body = ""
     current_review_body = ""
     for comment in owned:
-        body = comment.body.lstrip()
+        # Canonical journal markers are opaque protocol tokens.  Treating a
+        # whitespace-prefixed token as canonical would let inert prose alter
+        # the durable timeline reconstruction.
+        body = comment.body
         match = HISTORY_RE.match(body)
         if match:
             identity = (int(match.group("revision")), match.group("kind"))

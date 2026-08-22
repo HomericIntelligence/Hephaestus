@@ -79,7 +79,6 @@ from hephaestus.automation.prompts.planning import (
 )
 from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
-    PLAN_REVIEW_PREFIX,
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
@@ -845,7 +844,6 @@ class PlanReviewStage(Stage):
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
                 _normalize_review_comment(verdict.raw, revision=revision),
-                legacy_marker=PLAN_REVIEW_PREFIX,
             )
             item.payload["review_comment_published"] = True
 
@@ -941,7 +939,6 @@ class PlanReviewStage(Stage):
             item.issue,
             PLAN_REVIEW_CANONICAL_MARKER,
             _normalize_review_comment(verdict.raw, revision=revision),
-            legacy_marker=PLAN_REVIEW_PREFIX,
         )
         item.payload["review_comment_published"] = True
         return outcome

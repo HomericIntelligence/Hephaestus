@@ -7,9 +7,10 @@ on a GitHub issue through opaque canonical markers:
 - :data:`PLAN_REVIEW_CANONICAL_MARKER` keys the editable current review.
 
 The human-readable :data:`PLAN_COMMENT_MARKER` and
-:data:`PLAN_REVIEW_PREFIX` headings remain part of the display and migration
-format. All four strings are wire protocol: changing them without a migration
-breaks journal reconstruction.
+:data:`PLAN_REVIEW_PREFIX` headings remain display text on the following line.
+Historical heading-only comments are inert audit data. All four strings are
+wire protocol: changing them without a migration breaks journal
+reconstruction.
 
 Originally split across ``models.py`` and ``review_state.py``; consolidated
 here per issue #801 (tracking #708).

@@ -2256,7 +2256,7 @@ class TestConditionalMerge:
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
-            lambda issue: [{"body": f"{PLAN_COMMENT_MARKER}\nPlan", "user": {"login": "bot"}}],
+            lambda issue: [{"body": render_current_plan("Plan"), "user": {"login": "bot"}}],
         )
         monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
 
@@ -2581,7 +2581,7 @@ class TestMutatorMapping:
 
         assert upsert.call_args.args[:2] == (5, PLAN_REVIEW_CANONICAL_MARKER)
         assert upsert.call_args.args[2].endswith("state:plan-blocked")
-        assert upsert.call_args.kwargs == {"legacy_marker": PLAN_REVIEW_PREFIX}
+        assert upsert.call_args.kwargs == {}
 
     def test_ensure_blocked_audit_preserves_existing_detailed_review(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3052,7 +3052,7 @@ class TestRepoScoping:
             "_repo_issue_comments",
             lambda issue: [
                 {
-                    "body": f"{PLAN_COMMENT_MARKER}\n\nDo the thing.",
+                    "body": render_current_plan("Do the thing."),
                     "user": {"login": "bot"},
                 }
             ],
@@ -3114,11 +3114,11 @@ class TestRepoScoping:
             "_repo_issue_comments",
             lambda issue: [
                 {
-                    "body": f"{PLAN_COMMENT_MARKER}\n\nOld rejected plan.",
+                    "body": render_current_plan("Old rejected plan."),
                     "user": {"login": "bot"},
                 },
                 {
-                    "body": f"{PLAN_REVIEW_PREFIX}\n\nstate:plan-no-go",
+                    "body": render_current_review("state:plan-no-go", revision=1),
                     "user": {"login": "bot"},
                 },
             ],
@@ -3984,7 +3984,7 @@ class TestRepoScoping:
                 payload = [
                     {
                         "id": 9,
-                        "body": f"{PLAN_COMMENT_MARKER}\nold",
+                        "body": render_current_plan("old"),
                         "viewerDidAuthor": True,
                     }
                 ]
@@ -4703,7 +4703,7 @@ class TestReadSurface:
                     {
                         "comments": [
                             {
-                                "body": f"{PLAN_COMMENT_MARKER}\nPlan",
+                                "body": render_current_plan("Plan"),
                                 "viewerDidAuthor": True,
                             }
                         ]
@@ -4716,7 +4716,7 @@ class TestReadSurface:
             "_repo_issue_comments",
             lambda issue: [
                 {
-                    "body": f"{PLAN_COMMENT_MARKER}\nPlan",
+                    "body": render_current_plan("Plan"),
                     "user": {"login": "bot"},
                 }
             ],

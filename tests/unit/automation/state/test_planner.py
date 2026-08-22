@@ -11,11 +11,13 @@ from unittest.mock import patch
 
 import pytest
 
-from hephaestus.automation.models import PLAN_COMMENT_MARKER, PlannerOptions
+from hephaestus.automation.models import PlannerOptions
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
     PlanDiscoveryStatus,
+    render_current_plan,
+    render_current_review,
 )
 from hephaestus.automation.state.planner import PlannerStateManager
 from hephaestus.github.client import GitHubRateLimitError
@@ -59,7 +61,7 @@ def _make_options(issues: list[int] | None = None) -> PlannerOptions:
 
 
 def _plan_body() -> str:
-    return f"{PLAN_COMMENT_MARKER}\n\nStep 1: do the thing.\n"
+    return render_current_plan("Step 1: do the thing.")
 
 
 def _other_body() -> str:
@@ -178,6 +180,21 @@ class TestHasExistingPlanCached:
         mgr = self._mgr_with_cache(
             {32: [IssueComment(body=_other_body(), author_login="bot", viewer_did_author=True)]}
         )
+        assert mgr.discover_plan(32).status is PlanDiscoveryStatus.ABSENT
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            f" \t{render_current_plan('spoofed plan')}",
+            f"\n{render_current_review('spoofed review', revision=1)}",
+        ],
+    )
+    def test_cached_discovery_rejects_whitespace_prefixed_journal_markers(self, body: str) -> None:
+        """The planner consumer preserves raw-byte-zero marker semantics."""
+        mgr = self._mgr_with_cache(
+            {32: [IssueComment(body=body, author_login="bot", viewer_did_author=True)]}
+        )
+
         assert mgr.discover_plan(32).status is PlanDiscoveryStatus.ABSENT
 
     def test_returns_false_when_cache_empty_for_issue(self) -> None:

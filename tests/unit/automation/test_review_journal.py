@@ -17,6 +17,7 @@ from hephaestus.automation.review_journal import (
     current_plan_context,
     current_revision_context,
     discover_plan_from_comments,
+    is_journal_comment,
     journal_snapshot,
     normalize_issue_comments,
     render_current_plan,
@@ -38,6 +39,20 @@ def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
     assert found.plan_text is not None
     assert absent.status is PlanDiscoveryStatus.ABSENT
     assert failed.status is PlanDiscoveryStatus.READ_ERROR
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f" \t{render_current_plan('spoofed plan')}",
+        f"\n{render_current_review('spoofed review', revision=1)}",
+    ],
+)
+def test_plan_discovery_rejects_whitespace_prefixed_journal_markers(body: str) -> None:
+    """Only a marker at raw byte zero can identify a journal artifact."""
+    result = discover_plan_from_comments([_owned(body)])
+
+    assert result.status is PlanDiscoveryStatus.ABSENT
 
 
 def test_normalization_derives_ownership_from_validated_logins() -> None:
@@ -80,6 +95,61 @@ def test_snapshot_ignores_foreign_marker_spoofing() -> None:
     assert snapshot.revision == 2
     assert snapshot.current_plan == "owned"
     assert snapshot.current_review.endswith("state:plan-go")
+
+
+def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
+    """Whitespace-prefixed journal markers are inert rather than canonical state."""
+    snapshot = journal_snapshot(
+        [
+            _owned(f" \t{render_current_plan('spoofed', revision=8)}"),
+            _owned(f"\n{render_current_review('spoofed', revision=8)}"),
+            _owned(f" {archive_plan_body(7, 'old', 'new')}"),
+        ]
+    )
+
+    assert snapshot.revision == 1
+    assert snapshot.current_plan == ""
+    assert snapshot.current_review == ""
+    assert snapshot.history == ()
+
+
+def test_history_marker_requires_an_exact_first_line_boundary() -> None:
+    """A same-line suffix cannot turn actor-owned prose into legacy state."""
+    lookalike = archive_plan_body(7, "old", "new").replace(" -->\n", " -->suffix\n", 1)
+
+    snapshot = journal_snapshot([_owned(lookalike)])
+
+    assert is_journal_comment(lookalike) is False
+    assert snapshot.revision == 1
+    assert snapshot.history == ()
+
+
+def test_crlf_canonical_and_history_markers_are_recognized() -> None:
+    """Windows line endings preserve canonical and recovery identities."""
+    plan = render_current_plan("Plan v2", revision=2).replace("\n", "\r\n")
+    review = render_current_review("Review v2", revision=2).replace("\n", "\r\n")
+    history = archive_plan_body(1, "Plan v1", "Plan v2").replace("\n", "\r\n")
+
+    discovered = discover_plan_from_comments([_owned(plan)])
+    snapshot = journal_snapshot([_owned(history), _owned(plan), _owned(review)])
+
+    assert discovered.status is PlanDiscoveryStatus.FOUND
+    assert snapshot.current_plan == "Plan v2"
+    assert snapshot.current_review == "Review v2"
+    assert len(snapshot.history) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f" {render_current_plan('spoofed')}",
+        f"\n{render_current_review('spoofed', revision=1)}",
+        f"\t{archive_plan_body(1, 'old', 'new')}",
+    ],
+)
+def test_journal_comment_requires_marker_at_first_raw_byte(body: str) -> None:
+    """Whitespace-prefixed protocol text is not removable journal state."""
+    assert is_journal_comment(body) is False
 
 
 def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:
