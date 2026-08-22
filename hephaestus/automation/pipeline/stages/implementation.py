@@ -256,11 +256,10 @@ PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb
 #: can run before a PR exists.  Keep this fixed in trusted queue code: issue
 #: content and programmatic generic-test overrides must not weaken the gate.
 HEPHAESTUS_REQUIRED_CHECK_ARGV: tuple[str, ...] = (
-    "env",
-    "HEPHAESTUS_CI_REBUILD=1",
     "bash",
     "scripts/run_ci_local.sh",
     "all",
+    "--rebuild",
 )
 
 #: The required suite runs CI's formerly parallel jobs serially on a local

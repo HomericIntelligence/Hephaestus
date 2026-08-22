@@ -530,7 +530,7 @@ def render_markdown_inventory(registry: tuple[RegistryVariable, ...]) -> str:
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for variable in sorted(registry, key=lambda item: item.name):
-        readers = "<br>".join(
+        readers = ", ".join(
             f"`{reader.path}:{reader.reader}:{reader.access}`"
             for reader in sorted(variable.readers)
         )

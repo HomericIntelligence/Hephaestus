@@ -182,15 +182,17 @@ def _run_runner(
         "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
         "FAKE_LICENSE_VIOLATION": "1" if license_violation else "0",
-        "HEPHAESTUS_CI_REBUILD": "1" if rebuild_image else "0",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
     for name in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE"):
         environment.pop(name, None)
     if color_environment:
         environment.update(color_environment)
+    command = ["bash", str(repo_root / "scripts" / "run_ci_local.sh"), subset]
+    if rebuild_image:
+        command.append("--rebuild")
     result = subprocess.run(
-        ["bash", str(repo_root / "scripts" / "run_ci_local.sh"), subset],
+        command,
         cwd=repo_root,
         env=environment,
         text=True,

@@ -65,7 +65,7 @@ This table is generated from the ambient-reader projection. “Reader” is a st
 | `SystemRoot` | platform | config.child_environments | Windows system root alias | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `TEMP` | platform | config.child_environments | Windows temporary directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `TMP` | platform | config.child_environments | Windows temporary directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
-| `TMPDIR` | platform | config.child_environments | Temporary and runtime directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read`<br>`hephaestus/github/rate_limit.py:_runtime_base_dir:read` |
+| `TMPDIR` | platform | config.child_environments | Temporary and runtime directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read`, `hephaestus/github/rate_limit.py:_runtime_base_dir:read` |
 | `TZ` | platform | config.child_environments | Timezone stability | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `USER` | platform | config.child_environments | Host identity hint | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `USERPROFILE` | platform | config.child_environments | Windows home directory | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |

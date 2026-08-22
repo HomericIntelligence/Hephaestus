@@ -27,8 +27,8 @@
 # Override: CONTAINER_ENGINE=docker ./scripts/run_ci_local.sh
 #
 # Image: built locally from ci/Containerfile when it is not already present.
-# Set HEPHAESTUS_CI_REBUILD=1 to rebuild from the current checkout even when
-# the local tag exists. The autonomous queue uses this mode.
+# Pass --rebuild to rebuild from the current checkout even when the local tag
+# exists. The autonomous queue uses this mode.
 # `just ci-build` remains available for an explicit warm-up.
 
 set -euo pipefail
@@ -40,6 +40,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SUBSET="${1:-all}"
+REBUILD=0
+for arg in "$@"; do
+    case "${arg}" in
+        --rebuild) REBUILD=1 ;;
+    esac
+done
 
 # shellcheck source=scripts/shell/lib/install_helpers.sh
 source "${SCRIPT_DIR}/shell/lib/install_helpers.sh"
@@ -284,7 +290,7 @@ resolve_image_id() {
 }
 
 resolve_image() {
-    if [ "${HEPHAESTUS_CI_REBUILD:-0}" = "1" ]; then
+    if [ "${REBUILD}" = "1" ]; then
         log_info "Rebuilding CI image from the current checkout."
         build_ci_image
     elif "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \

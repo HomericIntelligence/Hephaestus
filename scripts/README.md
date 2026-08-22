@@ -52,8 +52,8 @@ through installed `hephaestus-*` console scripts.
   a named subset. Its `build` subset runs the required artifact lifecycle lane
   rather than a separate package-build approximation. Project-toolchain
   commands use a Podman/Docker image that the runner builds automatically when
-  absent. Set `HEPHAESTUS_CI_REBUILD=1` to rebuild the image from the current
-  checkout; the autonomous queue always sets it. Linked-worktree Git metadata
+  absent. Pass `--rebuild` to rebuild the image from the current checkout; the
+  autonomous queue always passes it. Linked-worktree Git metadata
   is mounted read-only so versioning and Git-aware scans inspect the candidate
   commit. `just`, ShellCheck, and Bats all run in the pinned CI image.
 
