@@ -44,6 +44,7 @@ from hephaestus.automation.github_api import (
     gh_pr_label_names,
     gh_pr_state,
 )
+from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.state_labels import (
@@ -70,6 +71,20 @@ _LABEL_RANK = {
     STATE_IMPLEMENTATION_NO_GO: 3,
     STATE_IMPLEMENTATION_GO: 4,
 }
+
+
+def read_pending_implementation_go_audit(
+    github: Any, pr_number: int
+) -> PendingImplementationGoAudit | None:
+    """Read a typed pending receipt only from adapters that implement the API."""
+    reader = getattr(type(github), "pending_implementation_go_audit", None)
+    if not callable(reader):
+        return None
+    receipt = reader(github, pr_number)
+    if receipt is not None and not isinstance(receipt, PendingImplementationGoAudit):
+        raise TypeError("pending implementation-go audit receipt has invalid type")
+    return receipt
+
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
 #: issue is EXCLUDED from the pipeline (state:skip / epic) — exclusion is NOT
@@ -117,6 +132,8 @@ class IssueFacts:
     issue_is_closed: bool = False
     pr_has_implementation_go: bool = False
     pr_has_implementation_no_go: bool = False
+    pending_implementation_go_audit: PendingImplementationGoAudit | None = None
+    pending_implementation_go_label_confirmed: bool = False
     body: str = ""
 
 
@@ -163,6 +180,8 @@ class SeedEntry:
     pr_description: str = ""
     passed: bool = True
     skip_tag_obligation: EpicSkipTagObligation | None = None
+    pending_implementation_go_audit: PendingImplementationGoAudit | None = None
+    pending_implementation_go_label_confirmed: bool = False
 
 
 def _get_state_label(labels: set[str]) -> str | None:
@@ -279,6 +298,8 @@ def classify_issue(facts: IssueFacts) -> Classification:
         # unarmed PR before returning to review; a matching current-process
         # proof attempts one ordinary conditional merge. No queue stage
         # creates, disables, adopts, or polls automatic merge.
+        if facts.pending_implementation_go_audit is not None:
+            return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
         if facts.pr_has_implementation_go:
             return (
                 StageName.MERGE_WAIT,
@@ -420,12 +441,14 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
     pr_is_merged = False
     pr_has_implementation_go = False
     pr_has_implementation_no_go = False
+    pending_implementation_go_audit = None
     pr_number: int | None = github.find_pr_for_issue(issue_number)
     if pr_number is not None:
         pr_is_open = True
         pr_has_implementation_go, pr_has_implementation_no_go = (
             github.pr_has_implementation_state_label(pr_number)
         )
+        pending_implementation_go_audit = read_pending_implementation_go_audit(github, pr_number)
     else:
         pr_number = github.find_merged_pr_for_issue(issue_number)
         if pr_number is not None:
@@ -443,6 +466,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         issue_is_closed=issue_is_closed,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
+        pending_implementation_go_audit=pending_implementation_go_audit,
     )
 
 
@@ -476,6 +500,10 @@ def seed_entry_from_facts(facts: IssueFacts) -> SeedEntry:
         issue_title=facts.title,
         issue_body=facts.body,
         skip_tag_obligation=obligation,
+        pending_implementation_go_audit=facts.pending_implementation_go_audit,
+        pending_implementation_go_label_confirmed=bool(
+            facts.pending_implementation_go_audit is not None and facts.pr_has_implementation_go
+        ),
     )
 
 
@@ -557,11 +585,25 @@ def seed_from_cli(
             )
             continue
 
+        pending_audit = None
         if github is not None:
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
+            pending_audit = read_pending_implementation_go_audit(github, pr)
         else:
             has_go = is_implementation_go(gh_pr_label_names(pr))
-        if has_go:
+        if pending_audit is not None:
+            entries.append(
+                SeedEntry(
+                    kind="pr",
+                    identifier=pr,
+                    stage=StageName.PR_REVIEW,
+                    reason=f"PR #{pr} has a pending implementation-go audit",
+                    pr_number=pr,
+                    pending_implementation_go_audit=pending_audit,
+                    pending_implementation_go_label_confirmed=has_go,
+                )
+            )
+        elif has_go:
             entries.append(
                 SeedEntry(
                     kind="pr",

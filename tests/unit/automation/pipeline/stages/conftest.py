@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -31,6 +32,7 @@ from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
 )
+from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
 from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
@@ -172,6 +174,7 @@ class FakeStageGitHub(FakeGitHub):
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
+        self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -569,6 +572,48 @@ class FakeStageGitHub(FakeGitHub):
         """Mirror pr_manager.mark_pr_implementation_go (records mutation)."""
         self._pr_impl_state = (True, False)
         self._log("mark_pr_implementation_go", pr_number)
+
+    def publish_implementation_go_audit(
+        self, pr_number: int, head_sha: str, audit: ReviewAudit
+    ) -> None:
+        """Mirror public audit publication and exact-head handoff cleanup."""
+        marker, body = render_implementation_go_audit(audit, pr_number=pr_number, head_sha=head_sha)
+        self.upsert_issue_comment(pr_number, marker, body)
+        handoff_prefix = (
+            f"<!-- hephaestus-implementation-reply-handoff:pr={pr_number}:head={head_sha}:"
+        )
+        self.comments[pr_number] = [
+            comment
+            for comment in self.comments.get(pr_number, [])
+            if not (
+                isinstance(comment, str) and comment.split("\n", 1)[0].startswith(handoff_prefix)
+            )
+        ]
+        self._log("publish_implementation_go_audit", pr_number, head_sha)
+
+    def persist_pending_implementation_go_audit(
+        self, pr_number: int, head_sha: str, audit: ReviewAudit
+    ) -> None:
+        """Persist the exact-head recovery record before the label transition."""
+        self.pending_go_audits[pr_number] = PendingImplementationGoAudit(
+            pr_number=pr_number,
+            head_sha=head_sha,
+            audit=audit,
+        )
+        self._log("persist_pending_implementation_go_audit", pr_number, head_sha)
+
+    def pending_implementation_go_audit(
+        self, pr_number: int
+    ) -> PendingImplementationGoAudit | None:
+        """Return the fake durable recovery record."""
+        return self.pending_go_audits.get(pr_number)
+
+    def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:
+        """Clear only a matching exact-head fake recovery record."""
+        receipt = self.pending_go_audits.get(pr_number)
+        if receipt is not None and receipt.head_sha == head_sha:
+            del self.pending_go_audits[pr_number]
+        self._log("clear_pending_implementation_go_audit", pr_number, head_sha)
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""

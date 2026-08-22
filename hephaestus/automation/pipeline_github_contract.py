@@ -88,6 +88,12 @@ if TYPE_CHECKING:
         ) -> None:
             pass
 
+        def _delete_issue_comment(self, comment_id: int) -> None:
+            pass
+
+        def _patch_issue_comment(self, comment_id: int, body: str) -> None:
+            pass
+
 else:
 
     class _PipelineGitHubHost:

@@ -396,6 +396,24 @@ class StageGitHub(Protocol):
         """
         ...
 
+    def publish_implementation_go_audit(self, pr_number: int, head_sha: str, audit: Any) -> None:
+        """Publish the public audit, then remove exact-head reply journals."""
+        pass
+
+    def persist_pending_implementation_go_audit(
+        self, pr_number: int, head_sha: str, audit: Any
+    ) -> None:
+        """Persist and read back the exact-head audit recovery receipt."""
+        pass
+
+    def pending_implementation_go_audit(self, pr_number: int) -> Any:
+        """Return the actor-owned pending audit receipt, if one exists."""
+        pass
+
+    def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:
+        """Remove the exact-head receipt after public audit readback."""
+        pass
+
     # -- merge_wait surface (#1816) ------------------------------------------
 
     def gh_pr_state(self, pr_number: int) -> dict[str, Any] | None:

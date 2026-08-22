@@ -548,7 +548,8 @@ omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
 **Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
 its normal default behavior when available, otherwise uses its inline-review
-fallback. It posts inline findings and an informational audit summary. Only a
+fallback. It posts inline findings and, after a clean Go-label proof, one
+ordinary public PR comment containing an informational audit summary. Only a
 structural audit plus fresh live GitHub head, thread, and exclusive-label facts
 may write `state:implementation-go`; review prose, grades, and decision-shaped
 output do not authorize it. Normal review may collect CI/CD evidence as
