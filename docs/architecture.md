@@ -1658,6 +1658,12 @@ PR state are normal restart authorities. `LearningJournalStore`,
 `ArmingStateStore`, and issue-wave checkpoints supply the other durable state
 listed in the journal contract above.
 
+The loop runner owns event-log lifecycle outside the pure coordinator: it holds
+the current file's activity lock and prunes only recognized inactive siblings
+under configurable age/count limits. Locking or cleanup failures preserve
+files, emit warnings, and do not affect pipeline routing. See
+[`observability.md`](observability.md#enabling-monitoring).
+
 ### Gauges
 
 [`_emit_observability_tick`](../hephaestus/automation/pipeline/coordinator.py)
