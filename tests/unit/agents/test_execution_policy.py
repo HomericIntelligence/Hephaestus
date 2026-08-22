@@ -361,6 +361,36 @@ def test_installed_host_adapter_bootstraps_in_a_fresh_python_process(tmp_path) -
     assert completed.stdout.strip() == "loaded"
 
 
+@pytest.mark.parametrize("invalid_factory", [True, False])
+def test_named_host_adapter_rejects_initialization_and_protocol_failures(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, invalid_factory: bool
+) -> None:
+    """A selected broker cannot enter automation without a usable adapter."""
+    from hephaestus.agents.pi_plugins import PiPreflightResult
+
+    class EntryPoint:
+        def load(self) -> object:
+            if invalid_factory:
+                raise RuntimeError("private adapter diagnostic")
+            return object
+
+    monkeypatch.setattr(
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
+    )
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
+    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+    monkeypatch.setattr(agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),))
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+
+    expected = "could not be initialized" if invalid_factory else "does not implement invoke"
+    with pytest.raises(agent_runtime.PiIsolationUnavailableError, match=expected) as exc_info:
+        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+
+    assert "private adapter diagnostic" not in str(exc_info.value)
+
+
 @pytest.mark.parametrize("match_count", [0, 2])
 def test_named_host_adapter_requires_one_exact_entry_point(
     tmp_path, monkeypatch: pytest.MonkeyPatch, match_count: int
@@ -437,10 +467,6 @@ def test_named_host_adapter_sanitizes_external_factory_failures(
     assert "private" not in str(exc_info.value)
 
 
-def test_named_host_adapter_rejects_an_invalid_protocol(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A factory result without a callable invoke boundary remains unadmitted."""
 def test_named_host_adapter_rejects_incompatible_invoke_signature(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
