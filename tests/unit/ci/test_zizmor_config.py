@@ -108,8 +108,8 @@ def _tracked_composite_actions() -> set[str]:
     return composites
 
 
-def _audit_ids(fixture: Path, tmp_path: Path) -> set[str]:
-    """Run isolated fixed-argv zizmor and return its reported audit IDs."""
+def _audit_ids(fixture: Path) -> set[str]:
+    """Run zizmor with the repository's effective config and return audit IDs."""
     executable = Path(sys.executable).with_name("zizmor")
     assert executable.is_file(), f"zizmor executable not found: {executable}"
 
@@ -117,14 +117,13 @@ def _audit_ids(fixture: Path, tmp_path: Path) -> set[str]:
         [
             str(executable),
             "--offline",
-            "--no-config",
             "--no-ignores",
             "--min-severity",
             "medium",
             "--format=json-v1",
             "-",
         ],
-        cwd=tmp_path,
+        cwd=REPO_ROOT,
         env={},
         input=fixture.read_text(encoding="utf-8"),
         capture_output=True,
@@ -219,10 +218,9 @@ def test_precommit_trigger_covers_tracked_composite_actions() -> None:
 def test_fixed_fixture_scan_keeps_security_audits_active(
     fixture: str,
     expected_audits: set[str],
-    tmp_path: Path,
 ) -> None:
-    """Pinning and workflow least-privilege audits remain active."""
-    observed = _audit_ids(FIXTURES / fixture, tmp_path)
+    """The effective production config keeps required security audits active."""
+    observed = _audit_ids(FIXTURES / fixture)
     assert expected_audits <= observed, f"missing audits: {expected_audits - observed}"
 
 
