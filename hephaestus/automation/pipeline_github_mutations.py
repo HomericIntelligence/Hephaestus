@@ -196,22 +196,23 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         legacy_marker: str | None = None,
     ) -> None:
         """Execute canonical comment upsert after the public error boundary."""
-        if not has_exact_leading_marker(body, marker):
-            raise ValueError(f"canonical comment body must start with marker {marker!r}")
-        if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
-            return
-        comments = self._repo_issue_comments(issue_number)
-        exact = [c for c in comments if has_exact_leading_marker(str(c.get("body", "")), marker)]
-        owned = [comment for comment in exact if self._comment_owned_by_viewer(comment)]
-        if not owned:
-            self._post_issue_comment(issue_number, body)
-            comments = self._repo_issue_comments(issue_number)
-            owned = [
+
+        def owned_matching(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
                 comment
                 for comment in comments
                 if has_exact_leading_marker(str(comment.get("body", "")), marker)
                 and self._comment_owned_by_viewer(comment)
             ]
+
+        if not has_exact_leading_marker(body, marker):
+            raise ValueError(f"canonical comment body must start with marker {marker!r}")
+        if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
+            return
+        owned = owned_matching(self._repo_issue_comments(issue_number))
+        if not owned:
+            self._post_issue_comment(issue_number, body)
+            owned = owned_matching(self._repo_issue_comments(issue_number))
             if not owned:
                 raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
 
@@ -223,13 +224,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         )
         if str(owned[-1].get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
-            comments = self._repo_issue_comments(issue_number)
-            owned = [
-                comment
-                for comment in comments
-                if has_exact_leading_marker(str(comment.get("body", "")), marker)
-                and self._comment_owned_by_viewer(comment)
-            ]
+            owned = owned_matching(self._repo_issue_comments(issue_number))
         if not owned or str(owned[-1].get("body", "")) != body:
             raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
         for duplicate in owned[:-1]:

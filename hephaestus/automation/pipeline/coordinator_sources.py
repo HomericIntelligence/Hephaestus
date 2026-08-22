@@ -752,12 +752,17 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
-            if pending_audit is not None:
+            if pending_audit is not None or has_go:
+                stage_name = (
+                    StageName.PR_REVIEW if pending_audit is not None else StageName.MERGE_WAIT
+                )
+                reason = (
+                    f"PR #{pr} has a pending implementation-go audit"
+                    if pending_audit is not None
+                    else f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
+                )
                 stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.PR_REVIEW,
-                    f"PR #{pr} has a pending implementation-go audit",
-                    scope_stages,
+                    scope_identifier, stage_name, reason, scope_stages
                 )
                 entries.append(
                     _seeding.SeedEntry(
@@ -770,24 +775,6 @@ class SourceCoordinator(_CoordinatorHost):
                         passed=passed,
                         pending_implementation_go_audit=pending_audit,
                         pending_implementation_go_label_confirmed=has_go,
-                    )
-                )
-            elif has_go:
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
-                    scope_stages,
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=passed,
                     )
                 )
             else:

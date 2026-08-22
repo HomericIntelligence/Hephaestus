@@ -84,7 +84,6 @@ from ._review_utils import (
 from .git_utils import issue_auto_impl_branch_name
 from .pipeline_github_audit import PipelineGitHubAuditReceipts
 from .pipeline_github_authorization import PipelineGitHubAuthorization
-from .pipeline_github_issue_bodies import PipelineGitHubIssueBodies
 from .pipeline_github_mutations import PipelineGitHubMutations
 from .pipeline_github_queries import PipelineGitHubQueries
 from .pipeline_github_reviews import PipelineGitHubReviews
@@ -234,7 +233,6 @@ class PipelineGitHub(
     PipelineGitHubAuthorization,
     PipelineGitHubReviews,
     PipelineGitHubAuditReceipts,
-    PipelineGitHubIssueBodies,
     PipelineGitHubMutations,
 ):
     """Stable GitHub façade with explicit single-owner semantics.

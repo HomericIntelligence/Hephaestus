@@ -1693,7 +1693,7 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     ):
         return _verify_published_plan_state(item, ctx)
 
-    if posted_plan or initial_plan_found:
+    if posted_plan or (initial_plan_found and not awaiting_revision_candidate):
         return StageOutcome(Disposition.RETRY, "plan disappeared before verification")
 
     attempt = item.attempts.get("plan", 0) + 1

@@ -25,6 +25,7 @@ from hephaestus.automation.pipeline.seeding import (
     SeedEntry,
     _label_at_or_past,
     classify_issue,
+    seed_entry_from_facts,
     seed_from_cli,
     seed_issue,
     seed_issue_from_github,
@@ -741,7 +742,7 @@ class TestSeedIssueFetchLayer:
                     "title": "A task",
                     "body": "",
                     "state": "OPEN",
-                    "labels": [],
+                    "labels": [{"name": STATE_PLAN_GO}],
                 }
 
             def find_pr_for_issue(self, issue_number: int) -> int:
