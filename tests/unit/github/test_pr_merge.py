@@ -641,6 +641,48 @@ class TestMain:
 
         assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
 
+    def test_check_run_replacement_between_paginated_traversals_blocks_merge(
+        self, monkeypatch
+    ) -> None:
+        """Mutable paginated evidence cannot authorize a merge from a stale composite."""
+        first_page = [
+            {
+                "id": index + 1,
+                "name": f"success-{index}",
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index in range(100)
+        ]
+        replacement_page = [
+            {
+                "id": 102,
+                "name": "replacement",
+                "status": "in_progress",
+                "conclusion": None,
+            },
+            *first_page[1:],
+        ]
+        final_page = [
+            {
+                "id": 101,
+                "name": "final-success",
+                "status": "completed",
+                "conclusion": "success",
+            }
+        ]
+        responses = iter(
+            [
+                _gh_result({"total_count": 101, "check_runs": first_page}),
+                _gh_result({"total_count": 101, "check_runs": final_page}),
+                _gh_result({"total_count": 101, "check_runs": replacement_page}),
+                _gh_result({"total_count": 101, "check_runs": final_page}),
+            ]
+        )
+        monkeypatch.setattr(pr_merge_module, "gh_call", lambda _args: next(responses))
+
+        assert pr_merge_module._checks_pass_and_log("owner/repo", "abc123") is False
+
     @patch("hephaestus.github.pr_merge.run_git_cmd")
     def test_returns_1_when_no_repo_detected(self, _mock_git) -> None:
         """main() returns 1 when repo can't be detected."""

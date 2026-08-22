@@ -304,8 +304,8 @@ def _parse_check_run_page(payload: dict[str, Any], head_sha: str) -> tuple[int, 
     return total_count, checks
 
 
-def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
-    """Return complete exact-head Check Runs evidence, rejecting partial results."""
+def _check_run_traversal(repo_name: str, head_sha: str) -> list[Any] | None:
+    """Perform one complete traversal of exact-head Check Runs pages."""
     endpoint = f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page={_CHECK_RUNS_PAGE_SIZE}"
     checks: list[Any] = []
     check_run_ids: set[int] | None = None
@@ -356,6 +356,45 @@ def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
             return None
         page += 1
     return checks
+
+
+def _check_run_snapshot(checks: list[Any], head_sha: str) -> dict[int, tuple[str, str]] | None:
+    """Return the identity and merge-relevant state from paginated evidence."""
+    snapshot: dict[int, tuple[str, str]] = {}
+    for check in checks:
+        check_run_id = check.get("id") if isinstance(check, dict) else None
+        if (
+            not isinstance(check_run_id, int)
+            or isinstance(check_run_id, bool)
+            or check_run_id <= 0
+            or check_run_id in snapshot
+        ):
+            logger.error("Invalid or duplicate check-run ID for head %s; refusing merge", head_sha)
+            return None
+        snapshot[check_run_id] = (
+            str(check.get("status", "")).lower(),
+            str(check.get("conclusion", "")).lower(),
+        )
+    return snapshot
+
+
+def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
+    """Return stable exact-head Check Runs evidence, rejecting partial results."""
+    checks = _check_run_traversal(repo_name, head_sha)
+    if checks is None or len(checks) <= _CHECK_RUNS_PAGE_SIZE:
+        return checks
+
+    first_snapshot = _check_run_snapshot(checks, head_sha)
+    if first_snapshot is None:
+        return None
+    repeated_checks = _check_run_traversal(repo_name, head_sha)
+    if repeated_checks is None:
+        return None
+    repeated_snapshot = _check_run_snapshot(repeated_checks, head_sha)
+    if repeated_snapshot is None or repeated_snapshot != first_snapshot:
+        logger.error("Check-run evidence changed while reading head %s; refusing merge", head_sha)
+        return None
+    return repeated_checks
 
 
 def _checks_pass_and_log(repo_name: str, head_sha: str) -> bool:
