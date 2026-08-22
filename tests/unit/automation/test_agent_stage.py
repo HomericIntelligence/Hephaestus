@@ -540,6 +540,66 @@ def test_main_rejects_approval_with_pi_agent(
     assert "--approval=on-request" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--approval", "on-request"),
+        ("--approval", "untrusted"),
+        ("--sandbox", "read-only"),
+        ("--sandbox", "danger-full-access"),
+    ],
+)
+def test_main_rejects_flags_opencode_does_not_honor(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+) -> None:
+    """OpenCode exposes no approval/sandbox flags; reject non-default values (#2806)."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    argv = [
+        "--prompt-file",
+        str(prompt_file),
+        "--repo-root",
+        str(tmp_path),
+        "--stage",
+        "x",
+        "--output",
+        str(tmp_path / "out.txt"),
+        "--agent",
+        "opencode",
+        flag,
+        value,
+    ]
+    with pytest.raises(SystemExit) as exc:
+        agent_stage.main(argv)
+    assert exc.value.code == 2
+    assert f"{flag}={value}" in capsys.readouterr().err
+
+
+def test_validate_agent_flags_allows_opencode_defaults(tmp_path: Path) -> None:
+    """Default approval/sandbox values pass validation for --agent=opencode."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("p", encoding="utf-8")
+    parser = agent_stage.build_parser()
+    args = parser.parse_args(
+        [
+            "--prompt-file",
+            str(prompt_file),
+            "--repo-root",
+            str(tmp_path),
+            "--stage",
+            "x",
+            "--output",
+            str(tmp_path / "out.txt"),
+            "--agent",
+            "opencode",
+        ]
+    )
+    agent_stage.validate_agent_flags(parser, args)
+
+
 def test_main_rejects_missing_prompt_file(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

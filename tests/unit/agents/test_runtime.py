@@ -1243,6 +1243,25 @@ def test_run_opencode_session_returns_session_id_and_final_text(tmp_path: Path) 
     assert result.stdout == "OK"
 
 
+def test_run_opencode_session_returns_empty_when_events_carry_no_text(tmp_path: Path) -> None:
+    """A well-formed event stream without assistant text must not leak JSONL."""
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured["cmd"] = cmd
+        stdout = (
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}\n'
+            '{"type":"step_finish","sessionID":"ses_fd61","part":{"reason":"stop"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert result.session_id == "ses_fd61"
+    assert result.stdout == ""
+
+
 def test_run_opencode_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
     """#1661: a NUL in the prompt must not crash the OpenCode stdin path."""
     captured_input: list[str | None] = []
@@ -1371,7 +1390,7 @@ def test_agent_dispatch_routes_opencode_sessions(tmp_path: Path) -> None:
         )
 
     assert isinstance(text, subprocess.CompletedProcess)
-    assert text.args == ["opencode", "run"]
+    assert text.args == ["opencode", "run", "--format", "json"]
     assert text.stdout == "OK"
 
 

@@ -109,6 +109,10 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
     "pi": (("pi", "--version"),),
+    # Exit 0 only proves the CLI runs. OpenCode serves models from stored
+    # credentials OR environment keys, so `providers list` legitimately reports
+    # "0 credentials" on fully working setups; credential-count parsing would
+    # false-negative those. Deeper authentication is verified by the run itself.
     "opencode": (("opencode", "providers", "list"),),
 }
 
@@ -477,6 +481,8 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
             status_hint = (
                 "`pi --version` and check ~/.pi/agent/models.json"
                 if agent == "pi"
+                else "`opencode providers login` (environment keys also work)"
+                if agent == "opencode"
                 else f"`{agent} auth status` (or `{agent} login status`)"
             )
             raise RuntimeError(
@@ -1638,6 +1644,20 @@ def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
     return session_id, final_message.strip()
 
 
+def _has_opencode_json_event(text: str) -> bool:
+    """Return whether OpenCode JSON-mode output contains at least one event object."""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("type"), str) and event["type"]:
+            return True
+    return False
+
+
 def _run_opencode_command(
     cmd: list[str],
     *,
@@ -1646,7 +1666,14 @@ def _run_opencode_command(
     timeout: int,
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
-    """Execute OpenCode with JSON events and return final text plus session id."""
+    """Execute OpenCode with JSON events and return final text plus session id.
+
+    When the CLI emits a well-formed event stream that carries no assistant
+    text, the result is empty rather than the raw event stream, so downstream
+    verdict parsers never see JSONL as prose. Unlike the Codex path there is
+    deliberately no fatal-event classifier yet: OpenCode's failure-event shapes
+    are not contractual, so none are invented here.
+    """
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -1668,7 +1695,7 @@ def _run_opencode_command(
                 timeout=timeout,
             )
     except subprocess.TimeoutExpired:
-        _terminate_codex_process(proc)
+        _terminate_process_group(proc)
         raise
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -1678,7 +1705,12 @@ def _run_opencode_command(
             stderr=stderr_text,
         )
     session_id, event_message = _parse_opencode_json_events(stdout_text or "")
-    stdout = (event_message or stdout_text or "").strip()
+    if event_message:
+        stdout: str = event_message.strip()
+    elif _has_opencode_json_event(stdout_text or ""):
+        stdout = ""
+    else:
+        stdout = (stdout_text or "").strip()
     return AgentRunResult(stdout=stdout, stderr=stderr_text or "", session_id=session_id)
 
 
@@ -1751,7 +1783,7 @@ def run_opencode_text(
         approval=approval,
     )
     return subprocess.CompletedProcess(
-        args=["opencode", "run"],
+        args=["opencode", "run", "--format", "json"],
         returncode=0,
         stdout=result.stdout,
         stderr=result.stderr,
@@ -2374,7 +2406,7 @@ def _communicate_codex_process(
             elapsed = time.monotonic() - started_at
             remaining = timeout - elapsed
             if remaining <= 0:
-                stdout_text, stderr_text = _terminate_codex_process(proc)
+                stdout_text, stderr_text = _terminate_process_group(proc)
                 last_message = _read_text_file(output_path).strip()
                 if last_message:
                     return stdout_text, stderr_text or f"Codex wrapper timed out after {timeout}s"
@@ -2400,27 +2432,27 @@ def _communicate_codex_process(
                 if _read_text_file(output_path).strip():
                     final_seen_at = final_seen_at or time.monotonic()
                     if time.monotonic() - final_seen_at >= grace_seconds:
-                        stdout_text, stderr_text = _terminate_codex_process(proc)
+                        stdout_text, stderr_text = _terminate_process_group(proc)
                         return (
                             stdout_text,
                             stderr_text or "Codex wrapper terminated after final message",
                         )
 
 
-def _terminate_codex_process(proc: subprocess.Popen[str]) -> tuple[str, str]:
-    """Terminate a Codex process group and collect any remaining stdout/stderr."""
+def _terminate_process_group(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate a direct-agent process group and collect any remaining output."""
     if proc.poll() is None:
-        _signal_codex_process_group(proc, signal.SIGTERM)
+        _signal_process_group(proc, signal.SIGTERM)
     try:
         stdout_text, stderr_text = proc.communicate(timeout=CODEX_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        _signal_codex_process_group(proc, signal.SIGKILL)
+        _signal_process_group(proc, signal.SIGKILL)
         stdout_text, stderr_text = proc.communicate()
     return stdout_text or "", stderr_text or ""
 
 
-def _signal_codex_process_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
-    """Signal Codex's dedicated process group, falling back to its wrapper."""
+def _signal_process_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
+    """Signal a direct-agent's dedicated process group, falling back to the wrapper."""
     pid = getattr(proc, "pid", None)
     if isinstance(pid, int) and hasattr(os, "killpg") and hasattr(os, "getpgid"):
         try:
