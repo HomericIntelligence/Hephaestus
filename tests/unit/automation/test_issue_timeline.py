@@ -86,6 +86,16 @@ def test_compaction_keeps_same_line_history_marker_lookalikes() -> None:
     assert 2 not in plan_issue_timeline_compaction(comments).delete_comment_ids
 
 
+def test_compaction_keeps_same_line_skip_marker_lookalikes() -> None:
+    """A skip marker with a same-line suffix is inert operator text."""
+    comments = [
+        _comment(1, render_current_plan("Plan", revision=1)),
+        _comment(2, f"{SKIP_REASON_MARKER}suffix\nkeep me"),
+    ]
+
+    assert 2 not in plan_issue_timeline_compaction(comments).delete_comment_ids
+
+
 def test_metadata_ownership_requires_viewer_proof_or_exact_login() -> None:
     """REST metadata cannot turn a foreign marker into an owned deletion."""
     metadata = [
@@ -186,3 +196,19 @@ def test_compaction_deletes_verified_plan_and_review_history_together() -> None:
     result = plan_issue_timeline_compaction(comments)
 
     assert result.delete_comment_ids == (3, 4)
+
+
+def test_compaction_deletes_complete_three_revision_history_chain() -> None:
+    """A fully proven chain compacts atomically instead of stranding rev 1."""
+    comments = [
+        _comment(1, render_current_plan("Plan v3", revision=3)),
+        _comment(2, render_current_review("Review v3", revision=3)),
+        _comment(3, archive_plan_body(1, "Plan v1", "Plan v2")),
+        _comment(4, archive_review_body(1, "Review v1")),
+        _comment(5, archive_plan_body(2, "Plan v2", "Plan v3")),
+        _comment(6, archive_review_body(2, "Review v2")),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == (3, 4, 5, 6)

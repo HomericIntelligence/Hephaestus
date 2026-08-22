@@ -26,7 +26,7 @@ HISTORY_MARKER: Final[str] = "<!-- hephaestus-plan-history:revision={revision}:k
 HISTORY_MARKER_PREFIX: Final[str] = "<!-- hephaestus-plan-history:"
 HISTORY_RE: Final[re.Pattern[str]] = re.compile(
     r"^<!-- hephaestus-plan-history:revision=(?P<revision>\d+):"
-    r"kind=(?P<kind>plan|review) -->(?=\n|\Z)"
+    r"kind=(?P<kind>plan|review) -->(?=\r?\n|\Z)"
 )
 REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\d+) -->")
 PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
@@ -155,7 +155,9 @@ def is_plan_review_comment(body: str) -> bool:
 
 def has_exact_leading_marker(body: str, marker: str) -> bool:
     """Return whether *marker* occupies the complete first raw line of *body*."""
-    return bool(marker) and (body == marker or body.startswith(f"{marker}\n"))
+    return bool(marker) and (
+        body == marker or body.startswith(f"{marker}\n") or body.startswith(f"{marker}\r\n")
+    )
 
 
 def normalize_issue_comments(

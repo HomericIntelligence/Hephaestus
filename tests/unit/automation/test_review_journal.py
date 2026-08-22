@@ -124,6 +124,21 @@ def test_history_marker_requires_an_exact_first_line_boundary() -> None:
     assert snapshot.history == ()
 
 
+def test_crlf_canonical_and_history_markers_are_recognized() -> None:
+    """Windows line endings preserve canonical and recovery identities."""
+    plan = render_current_plan("Plan v2", revision=2).replace("\n", "\r\n")
+    review = render_current_review("Review v2", revision=2).replace("\n", "\r\n")
+    history = archive_plan_body(1, "Plan v1", "Plan v2").replace("\n", "\r\n")
+
+    discovered = discover_plan_from_comments([_owned(plan)])
+    snapshot = journal_snapshot([_owned(history), _owned(plan), _owned(review)])
+
+    assert discovered.status is PlanDiscoveryStatus.FOUND
+    assert snapshot.current_plan == "Plan v2"
+    assert snapshot.current_review == "Review v2"
+    assert len(snapshot.history) == 1
+
+
 @pytest.mark.parametrize(
     "body",
     [

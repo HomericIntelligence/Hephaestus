@@ -106,7 +106,7 @@ def _is_obsolete_automation_comment(body: str) -> bool:
         is_plan_comment(body)
         or is_plan_review_comment(body)
         or HISTORY_RE.match(body) is not None
-        or body.startswith(SKIP_REASON_MARKER)
+        or has_exact_leading_marker(body, SKIP_REASON_MARKER)
         or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
     )
 
@@ -116,62 +116,48 @@ def _has_exact_leading_marker(body: str, marker: str) -> bool:
     return has_exact_leading_marker(body, marker)
 
 
-def _history_has_canonical_pointer(
-    comment: IssueComment,
-    *,
+def _deletable_history_ids(
     owned: Sequence[IssueComment],
+    *,
     target_plan: IssueComment | None,
     target_review: IssueComment | None,
-) -> bool:
-    """Return whether a legacy artifact has an exactly reconstructed successor.
+) -> set[int]:
+    """Return history IDs proven by one contiguous chain to canonical state."""
+    if target_plan is None or (current_revision := comment_revision(target_plan.body)) is None:
+        return set()
 
-    Legacy archives are recovery evidence, not merely redundant copies of an
-    arbitrary current pointer.  A plan archive can disappear only after the
-    canonical plan at the archive's immediate successor revision contains the
-    archived recovery payload.  When a same-revision review archive exists,
-    retain the pair until the immediate canonical review successor is durable.
-    """
-    history_match = HISTORY_RE.match(comment.body)
-    if history_match is None:
-        return True
-    revision = int(history_match.group("revision"))
-    successor_revision = revision + 1
-    plan_is_exact_successor = bool(
-        target_plan is not None
-        and comment_revision(target_plan.body) == successor_revision
-        and extract_current_plan(target_plan.body) == archived_new_plan(comment.body)
-    )
-    if history_match.group("kind") == "plan":
-        has_paired_review_archive = any(
-            (match := HISTORY_RE.match(candidate.body)) is not None
-            and match.group("kind") == "review"
-            and int(match.group("revision")) == revision
-            for candidate in owned
-        )
-        review_is_exact_successor = bool(
-            target_review is not None and comment_revision(target_review.body) == successor_revision
-        )
-        return bool(
-            plan_is_exact_successor and (not has_paired_review_archive or review_is_exact_successor)
-        )
+    plans: dict[int, IssueComment] = {}
+    reviews: dict[int, IssueComment] = {}
+    for comment in owned:
+        match = HISTORY_RE.match(comment.body)
+        if match is None:
+            continue
+        revision = int(match.group("revision"))
+        (plans if match.group("kind") == "plan" else reviews)[revision] = comment
 
-    # A review archive does not carry a future review payload.  It therefore
-    # needs a same-revision plan archive whose recovery payload reconstructs
-    # the canonical plan, plus the canonical review for that exact successor.
-    matching_plan_archive = any(
-        (match := HISTORY_RE.match(candidate.body)) is not None
-        and match.group("kind") == "plan"
-        and int(match.group("revision")) == revision
-        and target_plan is not None
-        and comment_revision(target_plan.body) == successor_revision
-        and extract_current_plan(target_plan.body) == archived_new_plan(candidate.body)
-        for candidate in owned
-    )
-    return bool(
-        matching_plan_archive
-        and target_review is not None
-        and comment_revision(target_review.body) == successor_revision
-    )
+    proven_revisions: list[int] = []
+    expected_plan = extract_current_plan(target_plan.body)
+    for revision in range(current_revision - 1, 0, -1):
+        archive = plans.get(revision)
+        if archive is None or archived_new_plan(archive.body) != expected_plan:
+            break
+        proven_revisions.append(revision)
+        expected_plan = archived_old_plan(archive.body)
+
+    if not proven_revisions:
+        return set()
+    paired_reviews = [revision for revision in proven_revisions if revision in reviews]
+    if paired_reviews and (
+        target_review is None or comment_revision(target_review.body) != current_revision
+    ):
+        return set()
+
+    deletable: set[int] = set()
+    for revision in proven_revisions:
+        for archive in (plans[revision], reviews.get(revision)):
+            if archive is not None and archive.database_id is not None:
+                deletable.add(archive.database_id)
+    return deletable
 
 
 def _obsolete_comment_ids(
@@ -182,15 +168,17 @@ def _obsolete_comment_ids(
     target_review: IssueComment | None,
 ) -> list[int]:
     """Return owned obsolete IDs whose canonical replacement is durable."""
+    deletable_history_ids = _deletable_history_ids(
+        owned,
+        target_plan=target_plan,
+        target_review=target_review,
+    )
     delete_ids: list[int] = []
     for comment in owned:
         if not _is_obsolete_automation_comment(comment.body) or comment.database_id in keep_ids:
             continue
-        if not _history_has_canonical_pointer(
-            comment,
-            owned=owned,
-            target_plan=target_plan,
-            target_review=target_review,
+        if HISTORY_RE.match(comment.body) is not None and (
+            comment.database_id not in deletable_history_ids
         ):
             # A legacy archive is the sole recoverable representation of its
             # artifact until a canonical pointer exists. Retain it rather than
