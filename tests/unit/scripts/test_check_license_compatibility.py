@@ -208,7 +208,7 @@ class TestAllExtraCompleteness:
 
 
 class TestMain:
-    """main() exit-code contract: blocking on PR, advisory on main."""
+    """main() exit-code contract: blocking on reviewed code events."""
 
     def _fixture(self, tmp_path, records):
         p = tmp_path / "meta.json"
@@ -218,6 +218,13 @@ class TestMain:
     def test_violation_on_pr_returns_one(self, tmp_path, monkeypatch):
         path = self._fixture(tmp_path, {"evil": {"License-Expression": "GPL-3.0"}})
         monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        with patch.object(sys, "argv", ["x", "--metadata-json", path]):
+            assert main() == 1
+
+    def test_violation_on_merge_group_returns_one(self, tmp_path, monkeypatch):
+        """Synthetic queue commits must not downgrade license violations."""
+        path = self._fixture(tmp_path, {"evil": {"License-Expression": "GPL-3.0"}})
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "merge_group")
         with patch.object(sys, "argv", ["x", "--metadata-json", path]):
             assert main() == 1
 

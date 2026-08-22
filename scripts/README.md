@@ -48,10 +48,14 @@ through installed `hephaestus-*` console scripts.
 
 ### Local CI
 
-- **`run_ci_local.sh`** — Run the locally executable CI checks or a named
-  subset. Project-toolchain commands use the Podman/Docker image built with
-  `just ci-build`; the full route also requires host `just`, `shellcheck`, and
-  `bats`, matching their GitHub Actions jobs.
+- **`run_ci_local.sh`** — Run the locally executable required source checks or
+  a named subset. Its `build` subset runs the required artifact lifecycle lane
+  rather than a separate package-build approximation. Project-toolchain
+  commands use a Podman/Docker image that the runner builds automatically when
+  absent. Set `HEPHAESTUS_CI_REBUILD=1` to rebuild the image from the current
+  checkout; the autonomous queue always sets it. Linked-worktree Git metadata
+  is mounted read-only so versioning and Git-aware scans inspect the candidate
+  commit. `just`, ShellCheck, and Bats all run in the pinned CI image.
 
 ### Disaster recovery
 

@@ -945,7 +945,7 @@ def test_ci_driver_help_describes_loop_owned_review() -> None:
 
 
 def test_loop_runner_pre_pr_tests_help_describes_the_test_gate() -> None:
-    """The optional gate is not restricted to repositories' unit-test roots."""
+    """Help distinguishes automatic required checks from the fallback gate."""
     parser = loop_runner._build_parser()
     action = next(
         action for action in parser._actions if "--run-pre-pr-tests" in action.option_strings
@@ -953,7 +953,8 @@ def test_loop_runner_pre_pr_tests_help_describes_the_test_gate() -> None:
 
     assert (
         action.help
-        == "Run the implementation-stage pre-PR test gate before committing and creating PRs."
+        == "Run the configurable pre-PR test gate for repositories without an automatic "
+        "required-check profile; Hephaestus runs its required checks before initial PR creation."
     )
 
 

@@ -10,7 +10,7 @@
 #   ./scripts/run_ci_local.sh unit         # unit tests + structure/coverage checks
 #   ./scripts/run_ci_local.sh integration  # integration tests
 #   ./scripts/run_ci_local.sh cli          # installed-CLI entry-point tests
-#   ./scripts/run_ci_local.sh build        # sdist + wheel build
+#   ./scripts/run_ci_local.sh build        # artifact + package lifecycle checks
 #   ./scripts/run_ci_local.sh audit        # pip-audit dependency scan
 #   ./scripts/run_ci_local.sh sast         # bandit static analysis
 #   ./scripts/run_ci_local.sh workflow-scan # zizmor workflow security scan
@@ -26,7 +26,10 @@
 # Container engine: auto-detected (podman first, docker fallback).
 # Override: CONTAINER_ENGINE=docker ./scripts/run_ci_local.sh
 #
-# Image: built locally from ci/Containerfile — run `just ci-build` first.
+# Image: built locally from ci/Containerfile when it is not already present.
+# Set HEPHAESTUS_CI_REBUILD=1 to rebuild from the current checkout even when
+# the local tag exists. The autonomous queue uses this mode.
+# `just ci-build` remains available for an explicit warm-up.
 
 set -euo pipefail
 
@@ -51,6 +54,130 @@ log_info()  { echo -e "${GREEN}[CI]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[CI]${NC} $*"; }
 log_error() { echo -e "${RED}[CI]${NC} $*" >&2; }
 log_step()  { echo -e "\n${BLUE}==>${NC} $*"; }
+
+CANDIDATE_ROOT=""
+CANDIDATE_TREE=""
+CANDIDATE_INDEX_CONTAINER=""
+CANDIDATE_OBJECTS_CONTAINER=""
+CI_BUILD_ROOT=""
+CI_RUN_IMAGE=""
+
+cleanup_candidate_snapshot() {
+    if [ -z "${CANDIDATE_ROOT}" ]; then
+        return
+    fi
+    case "${CANDIDATE_ROOT}" in
+        "${PROJECT_ROOT}"/build/ci-candidate.*)
+            rm -rf -- "${CANDIDATE_ROOT}"
+            ;;
+        *)
+            log_error "Refusing to remove unexpected candidate path: ${CANDIDATE_ROOT}"
+            ;;
+    esac
+    CANDIDATE_ROOT=""
+    CANDIDATE_TREE=""
+    CANDIDATE_INDEX_CONTAINER=""
+    CANDIDATE_OBJECTS_CONTAINER=""
+}
+
+cleanup_ci_build() {
+    if [ -n "${CI_RUN_IMAGE}" ]; then
+        case "${CI_RUN_IMAGE}" in
+            hephaestus-ci:run-*)
+                if ! "${CONTAINER_ENGINE}" image rm "${CI_RUN_IMAGE}" >/dev/null 2>&1; then
+                    log_warn "Unable to remove temporary CI image tag: ${CI_RUN_IMAGE}"
+                fi
+                ;;
+            *)
+                log_error "Refusing to remove unexpected CI image tag: ${CI_RUN_IMAGE}"
+                ;;
+        esac
+        CI_RUN_IMAGE=""
+    fi
+    if [ -n "${CI_BUILD_ROOT}" ]; then
+        case "${CI_BUILD_ROOT}" in
+            "${PROJECT_ROOT}"/build/ci-build.*)
+                rm -rf -- "${CI_BUILD_ROOT}"
+                ;;
+            *)
+                log_error "Refusing to remove unexpected CI build path: ${CI_BUILD_ROOT}"
+                ;;
+        esac
+        CI_BUILD_ROOT=""
+    fi
+}
+
+cleanup() {
+    cleanup_candidate_snapshot
+    cleanup_ci_build
+}
+
+prepare_candidate_snapshot() {
+    local candidate_relative
+    local candidate_sources
+    local metadata
+    local mode
+    local path
+    local repository_objects
+
+    cleanup_candidate_snapshot
+    mkdir -p "${PROJECT_ROOT}/build"
+    CANDIDATE_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-candidate.XXXXXX")"
+    CANDIDATE_TREE="${CANDIDATE_ROOT}/tree"
+    mkdir -p "${CANDIDATE_TREE}" "${CANDIDATE_ROOT}/objects"
+
+    repository_objects="$(
+        git -C "${PROJECT_ROOT}" rev-parse --path-format=absolute --git-path objects
+    )"
+
+    # Mirror the bytes that a later `git add -A` and commit would publish,
+    # including non-ignored untracked files, without touching the real index or
+    # object database.
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" read-tree HEAD
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" add -A -- .
+
+    # The image allowlist must contain regular files only. checkout-index
+    # preserves staged symlinks and ordinary cp would dereference their host
+    # targets into the container build context before the later repository-wide
+    # symlink gate runs. Reject symlinks and gitlinks at the alternate-index
+    # boundary, before materializing or copying any candidate path.
+    candidate_sources="${CANDIDATE_ROOT}/build-sources"
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" ls-files --stage -z -- > "${candidate_sources}"
+    while IFS=$'\t' read -r -d '' metadata path; do
+        mode="${metadata%% *}"
+        case "${path}" in
+            ci|ci/Containerfile|uv.lock|pyproject.toml|.pre-commit-config.yaml|README.md|hephaestus|hephaestus/*)
+                case "${mode}" in
+                    100644|100755) ;;
+                    *)
+                        log_error "Candidate build source must be a regular file: ${path} (mode ${mode})"
+                        return 1
+                        ;;
+                esac
+                ;;
+        esac
+    done < "${candidate_sources}"
+    GIT_INDEX_FILE="${CANDIDATE_ROOT}/index" \
+        GIT_OBJECT_DIRECTORY="${CANDIDATE_ROOT}/objects" \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${repository_objects}" \
+        git -C "${PROJECT_ROOT}" \
+        checkout-index --all --prefix="${CANDIDATE_TREE}/"
+
+    candidate_relative="${CANDIDATE_ROOT#"${PROJECT_ROOT}/"}"
+    CANDIDATE_INDEX_CONTAINER="/workspace/${candidate_relative}/index"
+    CANDIDATE_OBJECTS_CONTAINER="/workspace/${candidate_relative}/objects"
+}
+
+trap cleanup EXIT
 
 # ============================================================================
 # Container engine detection
@@ -84,18 +211,104 @@ detect_engine() {
 # Image resolution
 # ============================================================================
 
-resolve_image() {
-    if "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \
-       "${CONTAINER_ENGINE}" images -q "${LOCAL_IMAGE}" 2>/dev/null | grep -q .; then
-        CI_IMAGE="${LOCAL_IMAGE}"
-        log_info "Using local CI image: ${CI_IMAGE}"
-    else
-        log_error "Local image '${LOCAL_IMAGE}' not found."
-        log_error "Build it first: just ci-build"
-        log_error "  (podman build -f ci/Containerfile -t ${LOCAL_IMAGE} .)"
+is_immutable_image_id() {
+    [[ "$1" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
+}
+
+build_ci_image() {
+    local build_context
+    local image_id_file
+
+    # Build from the exact publishable candidate bytes. The alternate index
+    # excludes ignored local files without mutating the implementer's index.
+    prepare_candidate_snapshot
+    mkdir -p "${PROJECT_ROOT}/build"
+    CI_BUILD_ROOT="$(mktemp -d "${PROJECT_ROOT}/build/ci-build.XXXXXX")"
+    build_context="${CI_BUILD_ROOT}/context"
+    image_id_file="${CI_BUILD_ROOT}/image-id"
+    CI_RUN_IMAGE="hephaestus-ci:run-$$-${RANDOM}"
+    mkdir -p "${build_context}/ci"
+
+    # Do not send the checkout as build context. In particular, ignored local
+    # credentials, Git metadata, and unrelated build artifacts must never be
+    # readable by the container engine. Keep this allowlist aligned with COPY
+    # instructions in ci/Containerfile.
+    cp "${CANDIDATE_TREE}/ci/Containerfile" "${build_context}/ci/Containerfile"
+    cp "${CANDIDATE_TREE}/uv.lock" \
+        "${CANDIDATE_TREE}/pyproject.toml" \
+        "${CANDIDATE_TREE}/.pre-commit-config.yaml" \
+        "${CANDIDATE_TREE}/README.md" \
+        "${build_context}/"
+    cp -R "${CANDIDATE_TREE}/hephaestus" "${build_context}/hephaestus"
+
+    (
+        cd "${build_context}"
+        "${CONTAINER_ENGINE}" build \
+            --iidfile "${image_id_file}" \
+            -f ci/Containerfile \
+            -t "${CI_RUN_IMAGE}" \
+            -t "${LOCAL_IMAGE}" \
+            .
+    ) || {
+        log_error "Failed to build local CI image '${LOCAL_IMAGE}'."
+        exit 1
+    }
+    CI_IMAGE="$(tr -d '\r\n' < "${image_id_file}")"
+    if ! is_immutable_image_id "${CI_IMAGE}"; then
+        log_error "Container engine returned an invalid image ID."
         exit 1
     fi
+    log_info "Built local CI image: ${CI_IMAGE}"
+}
+
+resolve_image_id() {
+    CI_IMAGE="$(
+        "${CONTAINER_ENGINE}" image inspect --format '{{.Id}}' "${LOCAL_IMAGE}"
+    )" || {
+        log_error "Unable to resolve immutable ID for '${LOCAL_IMAGE}'."
+        exit 1
+    }
+    CI_IMAGE="$(printf '%s' "${CI_IMAGE}" | tr -d '\r\n')"
+    if ! is_immutable_image_id "${CI_IMAGE}"; then
+        log_error "Container engine returned an invalid image ID."
+        exit 1
+    fi
+}
+
+resolve_image() {
+    if [ "${HEPHAESTUS_CI_REBUILD:-0}" = "1" ]; then
+        log_info "Rebuilding CI image from the current checkout."
+        build_ci_image
+    elif "${CONTAINER_ENGINE}" image exists "${LOCAL_IMAGE}" 2>/dev/null || \
+       "${CONTAINER_ENGINE}" images -q "${LOCAL_IMAGE}" 2>/dev/null | grep -q .; then
+        resolve_image_id
+        log_info "Using local CI image: ${CI_IMAGE}"
+    else
+        log_warn "Local image '${LOCAL_IMAGE}' not found; building it now."
+        build_ci_image
+    fi
     export CI_IMAGE
+}
+
+resolve_git_metadata_mount() {
+    local common_dir
+    common_dir="$(
+        git -C "${PROJECT_ROOT}" rev-parse --path-format=absolute --git-common-dir
+    )" || {
+        log_error "Unable to resolve repository Git metadata."
+        exit 1
+    }
+    GIT_METADATA_MOUNT=()
+    case "${common_dir}" in
+        "${PROJECT_ROOT}"|"${PROJECT_ROOT}"/*)
+            ;;
+        *)
+            # A linked worktree's .git file points into the primary checkout.
+            # Preserve that absolute target inside the container, read-only, so
+            # hatch-vcs, Git-aware tests, and scanners see the candidate commit.
+            GIT_METADATA_MOUNT+=(--volume "${common_dir}:${common_dir}:ro")
+            ;;
+    esac
 }
 
 # ============================================================================
@@ -113,6 +326,7 @@ resolve_image() {
 run_in_container() {
     local cmd=("$@")
     local engine_flags=()
+    local candidate_mount=()
 
     if [ "${CONTAINER_ENGINE}" = "podman" ]; then
         engine_flags+=("--userns=keep-id:uid=1000,gid=1000")
@@ -124,8 +338,14 @@ run_in_container() {
             --env UV_NO_SYNC=1 --env PYTHONPATH=/workspace)
     fi
 
+    if [ -n "${CANDIDATE_TREE}" ]; then
+        candidate_mount+=(--volume "${CANDIDATE_TREE}:/candidate:ro")
+    fi
+
     "${CONTAINER_ENGINE}" run --rm \
         "${engine_flags[@]}" \
+        "${GIT_METADATA_MOUNT[@]}" \
+        "${candidate_mount[@]}" \
         --tmpfs /tmp:rw,size=4g,mode=1777 \
         --volume "${PROJECT_ROOT}:/workspace:Z" \
         --workdir /workspace \
@@ -139,7 +359,11 @@ run_in_container() {
 
 run_lint() {
     log_step "Lint (pre-commit + doc-link validation)"
-    run_in_container uv run pre-commit run --all-files --show-diff-on-failure || return 1
+    prepare_candidate_snapshot
+    run_in_container env \
+        "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES=${CANDIDATE_OBJECTS_CONTAINER}" \
+        uv run pre-commit run --all-files --show-diff-on-failure || return 1
     run_in_container uv run hephaestus-validate-links docs --repo-root . || return 1
 }
 
@@ -155,7 +379,7 @@ run_unit() {
 run_integration() {
     log_step "Integration tests"
     run_in_container bash -c '\
-        HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly"'
+        HEPHAESTUS_REQUIRE_CLI=1 uv run pytest tests/integration --override-ini="addopts=" -v --strict-markers -m "not nightly and not artifact"'
 }
 
 run_cli() {
@@ -172,8 +396,11 @@ run_cli() {
 }
 
 run_build() {
-    log_step "Package build (sdist + wheel)"
-    run_in_container uv run python -m build --no-isolation
+    log_step "Reproducible artifact and package lifecycle validation"
+    run_in_container uv run pytest tests/integration \
+        --override-ini="addopts=" \
+        --basetemp=build/pytest-artifacts \
+        -v --strict-markers -m artifact
 }
 
 run_audit() {
@@ -193,7 +420,7 @@ run_workflow_scan() {
 
 run_schema() {
     log_step "Workflow YAML schema validation"
-    run_in_container uvx check-jsonschema \
+    run_in_container env UV_NO_SYNC=1 UV_OFFLINE=1 uv run check-jsonschema \
         --builtin-schema vendor.github-workflows \
         .github/workflows/*.yml
 }
@@ -222,49 +449,46 @@ run_symlinks() {
 
 run_justfile() {
     log_step "Justfile evaluation"
-    command -v just >/dev/null || {
-        log_error "just is required for the justfile check"
-        return 1
-    }
-    just --evaluate >/dev/null || return 1
-    just --list >/dev/null
+    run_in_container just --evaluate >/dev/null || return 1
+    run_in_container just --list >/dev/null
 }
 
 run_shellcheck() {
     log_step "ShellCheck"
-    command -v shellcheck >/dev/null || {
-        log_error "shellcheck is required for shell static analysis"
-        return 1
-    }
     shopt -s nullglob globstar
     local files=(scripts/**/*.sh scripts/**/*.sbatch)
     if [ "${#files[@]}" -eq 0 ]; then
         log_info "No shell scripts found — nothing to lint."
         return 0
     fi
-    shellcheck --severity=error "${files[@]}"
+    run_in_container shellcheck --severity=error "${files[@]}"
 }
 
 run_shell_tests() {
     log_step "Bats shell tests"
-    command -v bats >/dev/null || {
-        log_error "bats is required for shell tests"
-        return 1
-    }
-    bats --recursive tests/shell
+    run_in_container bats --recursive tests/shell
 }
 
 run_secrets() {
     log_step "Gitleaks repository scan"
-    local args=(detect --source=. --verbose --exit-code=1)
+    local history_args=(detect --source=. --verbose --exit-code=1)
+    local candidate_args=(dir --verbose --exit-code=1 .)
+    prepare_candidate_snapshot
     if [ -f .gitleaks.toml ]; then
-        args+=(--config=.gitleaks.toml)
+        history_args+=(--config=.gitleaks.toml)
+        candidate_args+=(--config=.gitleaks.toml)
     fi
     "${CONTAINER_ENGINE}" run --rm \
+        "${GIT_METADATA_MOUNT[@]}" \
         --volume "${PROJECT_ROOT}:/repo:Z" \
         --workdir /repo \
         "${GITLEAKS_IMAGE}" \
-        "${args[@]}"
+        "${history_args[@]}" || return 1
+    "${CONTAINER_ENGINE}" run --rm \
+        --volume "${CANDIDATE_TREE}:/candidate:ro" \
+        --workdir /candidate \
+        "${GITLEAKS_IMAGE}" \
+        "${candidate_args[@]}"
 }
 
 # ============================================================================
@@ -287,6 +511,7 @@ run_step() {
 
 detect_engine
 resolve_image
+resolve_git_metadata_mount
 
 log_info "CI subset: ${SUBSET}"
 log_info "Project root: ${PROJECT_ROOT}"

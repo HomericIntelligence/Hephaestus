@@ -81,7 +81,13 @@ dev = [
     # pip-based dev installs need the backend requirements in the runtime env.
     "hatchling>=1.27.0,<2",
     "hatch-vcs>=0.4.0,<1",
+    # pip is audited as part of the locked dev environment; keep its security
+    # floor explicit rather than relying on pip-api's unconstrained dependency.
+    "pip>=26.2,<27",
     "pip-audit>=2.7,<3",
+    # Workflow schema validation must resolve from uv.lock; uvx would install
+    # mutable registry state during the required gate.
+    "check-jsonschema>=0.38,<1",
     # Property-based fuzz testing of LLM-output parsers (issue #1470).
     "hypothesis>=6.0,<7",
     "bandit>=1.9.4,<2",

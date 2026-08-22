@@ -133,6 +133,8 @@ RUN uv run pre-commit install-hooks && \
 FROM python-snapshot
 
 ARG TARGETARCH
+ARG BATS_VERSION=1.11.1-1
+ARG SHELLCHECK_VERSION=0.10.0-1
 
 LABEL org.opencontainers.image.title="hephaestus-ci"
 LABEL org.opencontainers.image.description="CI container for Hephaestus — validation, testing, security scans"
@@ -149,12 +151,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Runtime-only system packages (no build tools), resolved from the same
 # immutable snapshot as the builder stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bats="${BATS_VERSION}" \
     git \
     curl \
     ca-certificates \
     jq \
     openssh-client \
-    && rm -rf /var/lib/apt/lists/*
+    shellcheck="${SHELLCHECK_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && test "$(bats --version)" = "Bats 1.11.1" \
+    && shellcheck --version | grep -Fx "version: 0.10.0"
 
 # GitHub CLI (gh) — pinned release; native runners ship it preinstalled and the
 # automation pipeline's _trusted_gh_executable() requires it.
@@ -167,6 +173,17 @@ RUN case "$TARGETARCH" in \
     && echo "${gh_sha256}  /tmp/gh.deb" | sha256sum --check \
     && apt-get install -y /tmp/gh.deb \
     && rm -f /tmp/gh.deb
+
+# just — same release as the required justfile and shell-test jobs.
+RUN case "$TARGETARCH" in \
+        amd64) just_arch="x86_64"; just_sha256="bc7c9f377944f8de9cd0418b11d2955adebfa25a488c0b5e3dd2d2c0e9d732da" ;; \
+        arm64) just_arch="aarch64"; just_sha256="bb3886b15e2cbcb9c0eb19956297d36de4eaef45b89d3f5fa5d1fc4ed3b5b51d" ;; \
+        *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 --connect-timeout 30 --max-time 300 "https://github.com/casey/just/releases/download/1.36.0/just-1.36.0-${just_arch}-unknown-linux-musl.tar.gz" -o /tmp/just.tar.gz \
+    && echo "${just_sha256}  /tmp/just.tar.gz" | sha256sum --check \
+    && tar xzf /tmp/just.tar.gz -C /usr/local/bin just \
+    && rm -f /tmp/just.tar.gz
 
 # Node 22 + npm + the Pi coding-agent CLI (same pin as setup-pi-cli), copied
 # as one consistent /usr/local tree from the node stage.
