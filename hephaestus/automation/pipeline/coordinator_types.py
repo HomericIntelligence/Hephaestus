@@ -351,14 +351,6 @@ class PipelineConfig:
     enable_learn: bool = True
     reset_plan_review_sessions: frozenset[int] = frozenset()
 
-    def __post_init__(self) -> None:
-        """Isolate the one-shot reset set consumed by plan-review stages."""
-        object.__setattr__(
-            self,
-            "reset_plan_review_sessions",
-            set(self.reset_plan_review_sessions),
-        )
-
     @property
     def enable_advise(self) -> bool:
         """Return the positive stage-facing form of ``no_advise``."""

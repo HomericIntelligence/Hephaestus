@@ -52,7 +52,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -563,6 +563,11 @@ class StageContext:
     event_fn: Callable[[StageEvent], None] | None = None
     learning_journal: Any = None
     plan_review_sessions: Any = None
+    # Per-Coordinator one-shot consumption state for plan-review session
+    # resets. The coordinator copies this from the immutable
+    # ``PipelineConfig.reset_plan_review_sessions`` frozenset so stages can
+    # consume entries without mutating caller-owned configuration (POLA).
+    plan_review_session_resets: set[int] = field(default_factory=set)
     # A worktree-holder result is only a diagnostic fact from Git.  The
     # coordinator proves that it belongs to a live pipeline sibling before
     # implementation can treat a collision as redundant work.  Leaving this

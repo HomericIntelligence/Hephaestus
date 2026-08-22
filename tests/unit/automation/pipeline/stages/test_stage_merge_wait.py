@@ -238,8 +238,7 @@ def test_trusted_operator_authorization_permits_conditional_put(
         authorization_snapshots=[(_authorization_review("R1"),)],
         states=[_open_pr(), _open_pr(), {"state": "MERGED"}],
     )
-    ctx = make_ctx(github=github)
-    ctx.config.enable_learn = False
+    ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
 
     result = _complete_merge_cycle(MergeWaitStage(), _reviewed_item(make_work_item), ctx)
 

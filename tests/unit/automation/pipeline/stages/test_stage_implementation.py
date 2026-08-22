@@ -2018,9 +2018,13 @@ class TestTestsAndFix:
     ) -> None:
         """Programmatic generic-test overrides cannot weaken Hephaestus's gate."""
         stage = ImplementationStage()
-        ctx = make_ctx(org="HomericIntelligence")
-        ctx.config.run_pre_pr_tests = True
-        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            config_overrides={
+                "run_pre_pr_tests": True,
+                "pre_pr_test_argv": ("pytest", "tests/custom", "-q"),
+            },
+        )
         item = make_work_item(
             issue=1,
             repo="Hephaestus",
@@ -2044,9 +2048,13 @@ class TestTestsAndFix:
     ) -> None:
         """Only the configured canonical Hephaestus repo gets its fixed gate."""
         stage = ImplementationStage()
-        ctx = make_ctx(org="OtherOrg")
-        ctx.config.run_pre_pr_tests = True
-        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        ctx = make_ctx(
+            org="OtherOrg",
+            config_overrides={
+                "run_pre_pr_tests": True,
+                "pre_pr_test_argv": ("pytest", "tests/custom", "-q"),
+            },
+        )
         item = make_work_item(
             issue=1,
             repo="Hephaestus",

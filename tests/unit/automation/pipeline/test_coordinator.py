@@ -3759,7 +3759,11 @@ class TestConfigWiring:
         assert ctx.config.nitpick is True
         assert ctx.config.include_bot_prs is False
         assert ctx.config.include_all_authors is True
-        reset_issues = cast(set[int], ctx.config.reset_plan_review_sessions)
+        # Caller-owned configuration stays immutable; the per-run consumption
+        # copy lives on the StageContext (POLA).
+        assert ctx.config.reset_plan_review_sessions == frozenset({42})
+        reset_issues = ctx.plan_review_session_resets
         assert reset_issues == {42}
         reset_issues.discard(42)
         assert not reset_issues
+        assert ctx.config.reset_plan_review_sessions == frozenset({42})
