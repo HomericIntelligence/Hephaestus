@@ -23,7 +23,7 @@ from hephaestus.automation._review_utils import build_automation_parser
 from hephaestus.cli.utils import DRY_RUN_HELP_CAVEAT
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR
 
-AGENT_CHOICES = ("claude", "codex", "pi")
+AGENT_CHOICES = ("claude", "codex", "pi", "opencode")
 WORKER_CHOICES = tuple(range(1, 33))
 SUPPRESS_DEFAULT = "==SUPPRESS=="
 

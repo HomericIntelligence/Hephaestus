@@ -443,7 +443,7 @@ class TestCommitChanges:
         assert "Refresh stale license and notice metadata." in commit_msg
         assert "Closes #1515" in commit_msg
         assert "Implemented-By: Codex" in commit_msg
-        assert "Co-Authored-By: Codex <noreply@openai.com>" in commit_msg
+        assert "Co-Authored-By: Codex <4211002+mvillmow@users.noreply.github.com>" in commit_msg
 
     def test_commit_message_agent_invalid_output_falls_back(self) -> None:
         porcelain = _porcelain(" M src/feature.py")
@@ -1039,7 +1039,10 @@ class TestCoAuthorLine:
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
-        assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+        assert (
+            coauthor_line
+            == "Co-Authored-By: Claude Code <4211002+mvillmow@users.noreply.github.com>"
+        )
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         # Model id must NOT appear in the name slot of Co-Authored-By (#717).
         assert "claude-test-model-9" not in coauthor_line
@@ -1100,7 +1103,10 @@ class TestCoAuthorLine:
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
         assert "claude-env-override-5" not in coauthor_line
-        assert coauthor_line == "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+        assert (
+            coauthor_line
+            == "Co-Authored-By: Claude Code <4211002+mvillmow@users.noreply.github.com>"
+        )
 
     def test_codex_coauthor_is_codex_human_name(self) -> None:
         porcelain = _porcelain(" M foo.py")
@@ -1129,7 +1135,7 @@ class TestCoAuthorLine:
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
-        assert coauthor_line == "Co-Authored-By: Codex <noreply@openai.com>"
+        assert coauthor_line == "Co-Authored-By: Codex <4211002+mvillmow@users.noreply.github.com>"
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         assert "Implemented-By: Codex" in commit_msg
         mock_model.assert_not_called()
@@ -1161,7 +1167,7 @@ class TestCoAuthorLine:
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
-        assert coauthor_line == "Co-Authored-By: Pi <noreply@earendil.works>"
+        assert coauthor_line == "Co-Authored-By: Pi <4211002+mvillmow@users.noreply.github.com>"
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         assert "Implemented-By: Pi" in commit_msg
         mock_model.assert_not_called()

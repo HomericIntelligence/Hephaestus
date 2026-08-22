@@ -93,10 +93,13 @@ _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
     re.IGNORECASE,
 )
+# Commit-trailer identities per agent backend. Every agentic client shares the
+# maintainer's GitHub noreply email so attribution stays inside one account.
 _AGENT_COMMIT_IDENTITIES = {
-    "claude": ("Claude Code", "noreply@anthropic.com"),
-    "codex": ("Codex", "noreply@openai.com"),
-    "pi": ("Pi", "noreply@earendil.works"),
+    "claude": ("Claude Code", "4211002+mvillmow@users.noreply.github.com"),
+    "codex": ("Codex", "4211002+mvillmow@users.noreply.github.com"),
+    "pi": ("Pi", "4211002+mvillmow@users.noreply.github.com"),
+    "opencode": ("OpenCode-AI", "4211002+mvillmow@users.noreply.github.com"),
 }
 
 

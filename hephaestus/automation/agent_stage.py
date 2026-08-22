@@ -174,9 +174,18 @@ _PI_NOOP_VALUES: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("approval", "--approval", frozenset({"untrusted", "on-request"})),
     ("sandbox", "--sandbox", frozenset({"danger-full-access"})),
 )
+# OpenCode exposes no CLI approval or sandbox flags; permissions come from its
+# own configuration. Only NON-DEFAULT values are listed because validation
+# inspects parsed values even when the operator did not pass the flag; the
+# defaults ("never"/"workspace-write") flow through as accepted-but-unused.
+_OPENCODE_NOOP_VALUES: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("approval", "--approval", frozenset({"untrusted", "on-request"})),
+    ("sandbox", "--sandbox", frozenset({"read-only", "danger-full-access"})),
+)
 _NOOP_VALUES_BY_AGENT: dict[str, tuple[tuple[str, str, frozenset[str]], ...]] = {
     "claude": _CLAUDE_NOOP_VALUES,
     "pi": _PI_NOOP_VALUES,
+    "opencode": _OPENCODE_NOOP_VALUES,
 }
 
 

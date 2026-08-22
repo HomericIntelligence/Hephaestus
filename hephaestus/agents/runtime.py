@@ -45,11 +45,11 @@ from hephaestus.constants import (
 )
 from hephaestus.utils.helpers import strip_null_bytes
 
-AgentName = Literal["claude", "codex", "pi"]
+AgentName = Literal["claude", "codex", "pi", "opencode"]
 ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
-AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi")
+AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi", "opencode")
 DEFAULT_AGENT: AgentName = "claude"
 CODEX_HELP_PROBE_SECONDS = 10
 GIT_COMMON_DIR_PROBE_SECONDS = 5
@@ -109,6 +109,7 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
     "pi": (("pi", "--version"),),
+    "opencode": (("opencode", "providers", "list"),),
 }
 
 _PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
@@ -368,6 +369,12 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
             }
         ),
     ),
+    "opencode": AgentCapabilities(
+        direct_runner=True,
+        supports_approval=False,
+        supports_sandbox=False,
+        supports_sessions=True,
+    ),
 }
 
 
@@ -487,8 +494,8 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
         if shutil.which("pi") is not None:
             _require_pi_automation_admission(effective_cwd)
         raise RuntimeError(
-            "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
-            "or pass --agent after installing the selected backend."
+            "No supported agent backend found on PATH. Install `claude`, `codex`, `pi`, "
+            "or `opencode`, or pass --agent after installing the selected backend."
         )
 
     for agent_name in installed_agents:
@@ -497,8 +504,9 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
 
     raise RuntimeError(
         "Supported agent backends are installed but none are authenticated. "
-        "Run `claude auth status`, `codex login status`, or `pi --version`, then "
-        "log in/configure the provider you want automation to use."
+        "Run `claude auth status`, `codex login status`, `pi --version`, or "
+        "`opencode providers list`, then log in/configure the provider you want "
+        "automation to use."
     )
 
 
@@ -510,6 +518,11 @@ def is_codex(agent: str) -> bool:
 def is_pi(agent: str) -> bool:
     """Return True when the selected provider is Pi."""
     return agent == "pi"
+
+
+def is_opencode(agent: str) -> bool:
+    """Return True when the selected provider is OpenCode."""
+    return agent == "opencode"
 
 
 def reject_pi_unsupported_surface(agent: str, reason: str) -> None:
@@ -581,6 +594,7 @@ def agent_display_name(agent: str) -> str:
         "claude": "Claude Code",
         "codex": "Codex",
         "pi": "Pi",
+        "opencode": "OpenCode",
     }
     try:
         return names[agent]
@@ -1588,6 +1602,162 @@ def _run_codex_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
 
 
+def _opencode_base_cmd(*, session_id: str | None = None, model: str = "") -> list[str]:
+    """Build an OpenCode run command that reads the prompt from stdin."""
+    cmd = ["opencode", "run", "--format", "json"]
+    if model:
+        cmd.extend(["--model", model])
+    if session_id:
+        cmd.extend(["--session", session_id])
+    return cmd
+
+
+def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
+    """Extract OpenCode session id and final assistant text from JSONL output."""
+    session_id: str | None = None
+    final_message = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        raw_session_id = event.get("sessionID")
+        if isinstance(raw_session_id, str) and raw_session_id:
+            session_id = raw_session_id
+        part = event.get("part")
+        if (
+            event.get("type") == "text"
+            and isinstance(part, dict)
+            and isinstance(part.get("text"), str)
+        ):
+            final_message = part["text"]
+    return session_id, final_message.strip()
+
+
+def _run_opencode_command(
+    cmd: list[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Execute OpenCode with JSON events and return final text plus session id."""
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        text=True,
+        start_new_session=True,
+    )
+    tracker = process_tracker(proc.pid) if process_tracker is not None else contextlib.nullcontext()
+    try:
+        with tracker:
+            # Strip NUL bytes: proc.communicate(input=...) marshals text stdin
+            # and would raise ``ValueError: embedded null byte`` on a stray NUL
+            # before OpenCode runs (#1661) — the same guard the Claude/Codex
+            # paths apply.
+            stdout_text, stderr_text = proc.communicate(
+                input=strip_null_bytes(prompt),
+                timeout=timeout,
+            )
+    except subprocess.TimeoutExpired:
+        _terminate_codex_process(proc)
+        raise
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(
+            proc.returncode,
+            cmd,
+            output=stdout_text,
+            stderr=stderr_text,
+        )
+    session_id, event_message = _parse_opencode_json_events(stdout_text or "")
+    stdout = (event_message or stdout_text or "").strip()
+    return AgentRunResult(stdout=stdout, stderr=stderr_text or "", session_id=session_id)
+
+
+def run_opencode_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Run a new OpenCode JSON-event session and capture its id.
+
+    Model values pass through verbatim in ``provider/model`` form; when empty
+    OpenCode applies its own configured default. The CLI exposes no sandbox or
+    approval flags, so those compatibility inputs are accepted but unused.
+    """
+    del sandbox, approval
+    cmd = _opencode_base_cmd(model=model)
+    return _run_opencode_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        process_tracker=process_tracker,
+    )
+
+
+def resume_opencode_session(
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Resume an OpenCode session by id via ``--session``."""
+    del sandbox, approval
+    cmd = _opencode_base_cmd(session_id=session_id, model=model)
+    return _run_opencode_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        process_tracker=process_tracker,
+    )
+
+
+def run_opencode_text(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> subprocess.CompletedProcess[str]:
+    """Run OpenCode non-interactively and return a text completed process."""
+    result = run_opencode_session(
+        prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox=sandbox,
+        approval=approval,
+    )
+    return subprocess.CompletedProcess(
+        args=["opencode", "run"],
+        returncode=0,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
 def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
     """Build a Pi JSON-mode command without alias values in argv."""
     cmd = ["pi", "--mode", "json"]
@@ -1988,6 +2158,15 @@ def run_agent_text(
             sandbox=sandbox,
             approval=approval,
         )
+    if is_opencode(agent):
+        return run_opencode_text(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
     if is_pi(agent):
         if execution_request is None:
             raise AssertionError("unreachable")
@@ -2035,6 +2214,16 @@ def run_agent_session(
             )
     if is_codex(agent):
         return run_codex_session(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
+        )
+    if is_opencode(agent):
+        return run_opencode_session(
             prompt,
             cwd=cwd,
             timeout=timeout,
@@ -2104,6 +2293,17 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
     if is_codex(agent):
         return resume_codex_session(
+            session_id,
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
+        )
+    if is_opencode(agent):
+        return resume_opencode_session(
             session_id,
             prompt,
             cwd=cwd,

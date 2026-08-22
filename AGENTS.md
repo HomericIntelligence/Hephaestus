@@ -544,8 +544,8 @@ auxiliary queues.
 The default `hephaestus-automation-loop` path is the queue-based in-process
 pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
 eight bounded stage queues. A main worker pool runs ordinary work. A separate
-host-only pool runs learning and terminal cleanup. Each agent job runs either
-**Claude Code** or **Codex**, chosen via the
+host-only pool runs learning and terminal cleanup. Each agent job runs
+**Claude Code**, **Codex**, **Pi** (admission-gated), or **OpenCode**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
 
@@ -590,11 +590,11 @@ that do not map to a pipeline stage remain out-of-band tools:
 ## Agent runtime
 
 `hephaestus.agents.runtime` is the thin layer that abstracts over Claude Code,
-Codex, and the currently fail-closed Pi provider boundary. It provides:
+Codex, the currently fail-closed Pi provider boundary, and OpenCode. It provides:
 
 - `add_agent_argument(parser)` — adds a uniform `--agent` flag to any CLI.
-- `is_codex(agent_str)` / `is_pi(agent_str)` — provider-adapter branches kept
-  inside the shared runtime.
+- `is_codex(agent_str)` / `is_pi(agent_str)` / `is_opencode(agent_str)` —
+  provider-adapter branches kept inside the shared runtime.
 - `run_codex_*` and `run_agent_*` text/session/resume helpers invoke direct
   providers through the neutral boundary. Public `run_pi_*` execution helpers
   also reject unadmitted automation; only `run_pi_smoke_session` is the fixed
