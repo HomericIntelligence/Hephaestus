@@ -7,12 +7,13 @@ prose cannot grant approval or repair labels.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
+import hephaestus.automation.github_api as _api
+
 from ..git_utils import get_repo_info, get_repo_root, issue_ref
-from ..github_api import _gh_call, gh_issue_json
+from ..github_api.graphql import GraphQLMutationSpec, GraphQLQuerySpec
 from ..protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
 from ..review_journal import is_plan_review_comment
 from ..state_labels import STATE_PLAN_GO, is_exclusive_plan_state
@@ -28,6 +29,23 @@ _STATE_RESULTS = {
     "state:plan-no-go": "NOGO",
     "state:plan-blocked": "BLOCKED",
 }
+
+# Compatibility seams retained while the response contract moves callers from
+# raw subprocess fixtures to ``run_graphql``.  Tests and downstream helpers
+# can still replace these names without reintroducing a second executor.
+_gh_call = _api._gh_call
+gh_issue_json = _api.gh_issue_json
+
+
+def _run_graphql[T](
+    spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+    variables: dict[str, int | str],
+) -> T:
+    """Execute through the centralized validator and this module's test seam."""
+    if isinstance(spec, GraphQLQuerySpec):
+        return _api.run_graphql(spec, variables, call=_gh_call)
+    return _api.run_graphql(spec, call=_gh_call)
+
 
 # Maximum length for verdict context preview in logs (e.g., first verdict line or content).
 _VERDICT_LOG_PREVIEW_CHARS = 200
@@ -154,56 +172,17 @@ def _fetch_issue_comments_graphql(issue_number: int) -> list[dict[str, Any]]:
 
     Returns:
         List of comment dicts (each with at least a ``body`` key).
-        Returns an empty list on any failure.
+
+    Raises:
+        GraphQLResponseError: If the response is unavailable, malformed, or
+            fails the operation-specific contract.
 
     """
-    # get_repo_slug returns only the short repo name (e.g. "Mnemosyne");
-    # GraphQL needs the (owner, name) pair, which get_repo_info supplies.
-    # PR #575 fixed this in plan_reviewer.py but missed the identical bug here,
-    # crashing every implementer-side GO-gate check (#588).
     owner, name = get_repo_info(get_repo_root())
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!){"
-        "  repository(owner:$owner,name:$name){"
-        "    issue(number:$number){"
-        "      comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC}){"
-        "        nodes{ body updatedAt url }"
-        "      }"
-        "    }"
-        "  }"
-        "}"
+    return _run_graphql(
+        _api.issue_comments_query(owner, name, issue_number),
+        {"owner": owner, "name": name, "number": issue_number},
     )
-    try:
-        result = _gh_call(
-            [
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={name}",
-                "-F",
-                f"number={issue_number}",
-            ],
-        )
-        data = json.loads(result.stdout)
-        nodes = (
-            data.get("data", {})
-            .get("repository", {})
-            .get("issue", {})
-            .get("comments", {})
-            .get("nodes", [])
-        )
-        return list(reversed(nodes))
-    except Exception as exc:  # logged + treated as "no review"
-        logger.warning(
-            "Failed to fetch comments for issue %s: %s",
-            issue_ref(issue_number),
-            exc,
-        )
-        return []
 
 
 def fetch_all_issue_comments_graphql(
@@ -227,7 +206,9 @@ def fetch_all_issue_comments_graphql(
     context such as :func:`is_plan_review_go`; it is not an authoritative plan
     presence source.
 
-    Falls back to an empty list per issue on any failure.
+    Raises the typed GraphQL response error on any failure; an empty result is
+    valid only when GitHub returns every requested alias with a valid empty
+    connection.
 
     Args:
         issue_numbers: List of GitHub issue numbers to fetch.
@@ -241,69 +222,13 @@ def fetch_all_issue_comments_graphql(
         return {}
 
     owner, name = get_repo_info(get_repo_root())
-
-    # owner/name AND each issue number MUST be passed as GraphQL variables, not
-    # interpolated. A {owner!r} repr produces single-quoted literals
-    # (owner:'Owner'), which is invalid GraphQL (only double quotes are accepted)
-    # and gh rejects with "Expected VALUE, actual: UNKNOWN_CHAR". Mirror
-    # github_api._fetch_batch_states: declare $owner/$name/$nN and pass via -F.
-    var_decls = ",".join(f"$n{idx}:Int!" for idx in range(len(issue_numbers)))
-    fragments = " ".join(
-        (
-            f"issue{idx}: issue(number:$n{idx}){{"
-            "comments(last: 100, orderBy: {field: UPDATED_AT, direction: DESC})"
-            "{nodes{body updatedAt url}}"
-            "}"
-        )
-        for idx in range(len(issue_numbers))
+    variables: dict[str, int | str] = {"owner": owner, "name": name}
+    for idx, issue_number in enumerate(issue_numbers):
+        variables[f"n{idx}"] = int(issue_number)
+    return _run_graphql(
+        _api.batch_issue_comments_query(issue_numbers, owner, name),
+        variables,
     )
-    query = (
-        f"query($owner:String!,$name:String!,{var_decls})"
-        f"{{repository(owner:$owner,name:$name){{{fragments}}}}}"
-    )
-
-    # Map alias index back to issue number for result assembly.
-    idx_to_num = dict(enumerate(issue_numbers))
-    result_map: dict[int, list[dict[str, Any]]] = {num: [] for num in issue_numbers}
-
-    args = [
-        "api",
-        "graphql",
-        "-f",
-        f"query={query}",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"name={name}",
-    ]
-    for idx, issue_num in enumerate(issue_numbers):
-        args.extend(["-F", f"n{idx}={int(issue_num)}"])
-
-    try:
-        result = _gh_call(args)
-        data = json.loads(result.stdout)
-        repo_data = data.get("data", {}).get("repository", {})
-        for alias, issue_data in repo_data.items():
-            if not alias.startswith("issue"):
-                continue
-            try:
-                idx = int(alias[len("issue") :])
-            except ValueError:
-                continue
-            num = idx_to_num.get(idx)
-            if num is None or issue_data is None:
-                continue
-            nodes = issue_data.get("comments", {}).get("nodes", []) or []
-            # GraphQL returns newest-first; reverse to chronological order.
-            result_map[num] = list(reversed(nodes))
-    except Exception as exc:  # logged, callers get empty lists
-        logger.warning(
-            "Failed to batch-fetch comments for issues %s: %s",
-            issue_numbers,
-            exc,
-        )
-
-    return result_map
 
 
 def fetch_all_issue_labels_graphql(
@@ -317,8 +242,8 @@ def fetch_all_issue_labels_graphql(
     (``state:plan-go``) issues from its work set before the worker pool starts
     (avoids re-scanning every open issue every loop).
 
-    Falls back to an empty list per issue on any failure (caller then treats the
-    issue as "labels unknown" and re-evaluates it the slow way).
+    Raises the typed GraphQL response error on any failure; missing labels are
+    represented only by a validated empty connection.
 
     Args:
         issue_numbers: List of GitHub issue numbers to fetch.
@@ -332,59 +257,13 @@ def fetch_all_issue_labels_graphql(
         return {}
 
     owner, name = get_repo_info(get_repo_root())
-
-    # owner/name and each issue number as GraphQL variables (never interpolated);
-    # see fetch_all_issue_comments_graphql and github_api._fetch_batch_states.
-    var_decls = ",".join(f"$n{idx}:Int!" for idx in range(len(issue_numbers)))
-    fragments = " ".join(
-        f"issue{idx}: issue(number:$n{idx}){{labels(first: 50){{nodes{{name}}}}}}"
-        for idx in range(len(issue_numbers))
+    variables: dict[str, int | str] = {"owner": owner, "name": name}
+    for idx, issue_number in enumerate(issue_numbers):
+        variables[f"n{idx}"] = int(issue_number)
+    return _run_graphql(
+        _api.batch_issue_labels_query(issue_numbers, owner, name),
+        variables,
     )
-    query = (
-        f"query($owner:String!,$name:String!,{var_decls})"
-        f"{{repository(owner:$owner,name:$name){{{fragments}}}}}"
-    )
-
-    idx_to_num = dict(enumerate(issue_numbers))
-    result_map: dict[int, list[str]] = {num: [] for num in issue_numbers}
-
-    args = [
-        "api",
-        "graphql",
-        "-f",
-        f"query={query}",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"name={name}",
-    ]
-    for idx, issue_num in enumerate(issue_numbers):
-        args.extend(["-F", f"n{idx}={int(issue_num)}"])
-
-    try:
-        result = _gh_call(args)
-        data = json.loads(result.stdout)
-        repo_data = data.get("data", {}).get("repository", {})
-        for alias, issue_data in repo_data.items():
-            if not alias.startswith("issue"):
-                continue
-            try:
-                idx = int(alias[len("issue") :])
-            except ValueError:
-                continue
-            num = idx_to_num.get(idx)
-            if num is None or issue_data is None:
-                continue
-            nodes = issue_data.get("labels", {}).get("nodes", []) or []
-            result_map[num] = [n.get("name", "") for n in nodes if n.get("name")]
-    except Exception as exc:  # logged, callers get empty lists
-        logger.warning(
-            "Failed to batch-fetch labels for issues %s: %s",
-            issue_numbers,
-            exc,
-        )
-
-    return result_map
 
 
 def fetch_all_issue_titles_graphql(
@@ -397,8 +276,8 @@ def fetch_all_issue_titles_graphql(
     is_epic` can apply its title-based signal (catching epics/roadmaps that
     carry no label) without a per-issue ``gh issue view`` (#1669).
 
-    Falls back to an empty string per issue on any failure (caller then treats
-    the title as "unknown" and relies on labels alone).
+    Raises the typed GraphQL response error on any failure; an empty title is
+    not a substitute for an unreadable response.
 
     Args:
         issue_numbers: List of GitHub issue numbers to fetch.
@@ -412,57 +291,13 @@ def fetch_all_issue_titles_graphql(
         return {}
 
     owner, name = get_repo_info(get_repo_root())
-
-    # owner/name and each issue number as GraphQL variables (never interpolated);
-    # mirrors fetch_all_issue_labels_graphql.
-    var_decls = ",".join(f"$n{idx}:Int!" for idx in range(len(issue_numbers)))
-    fragments = " ".join(
-        f"issue{idx}: issue(number:$n{idx}){{title}}" for idx in range(len(issue_numbers))
+    variables: dict[str, int | str] = {"owner": owner, "name": name}
+    for idx, issue_number in enumerate(issue_numbers):
+        variables[f"n{idx}"] = int(issue_number)
+    return _run_graphql(
+        _api.batch_issue_titles_query(issue_numbers, owner, name),
+        variables,
     )
-    query = (
-        f"query($owner:String!,$name:String!,{var_decls})"
-        f"{{repository(owner:$owner,name:$name){{{fragments}}}}}"
-    )
-
-    idx_to_num = dict(enumerate(issue_numbers))
-    result_map: dict[int, str] = dict.fromkeys(issue_numbers, "")
-
-    args = [
-        "api",
-        "graphql",
-        "-f",
-        f"query={query}",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"name={name}",
-    ]
-    for idx, issue_num in enumerate(issue_numbers):
-        args.extend(["-F", f"n{idx}={int(issue_num)}"])
-
-    try:
-        result = _gh_call(args)
-        data = json.loads(result.stdout)
-        repo_data = data.get("data", {}).get("repository", {})
-        for alias, issue_data in repo_data.items():
-            if not alias.startswith("issue"):
-                continue
-            try:
-                idx = int(alias[len("issue") :])
-            except ValueError:
-                continue
-            num = idx_to_num.get(idx)
-            if num is None or issue_data is None:
-                continue
-            result_map[num] = issue_data.get("title", "") or ""
-    except Exception as exc:  # pragma: no cover - logged, callers get empty strings
-        logger.warning(
-            "Failed to batch-fetch titles for issues %s: %s",
-            issue_numbers,
-            exc,
-        )
-
-    return result_map
 
 
 def is_plan_review_go(

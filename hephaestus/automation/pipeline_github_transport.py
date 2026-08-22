@@ -12,7 +12,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from urllib.parse import quote
 
 import hephaestus.automation.github_api as github_api
@@ -26,6 +26,12 @@ from hephaestus.automation._review_utils import (
 )
 from hephaestus.automation.arming_state import ArmingStateStore
 from hephaestus.automation.git_utils import issue_auto_impl_branch_name
+from hephaestus.automation.github_api import gh_call
+from hephaestus.automation.github_api.graphql import (
+    GraphQLMutationSpec,
+    GraphQLQuerySpec,
+    run_graphql,
+)
 from hephaestus.automation.pipeline.scope_retraction import (
     SCOPE_RETRACTION_MARKER_PREFIX,
     normalize_scope_retraction_paths,
@@ -63,13 +69,13 @@ from hephaestus.automation.state_labels import (
     is_implementation_go,
 )
 from hephaestus.constants import read_timeout_env
-from hephaestus.github.client import gh_call
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 from .pipeline_github_contract import _PipelineGitHubHost
 
 # ruff: noqa: F811
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 _CLOSES_ISSUE_LINE_RE = re.compile(r"^Closes #(\d+)\s*$", re.MULTILINE)
 _STANDALONE_VERDICT_LINE_RE = re.compile(r"(?i)^\s*verdict\s*:")
@@ -293,18 +299,24 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         login = user.get("login") if isinstance(user, dict) else ""
         return bool(login) and str(login).lower() == self._viewer_login().lower()
 
-    def _graphql(self, query: str, **fields: int | str) -> dict[str, Any]:
-        """Run a repo-scoped GraphQL query with explicit owner/repo fields."""
+    def _graphql(
+        self,
+        spec: GraphQLQuerySpec[T] | GraphQLMutationSpec[T],
+        **fields: int | str,
+    ) -> T:
+        """Run a typed operation with repository identity owned by this adapter."""
+        if isinstance(spec, GraphQLMutationSpec):
+            if fields:
+                raise ValueError("mutation variables are owned by the typed spec")
+            return run_graphql(spec, call=gh_call)
         owner, name = self._owner_name()
-        argv = ["api", "graphql", "-f", f"query={query}"]
-        for key, value in {"owner": owner, "name": name, **fields}.items():
-            argv.extend(["-F" if isinstance(value, int) else "-f", f"{key}={value}"])
-        result = gh_call(argv)
-        data = json.loads(result.stdout or "{}")
-        if not isinstance(data, dict):
-            raise RuntimeError("GraphQL response was not an object")
-        github_api._check_graphql_errors(data, "repo-scoped pipeline GraphQL")
-        return data
+        if "owner" in fields or "name" in fields:
+            raise ValueError("repository identity is owned by PipelineGitHub")
+        return run_graphql(
+            spec,
+            {"owner": owner, "name": name, **fields},
+            call=gh_call,
+        )
 
     def _with_repo(self, argv: list[str]) -> list[str]:
         """Append an explicit repo selector when this accessor is repo-scoped."""

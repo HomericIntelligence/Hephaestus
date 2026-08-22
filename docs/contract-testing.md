@@ -47,6 +47,17 @@ model is intentionally inexpensive. Both lanes first require the corresponding
 CLI to be installed and authenticated; missing credentials produce skips, not
 failures.
 
+The GitHub contract lane also has a read-only GraphQL schema check. It
+introspects the live query and mutation schema and verifies the operation,
+input, payload, and nested receipt fields selected by automation. It never
+executes a mutation:
+
+```bash
+HEPHAESTUS_CONTRACT_TESTS=1 uv run pytest \
+  tests/integration/contract/test_github_graphql_schema_contract.py \
+  --override-ini="addopts=" -v --strict-markers
+```
+
 The repository also provides a manual-only `.github/workflows/contract.yml`
 workflow. It supplies the workflow's read-only GitHub token and pins the target
 repository to `github.repository`. The agent lane remains skipped there unless

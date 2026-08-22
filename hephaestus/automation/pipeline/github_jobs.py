@@ -273,7 +273,7 @@ class ReplyHandoffAttempted:
     """Detached receipt for one exact reply-delivery attempt."""
 
     request: DeliverReplyHandoffRequest
-    status: Literal["completed", "visibility_wait", "stale", "invalid", "retry"]
+    status: Literal["completed", "visibility_wait", "stale", "invalid", "blocked", "retry"]
     remaining_handoff: FrozenJson | None
     visibility_retries: int
     retry_delay_s: float | None
@@ -285,11 +285,14 @@ class ReplyHandoffAttempted:
             "visibility_wait",
             "stale",
             "invalid",
+            "blocked",
             "retry",
         }:
             raise ValueError("status must be a supported reply-handoff outcome")
         if self.remaining_handoff is not None:
             _json_root(self.remaining_handoff, dict, "remaining_handoff")
+        if self.status in {"completed", "stale", "blocked"} and self.remaining_handoff is not None:
+            raise ValueError("terminal handoff outcomes cannot retain mutation work")
         if (
             isinstance(self.visibility_retries, bool)
             or not isinstance(self.visibility_retries, int)

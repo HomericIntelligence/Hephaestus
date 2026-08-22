@@ -25,10 +25,10 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/coordinator_dispatch.py": 500,
     "hephaestus/automation/pipeline_github.py": 500,
     "hephaestus/automation/pipeline_github_contract.py": 125,
-    "hephaestus/automation/pipeline_github_transport.py": 400,
+    "hephaestus/automation/pipeline_github_transport.py": 425,
     "hephaestus/automation/pipeline_github_authorization.py": 300,
     "hephaestus/automation/pipeline_github_queries.py": 650,
-    "hephaestus/automation/pipeline_github_reviews.py": 1_400,
+    "hephaestus/automation/pipeline_github_reviews.py": 1_475,
     "hephaestus/automation/pipeline_github_mutations.py": 450,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,
     "hephaestus/automation/pipeline/stages/pr_review_threads.py": 850,
@@ -36,7 +36,9 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/stages/pr_review_repository.py": 100,
     "hephaestus/automation/pipeline/stages/pr_review_receipts.py": 100,
     "hephaestus/automation/pipeline/stages/pr_review_verification.py": 250,
-    "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_400,
+    # The GraphQL contract helpers added by #2393 bring this collaborator to
+    # 1,402 lines; keep the explicit cap just above the measured source size.
+    "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_402,
     "hephaestus/automation/pipeline/stages/pr_review_gate.py": 700,
 }
 

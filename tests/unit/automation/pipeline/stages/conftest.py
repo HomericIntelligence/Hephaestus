@@ -26,7 +26,10 @@ from hephaestus.automation.pipeline.stages import (
     StageContext,
     StageGitHub,
 )
-from hephaestus.automation.pipeline.stages.base import BranchWorktreeOwnerStatus
+from hephaestus.automation.pipeline.stages.base import (
+    BranchWorktreeOwnerStatus,
+    ImplementationReplyProgress,
+)
 from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (
@@ -509,9 +512,10 @@ class FakeStageGitHub(FakeGitHub):
         threads: list[dict[str, Any]],
         replies: dict[str, str],
         batch_nonce: str,
+        progress: ImplementationReplyProgress | None = None,
     ) -> ImplementationThreadReplyResult:
         """Record head-gated implementation replies for stage tests."""
-        del expected_head_sha, batch_nonce
+        del expected_head_sha, batch_nonce, progress
         by_id = {
             str(thread.get("thread_id") or thread.get("id") or ""): thread for thread in threads
         }
@@ -540,6 +544,21 @@ class FakeStageGitHub(FakeGitHub):
         replied = tuple(sorted(str(thread_id) for thread_id in replies if thread_id in by_id))
         blocked = tuple(sorted(set(replies) - set(replied)))
         return ImplementationThreadReplyResult(replied, blocked, tuple(receipts))
+
+    def reconcile_implementation_thread_replies(
+        self,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        threads: list[dict[str, Any]],
+        replies: dict[str, str],
+        batch_nonce: str,
+    ) -> ImplementationThreadReplyResult:
+        """Keep journal recovery read-only in the stage fake."""
+        del pr_number, expected_head_sha, threads, batch_nonce
+        return ImplementationThreadReplyResult(
+            blocked_thread_ids=tuple(sorted(replies)),
+        )
 
     def reviewer_validation_receipts(
         self,

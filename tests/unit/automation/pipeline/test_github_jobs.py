@@ -159,9 +159,11 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
     )
 
     recovered = runner.run(recovery_job)
+    recovered_handoff = dict(handoff)
+    recovered_handoff["reconciliation_only"] = True
     assert recovered == ReplyJournalRecovered(
         request=recovery_request,
-        handoff=FrozenJson.snapshot(handoff),
+        handoff=FrozenJson.snapshot(recovered_handoff),
     )
     assert recovered.handoff is not None
     delivery_request = DeliverReplyHandoffRequest(
@@ -181,12 +183,12 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
 
     assert delivered == ReplyHandoffAttempted(
         request=delivery_request,
-        status="completed",
+        status="blocked",
         remaining_handoff=None,
         visibility_retries=0,
         retry_delay_s=None,
     )
-    assert delivery_calls == [(7, "a" * 40, threads, {"thread-1": "fixed"}, "b" * 32)]
+    assert delivery_calls == []
 
 
 def test_pr_reconciliation_reads_back_late_threads_before_apply(

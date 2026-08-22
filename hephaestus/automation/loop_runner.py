@@ -50,6 +50,7 @@ from hephaestus.automation.event_log_retention import (
     DEFAULT_EVENT_LOG_RETENTION_DAYS,
     event_log_lifecycle,
 )
+from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.loop_repo_manager import (
     _clone_missing_repos as _clone_missing_repos,
     _detect_cwd_repo as _detect_cwd_repo,
@@ -65,7 +66,6 @@ from hephaestus.cli.utils import (
     emit_json_status,
 )
 from hephaestus.config.paths import DEFAULT_PROJECTS_DIR, resolve_projects_dir
-from hephaestus.github.client import gh_call
 from hephaestus.utils.helpers import get_repo_root
 
 LOG = logging.getLogger(__name__)

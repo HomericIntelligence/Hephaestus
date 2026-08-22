@@ -373,7 +373,7 @@ class IssueImplementer:
 
         # Check gh CLI
         try:
-            from hephaestus.github.client import gh_call
+            from hephaestus.automation.github_api import gh_call
 
             gh_call(["--version"], check=True, retry_on_rate_limit=False, max_retries=1)
             logger.info("gh CLI available")

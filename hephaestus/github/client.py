@@ -2,7 +2,8 @@
 
 Public contract
 ---------------
-``gh_call(args, *, check=True, retry_on_rate_limit=True, max_retries=6, timeout=None)``
+``gh_call(args, *, check=True, retry_on_rate_limit=True, max_retries=6,``
+``timeout=None, track_process_group=False, throttle=True)``
    Run ``gh <args>``. Every invocation passes through the ``github-api``
    circuit breaker, the per-thread throttle (``GH_RATE_LIMIT_PER_SEC``),
    REST + GraphQL rate-limit detection (waits until reset), and Claude
@@ -404,6 +405,7 @@ def _gh_call_impl(
     timeout: int | None = None,
     env: Mapping[str, str] | None = None,
     track_process_group: bool = False,
+    throttle: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Implement gh CLI call with rate limit handling (circuit breaker will wrap this).
 
@@ -419,6 +421,7 @@ def _gh_call_impl(
         timeout: Optional per-call timeout override. Defaults to
             :func:`gh_cli_timeout`.
         track_process_group: Make the child available to host shutdown.
+        throttle: Whether to acquire the global and per-thread throttle gates.
 
     Returns:
         CompletedProcess instance
@@ -431,8 +434,9 @@ def _gh_call_impl(
     """
     for attempt in range(max_retries):
         try:
-            gh_global_throttle_acquire()
-            _gh_throttle_wait()
+            if throttle:
+                gh_global_throttle_acquire()
+                _gh_throttle_wait()
             result = run_subprocess(
                 ["gh", *args],
                 check=check,
@@ -515,6 +519,7 @@ def _gh_call(
     timeout: int | None = None,
     env: Mapping[str, str] | None = None,
     track_process_group: bool = False,
+    throttle: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """Call gh CLI with rate limit handling and circuit breaker protection.
 
@@ -533,6 +538,8 @@ def _gh_call(
             foreign-authored comment that the caller recovers via a shadow post).
         timeout: Optional per-call timeout override. Defaults to
             :func:`gh_cli_timeout`.
+        track_process_group: Make the child available to host shutdown.
+        throttle: Whether to acquire the global and per-thread throttle gates.
 
     Returns:
         CompletedProcess instance
@@ -552,6 +559,7 @@ def _gh_call(
             "max_retries": max_retries,
             "log_on_error": log_on_error,
             "timeout": timeout,
+            "throttle": throttle,
         }
         if env is not None:
             kwargs["env"] = env
