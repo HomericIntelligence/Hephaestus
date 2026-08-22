@@ -80,9 +80,12 @@ def test_schema_step_builds_workflow_file_array_inside_container(tmp_path: Path)
         "exit 64\n",
     )
     _write_executable(
-        tools / "uvx",
+        tools / "uv",
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        '[[ "${UV_OFFLINE:-}" == "1" ]]\n'
+        '[[ "${UV_NO_SYNC:-}" == "1" ]]\n'
+        '[[ "$1" == "run" && "$2" == "check-jsonschema" ]]\n'
         'for argument in "$@"; do\n'
         '  [[ "$argument" == .github/workflows/*.yml ]] && exit 0\n'
         "done\n"

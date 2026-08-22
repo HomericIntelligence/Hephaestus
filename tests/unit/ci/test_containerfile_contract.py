@@ -69,7 +69,7 @@ def test_runtime_tools_follow_the_requested_build_architecture() -> None:
     """The image must select its executable artifacts for the build platform."""
     source = CONTAINERFILE.read_text(encoding="utf-8")
 
-    assert source.count('case "$TARGETARCH" in') == 2
+    assert source.count('case "$TARGETARCH" in') == 3
 
     assert (
         'amd64) uv_asset="uv-x86_64-unknown-linux-gnu"; '
@@ -93,7 +93,33 @@ def test_runtime_tools_follow_the_requested_build_architecture() -> None:
     assert "linux_${gh_arch}.deb" in source
     assert 'echo "${gh_sha256}  /tmp/gh.deb" | sha256sum --check' in source
 
-    assert source.count('*) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1') == 2
+    assert (
+        'amd64) just_arch="x86_64"; '
+        'just_sha256="bc7c9f377944f8de9cd0418b11d2955adebfa25a488c0b5e3dd2d2c0e9d732da"' in source
+    )
+    assert (
+        'arm64) just_arch="aarch64"; '
+        'just_sha256="bb3886b15e2cbcb9c0eb19956297d36de4eaef45b89d3f5fa5d1fc4ed3b5b51d"' in source
+    )
+    assert "just-1.36.0-${just_arch}-unknown-linux-musl.tar.gz" in source
+    assert 'echo "${just_sha256}  /tmp/just.tar.gz" | sha256sum --check' in source
+
+    assert source.count('*) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1') == 3
+
+
+def test_shell_tool_versions_are_explicit_and_verified() -> None:
+    """The shared CI image must make Bats/ShellCheck parity inspectable."""
+    source = CONTAINERFILE.read_text(encoding="utf-8")
+
+    assert "ARG BATS_VERSION=1.11.1-1" in source
+    assert "ARG SHELLCHECK_VERSION=0.10.0-1" in source
+    runtime_stage = source.rindex("FROM python-snapshot")
+    assert source.index("ARG BATS_VERSION=1.11.1-1") > runtime_stage
+    assert source.index("ARG SHELLCHECK_VERSION=0.10.0-1") > runtime_stage
+    assert 'bats="${BATS_VERSION}"' in source
+    assert 'shellcheck="${SHELLCHECK_VERSION}"' in source
+    assert 'test "$(bats --version)" = "Bats 1.11.1"' in source
+    assert 'grep -Fx "version: 0.10.0"' in source
 
 
 def test_github_artifact_downloads_retry_transient_network_failures() -> None:
@@ -105,7 +131,7 @@ def test_github_artifact_downloads_retry_transient_network_failures() -> None:
         if "curl -fsSL" in line and '"https://github.com/' in line
     ]
 
-    assert len(download_lines) == 2
+    assert len(download_lines) == 3
     for line in download_lines:
         assert "--retry 5" in line
         assert "--retry-all-errors" in line

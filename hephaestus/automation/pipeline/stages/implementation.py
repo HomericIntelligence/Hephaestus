@@ -249,6 +249,21 @@ PRE_PR_TEST_TIMEOUT_S = 1800
 #: issue-derived strings).
 PRE_PR_TEST_ARGV: tuple[str, ...] = ("uv", "run", "pytest", "tests", "-q", "--tb=short")
 
+#: Hephaestus owns a canonical local entry point for every source check that
+#: can run before a PR exists.  Keep this fixed in trusted queue code: issue
+#: content and programmatic generic-test overrides must not weaken the gate.
+HEPHAESTUS_REQUIRED_CHECK_ARGV: tuple[str, ...] = (
+    "env",
+    "HEPHAESTUS_CI_REBUILD=1",
+    "bash",
+    "scripts/run_ci_local.sh",
+    "all",
+)
+
+#: The required suite runs CI's formerly parallel jobs serially on a local
+#: host, so it needs a wider bound than one generic pytest invocation.
+HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S = 7200
+
 NO_COMMIT_REPLY_WARNING = "[auto-msg] reply has no corresponding commit, review thoroughly"
 _TRUNCATED_REPLY_WARNING = "[auto-msg] reply truncated to fit review limit"
 
@@ -994,19 +1009,37 @@ class ImplementationStage(Stage):
             # on_job_done (doc: agent_error consumes the implement
             # budget); RETRY re-enters the stage for the next attempt.
             return StageOutcome(Disposition.RETRY, "agent_error")
-        if not getattr(ctx.config, "run_pre_pr_tests", False):
+        is_hephaestus = (ctx.org.casefold(), item.repo.casefold()) == (
+            "homericintelligence",
+            "hephaestus",
+        )
+        run_hephaestus_pre_pr_checks = (
+            is_hephaestus and item.pr is None and not bool(item.payload.get("existing_pr"))
+        )
+        run_configured_pre_pr_checks = not is_hephaestus and bool(
+            getattr(ctx.config, "run_pre_pr_tests", False)
+        )
+        if not (run_hephaestus_pre_pr_checks or run_configured_pre_pr_checks):
             return Continue(next_state=COMMIT_PUSH_WAIT)
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
         item.payload.pop("test_receipt", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
-        test_argv = tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+        test_argv = (
+            HEPHAESTUS_REQUIRED_CHECK_ARGV
+            if run_hephaestus_pre_pr_checks
+            else tuple(getattr(ctx.config, "pre_pr_test_argv", PRE_PR_TEST_ARGV))
+        )
         item.payload["test_command"] = shlex.join(test_argv)
         test_job = BuildTestJob(
             repo=item.repo,
             cwd=_worktree_path(item, ctx),
             argv=test_argv,
-            timeout_s=PRE_PR_TEST_TIMEOUT_S,
+            timeout_s=(
+                HEPHAESTUS_REQUIRED_CHECK_TIMEOUT_S
+                if run_hephaestus_pre_pr_checks
+                else PRE_PR_TEST_TIMEOUT_S
+            ),
             descr="pre_pr_tests",
         )
         return JobRequest(test_job, on_done_state=COMMIT_PUSH_WAIT)

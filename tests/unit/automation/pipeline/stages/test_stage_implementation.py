@@ -1984,7 +1984,100 @@ class TestImplementBudget:
 
 
 class TestTestsAndFix:
-    """TEST_WAIT / TESTFIX_WAIT: optional pre-PR tests bounded by test_fix."""
+    """TEST_WAIT / TESTFIX_WAIT: repository validation bounded by test_fix."""
+
+    def test_hephaestus_runs_required_checks_without_opt_in(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Hephaestus always runs its repository-owned required-check suite."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(
+            issue=1,
+            repo="Hephaestus",
+            state="TEST_WAIT",
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == (
+            "env",
+            "HEPHAESTUS_CI_REBUILD=1",
+            "bash",
+            "scripts/run_ci_local.sh",
+            "all",
+        )
+        assert (
+            item.payload["test_command"]
+            == "env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all"
+        )
+
+    def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Programmatic generic-test overrides cannot weaken Hephaestus's gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        ctx.config.run_pre_pr_tests = True
+        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        item = make_work_item(
+            issue=1,
+            repo="Hephaestus",
+            state="TEST_WAIT",
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == (
+            "env",
+            "HEPHAESTUS_CI_REBUILD=1",
+            "bash",
+            "scripts/run_ci_local.sh",
+            "all",
+        )
+
+    def test_same_named_repo_in_another_org_preserves_configurable_gate(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Only the configured canonical Hephaestus repo gets its fixed gate."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="OtherOrg")
+        ctx.config.run_pre_pr_tests = True
+        ctx.config.pre_pr_test_argv = ("pytest", "tests/custom", "-q")
+        item = make_work_item(
+            issue=1,
+            repo="Hephaestus",
+            state="TEST_WAIT",
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.argv == ("pytest", "tests/custom", "-q")
+
+    def test_hephaestus_existing_pr_remediation_does_not_repeat_full_local_gate(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Automatic full local checks are confined to initial PR publication."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(
+            issue=1,
+            pr=1001,
+            repo="Hephaestus",
+            state="TEST_WAIT",
+        )
+        item.payload["existing_pr"] = True
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, Continue)
+        assert result.next_state == "COMMIT_PUSH_WAIT"
 
     def test_tests_disabled_skip_to_commit_push(self, make_ctx: Any, make_work_item: Any) -> None:
         """run_pre_pr_tests=False (the default) skips the test leg."""
@@ -2091,6 +2184,48 @@ class TestTestsAndFix:
 
         stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)
         assert item.attempts["test_fix"] == 1
+
+    def test_hephaestus_red_gate_returns_to_implementer_then_gates_pr_creation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A red one-shot gate is fixed and rerun before commit, push, or PR creation."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence")
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        first_gate = stage.step(item, ctx)
+        assert isinstance(first_gate, JobRequest)
+        assert isinstance(first_gate.job, BuildTestJob)
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=False, value=1, stderr_tail="required checks failed"),
+            ctx,
+        )
+        item.state = first_gate.on_done_state
+        failed_gate = stage.step(item, ctx)
+        assert isinstance(failed_gate, Continue)
+        assert failed_gate.next_state == "TESTFIX_WAIT"
+
+        item.state = failed_gate.next_state
+        fixer = stage.step(item, ctx)
+        assert isinstance(fixer, JobRequest)
+        assert isinstance(fixer.job, AgentJob)
+        assert fixer.job.descr == "test_fix"
+        assert fixer.on_done_state == "TEST_WAIT"
+
+        stage.on_job_done(item, JobResult(ok=True, value="fixed"), ctx)
+        item.state = fixer.on_done_state
+        second_gate = stage.step(item, ctx)
+        assert isinstance(second_gate, JobRequest)
+        assert isinstance(second_gate.job, BuildTestJob)
+
+        stage.on_job_done(item, JobResult(ok=True, value=0), ctx)
+        item.state = second_gate.on_done_state
+        commit_push = stage.step(item, ctx)
+        assert isinstance(commit_push, JobRequest)
+        assert isinstance(commit_push.job, GitJob)
+        assert commit_push.on_done_state == "PR_CREATE"
 
     def test_testfix_resumes_the_saved_direct_implementer_session(
         self, make_ctx: Any, make_work_item: Any

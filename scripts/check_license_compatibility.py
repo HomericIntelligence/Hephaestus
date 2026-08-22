@@ -22,7 +22,7 @@ FAILS LOUDLY (never silently passes):
 Stdlib only (importlib.metadata + packaging, both already runtime deps); runs
 under plain `python3` once the package + extras are pip-installed.
 
-Advisory on main/schedule (exit 0), blocking on pull_request (exit 1).
+Advisory on main/schedule (exit 0), blocking on pull_request/merge_group (exit 1).
 
 Usage:
     python3 scripts/check_license_compatibility.py
@@ -327,9 +327,10 @@ def main() -> int:
         "ALLOWED_EXTRA_COPYLEFT AND document it in NOTICE."
     )
 
-    if os.environ.get("GITHUB_EVENT_NAME", "") == "pull_request":
+    blocking_events = {"pull_request", "merge_group"}
+    if os.environ.get("GITHUB_EVENT_NAME", "") in blocking_events:
         return 1
-    print("(advisory: non-PR event, exit 0)")
+    print("(advisory: non-reviewed event, exit 0)")
     return 0
 
 

@@ -16,10 +16,8 @@ on:
       - ready_for_review
   push:
     branches: [main]
-  # merge_group intentionally removed: merge-queue checks are served by the
-  # single fast `merge-queue-smoke` job in merge-queue-smoke.yml. Re-running
-  # all 16+ jobs per queue entry serialized on runner slots (70-90 min per
-  # merge). PR-side jobs in this workflow are unchanged.
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: required-${{ github.workflow }}-${{ github.head_ref || github.sha }}
@@ -271,9 +269,6 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-24.04
-    # The package-install step is external to this repository and can exceed
-    # three minutes during an Ubuntu mirror slowdown.  Keep the job bounded,
-    # while allowing the lint command itself to run.
     timeout-minutes: 10
     needs: [lint, changes-gate]
     if: needs.changes-gate.outputs.code_event == 'true'
@@ -283,21 +278,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Run shellcheck
-        run: |
-          set -euo pipefail
-          shopt -s nullglob globstar
-          files=(scripts/**/*.sh scripts/**/*.sbatch)
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "No shell scripts found — nothing to lint."
-            exit 0
-          fi
-          # severity=error catches genuine bugs (unquoted vars in dangerous
-          # contexts, broken syntax) without bikeshedding on style — matches
-          # the bug class that broke the AchaeanFleet automation loop.
-          shellcheck --severity=error "${files[@]}"
+      - name: Build the shared CI image
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
+      - name: Run ShellCheck through the local CI runner
+        env:
+          CONTAINER_ENGINE: podman
+        run: bash scripts/run_ci_local.sh shellcheck
 
   pr-policy:
     name: pr-policy
@@ -307,10 +293,11 @@ jobs:
     #   2. The PR title and every branch commit subject follow the accepted
     #      Conventional Commit policy.
     #   3. Every branch commit carries a DCO Signed-off-by trailer.
-    # Push events are skipped because there is no PR to inspect. Merge-group
-    # events post this required context through a dedicated step because the
-    # PR-specific policy was already checked on the source PR and the synthetic
-    # merge-group payload has no pull_request object.
+    # Push events are skipped because there is no PR to inspect. On HEADGREEN
+    # merge queues, the synthetic group head alone is checked, so merge-group
+    # events fail closed unless every source PR represented by the exact
+    # synthetic group head has a successful GitHub-Actions-owned pr-policy
+    # check on its current head.
     #
     # This gate intentionally has NO `needs:` — it runs immediately so the
     # policy checks report without depending on another job's timing.
@@ -327,10 +314,306 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: Confirm PR policy was evaluated before queue entry
+      - name: Resolve complete merge-group membership
+        id: resolve_queue
         if: github.event_name == 'merge_group'
-        run: >-
-          echo "PR policy applies to the source PR; merge-group checks validate the synthetic commit."
+        env:
+          BASE_REF: ${{ github.event.merge_group.base_ref }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          queue_json="$RUNNER_TEMP/merge-queue-pages.json"
+          queue_selection="$RUNNER_TEMP/merge-queue-selection.json"
+          queue_members="$RUNNER_TEMP/queue-members.tsv"
+          base_branch="${BASE_REF#refs/heads/}"
+          head_ref="${HEAD_REF#refs/heads/}"
+          queue_prefix="gh-readonly-queue/${base_branch}/pr-"
+          if [[ "$head_ref" != "$queue_prefix"* ]]; then
+            echo "::error::Unexpected merge-group head ref: $HEAD_REF"
+            exit 1
+          fi
+          queue_tail="${head_ref#"$queue_prefix"}"
+          if [[ ! "$queue_tail" =~ ^([1-9][0-9]*)-([0-9a-f]{40})$ ]]; then
+            echo "::error::Unable to resolve source PR from merge-group head ref"
+            exit 1
+          fi
+          PR_NUMBER="${BASH_REMATCH[1]}"
+          queued_base="${BASH_REMATCH[2]}"
+
+          query='query($owner:String!,$name:String!,$pr:Int!,$endCursor:String) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                number
+                state
+                headRefOid
+                mergeQueueEntry {
+                  position
+                  baseCommit { oid }
+                  headCommit { oid }
+                  mergeQueue {
+                    entries(first:100, after:$endCursor) {
+                      totalCount
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        position
+                        baseCommit { oid }
+                        headCommit { oid }
+                        pullRequest { number state headRefOid }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }'
+          gh api graphql --paginate --slurp -f query="$query" \
+            -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR_NUMBER" \
+            > "$queue_json"
+          jq -er \
+            --argjson target_number "$PR_NUMBER" \
+            --arg queued_base "$queued_base" \
+            --arg group_head "$MERGE_GROUP_SHA" '
+            . as $pages
+            | select(($pages | length) > 0)
+            | select(all($pages[]; ((.errors // []) | length) == 0))
+            | select(all(range(0; ($pages | length) - 1);
+                $pages[.].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.pageInfo.hasNextPage == true and
+                ($pages[.].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.pageInfo.endCursor
+                  | type == "string" and length > 0)
+              ))
+            | select(
+                $pages[-1].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.pageInfo.hasNextPage == false
+              )
+            | select(([
+                $pages[].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.pageInfo.endCursor
+                | select(. != null)
+              ] | length) == ([
+                $pages[].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.pageInfo.endCursor
+                | select(. != null)
+              ] | unique | length))
+            | ([
+                $pages[].data.repository.pullRequest
+                | {
+                    number,
+                    state,
+                    headRefOid,
+                    position: .mergeQueueEntry.position,
+                    base: .mergeQueueEntry.baseCommit.oid,
+                    head: .mergeQueueEntry.headCommit.oid
+                  }
+              ] | unique) as $targets
+            | select(($targets | length) == 1)
+            | $pages[0].data.repository.pullRequest as $target
+            | select(
+                $target.number == $target_number and
+                $target.state == "OPEN"
+              )
+            | $target.mergeQueueEntry as $target_entry
+            | ([
+                $pages[].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.totalCount
+              ] | unique) as $counts
+            | ([
+                $pages[].data.repository.pullRequest.mergeQueueEntry
+                  .mergeQueue.entries.nodes[]
+              ] | sort_by(.position)) as $entries
+            | select($target_entry.baseCommit.oid == $queued_base)
+            | select($target_entry.headCommit.oid == $group_head)
+            | select(($counts | length) == 1 and $counts[0] == ($entries | length))
+            | ([
+                $entries[]
+                | select(.position <= $target_entry.position)
+              ] | sort_by(.position)) as $members
+            | select(($members | length) > 0)
+            | select(($members | map(.position) | unique | length) == ($members | length))
+            | select(
+                ($members | map(.pullRequest.number) | unique | length) ==
+                ($members | length)
+              )
+            | select(
+                $members[-1].pullRequest.number == $target_number and
+                $members[-1].headCommit.oid == $group_head
+              )
+            | select(all($members[];
+                .pullRequest != null and
+                .pullRequest.state == "OPEN" and
+                (.pullRequest.headRefOid | test("^[0-9a-f]{40}$"))
+              ))
+            | select(all(range(1; $members | length);
+                $members[.].baseCommit.oid == $members[. - 1].headCommit.oid
+              ))
+            | select($members[0].baseCommit.oid | test("^[0-9a-f]{40}$"))
+            | {
+                queue_root: $members[0].baseCommit.oid,
+                members: [
+                  $members[]
+                  | {
+                      number: .pullRequest.number,
+                      head: .pullRequest.headRefOid
+                    }
+                ]
+              }
+          ' "$queue_json" > "$queue_selection"
+          jq -er '.members[] | [.number, .head] | @tsv' \
+            "$queue_selection" > "$queue_members"
+          test -s "$queue_members"
+          queue_root=$(jq -er '.queue_root' "$queue_selection")
+          echo "queue_root=$queue_root" >> "$GITHUB_OUTPUT"
+
+      # HEADGREEN's event base can be the preceding synthetic queue commit.
+      # Resolve the first member's protected root before loading validators so
+      # an earlier queued PR cannot replace the policy implementation.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: github.event_name == 'merge_group'
+        with:
+          ref: ${{ steps.resolve_queue.outputs.queue_root }}
+          path: policy-base
+          persist-credentials: false
+
+      - name: Revalidate source PR policy
+        if: github.event_name == 'merge_group'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          queue_members="$RUNNER_TEMP/queue-members.tsv"
+
+          commit_query='query($owner:String!,$name:String!,$pr:Int!,$after:String) {
+            repository(owner:$owner, name:$name) {
+              pullRequest(number:$pr) {
+                number
+                state
+                headRefOid
+                commits(first:100, after:$after) {
+                  totalCount
+                  nodes { commit { oid message } }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }'
+
+          while IFS=$'\t' read -r source_pr source_head; do
+            source_prefix="$RUNNER_TEMP/source-pr-${source_pr}"
+            source_metadata="${source_prefix}-metadata.json"
+            source_nodes="${source_prefix}-commit-nodes.jsonl"
+            source_page="${source_prefix}-commit-page.json"
+            source_initial="${source_prefix}-initial-canonical.json"
+            source_final="${source_prefix}-final-canonical.json"
+
+            gh pr view "$source_pr" --repo "$REPOSITORY" \
+              --json author,body,headRefOid,state,title > "$source_metadata"
+            jq -e --arg head "$source_head" '
+              .state == "OPEN" and .headRefOid == $head
+            ' "$source_metadata" > /dev/null
+
+            : > "$source_nodes"
+            cursor=""
+            expected_total=""
+            declare -A seen_cursors=()
+            while true; do
+              if [ -n "$cursor" ]; then
+                gh api graphql -f query="$commit_query" \
+                  -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$source_pr" \
+                  -F after="$cursor" > "$source_page"
+              else
+                gh api graphql -f query="$commit_query" \
+                  -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$source_pr" \
+                  > "$source_page"
+              fi
+              jq -e --argjson number "$source_pr" --arg head "$source_head" '
+                ((.errors // []) | length) == 0
+                and (.data.repository.pullRequest as $pr
+                  | $pr.number == $number
+                  and $pr.state == "OPEN"
+                  and $pr.headRefOid == $head
+                  and ($pr.commits.totalCount | type) == "number"
+                  and $pr.commits.totalCount > 0
+                  and ($pr.commits.pageInfo.hasNextPage | type) == "boolean"
+                  and all($pr.commits.nodes[];
+                    (.commit.oid | test("^[0-9a-f]{40}$"))
+                    and (.commit.message | type) == "string"
+                  ))
+              ' "$source_page" > /dev/null
+              page_total=$(jq -er \
+                '.data.repository.pullRequest.commits.totalCount' "$source_page")
+              if [ -z "$expected_total" ]; then
+                expected_total="$page_total"
+              else
+                test "$page_total" -eq "$expected_total"
+              fi
+              jq -c '.data.repository.pullRequest.commits.nodes[]' "$source_page" \
+                >> "$source_nodes"
+              has_next=$(jq -r \
+                '.data.repository.pullRequest.commits.pageInfo.hasNextPage' "$source_page")
+              case "$has_next" in
+                false) break ;;
+                true)
+                  cursor=$(jq -r \
+                    '.data.repository.pullRequest.commits.pageInfo.endCursor // empty' \
+                    "$source_page")
+                  test -n "$cursor"
+                  test -z "${seen_cursors[$cursor]+present}"
+                  seen_cursors["$cursor"]=1
+                  ;;
+                *) exit 1 ;;
+              esac
+            done
+            test -s "$source_nodes"
+            actual_total=$(wc -l < "$source_nodes" | tr -d ' ')
+            unique_total=$(jq -r '.commit.oid' "$source_nodes" | sort -u | wc -l | tr -d ' ')
+            test "$actual_total" -eq "$expected_total"
+            test "$unique_total" -eq "$expected_total"
+            last_oid=$(tail -n 1 "$source_nodes" | jq -er '.commit.oid')
+            test "$last_oid" = "$source_head"
+
+            author=$(jq -r '.author.login // ""' "$source_metadata")
+            body=$(jq -r '.body // ""' "$source_metadata")
+            if [ "$author" != "dependabot[bot]" ]; then
+              printf '%s\n' "$body" | grep -qE '^Closes #[0-9]+[[:space:]]*$'
+            fi
+
+            title=$(jq -r '.title // ""' "$source_metadata")
+            [[ "$title" != *$'\n'* && "$title" != *$'\r'* ]]
+            printf '%s\n' "$title" \
+              | python3 policy-base/scripts/check_conventional_commit.py -
+            printf '%s\n' "$title" | grep -qE \
+              '^(feat|fix|docs|refactor|test|chore|ci|build|perf|style|revert)(\([^()]+\))?!?: .+$'
+            jq -r '.commit.message | split("\n")[0]' "$source_nodes" \
+              | python3 policy-base/scripts/check_conventional_commit.py -
+            if [ "$author" != "dependabot[bot]" ]; then
+              jq -j '.commit.message + "\u0000"' "$source_nodes" \
+                | python3 policy-base/scripts/check_dco_signoff.py -
+            fi
+
+            # GitHub has no transactionally immutable PR-metadata endpoint.
+            # Exact ordered commit OIDs, cardinality, tip, and this full final
+            # metadata rebind fail closed on observable drift. A complete ABA
+            # force-push/edit cycle between reads is an accepted residual race
+            # for this single-maintainer repository.
+            jq -S -c '{author,body,headRefOid,state,title}' \
+              "$source_metadata" > "$source_initial"
+            gh pr view "$source_pr" --repo "$REPOSITORY" \
+              --json author,body,headRefOid,state,title \
+              > "${source_prefix}-final.json"
+            jq -e --arg head "$source_head" '
+              .state == "OPEN" and .headRefOid == $head
+            ' "${source_prefix}-final.json" > /dev/null
+            jq -S -c '{author,body,headRefOid,state,title}' \
+              "${source_prefix}-final.json" > "$source_final"
+            cmp -s "$source_initial" "$source_final"
+          done < "$queue_members"
 
       # The policy validator must come from the trusted base revision, never
       # from the PR head. The base checkout also provides the bootstrap path for
@@ -660,8 +943,6 @@ jobs:
   shell-tests:
     name: shell-tests
     runs-on: ubuntu-24.04
-    # Bats is installed from the Ubuntu archive; retain a finite guard but do
-    # not cancel the test suite solely because a mirror is slow.
     timeout-minutes: 20
     needs: changes-gate
     if: needs.changes-gate.outputs.code_event == 'true'
@@ -671,21 +952,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: "3.13"
+      - name: Build the shared CI image
+        run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
-        with:
-          just-version: "1.36.0"
-
-      - name: Run bats shell tests
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bats
-          bats --recursive tests/shell
+      - name: Run Bats through the local CI runner
+        env:
+          CONTAINER_ENGINE: podman
+        run: bash scripts/run_ci_local.sh shell-tests
 
   build:
     name: build
@@ -939,7 +1212,7 @@ jobs:
               echo "No workflow files to validate"
               exit 0
             fi
-            uvx check-jsonschema \
+            UV_NO_SYNC=1 UV_OFFLINE=1 uv run check-jsonschema \
               --builtin-schema vendor.github-workflows \
               "${wf_files[@]}"
           '

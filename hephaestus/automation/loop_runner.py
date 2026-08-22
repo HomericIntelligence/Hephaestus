@@ -427,7 +427,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--run-pre-pr-tests",
         action="store_true",
-        help=("Run the implementation-stage pre-PR test gate before committing and creating PRs."),
+        help=(
+            "Run the configurable pre-PR test gate for repositories without an automatic "
+            "required-check profile; Hephaestus runs its required checks before initial "
+            "PR creation."
+        ),
     )
     p.add_argument(
         "--gh-extra-path-root",

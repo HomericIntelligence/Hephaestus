@@ -1431,8 +1431,9 @@ The exhaustive classification is maintained in the
 - [`BuildTestJob`](../hephaestus/automation/pipeline/jobs.py) — subprocess
  argv. Security: argv MUST NOT carry untrusted strings; only the
  coordinator constructs them from vetted templates
- (`PRE_PR_TEST_ARGV` for the pre-PR test gate and the fixed host-review
- verification registry).
+ (`HEPHAESTUS_REQUIRED_CHECK_ARGV` for Hephaestus's automatic required-check
+ gate, `PRE_PR_TEST_ARGV` for other repositories' opt-in fallback, and the
+ fixed host-review verification registry).
 - [`GitJob`](../hephaestus/automation/pipeline/jobs.py) — `op ∈ {clone,
  sync_checkout, create_worktree, verify_pr_review_checkout, remove_worktree,
  rebase, push, commit_push}`, validated by `__post_init__`. Before a PR-review
@@ -1563,11 +1564,25 @@ out-of-band.
 | `hephaestus-merge-prs` | (manual merge-driving, queues disabled) | [`hephaestus.github.pr_merge`](../hephaestus/github/pr_merge.py) |
 | `hephaestus-agent-stage` | (one-shot stage invocation) | [`agent_stage`](../hephaestus/automation/agent_stage.py) |
 
-`--run-pre-pr-tests` is an opt-in queue-runner flag enabling the
+Hephaestus implementation work always runs
+`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all` through the
 [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py)
-pre-PR test gate. Its vetted default is `uv run pytest tests -q --tb=short`;
-programmatic callers can supply `PipelineConfig.pre_pr_test_argv` for a
-different vetted test command.
+test-fix gate before commit, push, and PR creation. The fixed command executes
+the repository's locally executable required source checks and cannot be
+replaced by issue content or a generic test override. It rebuilds the CI image
+from the candidate checkout so an older local dependency environment cannot be
+reused. Because CI jobs run in parallel but the local entry point runs
+serially, this profile has a two-hour hard timeout. A linked implementation
+worktree's shared Git metadata is mounted read-only at its original absolute
+path so hatch-vcs, tests, and scanners resolve the candidate commit without
+granting container write access to repository metadata.
+
+`--run-pre-pr-tests` remains an opt-in fallback for repositories without an
+automatic profile. Its vetted default is
+`uv run pytest tests -q --tb=short`; programmatic callers can supply
+`PipelineConfig.pre_pr_test_argv` for a different vetted fallback command.
+GitHub-only checks that need a created PR, especially `pr-policy`, still run
+after publication and remain part of the merge contract.
 
 For hosts that cannot install GitHub CLI in the system-owned locations, the
 automation loop accepts the explicit, CLI-only

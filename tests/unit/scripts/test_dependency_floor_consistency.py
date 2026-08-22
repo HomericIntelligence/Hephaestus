@@ -13,6 +13,6 @@ def test_tooling_dependencies_are_versioned_in_the_dev_group() -> None:
         config = tomllib.load(handle)
 
     dependencies = config["dependency-groups"]["dev"]
-    for package in ("pytest", "pytest-cov", "ruff", "mypy", "bandit", "pdoc"):
-        spec = next(item for item in dependencies if item.startswith(package))
+    for package in ("pytest", "pytest-cov", "ruff", "mypy", "pip", "bandit", "pdoc"):
+        spec = next(item for item in dependencies if item.partition(">=")[0] == package)
         assert ">=" in spec and ",<" in spec

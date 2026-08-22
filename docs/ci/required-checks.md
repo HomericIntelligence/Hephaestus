@@ -18,6 +18,39 @@ label with its process-local reviewed-head proof and conditionally merges only
 that SHA; restarted labels re-enter review. CI/CD never independently produces
 or validates authorization.
 
+## Queue pre-PR source checks
+
+Before publishing a Hephaestus implementation, the queue runs the fixed command
+`env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all`. Rebuilding the
+CI image prevents a prior checkout's dependency environment from weakening the
+gate. Each invocation builds from an explicit allowlisted context, captures its
+own immutable image ID, and runs every container step against that ID; parallel
+workers therefore cannot retag one another's dependencies, and ignored local
+credentials, Git metadata, and unrelated artifacts never enter the build
+context. The command runs once after each implementation or test-fix turn and
+immediately before commit, push, and PR creation. A passing run advances
+directly to publication; a failing run returns the item to the implementer and
+must pass on the next attempt before publication. For linked implementation
+worktrees, the runner mounts the shared Git
+metadata read-only so hatch-vcs and Git-aware checks operate on the candidate
+commit. Before lint and secret scanning, it also builds an alternate Git index
+and read-only candidate tree from `HEAD` plus every non-ignored working-tree
+change. This includes untracked source bytes without mutating the implementer's
+real index; pre-commit reads the alternate index, while Gitleaks scans both Git
+history and that exact candidate tree. The entry point mirrors the locally
+executable source-validation jobs in `_required.yml`, including lint, unit and
+integration tests, installed-CLI tests, artifact lifecycle validation,
+security scans, schema and version checks, license policy, shell checks, and
+repository structure checks. A failure returns to the bounded implementation
+test-fix loop instead of publishing a knowingly red branch.
+
+This local pass cannot run checks whose inputs do not exist until GitHub creates
+the PR. `pr-policy` still validates the live PR body, title, commit subjects,
+and DCO trailers in Actions. The classic matrix contexts and
+`required-checks-gate` also remain authoritative merge requirements. The local
+run is early failure feedback only; it does not grant
+`state:implementation-go` and does not replace GitHub's exact-head checks.
+
 ## Current required contexts
 
 Classic branch protection requires:
@@ -45,6 +78,22 @@ The active ruleset requires these direct contexts:
 The active `homeric-main-baseline` branch ruleset also applies
 `required_signatures` to `main`. Signature enforcement is repository policy,
 not a duplicate GitHub Actions context.
+
+## Merge queue execution
+
+Both workflow sources of required contexts, `_required.yml` and `test.yml`,
+run on `merge_group: checks_requested`. GitHub therefore evaluates the full
+required suite against each synthetic `gh-readonly-queue/...` commit, including
+the aggregate `required-checks-gate`, every direct ruleset context, and the two
+classic matrix-test contexts. A separate smoke workflow cannot replace those
+required names and is not part of the queue contract. Because the live queue's
+`HEADGREEN` grouping strategy evaluates the synthetic group head, the
+merge-group `pr-policy` job binds the queue ref to the live GraphQL merge-queue
+entry and exact synthetic group head, enumerates every source PR represented by
+that head, and requires a successful GitHub-Actions-owned `pr-policy` check on
+each PR's exact current head SHA. Both queue entries and check runs are fully
+paginated and cardinality-checked. Missing, malformed, stale, pending, failed,
+or incomplete source-PR evidence fails closed.
 
 ## Maintenance
 
