@@ -31,6 +31,11 @@ _EVENT_LOG_NAME = re.compile(
 _RETENTION_LOCK_NAME = ".pipeline-events-retention.lock"
 
 
+def _event_log_lock_path(path: Path) -> Path:
+    """Return the stable sidecar used to coordinate one event log."""
+    return path.with_name(f".{path.name}.lock")
+
+
 @dataclass(frozen=True)
 class _EventLog:
     """A recognized regular event-log file and its name-derived timestamp."""
@@ -84,7 +89,11 @@ def _remove_event_log(log: _EventLog, *, dry_run: bool) -> bool:
         return False
 
     try:
-        with file_lock(log.path, blocking=False, require_exclusive=True):
+        with file_lock(
+            _event_log_lock_path(log.path),
+            blocking=False,
+            require_exclusive=True,
+        ):
             try:
                 mode = log.path.lstat().st_mode
             except OSError as exc:
@@ -146,6 +155,7 @@ def _cleanup_event_logs(
     try:
         with file_lock(
             directory / _RETENTION_LOCK_NAME,
+            blocking=False,
             require_exclusive=True,
         ):
             logs = sorted(_scan_event_logs(directory), key=lambda log: log.timestamp)
@@ -197,7 +207,12 @@ def event_log_lifecycle(
 
     active_lock = ExitStack()
     try:
-        active_lock.enter_context(file_lock(path, blocking=False, require_exclusive=True))
+        active_lock.enter_context(
+            file_lock(
+                _event_log_lock_path(path),
+                require_exclusive=True,
+            )
+        )
     except (LockUnavailableError, OSError, RuntimeError) as exc:
         LOG.warning("pipeline event-log cleanup skipped: %s", exc)
         yield

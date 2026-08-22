@@ -6,12 +6,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
+from time import monotonic
 
 import pytest
 
 from hephaestus.automation import event_log_retention
 from hephaestus.automation.event_log_retention import event_log_lifecycle
-from hephaestus.utils.file_lock import LockUnavailableError
+from hephaestus.utils.file_lock import LockUnavailableError, file_lock as real_file_lock
 
 
 def _event_log(directory: Path, timestamp: datetime, pid: int) -> Path:
@@ -143,6 +145,102 @@ def test_active_log_is_not_removed_by_concurrent_cleanup(tmp_path: Path) -> None
             assert active.exists()
 
     assert active.exists()
+
+
+def test_candidate_deletion_uses_stable_sidecar_lock(tmp_path: Path) -> None:
+    """Deleting a candidate never unlinks the inode used for activity locking."""
+    now = datetime(2026, 1, 31, tzinfo=UTC)
+    old = _event_log(tmp_path, now - timedelta(days=31), 101)
+    current = _event_log(tmp_path, now, 102)
+    old_lock = event_log_retention._event_log_lock_path(old)
+
+    with event_log_lifecycle(
+        current,
+        retention_days=30,
+        retention_count=0,
+        dry_run=False,
+        now=now,
+    ):
+        pass
+
+    assert not old.exists()
+    assert old_lock.exists()
+
+
+def test_cleaner_first_interleaving_protects_recreated_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lifecycle waits on the stable lock while a cleaner deletes its old log."""
+    now = datetime(2026, 1, 31, tzinfo=UTC)
+    reused = _event_log(tmp_path, now - timedelta(days=31), 101)
+    cleaner_current = _event_log(tmp_path, now, 102)
+    cleaner_reached_unlink = Event()
+    allow_unlink = Event()
+    lifecycle_entered = Event()
+    original_unlink = Path.unlink
+
+    def paused_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == reused:
+            cleaner_reached_unlink.set()
+            assert allow_unlink.wait(timeout=5)
+        original_unlink(path, missing_ok=missing_ok)
+
+    def clean() -> None:
+        with event_log_lifecycle(
+            cleaner_current,
+            retention_days=30,
+            retention_count=0,
+            dry_run=False,
+            now=now,
+        ):
+            pass
+
+    def reuse() -> None:
+        with event_log_lifecycle(
+            reused,
+            retention_days=0,
+            retention_count=0,
+            dry_run=False,
+            now=now,
+        ):
+            reused.write_text("new run\n", encoding="utf-8")
+            lifecycle_entered.set()
+
+    monkeypatch.setattr(Path, "unlink", paused_unlink)
+    cleaner = Thread(target=clean)
+    lifecycle = Thread(target=reuse)
+    cleaner.start()
+    assert cleaner_reached_unlink.wait(timeout=5)
+    lifecycle.start()
+    assert not lifecycle_entered.wait(timeout=0.1)
+    allow_unlink.set()
+    cleaner.join(timeout=5)
+    lifecycle.join(timeout=5)
+
+    assert not cleaner.is_alive()
+    assert not lifecycle.is_alive()
+    assert lifecycle_entered.is_set()
+    assert reused.read_text(encoding="utf-8") == "new run\n"
+
+
+def test_held_cleanup_lock_does_not_block_lifecycle(tmp_path: Path) -> None:
+    """A peer cleaner causes cleanup to be skipped without delaying dispatch."""
+    now = datetime(2026, 1, 31, tzinfo=UTC)
+    current = _event_log(tmp_path, now, 102)
+    cleanup_lock = tmp_path / event_log_retention._RETENTION_LOCK_NAME
+
+    with real_file_lock(cleanup_lock, require_exclusive=True):
+        started = monotonic()
+        with event_log_lifecycle(
+            current,
+            retention_days=30,
+            retention_count=100,
+            dry_run=False,
+            now=now,
+        ):
+            elapsed = monotonic() - started
+
+    assert elapsed < 1
 
 
 def test_active_logs_can_temporarily_exceed_count_limit(tmp_path: Path) -> None:
