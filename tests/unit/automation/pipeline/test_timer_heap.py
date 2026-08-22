@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.pipeline import coordinator as coordinator_mod, seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
@@ -208,7 +209,13 @@ class TestRetryDelayConsumption:
                 )
                 self.puts = 0
 
-            def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+            def merge_pr_if_head(
+                self,
+                pr_number: int,
+                reviewed_sha: str,
+                authorization: MergeAuthorization,
+            ) -> ConditionalMergeResult:
+                assert authorization.head_sha == reviewed_sha
                 self.puts += 1
                 return ConditionalMergeResult(status=405, body={"message": "not ready"})
 
@@ -291,7 +298,13 @@ class TestRetryDelayConsumption:
                 )
                 self.puts = 0
 
-            def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+            def merge_pr_if_head(
+                self,
+                pr_number: int,
+                reviewed_sha: str,
+                authorization: MergeAuthorization,
+            ) -> ConditionalMergeResult:
+                assert authorization.head_sha == reviewed_sha
                 self.puts += 1
                 return ConditionalMergeResult(status=None, body=None, transport_error=True)
 

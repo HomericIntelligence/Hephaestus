@@ -617,9 +617,10 @@ def _pipeline_scope_for_phases(phases: tuple[str, ...]) -> PipelineScope | None:
     Partial selections use the same stage ownership as the focused wrapper
     CLIs: plan = planning+plan_review, implement = implementation+pr_review+
     merge_wait, drive-green = pr_review+merge_wait. The overlap
-    lets either operational entry point resume an already-approved PR through
-    merge-wait, where the loop re-reads its approval label and live PR head
-    before arming; it does not require an ephemeral review handoff.
+    lets either operational entry point resume an already-eligible PR through
+    merge-wait, where the loop re-reads its eligibility label, live PR head,
+    and separate operator authorization before conditional merge; it still
+    requires the ephemeral current-process review proof.
     """
     selected = set(phases)
     if selected == set(ALL_SELECTABLE):

@@ -28,7 +28,7 @@ numbered, and listed here.
 | [0013](0013-backup-and-disaster-recovery-policy.md) | Tiered backup and disaster-recovery policy | Accepted |
 | [0014](0014-conditional-normal-merge.md) | Conditional normal merge after loop-owned review | Accepted (historical; superseded by 0015) |
 | [0015](0015-bounded-conditional-merge-retries.md) | Bounded conditional merge retries | Accepted (historical; superseded by 0016) |
-| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted |
+| [0016](0016-bounded-operational-merge-readiness.md) | Bounded operational merge-readiness wait | Accepted (merge-authorization boundary superseded by 0024) |
 | [0017](0017-frozen-legacy-agent-import-exceptions.md) | Frozen legacy agent-import exceptions | Accepted |
 | [0018](0018-reviewer-owned-thread-reconciliation.md) | Reviewer-owned PR review-thread reconciliation | Accepted |
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
@@ -36,6 +36,7 @@ numbered, and listed here.
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
 | [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Accepted |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
+| [0024](0024-explicit-operator-merge-authorization.md) | Explicit operator authorization before queue merge | Accepted |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
 | [0026](0026-auxiliary-host-learning-lane.md) | Auxiliary host-learning lane | Accepted |
 | [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |

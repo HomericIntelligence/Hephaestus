@@ -674,8 +674,8 @@ class TestSeedFromCli:
 
         assert entry.skip_tag_obligation == EpicSkipTagObligation(issue=10)
 
-    def test_prs_arm_impl_go_routes_to_merge_wait(self) -> None:
-        """A restarted loop label is the durable merge authorization."""
+    def test_prs_with_impl_go_route_to_merge_wait_for_fresh_admission(self) -> None:
+        """The durable label routes work; merge_wait still requires both proofs."""
         with (
             patch("hephaestus.automation.pipeline.seeding.gh_pr_state", return_value=None),
             patch(

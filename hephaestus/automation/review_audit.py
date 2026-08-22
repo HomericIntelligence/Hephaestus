@@ -208,7 +208,8 @@ def _bounded_feedback(source: str, payload: dict[str, object] | None) -> str:
         feedback = source.strip()
     # Reviewer prose is informational only. Never carry a decision-shaped
     # token forward into a durable audit comment or a later review prompt:
-    # GitHub's implementation-state label is the sole decision authority.
+    # GitHub's implementation-state label is the sole automated eligibility
+    # authority; operator merge authorization is a separate native review.
     feedback = _RESERVED_AUTHORITY_CLAIM_RE.sub("", feedback).strip()
     if len(feedback) <= MAX_RAW_FEEDBACK_CHARS:
         return feedback

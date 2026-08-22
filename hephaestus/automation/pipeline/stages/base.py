@@ -58,6 +58,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from hephaestus.agents.runtime import DEFAULT_AGENT, agent_supports_model_reasoning_effort
 from hephaestus.agents.workspace import SourceLane, WorkspaceBinding
+from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.review_journal import IssueComment, PlanDiscoveryResult
 from hephaestus.automation.state_labels import STATE_SKIP
 
@@ -433,6 +434,14 @@ class StageGitHub(Protocol):
         """Read operational normal-merge readiness without granting authorization."""
         pass
 
+    def merge_authorization_reviews(self, pr_number: int) -> tuple[dict[str, object], ...]:
+        """Return one stable native-review authorization snapshot."""
+        pass
+
+    def repository_permission_for_actor(self, login: str) -> str:
+        """Return the actor's current repository permission."""
+        pass
+
     def base_branch_requires_conversation_resolution(
         self, pr_number: int, base_branch: str
     ) -> bool:
@@ -447,8 +456,13 @@ class StageGitHub(Protocol):
         """
         ...
 
-    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
-        """Perform one immediate normal merge conditional on ``reviewed_sha``."""
+    def merge_pr_if_head(
+        self,
+        pr_number: int,
+        reviewed_sha: str,
+        authorization: MergeAuthorization,
+    ) -> ConditionalMergeResult:
+        """Perform one authorized normal merge conditional on ``reviewed_sha``."""
         pass
 
     def drive_green_learn_terminal(self, issue_number: int) -> bool:

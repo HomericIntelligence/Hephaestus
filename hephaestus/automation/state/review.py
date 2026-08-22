@@ -1,6 +1,6 @@
 """Shared plan-review state helpers for the automation pipeline.
 
-The GitHub issue label is the sole durable authorization gate. Plan-review
+The GitHub issue label is the sole durable plan-review routing gate. Plan-review
 comments carry an exact final state token for audit and diagnostics, but their
 prose cannot grant approval or repair labels.
 """
@@ -34,7 +34,7 @@ _VERDICT_LOG_PREVIEW_CHARS = 200
 
 # Legacy diagnostic threshold retained for compatibility and telemetry only.
 # It must never authorize or block a pipeline transition; live GitHub labels
-# are the sole durable state source.
+# are the sole durable plan-review state source.
 MAX_UNPARSEABLE_VERDICT_PASSES: int = 3
 
 
@@ -124,7 +124,8 @@ def exceeds_unparseable_verdict_cap(
     """Return True when an issue has exceeded the unparseable-verdict retry cap.
 
     This compatibility helper is diagnostic only. Its result must never drive
-    pipeline routing; live GitHub labels are the sole durable state authority.
+    pipeline routing; live GitHub labels are the sole durable plan-review state
+    source.
 
     Args:
         comments: Chronological list of comment dicts.  Same list used by
