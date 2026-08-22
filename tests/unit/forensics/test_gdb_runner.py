@@ -138,7 +138,7 @@ class TestGdbCmdPrefixParsing:
         process.pid = 4242
         process.wait.return_value = 0
 
-        def fake_popen(argv, *, start_new_session):
+        def fake_popen(argv, *, start_new_session, process_group):
             captured.append(list(argv))
             return process
 
@@ -303,6 +303,7 @@ class TestMain:
 
         assert main(["--timeout", "7", "unused-cores", "tool"]) == 0
         assert popen.call_args.kwargs["start_new_session"] is False
+        assert popen.call_args.kwargs["process_group"] is None
         process.kill.assert_not_called()
 
     def test_gdb_success_without_process_groups(
@@ -319,6 +320,47 @@ class TestMain:
 
         assert run_under_gdb(str(tmp_path / "cores"), "tool", [], timeout=7) == 0
         process.kill.assert_not_called()
+
+    @pytest.mark.skipif(not hasattr(os, "forkpty"), reason="requires a controlling TTY")
+    def test_direct_bypass_preserves_controlling_tty(self) -> None:
+        """The direct path keeps /dev/tty usable in a PTY-backed session."""
+        pid, master_fd = os.forkpty()
+        if pid == 0:
+            try:
+                os.environ["RUN_UNDER_GDB"] = "0"
+                rc = main(
+                    [
+                        "--timeout",
+                        "5",
+                        "unused-cores",
+                        sys.executable,
+                        "-c",
+                        "with open('/dev/tty', 'rb') as tty: assert tty.isatty()",
+                    ]
+                )
+            except BaseException:
+                rc = 125
+            os._exit(rc)
+
+        try:
+            _, status = os.waitpid(pid, 0)
+        finally:
+            os.close(master_fd)
+        assert os.waitstatus_to_exitcode(status) == 0
+
+    def test_artifact_cleanup_cannot_mask_timeout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Best-effort unlink failures preserve the execution timeout."""
+        timeout = subprocess.TimeoutExpired(["gdb"], 7)
+        monkeypatch.setattr(gdb_runner, "resolve_command", lambda _command: "/tool")
+        monkeypatch.setattr(gdb_runner, "_run_bounded", Mock(side_effect=timeout))
+        monkeypatch.setattr(Path, "unlink", Mock(side_effect=PermissionError("denied")))
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_under_gdb(str(tmp_path / "cores"), "tool", [], timeout=7)
 
 
 class TestBoundedProcess:
@@ -381,11 +423,49 @@ class TestBoundedProcess:
         monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
         monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
 
-        with pytest.raises(subprocess.TimeoutExpired):
+        with pytest.raises(RuntimeError, match="termination was not confirmed"):
             _run_bounded(["tool"], 7)
 
         assert process.kill.call_count == 2
         assert process.wait.call_args_list == [call(timeout=7), call(timeout=5), call(timeout=0)]
+
+    def test_permission_error_during_group_kill_is_not_suppressed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A genuine termination failure is surfaced instead of reporting 124."""
+        process = MagicMock(pid=4242)
+        process.wait.side_effect = subprocess.TimeoutExpired(["tool"], 7)
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
+        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+        monkeypatch.setattr(os, "killpg", Mock(side_effect=PermissionError("denied")))
+
+        with pytest.raises(PermissionError, match="denied"):
+            _run_bounded(["tool"], 7)
+
+    @pytest.mark.parametrize("process_groups", [True, False])
+    def test_keyboard_interrupt_cleans_up_before_reraising(
+        self,
+        process_groups: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both POSIX-group and direct-child paths clean up on Ctrl-C."""
+        process = MagicMock(pid=4242)
+        process.wait.side_effect = [KeyboardInterrupt, -signal.SIGKILL]
+        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", process_groups)
+        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
+        killpg = Mock()
+        monkeypatch.setattr(os, "killpg", killpg)
+
+        with pytest.raises(KeyboardInterrupt):
+            _run_bounded(["tool"], 7)
+
+        if process_groups:
+            killpg.assert_called_once_with(4242, signal.SIGKILL)
+            process.kill.assert_not_called()
+        else:
+            process.kill.assert_called_once()
+        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
 
     @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
     def test_timeout_kills_real_descendant(self, tmp_path: Path) -> None:
@@ -394,7 +474,7 @@ class TestBoundedProcess:
         child_code = "import time; time.sleep(60)"
         parent_code = (
             "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n"
+            "child = subprocess.Popen([sys.executable, '-c', sys.argv[3]])\n"
             "with open(sys.argv[1], 'w') as pid_file:\n"
             "    pid_file.write(str(child.pid))\n"
             "    pid_file.flush()\n"
@@ -427,18 +507,71 @@ class TestBoundedProcess:
             except ProcessLookupError:
                 break
             # A killed descendant may remain briefly as a zombie until its
-            # reaper collects it; that is terminated, not a live leak.
+            # reaper collects it; confirm that state portably rather than
+            # treating a platform without /proc as successful termination.
             try:
-                state = (
-                    Path(f"/proc/{child_pid}/stat").read_text().split(") ", 1)[1].split(" ", 1)[0]
+                status = subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(child_pid)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
                 )
-            except (FileNotFoundError, IndexError, OSError):
-                break
-            if state == "Z":
+            except (OSError, subprocess.TimeoutExpired):
+                status = None
+            if (
+                status is not None
+                and status.returncode == 0
+                and status.stdout.strip().startswith("Z")
+            ):
                 break
             time.sleep(0.01)
         else:
             pytest.fail(f"descendant process {child_pid} survived timeout cleanup")
+
+    @_requires_gdb
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+    def test_gdb_timeout_kills_forking_inferior_descendant(self, tmp_path: Path) -> None:
+        """Timeout cleanup kills a descendant in GDB's inferior process group."""
+        pid_file = tmp_path / "gdb-child.pid"
+        child_code = "import time; time.sleep(60)"
+        inferior_code = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n"
+            "with open(sys.argv[1], 'w') as pid_file:\n"
+            "    pid_file.write(str(child.pid))\n"
+            "    pid_file.flush()\n"
+            "time.sleep(60)\n"
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_under_gdb(
+                str(tmp_path / "cores"),
+                sys.executable,
+                ["-c", inferior_code, str(pid_file), child_code],
+                timeout=3,
+            )
+
+        assert pid_file.is_file(), "GDB did not start the forking inferior"
+        child_pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            status = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(child_pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            if status.returncode == 0 and status.stdout.strip().startswith("Z"):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail(f"GDB inferior descendant {child_pid} survived timeout cleanup")
 
 
 class TestExecutionTimeoutParser:

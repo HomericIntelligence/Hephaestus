@@ -20,7 +20,7 @@ before ``<core-dir>`` and accepts values from 1 through 86,400 seconds. A
 timeout terminates the dedicated POSIX process group, or the direct child when
 process groups are unavailable, and returns exit code 124 after bounded cleanup.
 If the bounded reap also times out, the runner makes one final nonblocking reap
-attempt before returning the original timeout outcome.
+attempt and surfaces a cleanup failure unless termination is confirmed.
 
 Environment variables:
 
@@ -82,7 +82,12 @@ _PROCESS_REAP_TIMEOUT_SECONDS = 5
 _TIMEOUT_EXIT_CODE = 124
 _TIMEOUT_ERROR = "[run-under-gdb] ERROR: command timed out"
 _TIMEOUT_JSON_MESSAGE = "command timed out"
-_PROCESS_GROUPS_SUPPORTED = hasattr(os, "killpg") and hasattr(signal, "SIGKILL")
+_PROCESS_GROUPS_SUPPORTED = (
+    os.name == "posix"
+    and hasattr(os, "setpgid")
+    and hasattr(os, "killpg")
+    and hasattr(signal, "SIGKILL")
+)
 
 
 def _validate_execution_timeout(timeout: int) -> int:
@@ -104,37 +109,99 @@ def _parse_execution_timeout(raw: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+def _read_process_group(path: Path | None) -> int | None:
+    """Return a positive process-group ID recorded by the child, if present."""
+    if path is None:
+        return None
+    try:
+        process_group = int(path.read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        return None
+    return process_group if process_group > 0 else None
+
+
+def _unlink_best_effort(*paths: Path) -> None:
+    """Remove temporary artifacts without masking the execution outcome."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
+def _terminate_process(
+    process: subprocess.Popen[bytes],
+    *,
+    additional_process_group_file: Path | None = None,
+) -> None:
     """Kill a POSIX process group or fall back to the direct child."""
     if _PROCESS_GROUPS_SUPPORTED:
+        additional_process_group = _read_process_group(additional_process_group_file)
+        if additional_process_group is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(additional_process_group, signal.SIGKILL)
         try:
             os.killpg(process.pid, signal.SIGKILL)
             return
-        except (ProcessLookupError, OSError):
+        except ProcessLookupError:
             pass
-    with contextlib.suppress(ProcessLookupError, OSError):
+    with contextlib.suppress(ProcessLookupError):
         process.kill()
 
 
-def _run_bounded(command: list[str], timeout: int) -> int:
+def _terminate_and_reap(
+    process: subprocess.Popen[bytes],
+    *,
+    additional_process_group_file: Path | None = None,
+) -> None:
+    """Terminate owned process groups and confirm the direct child was reaped."""
+    _terminate_process(
+        process,
+        additional_process_group_file=additional_process_group_file,
+    )
+    try:
+        process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _terminate_process(
+            process,
+            additional_process_group_file=additional_process_group_file,
+        )
+        # A final zero-wait reap records an exit which raced the bounded
+        # cleanup without extending timeout handling.
+        try:
+            process.wait(timeout=0)
+        except subprocess.TimeoutExpired as final_timeout:
+            raise RuntimeError(
+                "process termination was not confirmed within the cleanup timeout"
+            ) from final_timeout
+
+
+def _run_bounded(
+    command: list[str],
+    timeout: int,
+    *,
+    additional_process_group_file: Path | None = None,
+) -> int:
     """Run a command with inherited streams and bounded timeout cleanup."""
     process = subprocess.Popen(
         command,
-        start_new_session=_PROCESS_GROUPS_SUPPORTED,
+        # A new process group gives cleanup an owned signal target while
+        # preserving the caller's session and controlling terminal.
+        start_new_session=False,
+        process_group=0 if _PROCESS_GROUPS_SUPPORTED else None,
     )
     try:
         return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        _terminate_process(process)
-        try:
-            process.wait(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            _terminate_process(process)
-            # A final zero-wait reap records an exit which raced the bounded
-            # cleanup without extending timeout handling or masking the cause.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                process.wait(timeout=0)
+        _terminate_and_reap(
+            process,
+            additional_process_group_file=additional_process_group_file,
+        )
         raise exc
+    except KeyboardInterrupt:
+        _terminate_and_reap(
+            process,
+            additional_process_group_file=additional_process_group_file,
+        )
+        raise
 
 
 def _validate_gdb_cmd_prefix(raw: str | None) -> list[str]:
@@ -204,8 +271,10 @@ set logging on
 
 python
 import gdb
+import os
 EXIT_FILE = {exit_file!r}
 CORE_FILE = {core_file!r}
+PROCESS_GROUP_FILE = {process_group_file!r}
 # POSIX shell convention for signal-terminated processes (128 + signo).
 SIG_MAP = {{"SIGABRT": 6, "SIGSEGV": 11, "SIGBUS": 7, "SIGFPE": 8, "SIGILL": 4}}
 state = {{"signaled": False}}
@@ -213,6 +282,18 @@ state = {{"signaled": False}}
 def write_exit(code):
     with open(EXIT_FILE, "w") as f:
         f.write(str(code))
+
+def record_process_group(event):
+    # GDB normally puts the inferior in a process group distinct from its own.
+    # Persist that group for the wrapper so timeout cleanup owns both trees.
+    if PROCESS_GROUP_FILE is None:
+        return
+    pid = gdb.selected_inferior().pid
+    if pid:
+        temporary_file = PROCESS_GROUP_FILE + ".tmp"
+        with open(temporary_file, "w") as f:
+            f.write(str(os.getpgid(pid)))
+        os.replace(temporary_file, PROCESS_GROUP_FILE)
 
 # Default = 1 covers the case where neither handler fires (e.g. gdb dies).
 write_exit(1)
@@ -239,6 +320,8 @@ def on_exit(event):
 
 gdb.events.stop.connect(on_stop)
 gdb.events.exited.connect(on_exit)
+gdb.events.new_objfile.connect(record_process_group)
+gdb.events.cont.connect(record_process_group)
 end
 
 # Intercept crash signals before the inferior's own handlers run.
@@ -275,13 +358,20 @@ def resolve_command(command: str) -> str | None:
     return shutil.which(command)
 
 
-def build_gdb_script(gdb_log: str, core_file: str, exit_file: str) -> str:
+def build_gdb_script(
+    gdb_log: str,
+    core_file: str,
+    exit_file: str,
+    process_group_file: str | None = None,
+) -> str:
     """Render the gdb batch script.
 
     Args:
         gdb_log: Path gdb writes its logging output to.
         core_file: Path ``generate-core-file`` writes the ELF core to on crash.
         exit_file: Path the Python hook records the intended exit code to.
+        process_group_file: Optional path where the hook records the inferior's
+            process-group ID for bounded wrapper cleanup.
 
     Returns:
         The rendered gdb script text.
@@ -291,6 +381,7 @@ def build_gdb_script(gdb_log: str, core_file: str, exit_file: str) -> str:
         gdb_log=gdb_log,
         core_file=core_file,
         exit_file=exit_file,
+        process_group_file=process_group_file,
     )
 
 
@@ -347,8 +438,14 @@ def run_under_gdb(
     gdb_log = str(core_path / f"gdb-{timestamp}.log")
     core_file = str(core_path / f"core.gdb.{timestamp}")
     exit_file = core_path / f"exit-{timestamp}.code"
+    process_group_file = core_path / f"inferior-pgid-{timestamp}.code"
 
-    script_text = build_gdb_script(gdb_log, core_file, str(exit_file))
+    script_text = build_gdb_script(
+        gdb_log,
+        core_file,
+        str(exit_file),
+        str(process_group_file),
+    )
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".gdb", prefix="run-under-gdb-", delete=False, encoding="utf-8"
     ) as script_handle:
@@ -367,7 +464,11 @@ def run_under_gdb(
             command_bin,
             *command_args,
         ]
-        gdb_status = _run_bounded(gdb_cmd, timeout)
+        gdb_status = _run_bounded(
+            gdb_cmd,
+            timeout,
+            additional_process_group_file=process_group_file,
+        )
 
         print(f"[run-under-gdb] gdb log  : {gdb_log}", file=sys.stderr)
         print(f"[run-under-gdb] core file: {core_file} (written on crash)", file=sys.stderr)
@@ -384,8 +485,12 @@ def run_under_gdb(
                 return gdb_status
         return gdb_status
     finally:
-        exit_file.unlink(missing_ok=True)
-        Path(gdb_script).unlink(missing_ok=True)
+        _unlink_best_effort(
+            exit_file,
+            process_group_file,
+            Path(f"{process_group_file}.tmp"),
+            Path(gdb_script),
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:
