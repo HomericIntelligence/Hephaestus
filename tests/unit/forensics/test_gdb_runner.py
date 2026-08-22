@@ -504,24 +504,22 @@ class TestBoundedProcess:
             except ProcessLookupError:
                 break
             # A killed descendant may remain briefly as a zombie until its
-            # reaper collects it; confirm that state portably rather than
-            # treating a platform without /proc as successful termination.
-            try:
-                status = subprocess.run(
-                    ["ps", "-o", "stat=", "-p", str(child_pid)],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=1,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                status = None
-            if (
-                status is not None
-                and status.returncode == 0
-                and status.stdout.strip().startswith("Z")
-            ):
-                break
+            # reaper collects it. Confirm that state portably: read the
+            # kernel's /proc state directly instead of relying on procps
+            # userland, which minimal CI containers do not ship. A platform
+            # without /proc keeps requiring a positive ProcessLookupError.
+            proc_stat = Path(f"/proc/{child_pid}/stat")
+            if proc_stat.exists():
+                try:
+                    state = (
+                        proc_stat.read_text(encoding="utf-8")
+                        .rsplit(")", 1)[1]
+                        .split()[0]
+                    )
+                except (OSError, IndexError):
+                    state = None
+                if state == "Z":
+                    break
             time.sleep(0.01)
         else:
             pytest.fail(f"descendant process {child_pid} survived timeout cleanup")
