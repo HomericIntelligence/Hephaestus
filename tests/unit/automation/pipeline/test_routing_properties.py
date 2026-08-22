@@ -21,7 +21,11 @@ from hephaestus.automation.pipeline import (
     StageName,
     WorkItem,
 )
-from hephaestus.automation.pipeline.routing import MAIN_PIPELINE_ORDER, budget_keys
+from hephaestus.automation.pipeline.routing import (
+    MAIN_PIPELINE_ORDER,
+    PIPELINE_ORDER,
+    budget_keys,
+)
 from hephaestus.automation.pipeline.work_item import ItemKind
 
 NON_TERMINAL = [s for s in StageName if s != StageName.FINISHED]
@@ -214,8 +218,11 @@ def contiguous_scopes(draw: st.DrawFn) -> frozenset[StageName]:
 def test_scope_closure_over_generated_subsets(stages: frozenset[StageName]) -> None:
     """(d) Every trimmed route targets scope ∪ {FINISHED} for ANY contiguous scope."""
     scope = PipelineScope(stages)
+    trimmed = scope.trimmed_routes()
     allowed = set(stages) | {StageName.LEARNING, StageName.FINISHED}
-    for stage, route in scope.trimmed_routes().items():
+    expected_order = tuple(stage for stage in PIPELINE_ORDER if stage in allowed)
+    assert tuple(trimmed) == expected_order
+    for stage, route in trimmed.items():
         assert stage in allowed
         assert route.next in allowed
         for target in route.fail_routes.values():

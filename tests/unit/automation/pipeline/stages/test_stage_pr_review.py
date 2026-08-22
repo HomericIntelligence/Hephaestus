@@ -1167,7 +1167,7 @@ class TestPrReviewStageStep:
     ) -> None:
         """A direct provider receives the reviewer session created in round one."""
         stage = PrReviewStage()
-        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
         item.session_ids["pr-reviewer"] = "review-session-id"
 
@@ -1211,7 +1211,7 @@ class TestPrReviewStageStep:
     ) -> None:
         """Validation sees the review it validates, not an unrelated reviewer."""
         stage = PrReviewStage()
-        ctx = make_ctx(config=SimpleNamespace(agent="codex"))
+        ctx = make_ctx(config_overrides={"agent": "codex"})
         item = make_work_item(issue=1, pr=1001, state="VALIDATE_WAIT")
         item.payload["reviewed_pr_head_sha"] = "a" * 40
         item.session_ids["pr-reviewer"] = "review-session-id"
@@ -1229,7 +1229,7 @@ class TestPrReviewStageStep:
         """Codex follows the same compact-before-re-review lifecycle as Claude."""
         stage = PrReviewStage()
         ctx = make_ctx(
-            config=SimpleNamespace(agent="codex"),
+            config_overrides={"agent": "codex"},
             github=FakeStageGitHub(unresolved=[(3, 0)]),
         )
         item = make_work_item(issue=1, pr=1001, state="EVAL")
@@ -1294,7 +1294,7 @@ class TestPrReviewStageStep:
     def test_review_wait_forwards_nitpick_config(self, make_ctx: Any, make_work_item: Any) -> None:
         """--nitpick must reach the strict PR-review prompt."""
         stage = PrReviewStage()
-        ctx = make_ctx(config=SimpleNamespace(agent="claude", nitpick=True))
+        ctx = make_ctx(config_overrides={"agent": "claude", "nitpick": True})
         item = make_work_item(issue=1, pr=1001, state="REVIEW_WAIT")
 
         result = _dispatch_review(stage, item, ctx)
@@ -4178,7 +4178,6 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
-        ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
@@ -4385,7 +4384,6 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = DeferFailsGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
-        ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
@@ -4401,7 +4399,6 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
-        ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
@@ -4416,7 +4413,6 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
-        ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
@@ -5013,7 +5009,6 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 2, 0)])  # 0 blocking, 2 minor, 0 external
         ctx = make_ctx(github=github)
-        ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
@@ -5113,7 +5108,6 @@ class TestEvalVerdicts:
         stage = PrReviewStage()
         github = FakeStageGitHub(by_severity=[(0, 0, 0)])  # 0 blocking, 0 minor, 0 external
         ctx = make_ctx(github=github)
-        ctx.config.enable_follow_up = False
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = _valid_audit()
 
