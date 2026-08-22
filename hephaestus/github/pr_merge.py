@@ -144,61 +144,6 @@ def run_git_cmd(cmd: list[str], dry_run: bool = False, cwd: str | None = None) -
     run_git(cmd, cwd=cwd, dry_run=dry_run)
 
 
-def checks_success_and_log(commit: Any) -> tuple[bool | None, list[Any]]:
-    """Check if commit has successful CI/CD checks.
-
-    Args:
-        commit: GitHub commit object
-
-    Returns:
-        Tuple of (success status, checks list) or (None, []) if no check runs present
-
-    """
-    try:
-        checks = list(commit.get_check_runs())
-    except Exception as e:  # broad catch intentional: git remote detection can fail in many ways
-        logger.error("Error getting check runs: %s", e)
-        return None, []
-
-    bad = {"failure", "timed_out", "cancelled", "action_required"}
-    any_success = False
-
-    if checks:
-        for cr in checks:
-            logger.info("    - %s: status=%s, conclusion=%s", cr.name, cr.status, cr.conclusion)
-            if cr.status != "completed":
-                return False, checks
-            if cr.conclusion in bad:
-                return False, checks
-            if cr.conclusion == "success":
-                any_success = True
-        return any_success, checks
-
-    return None, []
-
-
-def legacy_status_and_log(commit: Any) -> str:
-    """Get legacy commit status and log contexts via logger.info.
-
-    Args:
-        commit: GitHub commit object
-
-    Returns:
-        Combined status state
-
-    """
-    try:
-        combined = commit.get_combined_status()
-        for ctx in combined.statuses:
-            logger.info(
-                "    - %s: state=%s, description=%s", ctx.context, ctx.state, ctx.description
-            )
-        return combined.state or "unknown"
-    except Exception as e:  # broad catch retained for legacy object-style helper compatibility
-        logger.error("Error getting combined status: %s", e)
-        return "unknown"
-
-
 def local_branch_exists(branch_name: str) -> bool:
     """Check if a local branch exists.
 
@@ -319,72 +264,168 @@ def _list_open_prs(repo_name: str) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-_CHECK_BAD_BUCKETS = {"fail", "cancel"}
+_CHECK_SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
+_CHECK_RUNS_PAGE_SIZE = 100
 
 
-def _checks_success_and_log(repo_name: str, pr_number: int) -> bool | None:
-    """Return PR checks success, false, or ``None`` when no checks exist."""
+def _fetch_check_run_page(endpoint: str, head_sha: str) -> dict[str, Any] | None:
+    """Return one exact-head Check Runs page, or log a fail-closed error."""
     try:
-        checks = _gh_json(
-            [
-                "pr",
-                "checks",
-                str(pr_number),
-                "--repo",
-                repo_name,
-                "--json",
-                "name,state,bucket,workflow",
-            ]
-        )
+        payload = _gh_json(["api", endpoint])
     except subprocess.CalledProcessError as exc:
         blob = (exc.stderr or "") + (exc.stdout or "")
-        if "no checks reported" in blob:
-            return None
-        logger.error("Error getting check runs for PR #%d: %s", pr_number, blob.strip() or exc)
+        logger.error(
+            "Error getting check runs for head %s; refusing merge: %s",
+            head_sha,
+            blob.strip() or exc,
+        )
         return None
     except (RuntimeError, json.JSONDecodeError) as exc:
-        logger.error("Error getting check runs for PR #%d: %s", pr_number, exc)
+        logger.error("Error getting check runs for head %s; refusing merge: %s", head_sha, exc)
         return None
+    if not isinstance(payload, dict):
+        logger.error("Invalid check-run response for head %s; refusing merge", head_sha)
+        return None
+    return payload
 
-    if not isinstance(checks, list) or not checks:
+
+def _parse_check_run_page(payload: dict[str, Any], head_sha: str) -> tuple[int, list[Any]] | None:
+    """Validate the pagination evidence GitHub returned for one Check Runs page."""
+    total_count = payload.get("total_count")
+    checks = payload.get("check_runs")
+    if (
+        not isinstance(total_count, int)
+        or isinstance(total_count, bool)
+        or total_count < 0
+        or not isinstance(checks, list)
+    ):
+        logger.error("Invalid check-run evidence for head %s; refusing merge", head_sha)
         return None
+    return total_count, checks
+
+
+def _check_run_traversal(repo_name: str, head_sha: str) -> list[Any] | None:
+    """Perform one complete traversal of exact-head Check Runs pages."""
+    endpoint = f"/repos/{repo_name}/commits/{head_sha}/check-runs?per_page={_CHECK_RUNS_PAGE_SIZE}"
+    checks: list[Any] = []
+    check_run_ids: set[int] | None = None
+    expected_count: int | None = None
+    page = 1
+
+    while expected_count is None or len(checks) < expected_count:
+        page_endpoint = endpoint if page == 1 else f"{endpoint}&page={page}"
+        payload = _fetch_check_run_page(page_endpoint, head_sha)
+        if payload is None:
+            return None
+        parsed_page = _parse_check_run_page(payload, head_sha)
+        if parsed_page is None:
+            return None
+        total_count, page_checks = parsed_page
+        if expected_count is None:
+            expected_count = total_count
+            # A multi-page read cannot trust its aggregate count alone: a
+            # replayed page can replace a failing run while preserving it.
+            # GitHub's Check Run IDs are stable positive integers, so require
+            # them as a complete, unique traversal proof whenever another
+            # page is needed.
+            if expected_count > len(page_checks):
+                check_run_ids = set()
+        elif total_count != expected_count:
+            logger.error("Inconsistent check-run count for head %s; refusing merge", head_sha)
+            return None
+
+        if check_run_ids is not None:
+            for check in page_checks:
+                check_run_id = check.get("id") if isinstance(check, dict) else None
+                if (
+                    not isinstance(check_run_id, int)
+                    or isinstance(check_run_id, bool)
+                    or check_run_id <= 0
+                    or check_run_id in check_run_ids
+                ):
+                    logger.error(
+                        "Invalid or duplicate check-run ID for head %s; refusing merge",
+                        head_sha,
+                    )
+                    return None
+                check_run_ids.add(check_run_id)
+
+        checks.extend(page_checks)
+        if len(checks) > expected_count or (not page_checks and len(checks) < expected_count):
+            logger.error("Incomplete check-run evidence for head %s; refusing merge", head_sha)
+            return None
+        page += 1
+    return checks
+
+
+def _check_run_snapshot(checks: list[Any], head_sha: str) -> dict[int, tuple[str, str]] | None:
+    """Return the identity and merge-relevant state from paginated evidence."""
+    snapshot: dict[int, tuple[str, str]] = {}
+    for check in checks:
+        check_run_id = check.get("id") if isinstance(check, dict) else None
+        if (
+            not isinstance(check_run_id, int)
+            or isinstance(check_run_id, bool)
+            or check_run_id <= 0
+            or check_run_id in snapshot
+        ):
+            logger.error("Invalid or duplicate check-run ID for head %s; refusing merge", head_sha)
+            return None
+        snapshot[check_run_id] = (
+            str(check.get("status", "")).lower(),
+            str(check.get("conclusion", "")).lower(),
+        )
+    return snapshot
+
+
+def _all_check_runs_for_head(repo_name: str, head_sha: str) -> list[Any] | None:
+    """Return stable exact-head Check Runs evidence, rejecting partial results."""
+    checks = _check_run_traversal(repo_name, head_sha)
+    if checks is None or len(checks) <= _CHECK_RUNS_PAGE_SIZE:
+        return checks
+
+    first_snapshot = _check_run_snapshot(checks, head_sha)
+    if first_snapshot is None:
+        return None
+    repeated_checks = _check_run_traversal(repo_name, head_sha)
+    if repeated_checks is None:
+        return None
+    repeated_snapshot = _check_run_snapshot(repeated_checks, head_sha)
+    if repeated_snapshot is None or repeated_snapshot != first_snapshot:
+        logger.error("Check-run evidence changed while reading head %s; refusing merge", head_sha)
+        return None
+    return repeated_checks
+
+
+def _checks_pass_and_log(repo_name: str, head_sha: str) -> bool:
+    """Return whether Check Runs for ``head_sha`` permit a merge.
+
+    Commit Status API records and PR check rollups can describe different
+    commits or evidence formats. Merge eligibility therefore accepts only the
+    current Check Runs response for the exact PR head.
+    """
+    checks = _all_check_runs_for_head(repo_name, head_sha)
+    if checks is None:
+        return False
+
+    if not checks:
+        logger.error("No check runs reported for head %s; refusing merge", head_sha)
+        return False
 
     any_success = False
     for check in checks:
         if not isinstance(check, dict):
-            continue
+            logger.error("Invalid check-run entry for head %s; refusing merge", head_sha)
+            return False
         name = check.get("name", "")
-        state = check.get("state", "")
-        bucket = str(check.get("bucket", "")).lower()
-        logger.info("    - %s: state=%s, bucket=%s", name, state, bucket)
-        if bucket in _CHECK_BAD_BUCKETS:
+        status = str(check.get("status", "")).lower()
+        conclusion = str(check.get("conclusion", "")).lower()
+        logger.info("    - %s: status=%s, conclusion=%s", name, status, conclusion)
+        if status != "completed" or conclusion not in _CHECK_SUCCESS_CONCLUSIONS:
             return False
-        if bucket == "pending":
-            return False
-        if bucket == "pass":
+        if conclusion == "success":
             any_success = True
     return any_success
-
-
-def _legacy_status_and_log(repo_name: str, head_sha: str) -> str:
-    """Return combined legacy commit status for ``head_sha``."""
-    try:
-        payload = _gh_json(["api", f"/repos/{repo_name}/commits/{head_sha}/status"])
-    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
-        logger.error("Error getting combined status: %s", exc)
-        return "unknown"
-    if not isinstance(payload, dict):
-        return "unknown"
-    for ctx in payload.get("statuses") or []:
-        if not isinstance(ctx, dict):
-            continue
-        logger.info(
-            "    - %s: state=%s, description=%s",
-            ctx.get("context", ""),
-            ctx.get("state", ""),
-            ctx.get("description", ""),
-        )
-    return str(payload.get("state") or "unknown")
 
 
 # GitHub returns HTTP 405 with this message from the direct merge API when the
@@ -517,16 +558,6 @@ def _list_open_prs_for_cli(repo_name: str) -> list[dict[str, Any]] | None:
         return None
 
 
-def _checks_pass_or_legacy(repo_name: str, pr_number: int, head_sha: str) -> bool:
-    logger.info("  Checks API results:")
-    success = _checks_success_and_log(repo_name, pr_number)
-    if success is not None:
-        return success
-
-    logger.info("  No check runs found; falling back to legacy status contexts:")
-    return _legacy_status_and_log(repo_name, head_sha) == "success"
-
-
 def _attempt_pr_merge(
     repo_name: str,
     pr_number: int,
@@ -564,7 +595,8 @@ def _process_pr(
         )
 
     logger.info("\nChecking PR #%d: %s -> %s", pr_number, head_branch, base_branch)
-    success = _checks_pass_or_legacy(repo_name, pr_number, head_sha)
+    logger.info("  Checks API results:")
+    success = _checks_pass_and_log(repo_name, head_sha)
 
     if push_all:
         logger.info("  Pushing head branch '%s' (--push-all mode)...", head_branch)
