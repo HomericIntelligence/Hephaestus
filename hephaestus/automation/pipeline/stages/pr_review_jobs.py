@@ -10,6 +10,7 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.workspace import SourceLane
 
+from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     DeliverReplyHandoffRequest,
     FrozenJson,
@@ -1021,11 +1022,11 @@ class PrReviewJobs(_PrReviewHost):
                 ),
                 "failure_kind": _host_verification_failure_kind(result_value),
                 "ok": result.ok,
-                "error": result.error or "",
+                "error": redact_diagnostic_text(result.error or "")[:500],
                 "platform": platform,
                 "status": status,
-                "stdout_tail": result.stdout_tail,
-                "stderr_tail": result.stderr_tail,
+                "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+                "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
             }
         )
 

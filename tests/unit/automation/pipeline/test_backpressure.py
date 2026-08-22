@@ -29,8 +29,11 @@ class _RecordingWorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: Any = None,
         athena_skill_executor: Any = None,
+        rebase_adr_validator: Any = None,
+        rebase_structural_test_argv: Any = None,
     ) -> None:
         del lock_dir
+        del rebase_adr_validator, rebase_structural_test_argv
         self.size = size
         self.shutdown_event = shutdown
         self.completion_q = completion_q

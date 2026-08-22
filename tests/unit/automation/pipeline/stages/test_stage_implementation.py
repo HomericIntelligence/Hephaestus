@@ -911,6 +911,46 @@ class TestGate:
             "stderr_tail": "safe stderr",
         }
 
+    def test_rebase_continuation_failure_redacts_all_durable_diagnostics(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Continuation receipts never persist secret-like worker diagnostics."""
+        secret = "sk" + "-live_12345678901234567890"
+        long_suffix = "x" * 600
+        long_tail = "x" * 4100
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error=f"host continuation failed: token={secret} {long_suffix}",
+                value={
+                    "failure_kind": "continuation",
+                    "phase": "rebase_continue",
+                    "returncode": 128,
+                    "receipt_error": f"receipt token={secret} {long_suffix}",
+                },
+                stdout_tail=f"{long_tail} stdout token={secret}",
+                stderr_tail=f"{long_tail} stderr token={secret}",
+            ),
+            ctx,
+        )
+
+        diagnostic = item.payload["rebase_failure_diagnostic"]
+        persisted = (
+            item.payload["rebase_error_detail"],
+            diagnostic["receipt_error"],
+            diagnostic["stdout_tail"],
+            diagnostic["stderr_tail"],
+        )
+        assert all(secret not in value for value in persisted)
+        assert all("<redacted>" in value for value in persisted)
+        assert all(len(value) <= 500 for value in persisted[:2])
+        assert all(len(value) <= 4000 for value in persisted[2:])
+
     def test_successful_conflict_agent_requires_host_completion_before_flags_clear(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -973,6 +1013,66 @@ class TestGate:
         assert "rebase_conflict" not in item.payload
         assert "rebase_conflict_index_snapshot" not in item.payload
         assert "rebase_paused_head_sha" not in item.payload
+
+    def test_failed_host_rebase_retains_structured_diagnostics(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A semantic rebase failure remains actionable when the stage fails."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase semantic validation failed: duplicate ADR number 0027",
+                value={"failure_kind": "semantic_validation"},
+                stdout_tail="duplicate ADR number 0027",
+                stderr_tail="pytest diagnostics",
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_error"] is True
+        assert item.payload["rebase_error_kind"] == "semantic_validation"
+        assert item.payload["rebase_error_detail"] == (
+            "rebase semantic validation failed: duplicate ADR number 0027"
+        )
+        assert item.payload["rebase_stdout_tail"] == "duplicate ADR number 0027"
+        assert item.payload["rebase_stderr_tail"] == "pytest diagnostics"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "rebase semantic validation failed: duplicate ADR number 0027",
+        )
+
+    def test_failed_host_rebase_redacts_secret_like_tails(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Item payload rebase tails never retain secret-like content."""
+        gh_token = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, pr=1001, state="REBASE_CONTINUE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="rebase semantic validation failed: duplicate ADR number 0027",
+                value={"failure_kind": "semantic_validation"},
+                stdout_tail=f"git remote add origin https://x-access-token:{gh_token}@github.com/o/r.git",
+                stderr_tail="pytest error\nAuthorization: Basic dXNlcjpwYXNz",
+            ),
+            ctx,
+        )
+
+        assert item.payload["rebase_error"] is True
+        assert item.payload["rebase_error_kind"] == "semantic_validation"
+        assert gh_token not in item.payload["rebase_stdout_tail"]
+        assert "dXNlcjpwYXNz" not in item.payload["rebase_stderr_tail"]
+        assert "<redacted>" in item.payload["rebase_stdout_tail"]
+        assert "<redacted>" in item.payload["rebase_stderr_tail"]
 
 
 class TestImplementationStateSkipGate:

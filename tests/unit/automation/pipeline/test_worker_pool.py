@@ -177,12 +177,25 @@ def pool(
     completion_q: CompletionQueue,
     tmp_path: Path,
 ) -> Iterator[WorkerPool]:
-    """Worker pool with a single thread and a temp cross-process lock dir."""
+    """Worker pool with a single thread and a temp cross-process lock dir.
+
+    Injects the repository-owned ADR rebase policy so the ADR semantic and
+    structural validation gates behave as they do in the production
+    coordinator wiring.  A deliberately policy-free pool is exercised by the
+    unaffected-layout regression tests below.
+    """
+    from hephaestus.automation.pipeline.rebase_adr_policy import (
+        REBASE_STRUCTURAL_TEST_ARGV,
+        validate_rebased_adr_tree,
+    )
+
     p = WorkerPool(
         size=1,
         shutdown=shutdown_event,
         completion_q=completion_q,
         lock_dir=tmp_path / "locks",
+        rebase_adr_validator=validate_rebased_adr_tree,
+        rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
     )
     yield p
     p.shutdown()
@@ -3448,6 +3461,203 @@ class TestGitOps:
         assert result.error == "rebase conflict resolution required: agent made no file changes"
         run.assert_not_called()
 
+    def test_rebase_semantic_validation_rejects_duplicate_adr_numbers(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A resolved README conflict cannot publish duplicate ADR identities."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
+        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        (adr_dir / "README.md").write_text(
+            "- [Durable plan review conversations](0027-durable-plan-review-conversations.md)\n"
+            "- [Host-owned learning preparation](0027-host-owned-learning-preparation.md)\n"
+        )
+
+        result = pool._validate_rebased_tree(tmp_path)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "semantic_validation"},
+            error=(
+                "rebase semantic validation failed: duplicate ADR number 0027 "
+                "(0027-durable-plan-review-conversations.md, "
+                "0027-host-owned-learning-preparation.md)"
+            ),
+        )
+
+    def test_rebase_semantic_validation_rejects_malformed_adr_record(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """An ADR that bypasses the duplicate check still cannot be published."""
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0001-first-decision.md").write_text(
+            "# ADR-0001: First decision\n- Status: Accepted\n"
+        )
+        (adr_dir / "README.md").write_text("- [First decision](0001-first-decision.md)\n")
+
+        result = pool._validate_rebased_tree(tmp_path)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "semantic_validation"},
+            error=(
+                "rebase semantic validation failed: malformed ADR record 0001-first-decision.md"
+            ),
+        )
+
+    def test_continue_rebase_does_not_publish_semantically_invalid_tree(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """Semantic validation fails closed after Git completes and before push."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "0027-durable-plan-review-conversations.md").write_text("# plan\n")
+        (adr_dir / "0027-host-owned-learning-preparation.md").write_text("# learning\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0")
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is False
+        assert result.value == {"failure_kind": "semantic_validation"}
+        assert result.error == (
+            "rebase semantic validation failed: duplicate ADR number 0027 "
+            "(0027-durable-plan-review-conversations.md, "
+            "0027-host-owned-learning-preparation.md)"
+        )
+        push.assert_not_called()
+
+    def test_continue_rebase_runs_repository_structural_validation_before_publish(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """The repository-owned ADR test runs after continuation and before push."""
+        (tmp_path / "x.py").write_text("resolved\n")
+        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("# repository-owned structural test\n")
+        job = self._continue_rebase_job(tmp_path)
+        receipt = {
+            "conflict_paths": ("x.py",),
+            "conflict_snapshot": {"x.py": "after"},
+            "conflict_index_snapshot": "1" * 64,
+            "paused_head_sha": "c" * 40,
+        }
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv == ["git", "diff", "--name-only", "-z"]:
+                return MagicMock(returncode=0, stdout="x.py\0")
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=0, stdout="")
+            if argv[:3] == ["git", "rev-list", "--reverse"]:
+                return MagicMock(returncode=0, stdout="c" * 40)
+            if argv[:3] == ["git", "cat-file", "-p"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout=(
+                        "tree deadbeef\ngpgsig signature\n\nfix\n\n"
+                        "Signed-off-by: Test User <test@example.com>\n"
+                    ),
+                )
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
+            patch.object(pool, "_conflict_receipt", return_value=receipt),
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(
+                pool,
+                "_run_rebase_structural_validation",
+                create=True,
+                return_value=None,
+            ) as validate,
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+        ):
+            result = pool._git_continue_rebase(job)
+
+        assert result.ok is True
+        validate.assert_called_once_with(tmp_path, timeout=60)
+        push.assert_called_once()
+
+    def test_rebase_structural_validation_preserves_bounded_diagnostics(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A failing repository test returns its bounded output without publishing."""
+        test_path = tmp_path / "tests" / "unit" / "docs" / "test_adr_records.py"
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("# repository-owned structural test\n")
+        failed = JobResult(
+            ok=False,
+            value={"failure_kind": "validation"},
+            error="rc=1",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
+
+        with (
+            patch.object(pool, "_read_publish_head", return_value="d" * 40),
+            patch.object(pool, "_run_immutable_build_test", return_value=failed) as run_test,
+        ):
+            result = pool._run_rebase_structural_validation(tmp_path, timeout=60)
+
+        assert result == JobResult(
+            ok=False,
+            value={"failure_kind": "validation"},
+            error="rebase structural validation failed",
+            stdout_tail="duplicate ADR number 0027",
+            stderr_tail="pytest diagnostics",
+        )
+        run_test.assert_called_once()
+
+    def test_rebase_semantic_validation_unaffected_without_injected_policy(
+        self, shutdown_event: threading.Event, completion_q: CompletionQueue, tmp_path: Path
+    ) -> None:
+        """A different valid ADR layout passes when no repository policy is injected.
+
+        The shared executor must not apply the owning repository's ADR
+        filename/section/README-index contract to another repository.  A
+        policy-free pool leaves a non-4-digit ADR layout with a custom
+        section structure untouched.
+        """
+        policy_free = WorkerPool(
+            size=1,
+            shutdown=shutdown_event,
+            completion_q=completion_q,
+            lock_dir=tmp_path / "locks",
+        )
+        adr_dir = tmp_path / "docs" / "adr"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "01-fleet-routing.md").write_text(
+            "# ADR-01: Fleet routing\n- Status: Accepted\n- Date: 2026-01-01\n"
+        )
+        (adr_dir / "README.md").write_text("- [Fleet routing](01-fleet-routing.md)\n")
+
+        assert policy_free._validate_rebased_tree(tmp_path) is None
+        assert policy_free._run_rebase_structural_validation(tmp_path, timeout=60) is None
+
+        policy_free.shutdown()
+
     def test_continue_rebase_rejects_unresolved_markers(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:
@@ -4284,6 +4494,52 @@ class TestGitOps:
 
         mock_push.assert_called_once_with(cwd=Path("/tmp/wt"), branch="7-auto", timeout=60)
         assert result.ok is True
+
+    @pytest.mark.parametrize(
+        ("push_error", "failure_kind", "error"),
+        [
+            (
+                git_utils.DetachedHeadPushRemoteHeadChangedError(),
+                "publish_remote_head_changed",
+                "publish failed: remote head changed",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteHeadUnchangedError(),
+                "publish_remote_head_unchanged",
+                "publish failed: remote head unchanged",
+            ),
+            (
+                git_utils.DetachedHeadPushRemoteProbeError(),
+                "publish_remote_probe_failed",
+                "publish failed: remote head probe failed",
+            ),
+        ],
+    )
+    def test_push_dispatch_classifies_detached_publish_failures(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        push_error: Exception,
+        failure_kind: str,
+        error: str,
+    ) -> None:
+        """Lease publication failures become durable results instead of worker crashes."""
+        job = GitJob(
+            repo="test/repo",
+            op="push",
+            timeout_s=60,
+            kwargs={"cwd": Path("/tmp/wt"), "branch": "7-auto"},
+        )
+        with patch(
+            "hephaestus.automation.git_utils.push_current_branch_with_lease_on_divergence",
+            side_effect=push_error,
+        ):
+            pool.submit(job, StageName.MERGE_WAIT)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == error
+        assert result.value == {"failure_kind": failure_kind}
 
     def test_release_branch_reservation_dispatches_conditional_delete(
         self,
