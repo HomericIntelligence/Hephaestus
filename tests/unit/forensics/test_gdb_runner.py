@@ -511,11 +511,7 @@ class TestBoundedProcess:
             proc_stat = Path(f"/proc/{child_pid}/stat")
             if proc_stat.exists():
                 try:
-                    state = (
-                        proc_stat.read_text(encoding="utf-8")
-                        .rsplit(")", 1)[1]
-                        .split()[0]
-                    )
+                    state = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0]
                 except (OSError, IndexError):
                     state = None
                 if state == "Z":
