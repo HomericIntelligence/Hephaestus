@@ -81,6 +81,7 @@ from hephaestus.automation.protocol import (
     PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
     IssueComment,
     current_plan_context,
     is_pending_review,
@@ -522,17 +523,47 @@ class PlanReviewStage(Stage):
             labels = _require_issue_labels(item, ctx)
             if STATE_PLAN_BLOCKED in labels:
                 logger.info("plan_review:%d: already plan-blocked; stopping", item.issue)
-                ctx.github.ensure_blocked_audit(item.issue)
+                try:
+                    ctx.github.ensure_blocked_audit(item.issue)
+                except CommentJournalReadError as exc:
+                    logger.warning(
+                        "plan_review:%d: plan journal blocked-audit read failed: %s",
+                        item.issue,
+                        exc,
+                    )
+                    return StageOutcome(
+                        Disposition.RETRY,
+                        f"plan journal read failed: {exc}",
+                    )
                 return StageOutcome(Disposition.BLOCKED, "plan requires external intervention")
+            try:
+                comments = reconcile_plan_journal(item.issue, ctx.github)
+            except CommentJournalReadError as exc:
+                logger.warning(
+                    "plan_review:%d: plan journal reconciliation read failed: %s",
+                    item.issue,
+                    exc,
+                )
+                return StageOutcome(
+                    Disposition.RETRY,
+                    f"plan journal read failed: {exc}",
+                )
+            snapshot = journal_snapshot(comments)
+            if not snapshot.current_plan:
+                item.payload.pop("plan_text", None)
+                item.payload.pop("plan_revision", None)
+                item.payload.pop("prior_review", None)
+                logger.warning(
+                    "plan_review:%d: canonical plan missing at admission; replanning",
+                    item.issue,
+                )
+                return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+
+            item.payload["plan_text"] = snapshot.current_plan
+            item.payload["plan_revision"] = snapshot.revision
             if is_exclusive_plan_state(labels, STATE_PLAN_GO):
                 logger.info("plan_review:%d: already plan-go; advancing", item.issue)
                 return StageOutcome(Disposition.ADVANCE, "plan already approved")
-
-            comments = reconcile_plan_journal(item.issue, ctx.github)
-            snapshot = journal_snapshot(comments)
-            if snapshot.current_plan:
-                item.payload["plan_text"] = snapshot.current_plan
-                item.payload["plan_revision"] = snapshot.revision
             if snapshot.current_review and snapshot.current_review_revision == snapshot.revision:
                 item.payload["prior_review"] = snapshot.current_review
 

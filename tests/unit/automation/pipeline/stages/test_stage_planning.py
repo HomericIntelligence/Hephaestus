@@ -27,6 +27,7 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.review_journal import (
     IssueComment,
+    PlanDiscoveryResult,
     render_current_plan,
     render_current_review,
 )
@@ -666,6 +667,48 @@ class TestPlanningStageStep:
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.ADVANCE
         assert github.mutation_log == []  # existing plan: no duplicate upsert
+
+    def test_verify_rechecks_found_plan_before_advancing(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plan appearing after the initial absence read must not spend retry budget."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        lookups = iter(
+            [
+                PlanDiscoveryResult.absent(),
+                PlanDiscoveryResult.found(render_current_plan("Concurrent plan")),
+            ]
+        )
+        monkeypatch.setattr(github, "discover_plan", lambda _issue: next(lookups))
+        item = make_work_item(issue=15, state="VERIFY")
+
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(Disposition.ADVANCE, "plan generated and verified")
+        assert item.attempts.get("plan", 0) == 0
+        assert github.mutation_log == []
+
+    def test_verify_retries_when_plan_disappears_before_advancing(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plan deleted after discovery cannot authorize plan-review advancement."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        lookups = iter(
+            [
+                PlanDiscoveryResult.found(render_current_plan("Initially durable")),
+                PlanDiscoveryResult.absent(),
+            ]
+        )
+        monkeypatch.setattr(github, "discover_plan", lambda _issue: next(lookups))
+        item = make_work_item(issue=16, state="VERIFY")
+
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(Disposition.RETRY, "plan disappeared before verification")
+        assert item.attempts.get("plan", 0) == 0
+        assert github.mutation_log == []
 
     def test_on_enter_journal_read_error_retries_without_mutation(
         self, make_ctx: Any, make_work_item: Any
