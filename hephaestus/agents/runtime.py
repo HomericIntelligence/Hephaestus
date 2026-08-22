@@ -45,11 +45,11 @@ from hephaestus.constants import (
 )
 from hephaestus.utils.helpers import strip_null_bytes
 
-AgentName = Literal["claude", "codex", "pi"]
+AgentName = Literal["claude", "codex", "pi", "opencode"]
 ProcessTracker = Callable[[int], contextlib.AbstractContextManager[None]]
 SubprocessCommandPart = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 SubprocessCommand = SubprocessCommandPart | Sequence[SubprocessCommandPart]
-AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi")
+AGENT_CHOICES: tuple[AgentName, ...] = ("claude", "codex", "pi", "opencode")
 DEFAULT_AGENT: AgentName = "claude"
 CODEX_HELP_PROBE_SECONDS = 10
 GIT_COMMON_DIR_PROBE_SECONDS = 5
@@ -109,6 +109,11 @@ AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
     "pi": (("pi", "--version"),),
+    # Exit 0 only proves the CLI runs. OpenCode serves models from stored
+    # credentials OR environment keys, so `providers list` legitimately reports
+    # "0 credentials" on fully working setups; credential-count parsing would
+    # false-negative those. Deeper authentication is verified by the run itself.
+    "opencode": (("opencode", "providers", "list"),),
 }
 
 _PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLifecycle]] = {
@@ -368,6 +373,12 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
             }
         ),
     ),
+    "opencode": AgentCapabilities(
+        direct_runner=True,
+        supports_approval=False,
+        supports_sandbox=False,
+        supports_sessions=True,
+    ),
 }
 
 
@@ -470,6 +481,8 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
             status_hint = (
                 "`pi --version` and check ~/.pi/agent/models.json"
                 if agent == "pi"
+                else "`opencode providers login` (environment keys also work)"
+                if agent == "opencode"
                 else f"`{agent} auth status` (or `{agent} login status`)"
             )
             raise RuntimeError(
@@ -487,8 +500,8 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
         if shutil.which("pi") is not None:
             _require_pi_automation_admission(effective_cwd)
         raise RuntimeError(
-            "No supported agent backend found on PATH. Install `claude`, `codex`, or `pi`, "
-            "or pass --agent after installing the selected backend."
+            "No supported agent backend found on PATH. Install `claude`, `codex`, `pi`, "
+            "or `opencode`, or pass --agent after installing the selected backend."
         )
 
     for agent_name in installed_agents:
@@ -497,8 +510,9 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
 
     raise RuntimeError(
         "Supported agent backends are installed but none are authenticated. "
-        "Run `claude auth status`, `codex login status`, or `pi --version`, then "
-        "log in/configure the provider you want automation to use."
+        "Run `claude auth status`, `codex login status`, `pi --version`, or "
+        "`opencode providers list`, then log in/configure the provider you want "
+        "automation to use."
     )
 
 
@@ -510,6 +524,11 @@ def is_codex(agent: str) -> bool:
 def is_pi(agent: str) -> bool:
     """Return True when the selected provider is Pi."""
     return agent == "pi"
+
+
+def is_opencode(agent: str) -> bool:
+    """Return True when the selected provider is OpenCode."""
+    return agent == "opencode"
 
 
 def reject_pi_unsupported_surface(agent: str, reason: str) -> None:
@@ -581,6 +600,7 @@ def agent_display_name(agent: str) -> str:
         "claude": "Claude Code",
         "codex": "Codex",
         "pi": "Pi",
+        "opencode": "OpenCode",
     }
     try:
         return names[agent]
@@ -1468,20 +1488,6 @@ def _parse_pi_json_events(text: str) -> tuple[str | None, str]:
     return session_id, final_message.strip()
 
 
-def _has_pi_json_event(text: str) -> bool:
-    """Return whether Pi JSON-mode output contains at least one event object."""
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event: Any = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and isinstance(event.get("type"), str) and event["type"].strip():
-            return True
-    return False
-
-
 def run_codex_session(
     prompt: str,
     *,
@@ -1586,6 +1592,258 @@ def _run_codex_command(
     session_id, event_message = _parse_codex_json_events(stdout_text)
     stdout = (last_message or event_message or stdout_text or "").strip()
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
+
+
+def _opencode_base_cmd(*, session_id: str | None = None, model: str = "") -> list[str]:
+    """Build an OpenCode run command that reads the prompt from stdin."""
+    cmd = ["opencode", "run", "--format", "json"]
+    if model:
+        cmd.extend(["--model", model])
+    if session_id:
+        cmd.extend(["--session", session_id])
+    return cmd
+
+
+def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
+    """Extract OpenCode session id and final assistant text from JSONL output."""
+    session_id: str | None = None
+    final_message = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        raw_session_id = event.get("sessionID")
+        if isinstance(raw_session_id, str) and raw_session_id:
+            session_id = raw_session_id
+        part = event.get("part")
+        if (
+            event.get("type") == "text"
+            and isinstance(part, dict)
+            and isinstance(part.get("text"), str)
+        ):
+            final_message = part["text"]
+    return session_id, final_message.strip()
+
+
+def _has_jsonl_event(text: str) -> bool:
+    """Return whether JSONL output contains at least one event object."""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("type"), str) and event["type"]:
+            return True
+    return False
+
+
+def _opencode_failure_diagnostic(*texts: str | None) -> str | None:
+    """Return a bounded diagnostic when an OpenCode stream carries a fatal error.
+
+    OpenCode v1.18.21 emits structured ``{"type":"error", "error":{"name":...,
+    "data":{"message":..., "ref":...}}}`` JSON events (observed for provider
+    and model failures) with a non-zero exit, and plain-text errors such as
+    ``Error: Session not found`` on stderr for resume failures. Recognizing the
+    structured shape converts CLI crashes into actionable automation errors
+    instead of opaque exit codes; the message is bounded like the Codex path.
+    """
+    for text in texts:
+        if not text:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event: Any = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "error":
+                continue
+            error = event.get("error")
+            if not isinstance(error, dict):
+                continue
+            name = error.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            data = error.get("data")
+            message = ""
+            if isinstance(data, dict):
+                raw_message = data.get("message")
+                if isinstance(raw_message, str):
+                    message = f": {raw_message[:300]}"
+            ref = error.get("ref")
+            suffix = f" [{ref}]" if isinstance(ref, str) and ref else ""
+            return f"opencode_fatal_error_event: {name}{message}{suffix}"
+    return None
+
+
+def _run_opencode_command(
+    cmd: list[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Execute OpenCode with JSON events and return final text plus session id.
+
+    When the CLI emits a well-formed event stream that carries no assistant
+    text, the result is empty rather than the raw event stream, so downstream
+    verdict parsers never see JSONL as prose. A structured ``type:"error"``
+    event raises :class:`AgentExecutionError` with a bounded diagnostic — both
+    on a non-zero exit and defensively on an exit-0 stream that reports an
+    error without one.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        text=True,
+        start_new_session=True,
+    )
+    tracker = process_tracker(proc.pid) if process_tracker is not None else contextlib.nullcontext()
+    try:
+        with tracker:
+            # Strip NUL bytes: proc.communicate(input=...) marshals text stdin
+            # and would raise ``ValueError: embedded null byte`` on a stray NUL
+            # before OpenCode runs (#1661) — the same guard the Claude/Codex
+            # paths apply.
+            stdout_text, stderr_text = proc.communicate(
+                input=strip_null_bytes(prompt),
+                timeout=timeout,
+            )
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        raise
+    diagnostic = _opencode_failure_diagnostic(stdout_text, stderr_text)
+    if proc.returncode != 0 or diagnostic is not None:
+        if diagnostic is not None:
+            raise AgentExecutionError(diagnostic)
+        raise subprocess.CalledProcessError(
+            proc.returncode,
+            cmd,
+            output=stdout_text,
+            stderr=stderr_text,
+        )
+    session_id, event_message = _parse_opencode_json_events(stdout_text or "")
+    if event_message:
+        stdout: str = event_message.strip()
+    elif _has_jsonl_event(stdout_text or ""):
+        stdout = ""
+    else:
+        stdout = (stdout_text or "").strip()
+    return AgentRunResult(stdout=stdout, stderr=stderr_text or "", session_id=session_id)
+
+
+def _reject_unenforceable_opencode_sandbox(sandbox: str) -> None:
+    """Fail closed when a stage requests an isolation OpenCode cannot enforce.
+
+    Codex maps ``read-only`` to ``--sandbox`` and Pi to ``--tools``; OpenCode
+    exposes no equivalent flag, so silently ignoring the request would grant
+    write-capable tools to read-only stages (reviewers, classifiers, commit
+    message generation). Raising matches the #773 precedent of rejecting
+    unsupported policy values loudly instead of no-oping them.
+    """
+    if sandbox != "workspace-write":
+        raise AgentExecutionError(
+            f"OpenCode cannot enforce sandbox mode {sandbox!r}; select claude, "
+            "codex, or pi for stages that require enforced isolation"
+        )
+
+
+def run_opencode_session(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Run a new OpenCode JSON-event session and capture its id.
+
+    Model values pass through verbatim in ``provider/model`` form; when empty
+    OpenCode applies its own configured default. The CLI exposes no approval
+    flag, so that compatibility input is accepted but unused. Sandbox modes
+    other than ``workspace-write`` are rejected because they cannot be
+    enforced on this backend.
+    """
+    _reject_unenforceable_opencode_sandbox(sandbox)
+    del approval
+    cmd = _opencode_base_cmd(model=model)
+    return _run_opencode_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        process_tracker=process_tracker,
+    )
+
+
+def resume_opencode_session(
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+    process_tracker: ProcessTracker | None = None,
+) -> AgentRunResult:
+    """Resume an OpenCode session by id via ``--session``.
+
+    Verified against opencode v1.18.21: resuming an existing session with an
+    explicitly different ``--model`` is accepted — the run completes on the
+    requested model instead of being locked or rejected — so the pass-through
+    is safe for automation flows that switch phase models between calls.
+    """
+    _reject_unenforceable_opencode_sandbox(sandbox)
+    del approval
+    cmd = _opencode_base_cmd(session_id=session_id, model=model)
+    return _run_opencode_command(
+        cmd,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        process_tracker=process_tracker,
+    )
+
+
+def run_opencode_text(
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    model: str = "",
+    sandbox: str = "workspace-write",
+    approval: str = "never",
+) -> subprocess.CompletedProcess[str]:
+    """Run OpenCode non-interactively and return a text completed process."""
+    result = run_opencode_session(
+        prompt,
+        cwd=cwd,
+        timeout=timeout,
+        model=model,
+        sandbox=sandbox,
+        approval=approval,
+    )
+    return subprocess.CompletedProcess(
+        args=["opencode", "run", "--format", "json"],
+        returncode=0,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
 
 
 def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
@@ -1813,7 +2071,7 @@ def _invoke_pi_session(
     )
     raw_stdout = result.stdout or ""
     observed_session_ids = _pi_json_session_ids(raw_stdout)
-    if require_json_event and not _has_pi_json_event(raw_stdout):
+    if require_json_event and not _has_jsonl_event(raw_stdout):
         raise RuntimeError("Pi smoke did not emit a JSON event")
     parsed_session_id, event_message = _parse_pi_json_events(raw_stdout)
     if require_json_event and not event_message:
@@ -1988,6 +2246,15 @@ def run_agent_text(
             sandbox=sandbox,
             approval=approval,
         )
+    if is_opencode(agent):
+        return run_opencode_text(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+        )
     if is_pi(agent):
         if execution_request is None:
             raise AssertionError("unreachable")
@@ -2035,6 +2302,16 @@ def run_agent_session(
             )
     if is_codex(agent):
         return run_codex_session(
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
+        )
+    if is_opencode(agent):
+        return run_opencode_session(
             prompt,
             cwd=cwd,
             timeout=timeout,
@@ -2113,6 +2390,17 @@ def resume_agent_session(
             approval=approval,
             process_tracker=process_tracker,
         )
+    if is_opencode(agent):
+        return resume_opencode_session(
+            session_id,
+            prompt,
+            cwd=cwd,
+            timeout=timeout,
+            model=model,
+            sandbox=sandbox,
+            approval=approval,
+            process_tracker=process_tracker,
+        )
     if is_pi(agent):
         if execution_request is None or resume_binding is None:
             raise AssertionError("unreachable")
@@ -2174,7 +2462,7 @@ def _communicate_codex_process(
             elapsed = time.monotonic() - started_at
             remaining = timeout - elapsed
             if remaining <= 0:
-                stdout_text, stderr_text = _terminate_codex_process(proc)
+                stdout_text, stderr_text = _terminate_process_group(proc)
                 last_message = _read_text_file(output_path).strip()
                 if last_message:
                     return stdout_text, stderr_text or f"Codex wrapper timed out after {timeout}s"
@@ -2200,27 +2488,27 @@ def _communicate_codex_process(
                 if _read_text_file(output_path).strip():
                     final_seen_at = final_seen_at or time.monotonic()
                     if time.monotonic() - final_seen_at >= grace_seconds:
-                        stdout_text, stderr_text = _terminate_codex_process(proc)
+                        stdout_text, stderr_text = _terminate_process_group(proc)
                         return (
                             stdout_text,
                             stderr_text or "Codex wrapper terminated after final message",
                         )
 
 
-def _terminate_codex_process(proc: subprocess.Popen[str]) -> tuple[str, str]:
-    """Terminate a Codex process group and collect any remaining stdout/stderr."""
+def _terminate_process_group(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate a direct-agent process group and collect any remaining output."""
     if proc.poll() is None:
-        _signal_codex_process_group(proc, signal.SIGTERM)
+        _signal_process_group(proc, signal.SIGTERM)
     try:
         stdout_text, stderr_text = proc.communicate(timeout=CODEX_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        _signal_codex_process_group(proc, signal.SIGKILL)
+        _signal_process_group(proc, signal.SIGKILL)
         stdout_text, stderr_text = proc.communicate()
     return stdout_text or "", stderr_text or ""
 
 
-def _signal_codex_process_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
-    """Signal Codex's dedicated process group, falling back to its wrapper."""
+def _signal_process_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
+    """Signal a direct-agent's dedicated process group, falling back to the wrapper."""
     pid = getattr(proc, "pid", None)
     if isinstance(pid, int) and hasattr(os, "killpg") and hasattr(os, "getpgid"):
         try:

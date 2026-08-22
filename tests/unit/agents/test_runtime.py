@@ -1131,6 +1131,395 @@ def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_pat
     assert 'approval_policy="never"' in captured_cmd
 
 
+class _FakeOpenCodePopen:
+    def __init__(
+        self,
+        cmd: list[str],
+        *,
+        proc_stdout: str,
+        proc_stderr: str = "",
+        returncode: int = 0,
+        captured_input: list[str | None] | None = None,
+        **_: Any,
+    ) -> None:
+        self.cmd = cmd
+        self.stdout = proc_stdout
+        self.stderr = proc_stderr
+        self.returncode = returncode
+        self.pid = 1357
+        self.terminated = False
+        self._captured_input = captured_input
+
+    def communicate(
+        self, input: str | None = None, timeout: float | None = None
+    ) -> tuple[str, str]:
+        if self._captured_input is not None:
+            self._captured_input.append(input)
+        del timeout
+        return self.stdout, self.stderr
+
+    def poll(self) -> int | None:
+        return -15 if self.terminated else self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+def test_opencode_registry_contract() -> None:
+    """OpenCode registers as a direct runner with sessions but no CLI sandbox."""
+    assert "opencode" in agent_runtime.AGENT_CHOICES
+    assert agent_runtime.is_opencode("opencode")
+    assert agent_runtime.agent_display_name("opencode") == "OpenCode"
+    assert agent_runtime.AGENT_AUTH_STATUS_COMMANDS["opencode"] == (
+        ("opencode", "providers", "list"),
+    )
+
+    capabilities = agent_runtime.AGENT_CAPABILITIES["opencode"]
+    assert capabilities.direct_runner is True
+    assert capabilities.supports_sessions is True
+    assert capabilities.supports_approval is False
+    assert capabilities.supports_sandbox is False
+    assert agent_runtime.uses_direct_agent_runner("opencode") is True
+    assert agent_runtime.agent_supports_model_reasoning_effort("opencode") is False
+
+
+def test_opencode_base_cmd_passes_model_through_and_omits_empty() -> None:
+    """Model values pass through verbatim; empty model uses OpenCode's default."""
+    assert agent_runtime._opencode_base_cmd() == ["opencode", "run", "--format", "json"]
+    assert agent_runtime._opencode_base_cmd(model="anthropic/claude-sonnet-4-5") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--model",
+        "anthropic/claude-sonnet-4-5",
+    ]
+    assert agent_runtime._opencode_base_cmd(session_id="ses_abc") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--session",
+        "ses_abc",
+    ]
+
+
+def test_parse_opencode_json_events_extracts_session_id_and_final_text() -> None:
+    """Every event carries sessionID; the last text part is the final message."""
+    text = "\n".join(
+        [
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}',
+            '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"partial"}}',
+            "not-json",
+            '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"final answer"}}',
+            '{"type":"step_finish","sessionID":"ses_fd61","part":{"reason":"stop"}}',
+        ]
+    )
+    session_id, message = agent_runtime._parse_opencode_json_events(text)
+    assert session_id == "ses_fd61"
+    assert message == "final answer"
+
+
+def test_parse_opencode_json_events_handles_empty_and_malformed_output() -> None:
+    """No JSON events yields no session id and no message."""
+    assert agent_runtime._parse_opencode_json_events("") == (None, "")
+    assert agent_runtime._parse_opencode_json_events("garbage\n\n[1,2]") == (None, "")
+
+
+def test_run_opencode_session_returns_session_id_and_final_text(tmp_path: Path) -> None:
+    """The runtime parses JSONL events into a session id plus final text."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}\n'
+            '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"OK"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert result.session_id == "ses_fd61"
+    assert result.stdout == "OK"
+
+
+def test_run_opencode_session_returns_empty_when_events_carry_no_text(tmp_path: Path) -> None:
+    """A well-formed event stream without assistant text must not leak JSONL."""
+    captured: dict[str, Any] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured["cmd"] = cmd
+        stdout = (
+            '{"type":"step_start","sessionID":"ses_fd61","part":{"type":"step-start"}}\n'
+            '{"type":"step_finish","sessionID":"ses_fd61","part":{"reason":"stop"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert result.session_id == "ses_fd61"
+    assert result.stdout == ""
+
+
+def test_run_opencode_session_raises_on_structured_error_event(tmp_path: Path) -> None:
+    """Observed v1.18.21 provider failures emit type:error JSON with rc=1."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"error","timestamp":1787434544443,"sessionID":"ses_fd61",'
+            '"error":{"name":"UnknownError","data":{"message":"Unexpected server error."},'
+            '"ref":"err_4889701c"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, returncode=1, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(agent_runtime.AgentExecutionError) as excinfo:
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    message = str(excinfo.value)
+    assert "opencode_fatal_error_event: UnknownError" in message
+    assert "Unexpected server error." in message
+    assert "[err_4889701c]" in message
+
+
+def test_run_opencode_session_raises_on_exit0_error_event(tmp_path: Path) -> None:
+    """An exit-0 stream that reports an error must not masquerade as success."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"error","sessionID":"ses_fd61",'
+            '"error":{"name":"ProviderAuthError","data":{"message":"bad key"}}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, returncode=0, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(agent_runtime.AgentExecutionError, match="ProviderAuthError"):
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+
+def test_run_opencode_session_preserves_plain_text_stderr_failures(tmp_path: Path) -> None:
+    """Resume failures surface as plain stderr text; keep CalledProcessError."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        return _FakeOpenCodePopen(
+            cmd,
+            proc_stdout="",
+            proc_stderr="Error: Session not found",
+            returncode=1,
+            **kwargs,
+        )
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            agent_runtime.resume_opencode_session("ses_missing", "prompt", cwd=tmp_path, timeout=30)
+
+    assert excinfo.value.stderr == "Error: Session not found"
+
+
+def test_resume_opencode_session_passes_model_through(tmp_path: Path) -> None:
+    """Verified v1.18.21 behavior: --model is honored on resumed sessions."""
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured_cmd.extend(cmd)
+        stdout = '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"ok"}}\n'
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        agent_runtime.resume_opencode_session(
+            "ses_fd61",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="opencode/hy3-free",
+        )
+
+    assert "--model" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--model") + 1] == "opencode/hy3-free"
+    assert "--session" in captured_cmd
+
+
+def test_run_opencode_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
+    """#1661: a NUL in the prompt must not crash the OpenCode stdin path."""
+    captured_input: list[str | None] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        return _FakeOpenCodePopen(
+            cmd,
+            proc_stdout="",
+            captured_input=captured_input,
+            **kwargs,
+        )
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        agent_runtime.run_opencode_session("plan this\x00issue", cwd=tmp_path, timeout=30)
+
+    assert captured_input == ["plan thisissue"]
+
+
+def test_run_opencode_session_tracks_a_dedicated_process_group(tmp_path: Path) -> None:
+    """An automation caller can reap the OpenCode process group on shutdown."""
+    popen_kwargs: dict[str, Any] = {}
+    tracker_events: list[tuple[str, int]] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        popen_kwargs.update(kwargs)
+        proc = _FakeOpenCodePopen(cmd, proc_stdout="", **kwargs)
+        proc.pid = 2468
+        return proc
+
+    @contextmanager
+    def track_process_group(pid: int) -> Any:
+        tracker_events.append(("enter", pid))
+        try:
+            yield
+        finally:
+            tracker_events.append(("exit", pid))
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        agent_runtime.run_opencode_session(
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            process_tracker=track_process_group,
+        )
+
+    assert popen_kwargs["start_new_session"] is True
+    assert tracker_events == [("enter", 2468), ("exit", 2468)]
+
+
+def test_run_opencode_session_raises_on_nonzero_exit(tmp_path: Path) -> None:
+    """A failed OpenCode run surfaces as CalledProcessError with both streams."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        return _FakeOpenCodePopen(
+            cmd,
+            proc_stdout="partial stdout",
+            proc_stderr="boom",
+            returncode=1,
+            **kwargs,
+        )
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    assert excinfo.value.returncode == 1
+    assert excinfo.value.output == "partial stdout"
+    assert excinfo.value.stderr == "boom"
+
+
+def test_resume_opencode_session_uses_the_session_flag(tmp_path: Path) -> None:
+    """Resumption passes the opaque id via --session and still parses events."""
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured_cmd.extend(cmd)
+        stdout = '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"resumed"}}\n'
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.resume_opencode_session(
+            "ses_fd61",
+            "review again",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert "--session" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--session") + 1] == "ses_fd61"
+    assert result.stdout == "resumed"
+    assert result.session_id == "ses_fd61"
+
+
+def test_agent_dispatch_routes_opencode_sessions(tmp_path: Path) -> None:
+    """run_agent_session/resume dispatch OpenCode through its own runners."""
+    stdout = '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"OK"}}\n'
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        session = agent_runtime.run_agent_session(
+            "opencode",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+        resumed = agent_runtime.resume_agent_session(
+            "opencode",
+            "ses_fd61",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert session.session_id == "ses_fd61"
+    assert resumed.session_id == "ses_fd61"
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        text = agent_runtime.run_agent_text(
+            "opencode",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+    assert isinstance(text, subprocess.CompletedProcess)
+    assert text.args == ["opencode", "run", "--format", "json"]
+    assert text.stdout == "OK"
+
+
+@pytest.mark.parametrize("sandbox", ["read-only", "danger-full-access"])
+@pytest.mark.parametrize(
+    "runner",
+    ["session", "resume", "agent_session", "agent_resume", "agent_text"],
+)
+def test_opencode_runners_reject_unenforceable_sandboxes(
+    tmp_path: Path, sandbox: str, runner: str
+) -> None:
+    """OpenCode cannot enforce isolation; unsupported modes must fail closed."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        raise AssertionError("no provider process may start for an unenforceable sandbox")
+
+    with (
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="cannot enforce sandbox"),
+    ):
+        if runner == "session":
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30, sandbox=sandbox)
+        elif runner == "resume":
+            agent_runtime.resume_opencode_session(
+                "ses_fd61", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        elif runner == "agent_session":
+            agent_runtime.run_agent_session(
+                "opencode", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        elif runner == "agent_resume":
+            agent_runtime.resume_agent_session(
+                "opencode", "ses_fd61", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        else:
+            agent_runtime.run_agent_text(
+                "opencode", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+
+
+def test_resolve_agent_accepts_explicit_authenticated_opencode() -> None:
+    """An explicit --agent opencode resolves after `opencode providers list` exits 0."""
+    with patch("hephaestus.agents.runtime.shutil.which", return_value="/bin/opencode"):
+        with patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["opencode", "providers", "list"], 0, stdout="", stderr=""
+            ),
+        ):
+            assert agent_runtime.resolve_agent("opencode") == "opencode"
+
+
 def test_run_pi_session_rejects_unadmitted_execution(tmp_path: Path) -> None:
     """The legacy public Pi session runner cannot bypass scoped dispatch."""
     with patch("subprocess.run") as run:

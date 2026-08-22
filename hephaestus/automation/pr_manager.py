@@ -30,6 +30,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.github.auto_merge import defer_auto_merge, defer_auto_merge_batch
+from hephaestus.utils.git import git_config_get
 
 from .agent_config import DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT, HAIKU
 from .ci_check_inspector import FAILING_CHECK_CONCLUSIONS
@@ -93,11 +94,16 @@ _RESERVED_MESSAGE_LINE = re.compile(
     r"^\s*(?:Closes\s+#\d+|Implemented-By:|Co-Authored-By:)",
     re.IGNORECASE,
 )
-_AGENT_COMMIT_IDENTITIES = {
-    "claude": ("Claude Code", "noreply@anthropic.com"),
-    "codex": ("Codex", "noreply@openai.com"),
-    "pi": ("Pi", "noreply@earendil.works"),
+# Co-author display names per agent backend. The trailer EMAIL is shared by
+# every agentic client and is resolved from the operator's global git identity
+# at render time (#2806) — never pinned to one machine's address.
+_AGENT_COMMIT_NAMES = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "pi": "Pi",
+    "opencode": "OpenCode-AI",
 }
+_FALLBACK_AGENT_COMMIT_EMAIL = "noreply@hephaestus.invalid"
 
 
 def _git_timeout_kw(timeout: int | None) -> dict[str, Any]:
@@ -157,6 +163,18 @@ def _agent_display_name(agent: str) -> str:
     return agent_display_name(agent)
 
 
+def _agentic_commit_email() -> str:
+    """Return the co-author email shared by every agentic client.
+
+    The commit path strips worktree-local ``user.email`` overrides before
+    committing (#2110), so the commit's author resolves through the operator's
+    GLOBAL git config. The trailer queries that same surface — via
+    :func:`git_config_get` — instead of pinning any single machine's address,
+    so attribution follows whoever runs the automation (#2806).
+    """
+    return git_config_get("user.email", global_=True) or _FALLBACK_AGENT_COMMIT_EMAIL
+
+
 def _coauthor_for_agent(agent: str) -> tuple[str, str]:
     """Return the co-author identity for fallback commits made by automation.
 
@@ -164,7 +182,8 @@ def _coauthor_for_agent(agent: str) -> tuple[str, str]:
     ``Co-Authored-By:`` git trailer. Model identifiers are intentionally NOT
     placed in the name slot — see ``_provenance_for_agent`` for that.
     """
-    return _AGENT_COMMIT_IDENTITIES.get(agent, _AGENT_COMMIT_IDENTITIES["claude"])
+    name = _AGENT_COMMIT_NAMES.get(agent, _AGENT_COMMIT_NAMES["claude"])
+    return name, _agentic_commit_email()
 
 
 def _provenance_for_agent(agent: str) -> str:
