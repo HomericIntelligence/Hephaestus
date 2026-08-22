@@ -351,4 +351,3 @@ direction = "input"
 readers = [
   { path = "hephaestus/config/child_environments.py", reader = "read_approved_parent_env", access = "read" },
 ]
-
