@@ -398,7 +398,7 @@ class StageGitHub(Protocol):
 
     def publish_implementation_go_audit(self, pr_number: int, head_sha: str, audit: Any) -> None:
         """Publish the public audit, then remove exact-head reply journals."""
-        ...
+        pass
 
     # -- merge_wait surface (#1816) ------------------------------------------
 
