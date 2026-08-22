@@ -423,6 +423,7 @@ class TestCommitChanges:
         with (
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
             patch.object(
                 pr_manager, "_invoke_git_message_agent", return_value=agent_output
             ) as invoke,
@@ -443,7 +444,7 @@ class TestCommitChanges:
         assert "Refresh stale license and notice metadata." in commit_msg
         assert "Closes #1515" in commit_msg
         assert "Implemented-By: Codex" in commit_msg
-        assert "Co-Authored-By: Codex <4211002+mvillmow@users.noreply.github.com>" in commit_msg
+        assert "Co-Authored-By: Codex <operator@example.com>" in commit_msg
 
     def test_commit_message_agent_invalid_output_falls_back(self) -> None:
         porcelain = _porcelain(" M src/feature.py")
@@ -1007,6 +1008,7 @@ class TestMessageAgentInvocation:
 
 
 _COAUTHOR_HUMAN_NAME_RE = re.compile(r"^Co-Authored-By: [A-Za-z].* <.*@.*>$")
+_TEST_AGENT_EMAIL = "operator@example.com"
 
 
 class TestCoAuthorLine:
@@ -1031,6 +1033,7 @@ class TestCoAuthorLine:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "implementer_model", return_value="claude-test-model-9"),
+            patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
             pr_manager.commit_changes(10, Path("/tmp/wt"))
@@ -1039,10 +1042,7 @@ class TestCoAuthorLine:
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
-        assert (
-            coauthor_line
-            == "Co-Authored-By: Claude Code <4211002+mvillmow@users.noreply.github.com>"
-        )
+        assert coauthor_line == "Co-Authored-By: Claude Code <operator@example.com>"
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         # Model id must NOT appear in the name slot of Co-Authored-By (#717).
         assert "claude-test-model-9" not in coauthor_line
@@ -1092,6 +1092,7 @@ class TestCoAuthorLine:
         with (
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
             pr_manager.commit_changes(20, Path("/tmp/wt"))
@@ -1103,10 +1104,7 @@ class TestCoAuthorLine:
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
         assert "claude-env-override-5" not in coauthor_line
-        assert (
-            coauthor_line
-            == "Co-Authored-By: Claude Code <4211002+mvillmow@users.noreply.github.com>"
-        )
+        assert coauthor_line == "Co-Authored-By: Claude Code <operator@example.com>"
 
     def test_codex_coauthor_is_codex_human_name(self) -> None:
         porcelain = _porcelain(" M foo.py")
@@ -1127,6 +1125,7 @@ class TestCoAuthorLine:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "implementer_model") as mock_model,
+            patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
             pr_manager.commit_changes(30, Path("/tmp/wt"), agent="codex")
@@ -1135,7 +1134,7 @@ class TestCoAuthorLine:
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
-        assert coauthor_line == "Co-Authored-By: Codex <4211002+mvillmow@users.noreply.github.com>"
+        assert coauthor_line == "Co-Authored-By: Codex <operator@example.com>"
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         assert "Implemented-By: Codex" in commit_msg
         mock_model.assert_not_called()
@@ -1159,6 +1158,7 @@ class TestCoAuthorLine:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "implementer_model") as mock_model,
+            patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
             pr_manager.commit_changes(31, Path("/tmp/wt"), agent="pi")
@@ -1167,10 +1167,23 @@ class TestCoAuthorLine:
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )
-        assert coauthor_line == "Co-Authored-By: Pi <4211002+mvillmow@users.noreply.github.com>"
+        assert coauthor_line == "Co-Authored-By: Pi <operator@example.com>"
         assert _COAUTHOR_HUMAN_NAME_RE.match(coauthor_line)
         assert "Implemented-By: Pi" in commit_msg
         mock_model.assert_not_called()
+
+
+class TestAgenticCommitEmail:
+    """The shared agentic co-author email resolves from git, never a pinned address (#2806)."""
+
+    def test_resolves_global_git_identity(self) -> None:
+        with patch.object(pr_manager, "git_config_get", return_value="git@example.com") as config:
+            assert pr_manager._agentic_commit_email() == "git@example.com"
+        config.assert_called_once_with("user.email", global_=True)
+
+    def test_falls_back_when_git_identity_unset(self) -> None:
+        with patch.object(pr_manager, "git_config_get", return_value=None):
+            assert pr_manager._agentic_commit_email() == pr_manager._FALLBACK_AGENT_COMMIT_EMAIL
 
 
 class TestImplementationStateLabel:
