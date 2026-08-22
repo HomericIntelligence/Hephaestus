@@ -108,21 +108,13 @@ def _validate_legacy_markers(comments: Sequence[IssueComment]) -> None:
 def _is_obsolete_automation_comment(body: str) -> bool:
     """Return whether an owned comment belongs to a removable automation role."""
     return bool(
-<<<<<<< HEAD
         is_plan_comment(body)
         or is_plan_review_comment(body)
         or HISTORY_RE.match(body) is not None
         or has_exact_leading_marker(body, SKIP_REASON_MARKER)
         or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
-=======
-        is_plan_comment(stripped)
-        or is_plan_review_comment(stripped)
-        or stripped.startswith(HISTORY_MARKER_PREFIX)
-        or stripped.startswith(SKIP_REASON_MARKER)
-        or stripped.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
-        or stripped.startswith(RECOVERY_PROVENANCE_PREFIX)
-        or stripped.startswith(OBSOLETE_EXPLANATION_MARKER)
->>>>>>> 2955d068 (fix(automation): bound recovery timeline artifacts)
+        or body.startswith(RECOVERY_PROVENANCE_PREFIX)
+        or body.startswith(OBSOLETE_EXPLANATION_MARKER)
     )
 
 

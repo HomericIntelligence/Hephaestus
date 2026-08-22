@@ -178,7 +178,6 @@ def test_existing_canonical_pointer_ignores_newer_legacy_comment() -> None:
 
     result = plan_issue_timeline_compaction(comments)
 
-<<<<<<< HEAD
     assert result.plan_body is not None
     assert "Older canonical" in result.plan_body
     assert result.plan_needs_update is False
@@ -191,28 +190,10 @@ def test_compaction_retains_history_without_a_canonical_pointer() -> None:
         _comment(1, archive_plan_body(1, "Plan v1", "Plan v2")),
         _comment(2, f"{PLAN_COMMENT_MARKER}\n\nHeading-only text"),
         _comment(3, "Unrelated operator note"),
-=======
-    assert "Latest legacy plan" in (result.plan_body or "")
-    assert result.plan_needs_update
-    assert result.delete_comment_ids == (2,)
-
-
-def test_compaction_keeps_one_valid_recovery_or_obsolete_role_per_issue() -> None:
-    """Actor-owned recovery roles stay bounded without touching foreign comments."""
-    recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
-    obsolete = render_obsolete_explanation("Superseded by #42")
-    comments = [
-        _comment(1, recovery),
-        _comment(2, recovery),
-        _comment(3, obsolete),
-        _comment(4, obsolete),
-        _comment(5, recovery, owned=False),
->>>>>>> 2955d068 (fix(automation): bound recovery timeline artifacts)
     ]
 
     result = plan_issue_timeline_compaction(comments)
 
-<<<<<<< HEAD
     assert result.plan_body is None
     assert result.review_body is None
     assert result.delete_comment_ids == ()
@@ -279,7 +260,22 @@ def test_compaction_deletes_complete_three_revision_history_chain() -> None:
     result = plan_issue_timeline_compaction(comments)
 
     assert result.delete_comment_ids == (3, 4, 5, 6)
-=======
+
+
+def test_compaction_keeps_one_valid_recovery_or_obsolete_role_per_issue() -> None:
+    """Actor-owned recovery roles stay bounded without touching foreign comments."""
+    recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
+    obsolete = render_obsolete_explanation("Superseded by #42")
+    comments = [
+        _comment(1, recovery),
+        _comment(2, recovery),
+        _comment(3, obsolete),
+        _comment(4, obsolete),
+        _comment(5, recovery, owned=False),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
     assert result.delete_comment_ids == (1, 3)
     assert OBSOLETE_EXPLANATION_MARKER in comments[3].body
 
@@ -293,4 +289,3 @@ def test_malformed_owned_recovery_provenance_fails_before_deletion() -> None:
 
     with pytest.raises(RuntimeError, match="malformed recovered requirements marker"):
         plan_issue_timeline_compaction(comments)
->>>>>>> 2955d068 (fix(automation): bound recovery timeline artifacts)
