@@ -46,6 +46,7 @@ _REASONS = [*_DECLARED_REASONS, "unknown_reason"]
 # map to None.
 _REASON_BUDGET: dict[str, str | None] = {
     "nogo": "plan_review_iter",
+    "plan_missing": None,
     "plan_cycles_exhausted": "plan_cycles",
     "plan_not_go": None,
     "already_implementation_go_pr": None,

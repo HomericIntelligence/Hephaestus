@@ -39,6 +39,7 @@ from hephaestus.automation.pipeline.work_item import (
     LearningIntent,
     WorkItem,
 )
+from hephaestus.automation.review_journal import render_current_plan, render_pending_review
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
@@ -609,6 +610,10 @@ class TestCrashMatrixJournal:
         item.payload["issue_title"] = "A task"
         item.payload["issue_body"] = "Body"
         item.payload["plan_text"] = "# Implementation Plan\n\nDo the work."
+        gh.comments[issue] = [
+            render_current_plan(item.payload["plan_text"]),
+            render_pending_review(revision=1),
+        ]
 
         assert stage.on_enter(item, ctx) is None
         enter = stage.step(item, ctx)
