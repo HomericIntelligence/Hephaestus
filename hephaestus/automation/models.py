@@ -243,6 +243,8 @@ class PlanReviewerOptions(VerboseParallelWorkerOptionsBase):
     agent: str = "claude"
     enable_ui: bool = True
     agent_timeout: int = DEFAULT_AGENT_TIMEOUT
+    reviewer_model: str = ""
+    fallback_model: str = ""
 
 
 class CIDriverOptions(VerboseParallelWorkerOptionsBase):

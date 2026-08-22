@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.utils.helpers import run_subprocess
 
 _FAILURE_OUTPUT_TAIL_CHARS = 12_000
@@ -34,7 +36,9 @@ _COVERAGE_POLICY_ARGS: tuple[str, ...] = (
 
 def _run(args: Sequence[str]) -> int:
     """Run one fixed command, emitting bounded diagnostics only on failure."""
-    result = run_subprocess([sys.executable, *args], check=False)
+    result = run_subprocess(
+        [sys.executable, *args], env=build_python_phase_env(Path.cwd()), check=False
+    )
     if result.returncode != 0:
         summary = tuple(
             line for line in result.stdout.splitlines() if line.startswith(("FAILED ", "ERROR "))

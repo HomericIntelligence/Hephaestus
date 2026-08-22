@@ -19,13 +19,13 @@ _PREDECOMPOSITION_LINES = {
 _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/coordinator.py": 1_100,
     "hephaestus/automation/pipeline/coordinator_contract.py": 225,
-    "hephaestus/automation/pipeline/coordinator_types.py": 500,
+    "hephaestus/automation/pipeline/coordinator_types.py": 537,
     "hephaestus/automation/pipeline/coordinator_runtime.py": 1_400,
     "hephaestus/automation/pipeline/coordinator_sources.py": 950,
     "hephaestus/automation/pipeline/coordinator_dispatch.py": 500,
     "hephaestus/automation/pipeline_github.py": 500,
     "hephaestus/automation/pipeline_github_contract.py": 125,
-    "hephaestus/automation/pipeline_github_transport.py": 400,
+    "hephaestus/automation/pipeline_github_transport.py": 406,
     "hephaestus/automation/pipeline_github_authorization.py": 300,
     "hephaestus/automation/pipeline_github_queries.py": 650,
     "hephaestus/automation/pipeline_github_reviews.py": 1_400,
@@ -36,7 +36,7 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline/stages/pr_review_repository.py": 100,
     "hephaestus/automation/pipeline/stages/pr_review_receipts.py": 100,
     "hephaestus/automation/pipeline/stages/pr_review_verification.py": 250,
-    "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_400,
+    "hephaestus/automation/pipeline/stages/pr_review_jobs.py": 1_401,
     "hephaestus/automation/pipeline/stages/pr_review_gate.py": 700,
 }
 

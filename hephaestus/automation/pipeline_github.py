@@ -61,10 +61,8 @@ if _typing.TYPE_CHECKING:
         logger,
         logging,
         normalize_scope_retraction_paths,
-        os,
         quote,
         re,
-        read_timeout_env,
         scope_retraction_marker,
         subprocess,
         sys,
@@ -126,15 +124,16 @@ def _parse_included_http_response(
     return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
 
 
-def rate_limit_remaining() -> tuple[int, int] | None:
+def rate_limit_remaining(*, timeout: int | None = None) -> tuple[int, int] | None:
     """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or ``None``.
 
     Feeds the coordinator's non-blocking rate gate. A blocking *sleeping* guard
     would be fatal for a single coordinator thread, so the pipeline timer-parks
-    instead (see ``coordinator._rate_budget_ok``).
+    instead (see ``coordinator._rate_budget_ok``). ``timeout`` bounds the live
+    GitHub CLI probe at the calling CLI boundary.
     """
     try:
-        out = gh_call(["api", "rate_limit"])
+        out = gh_call(["api", "rate_limit"], timeout=timeout)
     except (subprocess.SubprocessError, RuntimeError, OSError):
         return None
     try:
@@ -145,24 +144,30 @@ def rate_limit_remaining() -> tuple[int, int] | None:
         return None
 
 
-def rate_budget_ok(now_epoch: float | None = None) -> tuple[bool, float]:
+def rate_budget_ok(
+    now_epoch: float | None = None,
+    *,
+    enabled: bool = True,
+    threshold: int = 200,
+    timeout: int | None = None,
+) -> tuple[bool, float]:
     """Non-blocking GraphQL rate-budget gate for the coordinator.
 
     Args:
         now_epoch: Current epoch seconds (injectable for tests).
+        timeout: Maximum seconds for the live GitHub CLI budget probe.
 
     Returns:
         ``(ok, park_delay_s)``. ``ok`` is False when the GraphQL budget is
-        below ``HEPHAESTUS_RATE_GUARD_THRESHOLD`` (default 200) and the
-        ``HEPHAESTUS_RATE_GUARD`` env gate is enabled; ``park_delay_s`` is the
+        below the explicit threshold (default 200) and the guard is enabled;
+        ``park_delay_s`` is the
         seconds until the upstream reset (+5s slack, mirroring the legacy
         guard), 0.0 when ``ok``.
 
     """
-    if os.environ.get("HEPHAESTUS_RATE_GUARD", "1") == "0":
+    if not enabled:
         return True, 0.0
-    threshold = read_timeout_env("HEPHAESTUS_RATE_GUARD_THRESHOLD", 200)
-    rl = rate_limit_remaining()
+    rl = rate_limit_remaining(timeout=timeout)
     if rl is None:
         return True, 0.0
     remaining, reset_epoch = rl

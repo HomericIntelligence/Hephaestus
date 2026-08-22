@@ -1060,14 +1060,11 @@ class TestBaseBranchDetectionRaisesOnFailure:
         """Loop phases build issue worktrees from the exact validated trunk commit."""
         mock_get_root.return_value = tmp_path
 
-        with (
-            patch.dict("os.environ", {"HEPH_TRUNK_GITHASH": "330a7b1"}),
-            patch(
-                "hephaestus.automation.worktree_manager.run",
-                side_effect=AssertionError("remote detection should not run"),
-            ),
+        with patch(
+            "hephaestus.automation.worktree_manager.run",
+            side_effect=AssertionError("remote detection should not run"),
         ):
-            mgr = WorktreeManager()
+            mgr = WorktreeManager(trunk_githash="330a7b1")
 
         assert mgr.base_branch == "330a7b1"
 
@@ -1524,10 +1521,9 @@ class TestCreateWorktreeBranchCollision:
         self, worktree_mocks: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Issue-major workers branch from fresh origin/main, not loop-start trunk."""
-        monkeypatch.setenv("HEPH_TRUNK_GITHASH", "3883866")
         worktree_mocks.repo_root.return_value = tmp_path
         worktree_mocks.run.return_value = Mock(returncode=1, stdout="origin/main")
-        manager = WorktreeManager()
+        manager = WorktreeManager(trunk_githash="3883866")
 
         with patch.object(manager, "_worktree_holding_branch", return_value=None):
             manager.create_worktree(1420, "1420-auto-impl", refresh_base=True)

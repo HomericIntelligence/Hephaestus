@@ -40,6 +40,7 @@ from hephaestus.automation.agent_config import (
     session_name,
     session_uuid,
 )
+from hephaestus.config.child_environments import build_claude_child_env
 from hephaestus.github.client import ClaudeUsageCapError, PromptTooLongError
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch
 from hephaestus.utils.helpers import strip_null_bytes
@@ -153,6 +154,7 @@ def invoke_claude_with_session(
     model: str,
     cwd: Path,
     timeout: int | None = None,
+    fallback_model_value: str | None = None,
     system_prompt_file: Path | None = None,
     allowed_tools: str | None = None,
     permission_mode: str | None = None,
@@ -255,7 +257,7 @@ def invoke_claude_with_session(
             session_lifecycle=session_lifecycle,
         )
 
-    fallback = fallback_model()
+    fallback = fallback_model(fallback_model_value)
     effective = model
     if session_lifecycle == "resume-required":
         # A fallback model has a different deterministic Claude lineage.
@@ -354,10 +356,7 @@ def _invoke_claude_once(
     if not input_via_stdin:
         cmd.append(prompt)
 
-    env = os.environ.copy()
-    # CLAUDECODE is set by an outer Claude Code process to refuse nested
-    # invocations; clear it so the automation subprocess can launch.
-    env["CLAUDECODE"] = ""
+    env = build_claude_child_env()
     # Propagate correlation ID to subprocess if set (for gh tracing).
     from hephaestus.logging.utils import get_current_correlation_id
 

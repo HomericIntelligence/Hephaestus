@@ -22,11 +22,13 @@ from hephaestus.agents.pi_session import AgentSessionBinding
 from hephaestus.agents.runtime import (
     agent_compaction_resume,
     direct_agent_model,
+    resolve_agent,
     resume_agent_session,
     session_agent_matches,
     uses_direct_agent_runner,
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
+from hephaestus.config.child_environments import build_claude_child_env
 from hephaestus.github.rate_limit import resolve_quota_reset_epoch, wait_until
 from hephaestus.io.utils import write_secure
 
@@ -216,7 +218,7 @@ def run_learn(
         state_dir: Directory for state/log files
         slot_id: Worker slot ID (unused; kept for interface symmetry)
         model: Override the model used for /learn. When ``None`` (default)
-            the configured ``HEPH_LEARN_MODEL`` / ``learn_model()`` is used.
+            :func:`learn_model` default is used.
             Pass ``implementer_model()`` so the implementer's /learn turn runs
             on the same model tier the session was created with.
 
@@ -255,7 +257,7 @@ def run_learn(
                     prompt=build_learn_prompt(""),
                     cwd=worktree_path,
                     timeout=timeout,
-                    model=direct_agent_model(agent, "HEPH_LEARN_MODEL"),
+                    model=direct_agent_model(agent, model_value=learn_model(model)),
                 ).stdout
                 or ""
             )
@@ -269,7 +271,7 @@ def run_learn(
 
     # /learn is a SIMPLE-complexity task (summarization + file writes), so we
     # use the configured learn model (default: Haiku) but accept operator
-    # overrides via HEPH_LEARN_MODEL. Callers may pass `model` explicitly to
+    # Callers may pass ``model`` explicitly to
     # run /learn on the same model tier as the session (e.g. implementer_model()).
     # We can't route through `call_claude` here because we need `--resume`
     # semantics with full Bash/Edit tools; instead we add the model flag directly.
@@ -440,6 +442,7 @@ def compact_session(
             check=False,
             capture_output=True,
             text=True,
+            env=build_claude_child_env(),
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         logger.warning(
@@ -490,6 +493,8 @@ def compact_agent_session(
     sandbox: str = "read-only",
     execution_request: ExecutionRequest | None = None,
     session_binding: AgentSessionBinding | None = None,
+    disable_pi_automation: bool = False,
+    auth_status_timeout: int = 10,
 ) -> bool:
     """Compact a persisted provider session without making it a hard gate.
 
@@ -500,6 +505,12 @@ def compact_agent_session(
     """
     if provider == "claude":
         return compact_session(repo, issue, session_agent, cwd, timeout, model)
+    provider = resolve_agent(
+        provider,
+        cwd=cwd,
+        disable_pi_automation=disable_pi_automation,
+        auth_status_timeout=auth_status_timeout,
+    )
     resume = agent_compaction_resume(
         provider,
         session_agent=session_agent,
@@ -527,6 +538,7 @@ def compact_agent_session(
             model=model or "",
             sandbox=sandbox,
             approval="never",
+            disable_pi_automation=disable_pi_automation,
             **resume_options,
         )
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, ValueError) as exc:

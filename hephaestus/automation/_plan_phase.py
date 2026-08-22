@@ -9,11 +9,12 @@ implementation plan, and if not, generate one" responsibility.
 from __future__ import annotations
 
 import contextlib
-import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from hephaestus.config.child_environments import build_python_phase_env
 
 from ._stage_context import StageMixin
 from .agent_config import plan_stage_timeout
@@ -36,9 +37,7 @@ def _phase_env(repo_root: Path) -> dict[str, str]:
     third-party ``site-packages`` ahead of the stdlib. Keep only the repo root
     so source-checkout fallback still works without the ambient search path.
     """
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(repo_root)
-    return env
+    return build_python_phase_env(repo_root)
 
 
 class PlanPhase(StageMixin):
@@ -63,12 +62,14 @@ class PlanPhase(StageMixin):
         """Generate plan for an issue using hephaestus-plan-issues.
 
         The plan-issues subprocess is bounded by a stage-level wrapper timeout
-        (default 7200s, ``HEPH_PLAN_STAGE_TIMEOUT``-tunable) instead of the
+        (default 7200s) instead of the
         inner planner-agent timeout. A heavy god-class issue can exceed 1200s of
         total planner runtime while individual planner agent calls still use
         their shorter ``AGENT_PLAN_TIMEOUT`` budget (#1374).
         """
-        plan_timeout = plan_stage_timeout()
+        plan_timeout = getattr(self.options, "plan_stage_timeout", None)
+        if plan_timeout is None:
+            plan_timeout = plan_stage_timeout()
 
         # Invoke the planner through the active interpreter. Resolving a console
         # script from PATH can escape the uv project environment and select an
@@ -84,6 +85,7 @@ class PlanPhase(StageMixin):
                     "--agent",
                     self.options.agent,
                 ],
+                cwd=self.repo_root,
                 timeout=plan_timeout,
                 env=_phase_env(self.repo_root),
             )
@@ -94,6 +96,7 @@ class PlanPhase(StageMixin):
         if plan_script.exists():
             run(
                 [sys.executable, str(plan_script), "--issues", str(issue_number)],
+                cwd=self.repo_root,
                 timeout=plan_timeout,
                 env=_phase_env(self.repo_root),
             )

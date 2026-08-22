@@ -250,7 +250,7 @@ class TestArgvAssembly:
         """
         # Planner-specific override must NOT influence the generic fallback.
         monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
-        # The generic override is what applies.
+        # The removed generic override is inert; the explicit value applies.
         monkeypatch.setenv("HEPH_AGENT_DEFAULT_TIMEOUT", "4321")
         cwd = fake_home / "work"
         cwd.mkdir()
@@ -262,6 +262,7 @@ class TestArgvAssembly:
             prompt="hi",
             model="sonnet",
             cwd=cwd,
+            timeout=4321,
         )
 
         stub_run.assert_called_once()
@@ -809,18 +810,24 @@ class TestModelCapFallback:
             )
         assert sid == session_uuid("R", 1, AGENT_PLANNER, OPUS_48, cwd=cwd)
 
-    def test_heph_fallback_model_env_override(
+    def test_explicit_fallback_model_selection(
         self, fake_home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """HEPH_FALLBACK_MODEL redirects the fallback target."""
+        """A resolved fallback selection redirects the capped-model retry."""
         cwd = fake_home / "work"
         cwd.mkdir()
         monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-haiku-4-5")
         ok = MagicMock(stdout="ok", stderr="", returncode=0)
-        with patch(
-            "hephaestus.automation.claude_invoke._run_tracked",
-            side_effect=[_cap_error(), ok],
-        ) as m:
+        with (
+            patch(
+                "hephaestus.automation.claude_invoke.fallback_model",
+                return_value="claude-haiku-4-5",
+            ),
+            patch(
+                "hephaestus.automation.claude_invoke._run_tracked",
+                side_effect=[_cap_error(), ok],
+            ) as m,
+        ):
             invoke_claude_with_session(
                 repo="R",
                 issue=1,

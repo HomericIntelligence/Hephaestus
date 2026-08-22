@@ -92,6 +92,7 @@ from .base import (
     agent_provider,
     source_workspace_binding,
     stage_model,
+    stage_timeout,
 )
 
 logger = logging.getLogger(__name__)
@@ -628,7 +629,7 @@ class PlanningStage(Stage):
                     agent=agent_provider(ctx),
                     model=stage_model(ctx, "advise", advise_model),
                     cwd=workspace.cwd if workspace else ctx.paths.worktree,
-                    timeout_s=advise_claude_timeout(),
+                    timeout_s=stage_timeout(ctx, "advise", advise_claude_timeout),
                     workspace=workspace,
                     payload={
                         "issue_number": item.issue,
@@ -652,7 +653,7 @@ class PlanningStage(Stage):
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_plan_prompt,
                 cwd=workspace.cwd if workspace else ctx.paths.worktree,
-                timeout_s=planner_claude_timeout(),
+                timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",

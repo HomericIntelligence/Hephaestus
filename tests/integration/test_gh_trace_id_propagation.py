@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from hephaestus.config.child_environments import read_approved_parent_env
+from hephaestus.github.client import gh_call
 from hephaestus.logging.utils import correlation_id_scope, get_current_correlation_id
 from hephaestus.utils.helpers import run_subprocess
 
@@ -51,11 +53,21 @@ class TestGhTraceIdPropagation:
         """Verify that get_current_correlation_id() returns None by default."""
         assert get_current_correlation_id() is None
 
+    def test_gh_adapter_uses_the_approved_parent_path(self) -> None:
+        """The GitHub provider must locate an approved non-system ``gh`` binary."""
+        try:
+            result = gh_call(["--version"], max_retries=1)
+        except FileNotFoundError:
+            pytest.fail("gh_call discarded the approved PATH at the subprocess boundary")
+
+        assert "NO_GH_TRACE_ID" in result.stdout
+
     def test_gh_trace_id_injected_via_run_subprocess(self) -> None:
         """GH_TRACE_ID should be injected into the subprocess environment via run_subprocess."""
         # Outside scope: no GH_TRACE_ID should be set
         result = run_subprocess(
             ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+            env=read_approved_parent_env(),
             check=False,
         )
         assert "NO_GH_TRACE_ID" in result.stdout
@@ -64,6 +76,7 @@ class TestGhTraceIdPropagation:
         with correlation_id_scope("test-trace-id-123"):
             result = run_subprocess(
                 ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+                env=read_approved_parent_env(),
                 check=False,
             )
             assert "GH_TRACE_ID=test-trace-id-123" in result.stdout
@@ -73,6 +86,7 @@ class TestGhTraceIdPropagation:
         with correlation_id_scope("outer-id"):
             result_outer = run_subprocess(
                 ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+                env=read_approved_parent_env(),
                 check=False,
             )
             assert "GH_TRACE_ID=outer-id" in result_outer.stdout
@@ -80,6 +94,7 @@ class TestGhTraceIdPropagation:
             with correlation_id_scope("inner-id"):
                 result_inner = run_subprocess(
                     ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+                    env=read_approved_parent_env(),
                     check=False,
                 )
                 assert "GH_TRACE_ID=inner-id" in result_inner.stdout
@@ -87,6 +102,7 @@ class TestGhTraceIdPropagation:
             # After exiting inner scope, outer ID should be restored
             result_back = run_subprocess(
                 ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+                env=read_approved_parent_env(),
                 check=False,
             )
             assert "GH_TRACE_ID=outer-id" in result_back.stdout
@@ -97,6 +113,7 @@ class TestGhTraceIdPropagation:
             with correlation_id_scope("error-scope-id"):
                 result = run_subprocess(
                     ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+                    env=read_approved_parent_env(),
                     check=False,
                 )
                 assert "GH_TRACE_ID=error-scope-id" in result.stdout
@@ -108,6 +125,7 @@ class TestGhTraceIdPropagation:
         assert get_current_correlation_id() is None
         result = run_subprocess(
             ["sh", "-c", "env | grep GH_TRACE_ID || echo 'NO_GH_TRACE_ID'"],
+            env=read_approved_parent_env(),
             check=False,
         )
         assert "NO_GH_TRACE_ID" in result.stdout

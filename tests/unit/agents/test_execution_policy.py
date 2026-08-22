@@ -155,11 +155,16 @@ def test_ready_pi_is_explicitly_na_without_a_registered_isolation_adapter(
     from hephaestus.agents.pi_plugins import PiPreflightResult
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
-    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent: True)
+    monkeypatch.setattr(
+        agent_runtime,
+        "is_agent_authenticated",
+        lambda _agent, **_kwargs: True,
+    )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
-    monkeypatch.delenv("HEPH_PI_ISOLATION_ADAPTER", raising=False)
     monkeypatch.setattr(agent_runtime, "entry_points", pytest.fail, raising=False)
 
     with pytest.raises(agent_runtime.PiIsolationUnavailableError, match="Pi automation is N/A"):
@@ -177,9 +182,15 @@ def test_registered_host_adapter_admits_pi_selection(
             raise AssertionError("selection must not invoke the adapter")
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
-    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent: True)
+    monkeypatch.setattr(
+        agent_runtime,
+        "is_agent_authenticated",
+        lambda _agent, **_kwargs: True,
+    )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "must-not-be-loaded")
     monkeypatch.setattr(agent_runtime, "entry_points", pytest.fail, raising=False)
@@ -213,14 +224,19 @@ def test_named_host_adapter_entry_point_admits_fresh_cli_process(
         return (EntryPoint(),)
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
-    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent: True)
+    monkeypatch.setattr(agent_runtime, "is_agent_authenticated", lambda _agent, **_kwargs: True)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setattr(agent_runtime, "entry_points", entry_points, raising=False)
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
 
-    assert agent_runtime.resolve_agent("pi", cwd=tmp_path) == "pi"
+    assert (
+        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_isolation_adapter="operator-broker")
+        == "pi"
+    )
     assert observed == [
         {
             "group": "hephaestus.pi_isolation_adapters",
@@ -250,13 +266,12 @@ def test_installed_host_adapter_bootstraps_in_a_fresh_python_process(tmp_path) -
         encoding="utf-8",
     )
     env = os.environ.copy()
-    env["HEPH_PI_ISOLATION_ADAPTER"] = "process-fixture"
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(fixture_root), env.get("PYTHONPATH", "")) if part
     )
     process_code = (
         "from hephaestus.agents import runtime; "
-        + "runtime._require_pi_isolation_adapter(); print('loaded')"
+        + "runtime._require_pi_isolation_adapter('process-fixture'); print('loaded')"
     )
 
     completed = subprocess.run(
@@ -291,18 +306,21 @@ def test_named_host_adapter_bootstraps_before_direct_policy_dispatch(
         def load(self) -> object:
             return Adapter
 
-    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(
+        agent_runtime, "_require_pi_automation_admission", lambda _cwd, **_kwargs: None
+    )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setattr(
         agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
     )
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER,
         AgentOperation.PR_REVIEW,
         SessionLifecycle.ONE_SHOT,
     )
 
+    agent_runtime.load_pi_isolation_adapter("operator-broker")
     result = agent_runtime.run_agent_text(
         "pi", "review", cwd=tmp_path, timeout=30, execution_request=request
     )
@@ -322,7 +340,9 @@ def test_named_host_adapter_requires_one_exact_entry_point(
         pass
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
     monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
@@ -332,13 +352,13 @@ def test_named_host_adapter_requires_one_exact_entry_point(
         lambda **_kwargs: tuple(EntryPoint() for _index in range(match_count)),
         raising=False,
     )
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
 
     with pytest.raises(
         agent_runtime.PiIsolationUnavailableError,
         match="not installed exactly once",
     ):
-        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_isolation_adapter="operator-broker")
 
 
 @pytest.mark.parametrize("failure", ["discover", "load", "initialize"])
@@ -359,7 +379,9 @@ def test_named_host_adapter_sanitizes_external_factory_failures(
             return factory
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
     monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
@@ -370,13 +392,13 @@ def test_named_host_adapter_sanitizes_external_factory_failures(
         return (EntryPoint(),)
 
     monkeypatch.setattr(agent_runtime, "entry_points", entry_points, raising=False)
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
 
     with pytest.raises(
         agent_runtime.PiIsolationUnavailableError,
         match="could not be discovered" if failure == "discover" else "could not be initialized",
     ) as exc_info:
-        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_isolation_adapter="operator-broker")
 
     assert "private" not in str(exc_info.value)
 
@@ -392,20 +414,22 @@ def test_named_host_adapter_rejects_an_invalid_protocol(
             return object
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
     monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setattr(
         agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
     )
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
 
     with pytest.raises(
         agent_runtime.PiIsolationUnavailableError,
         match=r"does not implement invoke\(\)",
     ):
-        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_isolation_adapter="operator-broker")
 
 
 def test_named_host_adapter_sanitizes_protocol_attribute_failures(
@@ -424,20 +448,22 @@ def test_named_host_adapter_sanitizes_protocol_attribute_failures(
             return Adapter
 
     monkeypatch.setattr(
-        agent_runtime, "preflight_pi_environment", lambda _cwd: PiPreflightResult.ready_result()
+        agent_runtime,
+        "preflight_pi_environment",
+        lambda _cwd, **_kwargs: PiPreflightResult.ready_result(),
     )
     monkeypatch.setattr(agent_runtime, "is_agent_authenticated", pytest.fail)
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
     monkeypatch.setattr(
         agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
     )
-    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "operator-broker")
+    monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
 
     with pytest.raises(
         agent_runtime.PiIsolationUnavailableError,
         match="could not be initialized",
     ) as exc_info:
-        agent_runtime.resolve_agent("pi", cwd=tmp_path)
+        agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_isolation_adapter="operator-broker")
 
     assert "private" not in str(exc_info.value)
 
@@ -446,7 +472,11 @@ def test_pi_policy_dispatch_fails_before_provider_without_os_adapter(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pi cannot treat model-visible tool flags as filesystem or network isolation."""
-    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
     )
@@ -471,7 +501,11 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
             received.update(kwargs)
             return agent_runtime.AgentRunResult(stdout="review", stderr="")
 
-    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
@@ -495,7 +529,11 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
     binding = create_pi_binding(
         session_id="pi-session-123", cwd=tmp_path, role=AgentRole.PLANNER, model="model"
     )
-    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
     start_request = ExecutionRequest(
         AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW
     )
@@ -566,7 +604,11 @@ def test_pi_session_start_dispatches_without_resume_binding(
                 stdout="planned", stderr="", session_id="pi-session-new"
             )
 
-    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_require_pi_automation_admission",
+        lambda _cwd, **_kwargs: None,
+    )
     monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
     request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
 

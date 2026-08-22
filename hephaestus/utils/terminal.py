@@ -18,6 +18,8 @@ import sys
 import threading
 from collections.abc import Callable, Generator
 
+from hephaestus.config.child_environments import read_approved_parent_env
+
 
 def restore_terminal() -> None:
     """Restore terminal to sane state using stty.
@@ -30,7 +32,12 @@ def restore_terminal() -> None:
         if threading.current_thread() is not threading.main_thread():
             return
         if sys.stdin.isatty():
-            subprocess.run(["stty", "sane"], stdin=sys.stdin, check=False)
+            subprocess.run(
+                ["stty", "sane"],
+                stdin=sys.stdin,
+                check=False,
+                env=read_approved_parent_env(),
+            )
     # Best effort — never raise during cleanup
 
 

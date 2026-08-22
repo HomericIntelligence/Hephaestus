@@ -72,13 +72,22 @@ from hephaestus.automation.pipeline.tool_scopes import (
     ToolScope,
     tool_scope_for,
 )
+from hephaestus.automation.prompts._review_rubric import plugin_skills_context
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
     WorktreeManager,
 )
+from hephaestus.config.child_environments import (
+    build_git_child_env,
+    build_git_signing_env,
+    build_host_verification_env,
+    build_python_phase_env,
+    read_approved_parent_env,
+)
 from hephaestus.diagnostics import bounded_git_diagnostic
+from hephaestus.github.client import gh_call
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
@@ -271,38 +280,14 @@ def _host_verification_env(
     for directory in (home, temporary, cache):
         directory.mkdir(parents=True, exist_ok=True)
 
-    env = {
-        "HOME": str(home),
-        "TMPDIR": str(temporary),
-        "TMP": str(temporary),
-        "TEMP": str(temporary),
-        "XDG_CACHE_HOME": str(cache),
-        "UV_CACHE_DIR": str(cache / "uv"),
-        # The coordinator's existing runtime environment is host-owned and
-        # read-only inside the OS sandbox.  It has the locked dependencies
-        # needed for an offline ``uv run`` without exposing a user home/cache.
-        "UV_PROJECT_ENVIRONMENT": str(runtime_environment),
-        "UV_OFFLINE": "1",
-        "UV_NO_SYNC": "1",
-        "RUFF_CACHE_DIR": str(cache / "ruff"),
-        "COVERAGE_FILE": str(cache / ".coverage"),
-        "PYTHONPYCACHEPREFIX": str(cache / "pycache"),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTEST_ADDOPTS": "-p no:cacheprovider",
-        "PATH": os.pathsep.join(
-            (
-                str(Path(executable).parent),
-                *((str(Path(git_executable).parent),) if git_executable else ()),
-                os.defpath,
-            )
-        ),
-    }
-    # Locale is harmless input-only process configuration and prevents tools
-    # from producing platform-dependent decoding failures.
-    for key in ("LANG", "LC_ALL", "TZ"):
-        if value := os.environ.get(key):
-            env[key] = value
-    return env
+    return build_host_verification_env(
+        home=home,
+        temporary=temporary,
+        cache=cache,
+        runtime_environment=runtime_environment,
+        executable=Path(executable),
+        git_executable=Path(git_executable) if git_executable else None,
+    )
 
 
 def _host_runtime_fingerprint(runtime: Path) -> str:
@@ -712,6 +697,7 @@ def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Itera
         capture_output=True,
         timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
         check=False,
+        env=read_approved_parent_env(),
     )
     if create.returncode != 0:
         raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
@@ -722,6 +708,7 @@ def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Itera
             capture_output=True,
             timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
             check=False,
+            env=read_approved_parent_env(),
         )
         if attach.returncode != 0:
             raise _HostVerificationBoundaryError("host_verification_quota_unavailable")
@@ -742,6 +729,7 @@ def _quota_backed_volume(root: Path, image_name: str, mountpoint: Path) -> Itera
                         capture_output=True,
                         timeout=_HOST_VERIFICATION_SETUP_TIMEOUT_S,
                         check=False,
+                        env=read_approved_parent_env(),
                     )
                 except (OSError, subprocess.TimeoutExpired):
                     continue
@@ -1179,15 +1167,7 @@ def _is_full_commit_sha(value: object) -> TypeGuard[str]:
 
 def _controlled_git_env() -> dict[str, str]:
     """Return an environment that cannot redirect or extend Git execution."""
-    env = os.environ.copy()
-    for key in _FETCH_ENV_BLOCKLIST:
-        env.pop(key, None)
-    for key in tuple(env):
-        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
-            env.pop(key)
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env = build_git_child_env()
     trusted_git = _trusted_git_executable()
     path_entries = os.defpath.split(os.pathsep)
     if trusted_git is not None:
@@ -1197,8 +1177,6 @@ def _controlled_git_env() -> dict[str, str]:
             *(entry for entry in path_entries if entry != trusted_parent),
         ]
     env["PATH"] = os.pathsep.join(path_entries)
-    env["GIT_PAGER"] = "cat"
-    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 
@@ -1246,14 +1224,8 @@ def _read_host_git_signing_config(cwd: Path, *, timeout: int) -> dict[str, str] 
     trusted_git = _trusted_git_executable()
     if trusted_git is None:
         return None
-    env = os.environ.copy()
-    for key in _FETCH_ENV_BLOCKLIST:
-        env.pop(key, None)
-    for key in tuple(env):
-        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
-            env.pop(key)
+    env = build_git_signing_env()
     env.pop("GIT_CONFIG_GLOBAL", None)
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
     expression = "^(user\\.name|user\\.email|gpg\\.format|user\\.signingkey)$"
     try:
         result = subprocess.run(
@@ -1871,11 +1843,19 @@ class WorkerPool:
         """
         try:
             cwd = validate_job_workspace(job)
-            agent = resolve_agent(job.agent, cwd=cwd)
+            agent = resolve_agent(
+                job.agent,
+                cwd=cwd,
+                disable_pi_automation=job.disable_pi_automation,
+                auth_status_timeout=job.auth_status_timeout,
+                pi_isolation_adapter=job.pi_isolation_adapter,
+                pi_dir=job.pi_dir,
+            )
             is_claude = agent == "claude"
             session_agent = job.session_agent or job.agent
             session_key = job.session_key or session_agent
-            prompt = job.prompt_builder(**job.prompt_kwargs)
+            with plugin_skills_context(job.plugin_skills_dir):
+                prompt = job.prompt_builder(**job.prompt_kwargs)
 
             def _invoke() -> tuple[str, str | None, AgentSessionBinding | None]:
                 if is_claude:
@@ -1921,6 +1901,8 @@ class WorkerPool:
                         process_tracker=subprocess_registry.track_process_group,
                         execution_request=job.execution_request,
                         resume_binding=job.resume_binding,
+                        disable_pi_automation=job.disable_pi_automation,
+                        pi_dir=job.pi_dir,
                     )
                 elif job.resume_session_id:
                     agent_result = resume_agent_session(
@@ -1935,6 +1917,8 @@ class WorkerPool:
                         process_tracker=subprocess_registry.track_process_group,
                         execution_request=job.execution_request,
                         resume_binding=job.resume_binding,
+                        disable_pi_automation=job.disable_pi_automation,
+                        pi_dir=job.pi_dir,
                     )
                 else:
                     agent_result = run_agent_session(
@@ -1948,6 +1932,8 @@ class WorkerPool:
                         process_tracker=subprocess_registry.track_process_group,
                         execution_request=job.execution_request,
                         resume_binding=job.resume_binding,
+                        disable_pi_automation=job.disable_pi_automation,
+                        pi_dir=job.pi_dir,
                     )
                 # A resumed command may not repeat the session-start event;
                 # retain the known id in that case.
@@ -2056,6 +2042,8 @@ class WorkerPool:
             sandbox=job.sandbox,
             execution_request=job.execution_request,
             session_binding=job.session_binding,
+            disable_pi_automation=job.disable_pi_automation,
+            auth_status_timeout=job.auth_status_timeout,
         )
         # ``compact_agent_session`` intentionally swallows expected failures; a
         # missing or uncompactable transcript must not stall a review cycle.
@@ -2075,6 +2063,7 @@ class WorkerPool:
                 text=True,
                 timeout=job.timeout_s,
                 check=False,  # we inspect rc below
+                env=build_python_phase_env(job.cwd),
             )
             return JobResult(
                 ok=result.returncode == 0,
@@ -2307,7 +2296,11 @@ class WorkerPool:
                     ok=False,
                     error="clone requires non-empty 'repo' and 'dest' kwargs",
                 )
-            git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
+            gh_call(
+                ["repo", "clone", repo, dest],
+                timeout=job.timeout_s,
+                max_retries=1,
+            )
             return JobResult(ok=True)
 
         elif job.op == "sync_checkout":
@@ -3547,11 +3540,13 @@ class WorkerPool:
         )
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
+        git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         if agent_model is None:
             changed = git_utils.commit_if_changes(
                 *commit_args,
                 allowed_paths=allowed_paths,
                 timeout=job.timeout_s,
+                git_message_timeout=git_message_timeout,
             )
         else:
             changed = git_utils.commit_if_changes(
@@ -3559,6 +3554,7 @@ class WorkerPool:
                 allowed_paths=allowed_paths,
                 timeout=job.timeout_s,
                 agent_model=str(agent_model),
+                git_message_timeout=git_message_timeout,
             )
         branch = str(job.kwargs.get("branch") or "")
         if not changed:

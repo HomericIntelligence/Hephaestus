@@ -20,18 +20,27 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.80.2
 pi --version
 ```
 
-Set the local smoke sentinels at runtime:
+Create a private alias file owned by the invoking user with mode `0600`:
 
-```bash
-export HEPH_PI_PROVIDER=<operator-local-provider-alias>
-export HEPH_PI_MODEL=<operator-local-alias>
-python3 scripts/pi_smoke.py
+```toml
+provider = "<operator-local-provider-alias>"
+model = "<operator-local-alias>"
 ```
 
-Both variables are required by the explicit smoke seam. They are not yet
-forwarded as Pi native provider/model selection arguments, so a successful
-smoke validates only the bounded adapter path, not a requested provider/model
-selection. That seam is non-interactive and ephemeral: it disables sessions,
+Then pass the path explicitly:
+
+```bash
+chmod 0600 ~/.config/hephaestus/pi-aliases.toml
+python3 scripts/pi_smoke.py \
+  --pi-alias-config ~/.config/hephaestus/pi-aliases.toml \
+  --pi-dir ~/.pi/agent
+```
+
+The parser rejects symlinks, files owned by another user, group/other access,
+missing or unknown keys, and blank values. The aliases are not forwarded in
+subprocess arguments, environment variables, logs, or scheduler exports. A
+successful smoke validates only the bounded adapter path, not a requested
+provider/model selection. That seam is non-interactive and ephemeral: it disables sessions,
 tools, project approval/context, and extension, skill, prompt-template, and
 theme discovery. #2516 owns configuration discovery and preflight; #2518 owns
 native selection and scoped pipeline admission.
@@ -39,7 +48,7 @@ native selection and scoped pipeline admission.
 The smoke command starts Pi with a minimized execution, configuration, locale,
 and temporary-directory environment. It disconnects Pi from the caller's
 standard input, so a piped parent input cannot become part of the fixed smoke
-prompt. It does not forward the `HEPH_PI_*` sentinels, arbitrary Pi settings,
+prompt. It does not forward the private aliases, arbitrary Pi settings,
 GitHub/cloud credentials, or an operator's telemetry preference; it forces
 `PI_TELEMETRY=0` and `PI_SKIP_VERSION_CHECK=1`. A generated Pi session ID is
 discarded and never printed or written to the diagnostic artifact.
@@ -59,7 +68,16 @@ paths. On Windows or a POSIX platform without a verifiable ACL mechanism, it
 fails closed before invoking Pi; do not work around that guard by redirecting
 output to a shared path.
 
-For Slurm, use `python3 scripts/pi_smoke_slurm.py`. The wrapper invokes
+For Slurm, pass both private paths explicitly:
+
+```bash
+python3 scripts/pi_smoke_slurm.py \
+  --pi-alias-config ~/.config/hephaestus/pi-aliases.toml \
+  --pi-dir ~/.pi/agent \
+  --log-dir ~/private/pi-smoke-logs
+```
+
+The wrapper invokes
 `sbatch` with a minimized environment, writes scheduler artifacts only inside
 the same fresh ACL-verified private run directory, and redacts scheduler
 diagnostics. The default
@@ -101,8 +119,11 @@ operator-broker = "operator_package.pi_broker:create_adapter"
 ```
 
 ```bash
-export HEPH_PI_ISOLATION_ADAPTER=operator-broker
-hephaestus-plan-issues --agent pi --parallel 1 --json
+hephaestus-plan-issues \
+  --agent pi \
+  --pi-isolation-adapter operator-broker \
+  --parallel 1 \
+  --json
 ```
 
 The factory must return an object implementing
@@ -159,7 +180,7 @@ and Hephaestus checkouts and the pinned Pi binary to collect evidence:
 ```bash
 uv run python scripts/pi_package_acceptance.py collect \
   --athena-checkout "$ATHENA_CHECKOUT" \
-  --implementation-pr "$HEPHAESTUS_PR_NUMBER" \
+  --implementation-pr "$IMPLEMENTATION_PR_NUMBER" \
   --pi-bin "$ATHENA_PI_BIN" \
   --output-dir build/pi-acceptance
 ```

@@ -51,6 +51,12 @@ class AgentJob:
     cwd: Path
     timeout_s: int
     workspace: WorkspaceBinding | None = None
+    disable_pi_automation: bool = False
+    auth_status_timeout: int = 10
+    pi_isolation_adapter: str | None = None
+    pi_dir: Path | None = None
+    fallback_model: str | None = None
+    plugin_skills_dir: Path | None = None
     session_agent: str = ""
     # Stable cycle-scoped identity.  Unlike ``session_agent`` this must not
     # be shared by separate issues or explicit planning cycles.
@@ -148,6 +154,8 @@ class CompactJob:
     model: str
     cwd: Path
     timeout_s: int
+    disable_pi_automation: bool = False
+    auth_status_timeout: int = 10
     session_id: str | None = None
     # Direct-provider compaction only sends ``/compact`` and never needs write
     # access.  Keep the policy explicit so it cannot inherit user defaults.

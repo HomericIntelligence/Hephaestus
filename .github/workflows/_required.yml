@@ -867,12 +867,10 @@ jobs:
       - name: Run integration tests (in container)
         # The baked image installs every [project.scripts] binary into the venv,
         # so the CLI entry-point checks must never skip here (#2173).
-        env:
-          HEPHAESTUS_REQUIRE_CLI: "1"
         run: >
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
-          -e HEPHAESTUS_REQUIRE_CLI
           hephaestus-ci:local uv run pytest tests/integration
+          --require-cli
           --override-ini="addopts=" --basetemp=build/pytest-integration
           -v --strict-markers -m "not nightly and not artifact"
 
@@ -929,15 +927,12 @@ jobs:
           '
 
       - name: Run CLI entry-point tests against installed binaries (in container)
-        env:
-          HEPHAESTUS_REQUIRE_CLI: "1"
         run: |
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 \
-            -e HEPHAESTUS_REQUIRE_CLI \
             hephaestus-ci:local bash -c '
             export PATH="$PWD/build/cli-venv/bin:$PATH"
             build/cli-venv/bin/pytest tests/integration/test_cli_entry_points.py \
-              --override-ini="addopts=" -v --strict-markers
+              --require-cli --override-ini="addopts=" -v --strict-markers
           '
 
   shell-tests:

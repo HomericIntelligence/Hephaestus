@@ -16,19 +16,83 @@ os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(
 import pytest
 import yaml
 
-CONTRACT_OPT_IN_ENV = "HEPHAESTUS_CONTRACT_TESTS"
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register explicit controls for opt-in and CI-enforced test lanes."""
+    group = parser.getgroup("hephaestus", "Hephaestus test controls")
+    group.addoption(
+        "--run-contract-tests",
+        action="store_true",
+        help="run authenticated external contract tests",
+    )
+    group.addoption(
+        "--run-contract-agent",
+        action="store_true",
+        help="run contract tests that invoke an agent and spend model tokens",
+    )
+    group.addoption(
+        "--contract-repo",
+        metavar="OWNER/REPOSITORY",
+        help="target repository for authenticated GitHub contract tests",
+    )
+    group.addoption(
+        "--contract-model",
+        default="haiku",
+        metavar="MODEL",
+        help="agent model for contract tests (default: haiku)",
+    )
+    group.addoption(
+        "--require-cli",
+        action="store_true",
+        help="fail instead of skip when an installed console script is missing",
+    )
+    group.addoption(
+        "--require-pi-package-smoke",
+        action="store_true",
+        help="require live package evidence in the nightly Pi smoke tests",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip contract-marked tests unless the opt-in environment is enabled."""
-    del config
-    if os.environ.get(CONTRACT_OPT_IN_ENV) == "1":
+    """Skip contract-marked tests unless the explicit CLI option is enabled."""
+    if config.getoption("run_contract_tests"):
         return
 
-    skip = pytest.mark.skip(reason=f"contract lane is opt-in; set {CONTRACT_OPT_IN_ENV}=1 to run")
+    skip = pytest.mark.skip(reason="contract lane is opt-in; pass --run-contract-tests to run")
     for item in items:
         if item.get_closest_marker("contract"):
             item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def contract_agent_enabled(pytestconfig: pytest.Config) -> bool:
+    """Return whether token-spending contract agent tests were requested."""
+    return bool(pytestconfig.getoption("run_contract_agent"))
+
+
+@pytest.fixture(scope="session")
+def contract_repo_option(pytestconfig: pytest.Config) -> str | None:
+    """Return the explicitly selected contract repository, if any."""
+    value = pytestconfig.getoption("contract_repo")
+    return str(value).strip() if value else None
+
+
+@pytest.fixture(scope="session")
+def contract_model(pytestconfig: pytest.Config) -> str:
+    """Return the selected model for token-spending contract tests."""
+    return str(pytestconfig.getoption("contract_model"))
+
+
+@pytest.fixture(scope="session")
+def require_cli(pytestconfig: pytest.Config) -> bool:
+    """Return whether missing installed console scripts are test failures."""
+    return bool(pytestconfig.getoption("require_cli"))
+
+
+@pytest.fixture(scope="session")
+def require_pi_package_smoke(pytestconfig: pytest.Config) -> bool:
+    """Return whether nightly Pi package smoke evidence is required."""
+    return bool(pytestconfig.getoption("require_pi_package_smoke"))
 
 
 @pytest.fixture(autouse=True)
@@ -61,13 +125,31 @@ def _agents_authenticated_by_default(
         return
     if request.node.get_closest_marker("contract"):
         return
+
+    def _stub_is_agent_authenticated(
+        _agent: str,
+        *,
+        auth_status_timeout: int = 10,
+        pi_dir: Path | None = None,
+    ) -> bool:
+        del auth_status_timeout, pi_dir
+        return True
+
     monkeypatch.setattr(
         "hephaestus.agents.runtime.is_agent_authenticated",
-        lambda _agent: True,
+        _stub_is_agent_authenticated,
     )
 
-    def _stub_resolve_agent(agent: str | None, *, cwd: Path | None = None) -> str:
-        del cwd
+    def _stub_resolve_agent(
+        agent: str | None,
+        *,
+        cwd: Path | None = None,
+        disable_pi_automation: bool = False,
+        auth_status_timeout: int = 10,
+        pi_isolation_adapter: str | None = None,
+        pi_dir: Path | None = None,
+    ) -> str:
+        del cwd, disable_pi_automation, auth_status_timeout, pi_isolation_adapter, pi_dir
         return agent if agent is not None else "claude"
 
     # Patch at the runtime module and at every automation module that imported

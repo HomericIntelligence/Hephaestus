@@ -111,6 +111,7 @@ class Coordinator(
                 github_job_runner=PipelineGitHubJobRunner(
                     org=config.org,
                     dry_run=config.dry_run,
+                    gh_timeout=config.gh_timeout,
                 ),
                 athena_skill_executor=athena_executor,
             )
@@ -291,9 +292,29 @@ class Coordinator(
             planner_model=config.planner_model,
             reviewer_model=config.reviewer_model,
             implementer_model=config.implementer_model,
+            fallback_model=config.fallback_model,
             planner_reasoning_effort=config.planner_reasoning_effort,
             reviewer_reasoning_effort=config.reviewer_reasoning_effort,
             implementer_reasoning_effort=config.implementer_reasoning_effort,
+            disable_pi_automation=config.disable_pi_automation,
+            auth_status_timeout=config.auth_status_timeout,
+            pi_isolation_adapter=config.pi_isolation_adapter,
+            pi_dir=config.pi_dir,
+            rate_guard_enabled=config.rate_guard_enabled,
+            rate_guard_threshold=config.rate_guard_threshold,
+            planner_timeout=config.planner_timeout,
+            reviewer_timeout=config.reviewer_timeout,
+            implementer_timeout=config.implementer_timeout,
+            address_review_timeout=config.address_review_timeout,
+            git_message_timeout=config.git_message_timeout,
+            poll_max_wait=config.poll_max_wait,
+            clone_timeout=config.clone_timeout,
+            network_timeout=config.network_timeout,
+            gh_timeout=config.gh_timeout,
+            metadata_timeout=config.metadata_timeout,
+            rebase_timeout=config.rebase_timeout,
+            diff_collect_timeout=config.diff_collect_timeout,
+            pre_pr_test_timeout=config.pre_pr_test_timeout,
             dry_run=config.dry_run,
             nitpick=config.nitpick,
             drive_green_all=config.drive_green_all,
@@ -387,12 +408,15 @@ def run_pipeline(config: PipelineConfig) -> int:
             repo=repo_name,
             dry_run=config.dry_run,
             repo_root=repo_root,
+            gh_timeout=config.gh_timeout,
         )
 
     repo = config.repos[0] if config.repos else ""
     repo_root = _effective_repo_root(config, repo) if repo else Path(config.projects_dir)
     github = (
-        _github_for(repo, repo_root) if repo else PipelineGitHub(config.org, dry_run=config.dry_run)
+        _github_for(repo, repo_root)
+        if repo
+        else PipelineGitHub(config.org, dry_run=config.dry_run, gh_timeout=config.gh_timeout)
     )
     coordinator = Coordinator(config, github=github, github_factory=_github_for)
     return coordinator.run()

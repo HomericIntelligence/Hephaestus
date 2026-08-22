@@ -162,6 +162,7 @@ hephaestus-check-cli-tier-docs = "hephaestus.validation.cli_tier_docs:main"
 hephaestus-check-api-table-docs = "hephaestus.validation.api_table_docs:main"
 hephaestus-check-api-reference = "hephaestus.validation.api_reference:main"
 hephaestus-check-unlinked-todo = "hephaestus.validation.unlinked_todo:main"
+hephaestus-check-environment-variables = "hephaestus.validation.environment_variables:main"
 
 [project.urls]
 Homepage = "https://github.com/HomericIntelligence/Hephaestus"
@@ -240,7 +241,7 @@ markers = [
     "performance: bounded capacity, latency, and sustained-concurrency tests",
     "nightly: high-cost functional tests run by the scheduled nightly workflow",
     "requires_posix: requires POSIX coreutils (echo, false, ls) and/or git on PATH; skipped on win32",
-    "contract: opt-in sandboxed contract tests against real gh/claude CLIs; skipped unless HEPHAESTUS_CONTRACT_TESTS=1",
+    "contract: opt-in sandboxed contract tests against real gh/agent CLIs; selected with --run-contract-tests",
 ]
 
 [tool.mypy]

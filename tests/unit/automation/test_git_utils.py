@@ -118,7 +118,10 @@ try:
 finally:
     builtins.__import__ = real_import
 
-assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None})]
+assert calls == [((123, Path("/tmp/worktree"), "codex"), {
+    "allowed_paths": None,
+    "git_message_timeout": 1200,
+})]
 """
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -142,7 +145,9 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None}
             cwd=tmp_path,
             capture_output=True,
         )
-        mock_commit.assert_called_once_with(123, tmp_path, "codex", allowed_paths=None)
+        mock_commit.assert_called_once_with(
+            123, tmp_path, "codex", allowed_paths=None, git_message_timeout=1200
+        )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_dirty_tree_threads_timeout_to_commit_helper(
@@ -164,6 +169,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None}
             "codex",
             allowed_paths=None,
             git_timeout=42,
+            git_message_timeout=1200,
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
@@ -181,6 +187,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None}
             "codex",
             allowed_paths=None,
             agent_model="sol:medium",
+            git_message_timeout=1200,
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
@@ -204,6 +211,7 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {"allowed_paths": None}
             tmp_path,
             "codex",
             allowed_paths=("fixed.py",),
+            git_message_timeout=1200,
         )
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
@@ -644,14 +652,14 @@ class TestSafeGitFetch:
         assert result is True
         git_utils_mocks.run.assert_called_once()
 
-    def test_fetch_timeout_uses_agent_git_timeout_env(
+    def test_fetch_uses_explicit_timeout_and_ignores_legacy_env(
         self, monkeypatch: pytest.MonkeyPatch, git_utils_mocks: Any
     ) -> None:
-        """Fetch inherits the shared agent git timeout instead of a local literal."""
-        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "77")
+        """Fetch uses the typed timeout rather than the removed environment knob."""
+        monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "999")
         repo_root = Path("/home/user/repo")
 
-        assert safe_git_fetch(repo_root, retries=1) is True
+        assert safe_git_fetch(repo_root, retries=1, timeout_s=77) is True
 
         assert git_utils_mocks.run.call_args.kwargs["timeout"] == 77
 

@@ -55,6 +55,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
                 check=False,
                 retry_on_rate_limit=False,
                 max_retries=1,
+                timeout=self._gh_timeout,
             )
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             logger.warning("PR #%s: conditional merge transport failure: %s", pr_number, exc)
@@ -226,7 +227,8 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
                     f"/repos/{owner}/{name}/issues/comments/{comment_id}",
                     "-F",
                     f"body=@{path}",
-                ]
+                ],
+                timeout=self._gh_timeout,
             )
 
     def _delete_issue_comment(self, comment_id: int) -> None:

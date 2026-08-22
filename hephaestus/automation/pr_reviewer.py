@@ -29,6 +29,7 @@ import logging
 from hephaestus.agents.runtime import resolve_agent
 from hephaestus.cli.utils import (
     add_agent_timeout_arg,
+    add_pipeline_runtime_args,
     add_version_arg,
     configure_cli_logging,
     configure_github_throttle_from_args,
@@ -37,6 +38,7 @@ from hephaestus.cli.utils import (
 from hephaestus.config.paths import resolve_projects_dir
 
 from ._review_utils import build_review_parser
+from .agent_config import fallback_model, reviewer_model
 from .git_utils import get_repo_info
 from .pipeline.routing import PipelineScope, StageName
 
@@ -64,14 +66,14 @@ class PRReviewer:
     """
 
 
-def _setup_logging(verbose: bool = False) -> None:
+def _setup_logging(verbose: bool = False, log_format: str = "text") -> None:
     """Configure logging for the CLI.
 
     Args:
         verbose: Enable verbose (DEBUG) logging.
 
     """
-    configure_cli_logging(verbose=verbose)
+    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -105,7 +107,13 @@ Examples:
         ),
     )
     add_version_arg(parser)
-    add_agent_timeout_arg(parser)
+    add_agent_timeout_arg(parser, default=1200)
+    add_pipeline_runtime_args(
+        parser,
+        role="reviewer",
+        timeouts=("network", "gh", "metadata", "diff-collect"),
+        plugin_skills=True,
+    )
     return parser
 
 
@@ -147,8 +155,14 @@ def main() -> int:
     install_sigtstp_only()
     args = _parse_args()
     configure_github_throttle_from_args(args)
-    _setup_logging(args.verbose)
-    agent = resolve_agent(args.agent)
+    _setup_logging(args.verbose, args.log_format)
+    agent = resolve_agent(
+        args.agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
+    )
 
     log = logging.getLogger(__name__)
     log.info("Starting PR review (pipeline, pr_review scope) for issues: %s", args.issues)
@@ -173,7 +187,20 @@ def main() -> int:
             max_workers=args.max_workers,
             dry_run=args.dry_run,
             agent=agent,
-            projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            model=args.model,
+            reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
+            fallback_model=fallback_model(args.fallback_model or args.model or None),
+            reviewer_timeout=args.agent_timeout,
+            projects_dir=resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True),
+            rate_guard_enabled=args.rate_guard_enabled,
+            rate_guard_threshold=args.rate_guard_threshold,
+            plugin_skills_dir=args.plugin_skills_dir,
+            network_timeout=args.network_timeout,
+            gh_timeout=args.gh_timeout,
+            metadata_timeout=args.metadata_timeout,
+            diff_collect_timeout=args.diff_collect_timeout,
             json_out=args.json,
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),
         )

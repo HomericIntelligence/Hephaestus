@@ -33,7 +33,9 @@ jobs:
 
       - name: Run contract lane (agent tests self-skip without the second opt-in)
         env:
-          HEPHAESTUS_CONTRACT_TESTS: "1"
           GH_TOKEN: ${{ github.token }}
-          HEPHAESTUS_CONTRACT_REPO: ${{ github.repository }}
-        run: uv run pytest tests/integration/contract --override-ini="addopts=" -v --strict-markers
+        run: >-
+          uv run pytest tests/integration/contract
+          --run-contract-tests
+          --contract-repo "${{ github.repository }}"
+          --override-ini="addopts=" -v --strict-markers

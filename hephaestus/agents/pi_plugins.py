@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from hephaestus.cli.utils import add_version_arg
+from hephaestus.config.child_environments import build_pi_child_env
 
 CATALOG_PATH = Path(__file__).with_name("pi_package_catalog.json")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
@@ -525,12 +526,13 @@ def run_bounded_command(
     """Run one argv without a shell and kill it on timeout or output overflow."""
     if timeout <= 0:
         raise ValueError("timeout must be positive")
+    child_env = env if env is not None else build_pi_child_env()
     windows_job = _WindowsJob() if os.name != "posix" else None
     try:
         process = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=env,
+            env=child_env,
             stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -692,6 +694,8 @@ class InstallOptions:
     yes: bool = False
     approve: bool = False
     timeout: float = 60.0
+    pi_bin: Path | None = None
+    pi_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -744,31 +748,9 @@ def _install_plan(
     return tuple(commands)
 
 
-def _pi_child_env() -> dict[str, str]:
-    allowed = (
-        "COMSPEC",
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "PATH",
-        "PATHEXT",
-        "PI_CODING_AGENT_DIR",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-    )
-    env = {name: value for name in allowed if (value := os.environ.get(name))}
-    env.setdefault("PATH", os.defpath)
-    env.update(
-        {
-            "GIT_TERMINAL_PROMPT": "0",
-            "NPM_CONFIG_IGNORE_SCRIPTS": "true",
-            "PI_SKIP_VERSION_CHECK": "1",
-            "PI_TELEMETRY": "0",
-        }
-    )
-    return env
+def _pi_child_env(*, pi_dir: Path | None = None) -> dict[str, str]:
+    """Return the named Pi subprocess environment."""
+    return build_pi_child_env(pi_dir=pi_dir)
 
 
 def install_pi_plugins(
@@ -784,7 +766,7 @@ def install_pi_plugins(
         return InstallReport(False, "invalid_timeout", ())
     if options.approve and not options.project_local:
         return InstallReport(False, "approve_requires_project_local", ())
-    resolved = pi_bin or Path(shutil.which("pi") or "pi")
+    resolved = pi_bin or options.pi_bin or Path(shutil.which("pi") or "pi")
     commands = _install_plan(resolved, catalog, options)
     states = tuple(
         PiPackageState(package.key, package.install_spec, "planned") for package in catalog.packages
@@ -802,7 +784,7 @@ def install_pi_plugins(
     identity = probe_pi_cli_identity(resolved, catalog, runner=runner, timeout=options.timeout)
     if not identity.ready:
         return InstallReport(False, identity.status, commands, identity.remediation, states)
-    env = _pi_child_env()
+    env = _pi_child_env(pi_dir=options.pi_dir)
     mutable_states = list(states)
     for index, command in enumerate(commands[1:-1]):
         result = runner(command, env=env, timeout=options.timeout)
@@ -838,6 +820,7 @@ def install_pi_plugins(
         Path.cwd(),
         catalog=catalog,
         pi_bin=identity.executable,
+        pi_dir=options.pi_dir,
         runner=runner,
         timeout=options.timeout,
         trust_override="--approve" if options.approve else "--no-approve",
@@ -917,7 +900,7 @@ def inspect_pi_package_inventory(
     runner: CommandRunner | None = None,
 ) -> InventoryResult:
     """Verify exact effective settings and installed roots without loading extensions."""
-    user_root = (pi_dir or Path(os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent"))).expanduser()
+    user_root = (pi_dir or Path("~/.pi/agent")).expanduser()
     project_root = cwd / ".pi"
     try:
         user_sources = _settings_packages(user_root / "settings.json")
@@ -1202,9 +1185,9 @@ def _isolated_pi_probe_environment(
     try:
         with tempfile.TemporaryDirectory(prefix="pi-preflight-", dir=build_root) as temporary:
             root = Path(temporary)
-            agent_dir = root / "agent"
+            agent_dir = root / ".pi" / "agent"
             probe_cwd = root / "project"
-            agent_dir.mkdir()
+            agent_dir.mkdir(parents=True)
             probe_cwd.mkdir()
             user_packages = [
                 str(inventory.roots[package.key])
@@ -1227,7 +1210,7 @@ def _isolated_pi_probe_environment(
                     json.dumps({"packages": project_packages}), encoding="utf-8"
                 )
             env = _pi_child_env()
-            env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+            env["HOME"] = str(root)
             trust = "--approve" if project_packages else "--no-approve"
             yield probe_cwd, env, trust
     finally:
@@ -1351,6 +1334,20 @@ def build_parser() -> argparse.ArgumentParser:
     approval.add_argument("--no-approve", dest="approve", action="store_false")
     parser.set_defaults(approve=False)
     parser.add_argument("--timeout", type=float, default=60.0, metavar="SECONDS")
+    parser.add_argument(
+        "--pi-bin",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="explicit Pi executable path",
+    )
+    parser.add_argument(
+        "--pi-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="explicit Pi coding-agent configuration directory",
+    )
     return parser
 
 
@@ -1387,6 +1384,8 @@ def main(argv: list[str] | None = None) -> int:
         yes=yes,
         approve=args.approve,
         timeout=args.timeout,
+        pi_bin=args.pi_bin,
+        pi_dir=args.pi_dir,
     )
     report = install_pi_plugins(options)
     if args.json_output:

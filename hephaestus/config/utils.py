@@ -3,7 +3,7 @@
 
 This module provides utilities for loading, validating, and managing
 configuration settings across the HomericIntelligence ecosystem with
-support for YAML, environment variables, and hierarchical merging.
+support for YAML, JSON, validation, and hierarchical merging.
 
 Usage:
     from hephaestus.config.utils import load_config, get_setting, merge_configs
@@ -11,9 +11,7 @@ Usage:
     value = get_setting(config, 'database.host', default='localhost')
 """
 
-import contextlib
 import json
-import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,9 +19,6 @@ from hephaestus.io.yaml import import_yaml
 from hephaestus.logging.utils import get_logger
 
 _logger = get_logger(__name__)
-
-_BOOL_TRUTHY: frozenset[str] = frozenset({"true", "yes", "on", "1"})
-_BOOL_FALSY: frozenset[str] = frozenset({"false", "no", "off", "0"})
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -162,120 +157,3 @@ def load_yaml_config(config_path: str | Path) -> dict[str, Any]:
     """
     import_yaml()
     return load_config(config_path)
-
-
-def merge_with_env(
-    config: dict[str, Any],
-    prefix: str = "HEPHAESTUS_",
-    convert_bools: bool = False,
-) -> dict[str, Any]:
-    """Merge configuration with environment variables.
-
-    Environment variables with the given prefix are mapped to config keys
-    using double-underscore (``__``) as the nesting delimiter.  A single
-    underscore is preserved as part of the key name.
-
-    Mapping examples::
-
-        HEPHAESTUS_DATABASE__HOST       → {"database": {"host": <value>}}
-        HEPHAESTUS_MAX_CONNECTIONS      → {"max_connections": <value>}
-        HEPHAESTUS_DATABASE__MAX_RETRIES → {"database": {"max_retries": <value>}}
-
-    Environment variables that produce empty key segments (e.g., trailing
-    or consecutive double-underscores) are skipped with a warning.
-
-    When two environment variables conflict on nesting (e.g.,
-    ``HEPHAESTUS_A=scalar`` and ``HEPHAESTUS_A__B=nested``), the
-    last variable in sorted order wins and a warning is logged.
-
-    Args:
-        config: Base configuration dictionary
-        prefix: Environment variable prefix to look for
-        convert_bools: If True, convert boolean-like string values
-            (true/false/yes/no/on/off/1/0, case-insensitive) to Python
-            bool. When enabled, "1" and "0" become True/False instead
-            of int. Defaults to False for backward compatibility.
-
-    Returns:
-        Configuration merged with environment variables
-
-    """
-    env_config: dict[str, Any] = {}
-    # Maps dotted key path (e.g. "a.b") to the env var name that last wrote it.
-    # Used to produce informative conflict warnings that name both parties.
-    key_provenance: dict[str, str] = {}
-
-    # Sort env vars for deterministic processing order
-    env_vars = sorted(
-        ((k, v) for k, v in os.environ.items() if k.startswith(prefix)),
-        key=lambda item: item[0],
-    )
-
-    for key, value in env_vars:
-        # Convert HEPHAESTUS_DATABASE__HOST to database.host
-        # Double underscore is the nesting delimiter; single underscore is
-        # preserved as part of the key name (e.g. max_connections stays intact).
-        config_key = key[len(prefix) :].lower().replace("__", ".")
-
-        # Filter out empty segments from malformed env var names
-        keys = [k for k in config_key.split(".") if k]
-        if not keys:
-            _logger.warning(
-                "Skipping malformed env var %r: produces no valid config keys",
-                key,
-            )
-            continue
-
-        # Try to convert to bool, int, or float if possible
-        typed_value: int | float | bool | str = value
-        lower_value = value.lower()
-        if convert_bools and lower_value in _BOOL_TRUTHY:
-            typed_value = True
-        elif convert_bools and lower_value in _BOOL_FALSY:
-            typed_value = False
-        else:
-            try:
-                typed_value = int(value)
-            except ValueError:
-                with contextlib.suppress(ValueError):
-                    typed_value = float(value)
-
-        # Set nested keys
-        current = env_config
-        for depth, k in enumerate(keys[:-1]):
-            path_so_far = ".".join(keys[: depth + 1])
-            existing = current.get(k)
-            if existing is None:
-                current[k] = {}
-                key_provenance[path_so_far] = key
-            elif not isinstance(existing, dict):
-                prior_env_var = key_provenance.get(path_so_far, "<unknown>")
-                _logger.warning(
-                    "Environment variable '%s' requires nesting under key '%s', "
-                    "which was already set to a scalar value by '%s'. "
-                    "The scalar value is being overwritten by a dict.",
-                    key,
-                    k,
-                    prior_env_var,
-                )
-                current[k] = {}
-                key_provenance[path_so_far] = key
-            current = current[k]
-
-        leaf = keys[-1]
-        leaf_path = ".".join(keys)
-        existing_leaf = current.get(leaf)
-        if isinstance(existing_leaf, dict):
-            prior_env_var = key_provenance.get(leaf_path, "<unknown>")
-            _logger.warning(
-                "Environment variable '%s' sets key '%s' to a scalar, "
-                "but it was already a nested dict from '%s'. "
-                "The nested dict is being overwritten by the scalar value.",
-                key,
-                leaf,
-                prior_env_var,
-            )
-        current[leaf] = typed_value
-        key_provenance[leaf_path] = key
-
-    return merge_configs(config, env_config)

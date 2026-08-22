@@ -25,7 +25,7 @@ Provides:
 - ``log_file_path``: Standard per-issue automation log filename builder.
 - ``load_state_file``: Generic state file loader (raw dict or Pydantic model).
 - ``save_state_file``: Generic secure state file writer.
-- ``write_work_report``: Write a phase's work-unit count to $HEPH_WORK_REPORT.
+- ``write_work_report``: Write a phase's work-unit count to an explicit report path.
 - ``work_report_context``: Context manager that writes a work report on exit
   when the loop runner requested one (#613).
 """
@@ -36,7 +36,6 @@ import argparse
 import contextlib
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -54,6 +53,7 @@ from hephaestus.cli.utils import (
     add_dry_run_arg,
     add_github_throttle_args,
     add_json_arg,
+    add_logging_args,
     add_version_arg,
     configure_cli_logging,
 )
@@ -193,7 +193,7 @@ def save_state_file(state_dir: Path, prefix: str, issue_number: int, state: Base
     write_secure(state_file, state.model_dump_json(indent=2))
 
 
-def setup_review_logging(verbose: bool = False) -> None:
+def setup_review_logging(verbose: bool = False, log_format: str = "text") -> None:
     """Configure root logging for the reviewer CLIs.
 
     Centralizes the review CLI's logging configuration.
@@ -202,7 +202,7 @@ def setup_review_logging(verbose: bool = False) -> None:
         verbose: Enable DEBUG-level logging (otherwise INFO).
 
     """
-    configure_cli_logging(verbose=verbose)
+    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def ensure_state_dir(repo_root: Path, subdir: str = DEFAULT_STATE_DIR) -> Path:
@@ -419,7 +419,7 @@ def build_automation_parser(
             help="Disable curses UI (use plain logging instead)",
         )
     if add_verbose:
-        parser.add_argument("-v", "--verbose", action="store_true", help=verbose_help)
+        add_logging_args(parser)
     if add_json:
         add_json_arg(parser)
     if add_version:
@@ -1003,13 +1003,11 @@ def pr_head_is_writable(pr_number: int, repository: tuple[str, str] | None) -> b
     )
 
 
-def write_work_report(work_units: int) -> None:
-    """Write the phase's work-unit count to the path in $HEPH_WORK_REPORT.
+def write_work_report(work_units: int, path: Path | None = None) -> None:
+    """Write the phase's work-unit count to an explicit path.
 
-    The loop runner injects HEPH_WORK_REPORT (a temp file path) into subprocess
-    envs. Phases that understand the contract write their work-unit count to that
-    file; the runner reads it after the subprocess returns to measure
-    convergence (#613).
+    Phases that receive a report path write their work-unit count there; the
+    parent reads it after the subprocess returns to measure convergence.
 
     Args:
         work_units: The number of work units (e.g., issues planned or reviewed).
@@ -1018,19 +1016,20 @@ def write_work_report(work_units: int) -> None:
         No-op when the env var is unset (phase run outside the loop runner).
 
     """
-    path = os.environ.get("HEPH_WORK_REPORT")
-    if not path:
+    if path is None:
         return
     # best-effort; absence ⇒ "unknown" ⇒ treated as work
     with contextlib.suppress(OSError):
-        write_secure(Path(path), str(int(work_units)))
+        write_secure(path, str(int(work_units)))
 
 
 @contextlib.contextmanager
-def work_report_context(work_units_fn: Callable[[], int]) -> Iterator[None]:
+def work_report_context(
+    work_units_fn: Callable[[], int], path: Path | None = None
+) -> Iterator[None]:
     """Write a work report when the loop runner requested one.
 
-    The report env var remains optional so phases still run outside the loop
+    The report path remains optional so phases still run outside a parent
     runner. When it is present on entry, the work-unit callback is evaluated on
     exit and written through write_work_report().
 
@@ -1038,7 +1037,7 @@ def work_report_context(work_units_fn: Callable[[], int]) -> Iterator[None]:
         work_units_fn: Callback returning the work-unit count to report.
 
     """
-    if not os.environ.get("HEPH_WORK_REPORT"):
+    if path is None:
         yield
         return
 
@@ -1047,4 +1046,4 @@ def work_report_context(work_units_fn: Callable[[], int]) -> Iterator[None]:
     finally:
         # Best-effort reporting: suppress reporting failures without masking the block's exception.
         with contextlib.suppress(Exception):
-            write_work_report(work_units_fn())
+            write_work_report(work_units_fn(), path)

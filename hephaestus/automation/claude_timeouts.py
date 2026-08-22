@@ -24,5 +24,4 @@ from hephaestus.automation.agent_config import (
     plan_stage_timeout as plan_stage_timeout,
     planner_claude_timeout as planner_claude_timeout,
     pr_reviewer_claude_timeout as pr_reviewer_claude_timeout,
-    read_timeout_env as read_timeout_env,
 )

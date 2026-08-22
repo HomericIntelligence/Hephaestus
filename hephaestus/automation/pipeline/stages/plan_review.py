@@ -121,6 +121,7 @@ from .base import (
     agent_provider,
     source_workspace_binding,
     stage_model,
+    stage_timeout,
 )
 from .planning import _publish_plan_blocked, build_plan_prompt
 
@@ -704,7 +705,7 @@ class PlanReviewStage(Stage):
                 ),
                 prompt_builder=get_plan_loop_review_prompt,
                 cwd=workspace.cwd if workspace else ctx.paths.worktree,
-                timeout_s=plan_reviewer_claude_timeout(),
+                timeout_s=stage_timeout(ctx, "reviewer", plan_reviewer_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",
@@ -773,7 +774,7 @@ class PlanReviewStage(Stage):
                 model=stage_model(ctx, "planner", planner_model),
                 prompt_builder=build_amend_prompt,
                 cwd=workspace.cwd if workspace else ctx.paths.worktree,
-                timeout_s=planner_claude_timeout(),
+                timeout_s=stage_timeout(ctx, "planner", planner_claude_timeout),
                 workspace=workspace,
                 sandbox="read-only",
                 allowed_tools="Read,Glob,Grep",

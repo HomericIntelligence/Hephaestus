@@ -78,6 +78,7 @@ def commit_if_changes(
     committed_log_message: str = "Committed changes for issue #%s",
     allowed_paths: Collection[str] | None = None,
     timeout: int | None = None,
+    git_message_timeout: int = 1200,
 ) -> bool:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -117,6 +118,7 @@ def commit_if_changes(
             commit_kwargs["agent_model"] = agent_model
         if timeout is not None:
             commit_kwargs["git_timeout"] = timeout
+        commit_kwargs["git_message_timeout"] = git_message_timeout
         commit_changes(
             issue_number,
             worktree_path,
@@ -435,7 +437,7 @@ def has_unpushed_commits(
         raise RuntimeError(f"Could not count unpushed commits for {branch_name}") from exc
 
 
-def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
+def safe_git_fetch(repo_root: Path, retries: int = 3, *, timeout_s: int | None = None) -> bool:
     """Safely fetch from git remote with retry and exponential backoff.
 
     Uses the retry_with_backoff decorator for consistent retry behavior
@@ -462,7 +464,7 @@ def safe_git_fetch(repo_root: Path, retries: int = 3) -> bool:
         run(
             ["git", "fetch", "origin"],
             cwd=repo_root,
-            timeout=agent_git_timeout(),
+            timeout=timeout_s if timeout_s is not None else agent_git_timeout(),
         )
         logger.debug("Git fetch succeeded")
         return True

@@ -62,6 +62,7 @@ from .base import (
     StageOutcome,
     StepResult,
     WorkItem,
+    stage_timeout,
 )
 
 logger = logging.getLogger(__name__)
@@ -263,7 +264,7 @@ class RepoStage(Stage):
                 job=GitJob(
                     repo=item.repo,
                     op="verify_issue_wave_ancestry",
-                    timeout_s=GIT_JOB_TIMEOUT_S,
+                    timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
                     kwargs={
                         "repo_root": str(ctx.paths.repo_root),
                         "main_sha": str(main_sha),
@@ -434,7 +435,7 @@ class RepoStage(Stage):
             job = GitJob(
                 repo=item.repo,
                 op="sync_checkout",
-                timeout_s=GIT_JOB_TIMEOUT_S,
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
                 kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},
                 descr=f"synchronize {ctx.org}/{item.repo}",
             )
@@ -444,7 +445,7 @@ class RepoStage(Stage):
         job = GitJob(
             repo=item.repo,
             op="clone",
-            timeout_s=GIT_JOB_TIMEOUT_S,
+            timeout_s=stage_timeout(ctx, "clone", GIT_JOB_TIMEOUT_S),
             # worker_pool._dispatch_git_op clone contract: 'repo' (org/name
             # slug for gh repo clone) + 'dest' (checkout path).
             kwargs={"repo": f"{ctx.org}/{item.repo}", "dest": str(dest)},

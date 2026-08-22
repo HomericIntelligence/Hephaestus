@@ -352,19 +352,32 @@ class TestGhCliTimeout:
     """Test gh_cli_timeout configuration."""
 
     def test_gh_cli_timeout_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """gh_cli_timeout returns 120 by default."""
-        monkeypatch.delenv("HEPH_GH_TIMEOUT", raising=False)
+        """Removed environment variables cannot change the fixed default."""
+        monkeypatch.setenv("HEPH_GH_TIMEOUT", "1")
         assert gh_cli_timeout() == 120
 
-    def test_gh_cli_timeout_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """gh_cli_timeout respects HEPH_GH_TIMEOUT environment variable."""
-        monkeypatch.setenv("HEPH_GH_TIMEOUT", "60")
-        assert gh_cli_timeout() == 60
-
-    def test_gh_cli_timeout_invalid_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """gh_cli_timeout falls back to 120 on non-integer HEPH_GH_TIMEOUT."""
-        monkeypatch.setenv("HEPH_GH_TIMEOUT", "not_a_number")
+    def test_gh_cli_timeout_explicit_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit typed value replaces the removed environment override."""
+        monkeypatch.setenv("HEPH_GH_TIMEOUT", "1")
         assert gh_cli_timeout() == 120
+        assert gh_cli_timeout(60) == 60
+
+
+@patch("hephaestus.github.client.time.sleep")
+@patch("hephaestus.github.client.run_subprocess")
+def test_removed_per_thread_rate_environment_has_no_effect(
+    run_subprocess: Mock,
+    sleep: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH_RATE_LIMIT_PER_SEC no longer adds a second per-thread throttle."""
+    monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "0.000001")
+    run_subprocess.return_value = subprocess.CompletedProcess(["gh"], 0, "", "")
+
+    gh_call(["api", "rate_limit"], max_retries=1)
+    gh_call(["api", "rate_limit"], max_retries=1)
+
+    sleep.assert_not_called()
 
 
 class TestGhCallPublicExports:

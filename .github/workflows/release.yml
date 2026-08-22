@@ -248,10 +248,9 @@ jobs:
         # entry-point checks must never skip here (#2173).
         # Artifact tests repeat reproducibility, complete-manifest, RECORD,
         # clean-install, upgrade, and uninstall checks before publication.
-        env:
-          HEPHAESTUS_REQUIRE_CLI: "1"
         run: >-
           uv run pytest tests/integration
+          --require-cli
           --override-ini="addopts="
           --basetemp=build/pytest-release-integration
           -v --strict-markers

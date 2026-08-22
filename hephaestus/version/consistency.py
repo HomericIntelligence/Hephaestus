@@ -43,6 +43,7 @@ from hephaestus.cli.utils import (
     format_output,
     resolve_repo_root,
 )
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.version.manager import VersionManager, parse_version
 from hephaestus.version.parsing import parse_version_tuple
 
@@ -96,6 +97,7 @@ def _version_from_git_tag(repo_root: Path) -> str | None:
             capture_output=True,
             text=True,
             check=False,
+            env=build_git_child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None

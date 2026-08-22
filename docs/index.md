@@ -13,7 +13,7 @@ Hephaestus is the shared utilities and tooling library for the HomericIntelligen
 - **hephaestus.benchmarks** — Benchmark comparison and regression detection
 - **hephaestus.ci** — CI helpers (precommit, workflows, docker timing)
 - **hephaestus.cli** — CLI argument parsing and output formatting
-- **hephaestus.config** — Configuration loading and management (YAML, JSON, env vars)
+- **hephaestus.config** — Explicit YAML/JSON configuration loading and merging
 - **hephaestus.datasets** — Dataset downloading utilities
 - **hephaestus.discovery** — Discovery of agents, skills, and code blocks
 - **hephaestus.forensics** — Coredump capture and gdb post-mortem runner
@@ -39,7 +39,7 @@ annotations for documented first-level subpackages, excluding the
 `hephaestus.automation` product layer and the package's CLI entry points,
 regenerated from the released package via [pdoc](https://pdoc.dev/).
 
-Full CLI usage and option details for all 57 CLI entry points remain available
+Full CLI usage and option details for all 58 CLI entry points remain available
 through each command's `--help` output.
 
 To build the same reference locally (output to the git-ignored `docs/api/`):
@@ -59,6 +59,8 @@ See the [README](../README.md) for installation and development setup instructio
 - [Operations Runbooks](runbooks/index.md) — Operator recovery procedures for the automation pipeline (loop crash, corrupted worktree, drive-green stall, quota exhaustion)
 - [Performance Testing](performance-testing.md) — Bounded worker-pool load, capacity, latency, and sustained-concurrency testing
 - [Contract Testing](contract-testing.md) — Opt-in authenticated GitHub and agent end-to-end contract coverage
+- [Environment Variables](environment-variables.md) — Exact runtime registry,
+  rationale, and deny-by-default enforcement policy
 - [Privacy, Retention, and Deletion Policy](../PRIVACY.md) — data inventory, retention periods, deletion procedures, and GDPR contact (issue #2175)
 - [Third-Party Services](third-party-services.md) — Vendor inventory, responsibility split, and availability expectations for GitHub, PyPI, and agent providers (issue #2177)
 - [Documentation Maintenance](documentation-maintenance.md) — Living-doc scope,

@@ -1566,14 +1566,15 @@ are NOT retried.
  whole phase subprocess.
 - `agent_default_timeout()` / `planner_claude_timeout()` /
  `implementer_claude_timeout()` / `pr_reviewer_claude_timeout()` /
- `ci_driver_claude_timeout()` /
- `learn_claude_timeout()` /
- [`...`](../hephaestus/automation/agent_config.py) are
- phase-specific CLI-time defaults. Shared phase budgets accept only
- `HEPH_AGENT_PLAN_TIMEOUT`, `HEPH_AGENT_REVIEW_TIMEOUT`,
- `HEPH_AGENT_IMPL_TIMEOUT`, and `HEPH_AGENT_LEARN_TIMEOUT`; the outer planning
- wrapper accepts `HEPH_PLAN_STAGE_TIMEOUT`. Deprecated phase-specific fallback
- aliases are not consulted.
+ [`...`](../hephaestus/automation/agent_config.py) remain fixed library defaults.
+ The automation loop resolves its active agent, GitHub, Git, metadata, network,
+ readiness, diff-collection, and pre-PR-test budgets once from typed CLI
+ options. Standalone stage commands expose only the budgets used by their
+ stage slice. Modern advise and learn jobs are host-owned Mnemosyne operations,
+ not agent-provider subprocesses, so the queue does not expose model or agent
+ timeout knobs for them. Disconnected legacy follow-up and outer plan helpers
+ retain fixed, injectable function defaults. No environment fallback is
+ consulted.
 
 ---
 

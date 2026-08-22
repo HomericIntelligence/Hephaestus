@@ -444,10 +444,10 @@ def gh_pr_state(pr_number: int) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def gh_current_login() -> str | None:
+def gh_current_login(*, timeout: int | None = None) -> str | None:
     """Return the authenticated GitHub login for the current ``gh`` token."""
     try:
-        result = _api._gh_call(["api", "user", "--jq", ".login"], check=False)
+        result = _api._gh_call(["api", "user", "--jq", ".login"], check=False, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         _api.logger.warning("Could not determine current GitHub login: %s", exc)
         return None

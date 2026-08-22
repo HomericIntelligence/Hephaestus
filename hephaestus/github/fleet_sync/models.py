@@ -7,6 +7,20 @@ from enum import Enum, auto
 
 
 @dataclass(frozen=True)
+class FleetTimeouts:
+    """Explicit subprocess budgets resolved at the fleet CLI boundary."""
+
+    gh: int = 120
+    metadata: int = 10
+    network: int = 120
+    clone: int = 120
+    rebase: int = 2400
+
+
+DEFAULT_FLEET_TIMEOUTS = FleetTimeouts()
+
+
+@dataclass(frozen=True)
 class Symbols:
     """Glyphs used in user-facing log output. Frozen for safe sharing across calls."""
 

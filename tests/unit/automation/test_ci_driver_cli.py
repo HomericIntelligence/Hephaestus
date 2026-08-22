@@ -45,16 +45,14 @@ def test_parse_args_accepts_github_throttle_options(monkeypatch: pytest.MonkeyPa
 
 
 def test_parse_args_rejects_removed_ci_repair_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The loop-owned driver exposes no CI repair or polling switches."""
+    """The loop-owned driver rejects retired CI repair switches."""
     monkeypatch.setattr(sys, "argv", ["drive_prs_green.py", "--max-fix-iterations", "5"])
     with pytest.raises(SystemExit) as exc:
         ci_driver._parse_args()
     assert exc.value.code == 2
 
     monkeypatch.setattr(sys, "argv", ["drive_prs_green.py", "--poll-max-wait", "5"])
-    with pytest.raises(SystemExit) as exc:
-        ci_driver._parse_args()
-    assert exc.value.code == 2
+    assert ci_driver._parse_args().poll_max_wait == 5
 
 
 def test_prs_parses_integers(monkeypatch: pytest.MonkeyPatch) -> None:

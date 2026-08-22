@@ -69,6 +69,35 @@ class TestModuleSurface:
         assert isinstance(implementer_mod._CLAUDE_IMPL_TIMEOUT, int)
 
 
+def test_timeout_flags_thread_into_pipeline_config(tmp_path: Path) -> None:
+    """Standalone implementer timeout options configure each sub-operation."""
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--agent-timeout",
+            "11",
+            "--git-message-timeout",
+            "13",
+            "--reviewer-timeout",
+            "12",
+            "--reviewer-model",
+            "review-model",
+            "--poll-max-wait",
+            "14",
+            "--pre-pr-test-timeout",
+            "15",
+            "--run-pre-pr-tests",
+        ],
+        tmp_path,
+    )
+    config = captured["config"]
+    assert (config.implementer_timeout, config.reviewer_timeout) == (11, 12)
+    assert (config.git_message_timeout, config.poll_max_wait) == (13, 14)
+    assert (config.pre_pr_test_timeout, config.run_pre_pr_tests) == (15, True)
+    assert config.reviewer_model == "review-model"
+
+
 def test_main_builds_implementation_scope_and_dispatches(tmp_path: Path) -> None:
     """--issues N builds an (implementation, pr_review) scoped config and returns rc."""
     captured = _run_main_capturing_config(["--issues", "123", "--dry-run"], tmp_path, rc=0)

@@ -10,31 +10,16 @@ import sys
 from pathlib import Path
 
 from hephaestus.agents.runtime import (
-    REQUIRED_ALIAS_ENVS,
-    missing_pi_alias_env,
+    load_pi_alias_config,
     pi_private_redaction_tokens,
     prepare_pi_private_log_dir,
     redact_pi_private_values,
 )
+from hephaestus.config.child_environments import build_sbatch_submission_env
 
 DEFAULT_LOG_DIR = Path("pi-smoke-logs")
 DEFAULT_TEMPLATE = Path("scripts/slurm/pi_smoke.sbatch")
-LOG_DIR_ENV = "HEPH_PI_SMOKE_LOG_DIR"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-EXPORT_NAMES = (
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    *REQUIRED_ALIAS_ENVS,
-    LOG_DIR_ENV,
-)
 
 
 def _private_smoke_log_permissions_supported() -> bool:
@@ -49,46 +34,56 @@ def _prepare_private_log_dir(log_dir: Path) -> Path:
     return prepare_pi_private_log_dir(log_dir)
 
 
-def _submission_env(log_dir: Path) -> dict[str, str]:
+def _submission_env() -> dict[str, str]:
     """Return the minimal environment needed by the local ``sbatch`` process."""
-    env = {name: value for name in EXPORT_NAMES if (value := os.environ.get(name))}
-    env.setdefault("PATH", os.defpath)
-    env[LOG_DIR_ENV] = str(log_dir)
-    return env
+    return build_sbatch_submission_env()
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the Pi Slurm smoke submission parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    parser.add_argument("--pi-alias-config", type=Path)
+    parser.add_argument("--pi-dir", type=Path, default=None)
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--sbatch", default="sbatch")
     return parser
 
 
 def build_sbatch_cmd(args: argparse.Namespace) -> list[str]:
-    """Build an sbatch command that exports alias env var names only."""
+    """Build an sbatch command carrying only private-file and log paths as job args."""
     log_dir: Path = args.log_dir
-    return [
+    command = [
         args.sbatch,
-        f"--export={','.join(EXPORT_NAMES)}",
+        "--export=NONE",
         f"--output={log_dir / 'pi-smoke-%j.out'}",
         f"--error={log_dir / 'pi-smoke-%j.err'}",
         str(args.template),
+        str(args.pi_alias_config),
+        str(log_dir),
     ]
+    if args.pi_dir is not None:
+        command.append(str(args.pi_dir))
+    return command
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Submit the Pi smoke Slurm template after validating alias env vars."""
+    """Submit the Pi smoke Slurm template after validating its alias file."""
     args = build_parser().parse_args(argv)
-    missing = missing_pi_alias_env()
-    if missing:
-        print(f"ERROR: missing required env vars: {', '.join(missing)}", file=sys.stderr)
+    if args.pi_alias_config is None:
+        print("ERROR: --pi-alias-config is required", file=sys.stderr)
+        return 2
+    try:
+        aliases = load_pi_alias_config(args.pi_alias_config)
+    except (OSError, ValueError):
+        print("ERROR: unable to load Pi alias config safely", file=sys.stderr)
         return 2
 
     try:
         redaction_tokens = pi_private_redaction_tokens(
             Path.cwd(),
+            aliases.model,
+            provider=aliases.provider,
             additional_roots=(REPOSITORY_ROOT,),
             require_readable=True,
         )
@@ -109,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             check=True,
             capture_output=True,
             text=True,
-            env=_submission_env(private_log_dir),
+            env=_submission_env(),
         )
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr or exc.stdout or str(exc)

@@ -19,6 +19,7 @@ from hephaestus.cli.utils import (
     create_parser,
     emit_json_status,
 )
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.github.client import gh_call
 from hephaestus.github.git_ops import run_git
 
@@ -119,7 +120,7 @@ def _git_output(*arguments: str) -> str:
 
 def _git_read_environment() -> dict[str, str]:
     """Return a hermetic environment for non-interactive immutable Git reads."""
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment = build_git_child_env()
     environment.update(
         {
             "GIT_ATTR_NOSYSTEM": "1",

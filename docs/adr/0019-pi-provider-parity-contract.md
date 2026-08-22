@@ -95,16 +95,15 @@ that a role-derived Pi scope has been admitted.
 ### Authentication, configuration, and errors
 
 Pi configuration is operator-local. A valid provider can use Pi's supported
-OAuth/API-key flow or local model configuration. The legacy, smoke-only
-`is_agent_authenticated("pi")` probe currently reads the default
-`~/.pi/agent/models.json` location; it neither honors `PI_CODING_AGENT_DIR` nor
-constitutes automation-admission evidence. #2516 owns environment-aware
-configuration discovery, concrete authentication, and security-cleared package
-probes. The current operator-only smoke seam does **not** turn
-`HEPH_PI_PROVIDER` / `HEPH_PI_MODEL` into Pi's native provider/model selection
-arguments. #2518 owns applying the verified selection, role-derived tool grants,
-and lifecycle parity. Those later stages must keep prompts and private aliases
-out of publishable diagnostics.
+OAuth/API-key flow or local model configuration. The smoke-only
+`is_agent_authenticated("pi")` probe reads the configured Pi package directory
+and does not constitute automation-admission evidence. Provider and model aliases
+for the operator smoke seam come from the explicit, owner-only mode-0600 TOML
+selected by `--pi-alias-config`; they are never read from Hephaestus environment
+variables. #2516 owns concrete authentication and security-cleared package
+probes. #2518 owns applying verified selection, role-derived tool grants, and
+lifecycle parity. Those later stages must keep prompts and private aliases out
+of publishable diagnostics.
 
 Normal Pi automation does not currently execute. After #2516 admits a verified
 package/configuration inventory, #2518 must apply Pi's non-interactive JSON

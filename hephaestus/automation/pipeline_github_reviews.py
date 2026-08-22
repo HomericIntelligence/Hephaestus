@@ -1351,7 +1351,8 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
                         f"repos/{owner}/{name}/pulls/{pr_number}/reviews",
                         "--input",
                         input_path,
-                    ]
+                    ],
+                    timeout=self._gh_timeout,
                 )
             review = json.loads(result.stdout or "{}")
             review_node_id = review.get("node_id")

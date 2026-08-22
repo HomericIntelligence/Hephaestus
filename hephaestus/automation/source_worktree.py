@@ -18,6 +18,7 @@ from hephaestus.agents.workspace import (
     validate_workspace_binding,
 )
 from hephaestus.automation.worktree_manager import WorktreeManager
+from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import file_lock
 from hephaestus.utils.worktree_identity import source_worktree_name
@@ -104,7 +105,14 @@ class SourceWorkspaceReceipt:
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=cwd, check=check, capture_output=True, text=True)
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=check,
+        capture_output=True,
+        text=True,
+        env=build_git_signing_env(),
+    )
 
 
 class SourceWorkspaceManager:

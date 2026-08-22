@@ -131,10 +131,10 @@ class TestMainTargetDir:
         assert rc == 0
         assert (cores / "core.7.proc.100.sig11").read_bytes() == b"ELF"
 
-    def test_target_dir_overrides_env_var(
+    def test_removed_environment_cannot_override_target_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """--target-dir wins over COREDUMP_TARGET_DIRS."""
+        """A poison COREDUMP_TARGET_DIRS value cannot affect explicit candidates."""
         env_dir = tmp_path / "from-env"
         env_dir.mkdir()
         cli_dir = tmp_path / "from-cli"
@@ -146,16 +146,29 @@ class TestMainTargetDir:
         # The env-var directory must NOT have received the core.
         assert not list(env_dir.iterdir())
 
-    def test_env_var_used_when_no_target_dir_option(
+    def test_target_dir_is_repeatable_and_preserves_order(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Without --target-dir, COREDUMP_TARGET_DIRS is honored."""
-        env_dir = tmp_path / "env-cores"
-        monkeypatch.setenv("COREDUMP_TARGET_DIRS", str(env_dir))
+        """Repeated --target-dir values preserve ordered fallback candidates."""
+        unusable = tmp_path / "not-a-dir"
+        unusable.write_text("occupied")
+        fallback = tmp_path / "fallback" / "cores"
+        monkeypatch.setenv("COREDUMP_TARGET_DIRS", str(tmp_path / "poison"))
         monkeypatch.setattr("sys.stdin", _FakeStdin(b"x"))
-        rc = main(["2", "q", "0", "4"])
+        rc = main(
+            [
+                "--target-dir",
+                str(unusable),
+                "--target-dir",
+                str(fallback),
+                "2",
+                "q",
+                "0",
+                "4",
+            ]
+        )
         assert rc == 0
-        assert (env_dir / "core.2.q.0.sig4").is_file()
+        assert (fallback / "core.2.q.0.sig4").is_file()
 
     def test_tty_stdin_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A TTY stdin is refused with exit code 1 (would otherwise block)."""
@@ -205,16 +218,16 @@ class TestMainTargetDir:
         assert payload["message"] == "core written"
         assert payload["path"].endswith("core.7.proc.100.sig11")
 
-    def test_max_bytes_env_var_respected_via_main(
+    def test_max_bytes_option_respected_via_main(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """COREDUMP_MAX_BYTES is parsed by main()."""
+        """--max-bytes is parsed by main()."""
         cores = tmp_path / "cores"
-        monkeypatch.setenv("COREDUMP_MAX_BYTES", "3")
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "999")
         monkeypatch.setattr("sys.stdin", _FakeStdin(b"ABCDEFG"))
-        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
+        rc = main(["--target-dir", str(cores), "--max-bytes", "3", "1", "p", "0", "6"])
         assert rc == 0
         # Cap of 3 bytes should clip output to 3 bytes.
         written = (cores / "core.1.p.0.sig6").read_bytes()
@@ -251,56 +264,35 @@ class TestParseMaxBytes:
         assert _parse_max_bytes(raw) is None
 
 
-class TestMaxBytesEnvFallback:
-    """``main()`` env-var error handling."""
+class TestMaxBytesOption:
+    """``main()`` explicit max-size option handling."""
 
-    def test_malformed_env_falls_back_and_logs(
+    def test_suffix_option_parsed(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Malformed COREDUMP_MAX_BYTES logs to handler.log and uses default."""
+        """--max-bytes 4K caps at 4096 bytes."""
         cores = tmp_path / "cores"
-        monkeypatch.setenv("COREDUMP_MAX_BYTES", "4X")
-        monkeypatch.setattr("sys.stdin", _FakeStdin(b"ELF-bytes"))
-        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
-        assert rc == 0
-        # Core is still written (default cap is generous).
-        assert (cores / "core.1.p.0.sig6").read_bytes() == b"ELF-bytes"
-        # Failure is recorded in handler.log next to the cores dir.
-        log_text = (tmp_path / "handler.log").read_text(encoding="utf-8")
-        assert "COREDUMP_MAX_BYTES=" in log_text
-        assert "'4X'" in log_text
-        assert "falling back to default" in log_text
-
-    def test_suffix_env_var_parsed(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """COREDUMP_MAX_BYTES='4K' caps at 4096 bytes."""
-        cores = tmp_path / "cores"
-        monkeypatch.setenv("COREDUMP_MAX_BYTES", "4K")
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "1")
         monkeypatch.setattr("sys.stdin", _FakeStdin(b"A" * 8192))
-        rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
+        rc = main(["--target-dir", str(cores), "--max-bytes", "4K", "1", "p", "0", "6"])
         assert rc == 0
         written = (cores / "core.1.p.0.sig6").read_bytes()
         assert len(written) == 4096
 
-    def test_whitespace_only_env_uses_default(
+    def test_retired_environment_value_is_ignored(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Whitespace-only COREDUMP_MAX_BYTES is treated as unset, no warning."""
+        """A poison COREDUMP_MAX_BYTES value cannot change the default cap."""
         cores = tmp_path / "cores"
-        monkeypatch.setenv("COREDUMP_MAX_BYTES", "   ")
-        monkeypatch.setattr("sys.stdin", _FakeStdin(b"X"))
+        monkeypatch.setenv("COREDUMP_MAX_BYTES", "1")
+        monkeypatch.setattr("sys.stdin", _FakeStdin(b"XYZ"))
         rc = main(["--target-dir", str(cores), "1", "p", "0", "6"])
         assert rc == 0
-        log_path = tmp_path / "handler.log"
-        if log_path.exists():
-            assert "COREDUMP_MAX_BYTES" not in log_path.read_text(encoding="utf-8")
+        assert (cores / "core.1.p.0.sig6").read_bytes() == b"XYZ"
 
 
 class TestVerifyCrashBundle:

@@ -16,7 +16,7 @@ __author__ = "Micah Villmow"
 #   from hephaestus.io.utils import load_data
 #
 # Design note: __all__ lists the *recommended* top-level symbols (9 most-used).
-# _LAZY_IMPORTS maps the full set of lazily-loaded symbols (28 total) that are
+# _LAZY_IMPORTS maps the full set of lazily-loaded symbols that are
 # also accessible via `hephaestus.<name>` but not re-exported by star-import.
 # This keeps `import hephaestus` fast (PEP 562) while providing convenient access.
 __all__ = [
@@ -59,7 +59,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "format_system_info": ("hephaestus.system.info", "format_system_info"),
     "get_system_info": ("hephaestus.system.info", "get_system_info"),
     "flatten_dict": ("hephaestus.utils", "flatten_dict"),
-    "get_proj_root": ("hephaestus.utils", "get_proj_root"),
     "get_repo_root": ("hephaestus.utils", "get_repo_root"),
     "human_readable_size": ("hephaestus.utils", "human_readable_size"),
     "install_package": ("hephaestus.utils", "install_package"),
@@ -84,6 +83,7 @@ _REMOVED_TOP_LEVEL_SYMBOL_REPLACEMENTS: dict[str, str] = {
     "get_config_value": (
         "use load_config(), merge_configs(), and get_setting() from hephaestus.config"
     ),
+    "get_proj_root": "use get_repo_root() or pass the project root explicitly",
     "retry_with_jitter": (
         "use retry_with_backoff(..., jitter=True, max_delay=...) from hephaestus.utils"
     ),

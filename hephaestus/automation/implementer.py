@@ -44,11 +44,9 @@ from hephaestus.agents.runtime import (
     resolve_agent,
 )
 from hephaestus.cli.utils import (
-    add_advise_timeout_arg,
     add_agent_timeout_arg,
-    add_follow_up_timeout_arg,
     add_git_message_timeout_arg,
-    add_learn_timeout_arg,
+    add_pipeline_runtime_args,
     positive_int,
 )
 from hephaestus.config.paths import resolve_projects_dir
@@ -56,7 +54,12 @@ from hephaestus.constants import AUTOMATION_LOG_FORMAT, LOG_DATEFMT
 from hephaestus.logging.utils import setup_logging
 
 from ._review_utils import build_automation_parser, ensure_state_dir
-from .agent_config import AGENT_IMPL_TIMEOUT
+from .agent_config import (
+    AGENT_IMPL_TIMEOUT,
+    fallback_model,
+    implementer_model,
+    reviewer_model,
+)
 from .dependency_resolver import CyclicDependencyError, DependencyResolver
 
 # Patched at ``hephaestus.automation.implementer.get_repo_root`` by every test
@@ -102,7 +105,9 @@ _CLAUDE_IMPL_TIMEOUT: int = AGENT_IMPL_TIMEOUT
 logger = logging.getLogger(__name__)
 
 
-def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
+def _setup_logging(
+    verbose: bool = False, log_dir: Path | None = None, *, log_format: str = "text"
+) -> None:
     """Configure logging for the CLI.
 
     Args:
@@ -118,6 +123,7 @@ def _setup_logging(verbose: bool = False, log_dir: Path | None = None) -> None:
         format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
         primary_stream="stderr",
+        json_format=log_format == "json",
     )
 
 
@@ -229,11 +235,21 @@ Examples:
         action="store_true",
         help="Let the reviewer emit nitpick-severity comments (suppressed by default)",
     )
-    add_agent_timeout_arg(parser)
-    add_advise_timeout_arg(parser)
+    add_agent_timeout_arg(parser, default=1800)
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
+    parser.add_argument("--reviewer-timeout", type=positive_int, default=1200, metavar="SECONDS")
+    parser.add_argument(
+        "--address-review-timeout", type=positive_int, default=7200, metavar="SECONDS"
+    )
     add_git_message_timeout_arg(parser)
-    add_learn_timeout_arg(parser)
-    add_follow_up_timeout_arg(parser)
+    add_pipeline_runtime_args(
+        parser,
+        role="implementer",
+        timeouts=("network", "gh", "metadata", "rebase", "diff-collect", "pre-pr-test"),
+        plugin_skills=True,
+    )
+    parser.add_argument("--poll-max-wait", type=positive_int, default=1200, metavar="SECONDS")
+    parser.add_argument("--run-pre-pr-tests", action="store_true")
     return parser
 
 
@@ -481,10 +497,16 @@ def main() -> int:
     install_sigtstp_only()
     args = _parse_args()
     configure_github_throttle_from_args(args)
-    agent = resolve_agent(args.agent)
+    agent = resolve_agent(
+        args.agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
+    )
 
     state_dir = ensure_state_dir(get_repo_root())
-    _setup_logging(args.verbose, log_dir=state_dir)
+    _setup_logging(args.verbose, log_dir=state_dir, log_format=args.log_format)
 
     log = logging.getLogger(__name__)
 
@@ -511,7 +533,7 @@ def main() -> int:
     issues = list(args.issues) if args.issues else []
     if not issues and not args.epic:
         try:
-            issues = gh_list_open_issues()
+            issues = gh_list_open_issues(timeout=args.gh_timeout)
         except GitHubRateLimitError as e:
             # Don't smear a traceback across the driver's loop output when the
             # only problem is that the GraphQL hourly budget is gone. Exit
@@ -546,10 +568,31 @@ def main() -> int:
         learning_queue_capacity=args.learning_queue_capacity,
         dry_run=args.dry_run,
         agent=agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        model=args.model,
+        implementer_model=implementer_model(args.implementer_model or args.model or None),
+        reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
+        fallback_model=fallback_model(args.fallback_model or args.model or None),
+        implementer_timeout=args.agent_timeout,
+        reviewer_timeout=args.reviewer_timeout,
+        address_review_timeout=args.address_review_timeout,
+        git_message_timeout=args.git_message_timeout,
         no_advise=args.no_advise,
         enable_learn=not args.no_learn,
         nitpick=args.nitpick,
-        projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
+        projects_dir=resolve_projects_dir(args.projects_dir, prefer_cwd_parent=True),
+        rate_guard_enabled=args.rate_guard_enabled,
+        rate_guard_threshold=args.rate_guard_threshold,
+        plugin_skills_dir=args.plugin_skills_dir,
+        network_timeout=args.network_timeout,
+        gh_timeout=args.gh_timeout,
+        metadata_timeout=args.metadata_timeout,
+        rebase_timeout=args.rebase_timeout,
+        diff_collect_timeout=args.diff_collect_timeout,
+        pre_pr_test_timeout=args.pre_pr_test_timeout,
+        poll_max_wait=args.poll_max_wait,
+        run_pre_pr_tests=args.run_pre_pr_tests,
         json_out=args.json,
         scope=PipelineScope(
             frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT})

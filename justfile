@@ -35,7 +35,7 @@ test-integration:
 
 # Run the opt-in external contract lane (the agent lane needs a second opt-in).
 test-contract:
-    HEPHAESTUS_CONTRACT_TESTS=1 uv run pytest tests/integration/contract --override-ini="addopts=" -v --strict-markers
+    uv run pytest tests/integration/contract --run-contract-tests --override-ini="addopts=" -v --strict-markers
 
 # Run BATS shell tests (recursive under tests/shell)
 test-shell:

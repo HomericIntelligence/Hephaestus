@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """System information collection utilities for Hephaestus.
 
-Collects comprehensive system information for debugging, reporting, and environment analysis.
-Gathers OS details, Python versions, Git information, and environment variables.
+Collects comprehensive system information for debugging and reporting.
+Gathers OS details, Python versions, Git information, and tool versions.
 """
 
 import contextlib
-import os
 import platform
 import sys
 from collections.abc import Callable
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hephaestus.cli.utils import add_json_arg, add_version_arg, format_output
+from hephaestus.config.child_environments import read_approved_parent_env
 from hephaestus.utils.helpers import run_subprocess
 
 
@@ -50,7 +50,7 @@ def run_command(cmd: list[str], timeout: int = 5) -> tuple[bool, str]:
     import subprocess as _subprocess
 
     try:
-        result = run_subprocess(cmd, timeout=timeout, check=False)
+        result = run_subprocess(cmd, env=read_approved_parent_env(), timeout=timeout, check=False)
         return (result.returncode == 0, result.stdout.strip())
     except (_subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return (False, "")
@@ -184,12 +184,6 @@ def get_git_info() -> dict[str, str]:
     return git_info
 
 
-def get_environment_info() -> dict[str, str]:
-    """Get selected environment variables."""
-    env_vars = ["SHELL", "LANG", "USER", "HOME", "PATH"]
-    return {var: os.environ.get(var, "Not set") for var in env_vars}
-
-
 def get_system_info(include_tools: bool = True) -> dict[str, Any]:
     """Collect comprehensive system information.
 
@@ -212,7 +206,6 @@ def get_system_info(include_tools: bool = True) -> dict[str, Any]:
             "current": str(Path.cwd()),
         },
         "git": get_git_info(),
-        "environment": get_environment_info(),
     }
 
     if include_tools:
@@ -282,12 +275,6 @@ def format_system_info(info: dict[str, Any], format_type: str = "text") -> str:
     # Directory Information
     output.append("Directory:")
     output.append(f"  Current: {info['directory']['current']}")
-    output.append("")
-
-    # Environment Information
-    output.append("Environment:")
-    for key, value in info["environment"].items():
-        output.append(f"  {key}: {value}")
     output.append("")
 
     # Tools Information (if available)

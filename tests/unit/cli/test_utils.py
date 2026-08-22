@@ -230,6 +230,12 @@ class TestConfigureCliLogging:
         assert setup.call_args.kwargs["format_string"] == constants.AUTOMATION_LOG_FORMAT
         assert setup.call_args.kwargs["datefmt"] == constants.LOG_DATEFMT
 
+    def test_json_log_format_is_explicit_and_distinct_from_status_json(self) -> None:
+        """Structured logs are selected through the logging API, not process state."""
+        with patch("hephaestus.cli.utils.setup_logging") as setup:
+            configure_cli_logging(log_format="json")
+        assert setup.call_args.kwargs["json_format"] is True
+
 
 class TestResolveRepoRoot:
     """Tests for resolve_repo_root."""
@@ -304,6 +310,12 @@ class TestAddLoggingArgs:
         add_logging_args(parser)
         args = parser.parse_args(["--log-file", "out.log"])
         assert args.log_file == "out.log"
+
+    def test_adds_typed_log_format(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_logging_args(parser)
+        assert parser.parse_args([]).log_format == "text"
+        assert parser.parse_args(["--log-format", "json"]).log_format == "json"
 
 
 class TestAddGithubThrottleArgs:

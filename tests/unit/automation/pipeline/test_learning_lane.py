@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import queue
 import sys
 import threading
@@ -851,6 +852,7 @@ def test_forced_auxiliary_shutdown_stops_active_host_process() -> None:
             del request
             run_subprocess(
                 [sys.executable, "-c", "import time; time.sleep(60)"],
+                env={"PATH": os.defpath},
                 check=False,
                 timeout=60,
                 track_process_group=True,

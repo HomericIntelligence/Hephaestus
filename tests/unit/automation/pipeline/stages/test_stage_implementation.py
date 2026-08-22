@@ -2899,6 +2899,7 @@ class TestCommitPushAndPrCreate:
             "branch": "1-auto-impl",
             "agent": "claude",
             "agent_model": "claude-haiku-4-5",
+            "git_message_timeout": 1200,
         }
         assert result.on_done_state == "PR_CREATE"
 

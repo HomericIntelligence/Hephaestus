@@ -63,7 +63,7 @@ may change incompatibly in a minor release.
 The console scripts registered in `[project.scripts]` are classified into one
 of three tiers:
 
-Hephaestus installs 57 console scripts via `[project.scripts]` in
+Hephaestus installs 58 console scripts via `[project.scripts]` in
 `pyproject.toml`.
 
 - **Stable** — covered by the [deprecation policy](#deprecation-policy). CLI
@@ -147,6 +147,7 @@ bypass a misfiring hook locally use
 | `hephaestus-check-api-table-docs` | Internal | Enforces per-symbol `__all__` documentation in COMPATIBILITY.md |
 | `hephaestus-check-api-reference` | Internal | Verifies generated pdoc API reference output before Pages upload |
 | `hephaestus-check-unlinked-todo` | Internal | Repo CI tech-debt-marker linkage validator; added in #1492 |
+| `hephaestus-check-environment-variables` | Internal | Enforces the exact deny-by-default runtime environment registry |
 
 ## Public API
 
@@ -171,7 +172,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 `check_coverage`, `check_max_complexity`, `check_python_version_consistency`,
 `check_test_structure`, `COMMAND_REGISTRY`, `confirm_action`, `create_parser`,
 `detect_rate_limit`, `filter_audit_results`, `flatten_dict`, `format_output`,
-`format_system_info`, `format_table`, `get_proj_root`,
+`format_system_info`, `format_table`,
 `get_repo_root`, `get_setting`, `human_readable_size`, `install_package`,
 `load_data`, `merge_configs`, `parse_reset_epoch`, `read_file`, `register_command`,
 `run_subprocess`, `safe_write`, `save_data`, `wait_until`, `write_file`, `write_secure`.
@@ -196,7 +197,6 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `load_config` | 0.1.0 | Load YAML/JSON config file |
 | `load_yaml_config` | 0.1.0 | Load a YAML config file |
 | `merge_configs` | 0.1.0 | Deep-merge multiple config dicts |
-| `merge_with_env` | 0.2.0 | Overlay env vars onto config |
 | `validate_config` | 0.1.0 | Validate a config dict against a schema |
 
 ### `hephaestus.io`
@@ -217,7 +217,6 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 |--------|-------|-------|
 | `ThreadSafeCache` | 0.9.8 | Lock-protected TTL cache with `get_or_compute` |
 | `flatten_dict` | 0.1.0 | Flatten nested dict |
-| `get_proj_root` | 0.1.0 | Locate the project root directory |
 | `get_repo_root` | 0.1.0 | Locate the git repository root |
 | `human_readable_size` | 0.1.0 | Format byte count as human-readable string |
 | `install_package` | 0.2.0 | Install a Python package at runtime via pip |
@@ -268,6 +267,7 @@ Lazy-loaded symbols (accessible via `hephaestus.<name>`): `add_logging_args`,
 | `add_json_arg` | 0.6.0 | Add a `--json` output flag to a parser |
 | `add_learn_timeout_arg` | 0.9.8 | Add a `--learn-timeout` flag to a parser |
 | `add_logging_args` | 0.1.0 | Add `--verbose`/`--quiet` logging flags |
+| `add_pipeline_runtime_args` | TBD | Add explicit model, path, rate-guard, and scoped timeout options to a pipeline wrapper |
 | `add_poll_max_wait_arg` | 0.9.8 | Add a `--poll-max-wait` flag to a parser |
 | `add_version_arg` | 0.1.0 | Add a `--version` flag to a parser |
 | `configure_cli_logging` | 0.9.8 | Configure standard stderr-safe logging for a CLI |

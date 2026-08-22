@@ -598,7 +598,8 @@ class MergeWaitStage(Stage):
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_state_invalid")
         if deadline is None:
-            deadline = now + _READINESS_WAIT_TIMEOUT_S
+            poll_max_wait = getattr(ctx.config, "poll_max_wait", _READINESS_WAIT_TIMEOUT_S)
+            deadline = now + int(poll_max_wait)
             item.payload["merge_readiness_deadline_s"] = deadline
         if now >= deadline:
             return StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")

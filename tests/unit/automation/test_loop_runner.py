@@ -667,12 +667,12 @@ class TestDefaultPhaseTimeout:
         assert cfg.phase_timeout_s == _default_phase_timeout_s()
         assert cfg.phase_timeout_s > 0
 
-    def test_default_phase_timeout_reads_env_override(
+    def test_default_phase_timeout_ignores_removed_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``HEPH_PHASE_TIMEOUT`` overrides the built-in default."""
         monkeypatch.setenv("HEPH_PHASE_TIMEOUT", "42")
-        assert _default_phase_timeout_s() == 42.0
+        assert _default_phase_timeout_s() == 7800.0
 
     def test_default_phase_timeout_ignores_malformed_env(
         self, monkeypatch: pytest.MonkeyPatch
@@ -823,7 +823,7 @@ def test_main_wires_external_checkout_as_explicit_repo_root(
     checkout = tmp_path / "isolated" / "automation-worktree"
     projects_dir = tmp_path / "configured-projects"
 
-    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda **_kwargs: ("Org", "Repo"))
     monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
     with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
         config = _capture_main_config(
@@ -843,7 +843,7 @@ def test_main_does_not_override_explicit_projects_dir_with_checkout(
     checkout = tmp_path / "isolated" / "automation-worktree"
     projects_dir = tmp_path / "configured-projects"
 
-    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda **_kwargs: ("Org", "Repo"))
     monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
     config = _capture_main_config(
         [
@@ -864,24 +864,25 @@ def test_main_does_not_override_explicit_projects_dir_with_checkout(
     assert config.repo_roots == {}  # type: ignore[attr-defined]
 
 
-def test_main_does_not_override_valid_projects_root_with_checkout(
+def test_main_ignores_removed_projects_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A valid ``PROJECTS_ROOT`` remains authoritative for every repo."""
+    """A poisoned removed projects root cannot override typed path resolution."""
     checkout = tmp_path / "isolated" / "automation-worktree"
     projects_dir = tmp_path / "configured-projects"
     projects_dir.mkdir()
 
     monkeypatch.setenv("PROJECTS_ROOT", str(projects_dir))
-    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda **_kwargs: ("Org", "Repo"))
     monkeypatch.setattr(loop_runner, "get_repo_root", lambda: checkout)
-    config = _capture_main_config(
-        ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
-        monkeypatch,
-    )
+    with patch.object(loop_runner, "resolve_projects_dir", return_value=checkout.parent):
+        config = _capture_main_config(
+            ["--repos", "Repo,Other", "--dry-run", "--loops", "1", "--agent", "claude"],
+            monkeypatch,
+        )
 
-    assert config.projects_dir == projects_dir  # type: ignore[attr-defined]
-    assert config.repo_roots == {}  # type: ignore[attr-defined]
+    assert config.projects_dir == checkout.parent  # type: ignore[attr-defined]
+    assert config.repo_roots == {"Repo": checkout}  # type: ignore[attr-defined]
 
 
 def test_main_does_not_override_projects_root_for_automation_worktree(
@@ -892,7 +893,7 @@ def test_main_does_not_override_projects_root_for_automation_worktree(
     base_checkout = projects_dir / "Repo"
     automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
 
-    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda **_kwargs: ("Org", "Repo"))
     monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
     with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
         config = _capture_main_config(
@@ -918,7 +919,7 @@ def test_main_uses_noncanonical_automation_worktree_base_as_repo_root(
     base_checkout = projects_dir / "renamed-base-checkout"
     automation_worktree = base_checkout / "build" / ".worktrees" / "issue-99"
 
-    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda: ("Org", "Repo"))
+    monkeypatch.setattr(loop_runner, "_detect_cwd_repo", lambda **_kwargs: ("Org", "Repo"))
     monkeypatch.setattr(loop_runner, "get_repo_root", lambda: automation_worktree)
     with patch.object(loop_runner, "resolve_projects_dir", return_value=projects_dir):
         config = _capture_main_config(
@@ -936,7 +937,13 @@ def test_main_resolves_agent_before_building_config(monkeypatch: pytest.MonkeyPa
     resolve = patch.object(loop_runner, "resolve_agent", return_value="codex")
     with resolve as mock_resolve:
         config = _capture_config(["--repos", "Repo", "--dry-run", "--loops", "1"], monkeypatch)
-    mock_resolve.assert_called_once_with(None)
+    mock_resolve.assert_called_once_with(
+        None,
+        disable_pi_automation=False,
+        auth_status_timeout=10,
+        pi_isolation_adapter=None,
+        pi_dir=None,
+    )
     assert config.agent == "codex"  # type: ignore[attr-defined]
 
 

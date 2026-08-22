@@ -25,6 +25,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from hephaestus.cli.utils import create_validation_parser, emit_json_status
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # mypy flags that consume the next argument as their value.
@@ -107,7 +108,12 @@ def run_mypy_per_file(
                 filepath,
             ]
             try:
-                result = subprocess.run(cmd, capture_output=False, timeout=NETWORK_TIMEOUT)
+                result = subprocess.run(
+                    cmd,
+                    capture_output=False,
+                    timeout=NETWORK_TIMEOUT,
+                    env=build_python_phase_env(Path.cwd()),
+                )
                 rc = result.returncode
             except subprocess.TimeoutExpired as exc:
                 # A hung mypy run must not stall the whole check; treat it as a

@@ -189,23 +189,23 @@ class TestPRInfo:
 class TestGetResignEmail:
     """Regression tests for #497: resign email is configurable, not hardcoded.
 
-    These exercise email *resolution*; the GPG-key-match guard (#1025) is
-    bypassed with FLEET_SKIP_EMAIL_KEY_CHECK so resolution is tested in
-    isolation. The guard itself is covered by TestResignEmailKeyGuard.
+    These exercise email *resolution* through explicit arguments. The
+    GPG-key-match guard is covered by TestResignEmailKeyGuard.
     """
 
-    def test_env_var_takes_precedence(self, monkeypatch) -> None:
-        """FLEET_GIT_EMAIL is used when set."""
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "alice@example.com")
-        assert fleet_gpg.get_resign_email() == "alice@example.com"
+    def test_explicit_email_takes_precedence(self, monkeypatch) -> None:
+        """The explicit email wins while retired environment values are inert."""
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "poison@example.com")
+        assert (
+            fleet_gpg.get_resign_email(resign_email="alice@example.com", skip_email_key_check=True)
+            == "alice@example.com"
+        )
 
     def test_empty_env_var_falls_through_to_git_config(self, monkeypatch) -> None:
-        """An empty FLEET_GIT_EMAIL falls back to git config."""
+        """A retired environment value cannot replace Git configuration."""
         from hephaestus.github import fleet_sync
 
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "")
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "poison@example.com")
 
         # Stub subprocess.run so the test does not depend on the operator's
         # actual git config.
@@ -220,7 +220,7 @@ class TestGetResignEmail:
             "hephaestus.github.fleet_sync.gpg.subprocess.run",
             lambda *a, **k: _Result(),
         )
-        assert fleet_sync.get_resign_email() == "bob@example.com"
+        assert fleet_sync.get_resign_email(skip_email_key_check=True) == "bob@example.com"
 
     def test_no_config_raises_runtime_error(self, monkeypatch) -> None:
         """When nothing is configured, fleet_sync fails loudly rather than guess."""
@@ -245,9 +245,8 @@ class TestGetResignEmail:
         """get_resign_exec() inlines the resolved email into the git command."""
         from hephaestus.github.fleet_sync import get_resign_exec
 
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "carol@example.com")
-        cmd = get_resign_exec()
+        monkeypatch.setenv("FLEET_GIT_EMAIL", "poison@example.com")
+        cmd = get_resign_exec(resign_email="carol@example.com", skip_email_key_check=True)
         assert "user.email=carol@example.com" in cmd
         assert "commit --amend --no-edit -S -s --reset-author" in cmd
 
@@ -255,9 +254,12 @@ class TestGetResignEmail:
         """Rebase --exec command construction keeps email metacharacters in one argv."""
         from hephaestus.github.fleet_sync import get_resign_exec
 
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "dev@example.com; injected-word")
-        argv = shlex.split(get_resign_exec())
+        argv = shlex.split(
+            get_resign_exec(
+                resign_email="dev@example.com; injected-word",
+                skip_email_key_check=True,
+            )
+        )
         assert argv[:3] == [
             "git",
             "-c",
@@ -299,45 +301,43 @@ class TestResignEmailKeyGuard:
         """Resolution succeeds when the email is a UID on the signing key."""
         from hephaestus.github import fleet_sync
 
-        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "Dev@Example.com")  # case-insensitive
         self._stub_signing_key(monkeypatch, signingkey="ABC123", uids=["dev@example.com"])
-        assert fleet_sync.get_resign_email() == "Dev@Example.com"
+        assert fleet_sync.get_resign_email(resign_email="Dev@Example.com") == "Dev@Example.com"
 
     def test_email_not_on_key_raises(self, monkeypatch) -> None:
         """A mismatch fails fast with an actionable ruleset message."""
         from hephaestus.github import fleet_sync
 
-        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "bot@users.noreply.github.com")
         self._stub_signing_key(monkeypatch, signingkey="ABC123", uids=["dev@example.com"])
         with pytest.raises(RuntimeError, match="not a UID on the configured"):
-            fleet_sync.get_resign_email()
+            fleet_sync.get_resign_email(resign_email="bot@users.noreply.github.com")
 
-    def test_skip_env_bypasses_check(self, monkeypatch) -> None:
-        """FLEET_SKIP_EMAIL_KEY_CHECK lets a mismatched email through."""
+    def test_explicit_skip_bypasses_check(self, monkeypatch) -> None:
+        """The explicit skip option lets a mismatched email through."""
         from hephaestus.github import fleet_sync
 
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "bot@users.noreply.github.com")
         self._stub_signing_key(monkeypatch, signingkey="ABC123", uids=["dev@example.com"])
-        assert fleet_sync.get_resign_email() == "bot@users.noreply.github.com"
+        assert (
+            fleet_sync.get_resign_email(
+                resign_email="bot@users.noreply.github.com",
+                skip_email_key_check=True,
+            )
+            == "bot@users.noreply.github.com"
+        )
 
     def test_no_signing_key_skips_check(self, monkeypatch) -> None:
         """When no signingkey is configured, the check is skipped (cannot verify)."""
         from hephaestus.github import fleet_sync
 
-        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "anything@example.com")
         self._stub_signing_key(monkeypatch, signingkey="", uids=[])
-        assert fleet_sync.get_resign_email() == "anything@example.com"
+        assert (
+            fleet_sync.get_resign_email(resign_email="anything@example.com")
+            == "anything@example.com"
+        )
 
     def test_gpg_missing_skips_check(self, monkeypatch) -> None:
         """When gpg is not installed, the check is skipped rather than blocking."""
         from hephaestus.github import fleet_sync
-
-        monkeypatch.delenv("FLEET_SKIP_EMAIL_KEY_CHECK", raising=False)
-        monkeypatch.setenv("FLEET_GIT_EMAIL", "anything@example.com")
 
         def fake_run(cmd, *args, **kwargs):
             if cmd[:2] == ["gpg", "--list-keys"]:
@@ -348,7 +348,10 @@ class TestResignEmailKeyGuard:
             return result
 
         monkeypatch.setattr("hephaestus.github.fleet_sync.gpg.subprocess.run", fake_run)
-        assert fleet_sync.get_resign_email() == "anything@example.com"
+        assert (
+            fleet_sync.get_resign_email(resign_email="anything@example.com")
+            == "anything@example.com"
+        )
 
 
 class TestMain:
@@ -465,15 +468,100 @@ class TestMain:
 
         assert fleet_cli.main() == 0
 
+    def test_main_threads_explicit_pi_policy_to_agent_resolution(self, monkeypatch) -> None:
+        """Provider resolution receives the CLI-owned Pi policy and auth budget."""
+        captured: dict[str, object] = {}
+
+        def fake_resolve(
+            agent,
+            *,
+            disable_pi_automation,
+            auth_status_timeout,
+            pi_isolation_adapter,
+            pi_dir,
+        ):
+            captured.update(
+                agent=agent,
+                disable_pi_automation=disable_pi_automation,
+                auth_status_timeout=auth_status_timeout,
+                pi_isolation_adapter=pi_isolation_adapter,
+                pi_dir=pi_dir,
+            )
+            return "codex"
+
+        monkeypatch.setattr(fleet_cli, "resolve_agent", fake_resolve)
+        monkeypatch.setattr(
+            fleet_cli,
+            "resolve_fleet_config",
+            lambda _org, _repos, _config: ("owner", []),
+        )
+
+        assert (
+            fleet_cli.main(
+                [
+                    "--agent",
+                    "codex",
+                    "--disable-pi-automation",
+                    "--auth-status-timeout",
+                    "17",
+                ]
+            )
+            == 0
+        )
+        assert captured == {
+            "agent": "codex",
+            "disable_pi_automation": True,
+            "auth_status_timeout": 17,
+            "pi_isolation_adapter": None,
+            "pi_dir": None,
+        }
+
 
 class TestTimeoutHandling:
     """Tests for subprocess timeout handling in fleet_sync."""
+
+    def test_parser_exposes_typed_timeout_options(self) -> None:
+        """Fleet subprocess budgets are explicit positive CLI settings."""
+        args = fleet_cli._build_parser().parse_args(
+            [
+                "--gh-timeout",
+                "31",
+                "--metadata-timeout",
+                "7",
+                "--network-timeout",
+                "41",
+                "--clone-timeout",
+                "43",
+                "--rebase-timeout",
+                "47",
+            ]
+        )
+
+        assert args.gh_timeout == 31
+        assert args.metadata_timeout == 7
+        assert args.network_timeout == 41
+        assert args.clone_timeout == 43
+        assert args.rebase_timeout == 47
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "--gh-timeout",
+            "--metadata-timeout",
+            "--network-timeout",
+            "--clone-timeout",
+            "--rebase-timeout",
+        ],
+    )
+    def test_timeout_options_reject_non_positive_values(self, flag: str) -> None:
+        """All fleet timeout flags require positive seconds."""
+        with pytest.raises(SystemExit):
+            fleet_cli._build_parser().parse_args([flag, "0"])
 
     def test_get_resign_email_with_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_resign_email handles TimeoutExpired by trying next config source."""
         monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
         # Isolate resolution from the #1025 GPG-key-match guard.
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
 
         call_count = [0]
 
@@ -489,21 +577,127 @@ class TestTimeoutHandling:
 
         monkeypatch.setattr("hephaestus.github.fleet_sync.gpg.subprocess.run", failing_run)
         # Should get email from second attempt (after timeout)
-        assert fleet_gpg.get_resign_email() == "alice@example.com"
+        assert fleet_gpg.get_resign_email(skip_email_key_check=True) == "alice@example.com"
 
     def test_get_resign_email_uses_metadata_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_resign_email uses METADATA_TIMEOUT."""
         monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
         # Isolate resolution from the #1025 GPG-key-match guard.
-        monkeypatch.setenv("FLEET_SKIP_EMAIL_KEY_CHECK", "1")
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="test@example.com\n")
-            fleet_gpg.get_resign_email()
+            fleet_gpg.get_resign_email(skip_email_key_check=True)
             assert mock_run.called
             call_kwargs = mock_run.call_args[1]
             assert "timeout" in call_kwargs
             assert call_kwargs["timeout"] == METADATA_TIMEOUT
+
+    def test_gpg_config_reads_receive_explicit_metadata_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit fleet metadata budgets reach both Git config reads."""
+        monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+
+        with (
+            patch.object(
+                fleet_gpg,
+                "git_config_get",
+                return_value="alice@example.com",
+            ) as config_get,
+            patch.object(
+                fleet_gpg,
+                "_validate_resign_email",
+                return_value="alice@example.com",
+            ),
+        ):
+            assert fleet_gpg.get_resign_email(metadata_timeout=7) == "alice@example.com"
+
+        config_get.assert_called_once_with("user.email", global_=True, timeout=7)
+
+        with patch.object(fleet_gpg, "git_config_get", return_value=None) as config_get:
+            assert fleet_gpg._signing_key_uid_emails(metadata_timeout=7) is None
+
+        config_get.assert_called_once_with("user.signingkey", timeout=7)
+
+    def test_gpg_config_reads_preserve_default_call_compatibility(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omitted fleet budgets do not add kwargs to legacy Git config calls."""
+        monkeypatch.delenv("FLEET_GIT_EMAIL", raising=False)
+
+        with (
+            patch.object(
+                fleet_gpg,
+                "git_config_get",
+                return_value="alice@example.com",
+            ) as config_get,
+            patch.object(
+                fleet_gpg,
+                "_validate_resign_email",
+                return_value="alice@example.com",
+            ),
+        ):
+            assert fleet_gpg.get_resign_email() == "alice@example.com"
+
+        config_get.assert_called_once_with("user.email", global_=True)
+
+    def test_conflict_git_helpers_receive_explicit_timeouts(self) -> None:
+        """Fleet metadata and network budgets reach conflict Git helpers."""
+        work = Path("/tmp/fleet-work")
+        timeouts = fleet_models.FleetTimeouts(metadata=7, network=41)
+
+        with (
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=[]) as unmerged,
+            patch.object(fleet_conflicts, "git_rev_list_count", return_value=2) as rev_count,
+            patch.object(fleet_conflicts, "git_ls_remote_sha", return_value="abc") as remote,
+        ):
+            assert fleet_conflicts._git_unmerged_files(work, timeouts=timeouts) == []
+            assert (
+                fleet_conflicts._git_rev_list_count(work, "origin/main..HEAD", timeouts=timeouts)
+                == 2
+            )
+            assert (
+                fleet_conflicts._git_ls_remote_sha(
+                    work,
+                    "origin",
+                    "feature",
+                    raise_on_error=True,
+                    timeouts=timeouts,
+                )
+                == "abc"
+            )
+
+        unmerged.assert_called_once_with(work, timeout=7)
+        rev_count.assert_called_once_with(work, "origin/main..HEAD", timeout=7)
+        remote.assert_called_once_with(
+            work,
+            "origin",
+            "feature",
+            raise_on_error=True,
+            timeout=41,
+        )
+
+    def test_conflict_git_helpers_preserve_default_call_compatibility(self) -> None:
+        """Omitted fleet budgets retain exact legacy helper calls."""
+        work = Path("/tmp/fleet-work")
+
+        with (
+            patch.object(fleet_conflicts, "git_unmerged_files", return_value=[]) as unmerged,
+            patch.object(fleet_conflicts, "git_rev_list_count", return_value=2) as rev_count,
+            patch.object(fleet_conflicts, "git_ls_remote_sha", return_value="abc") as remote,
+        ):
+            fleet_conflicts._git_unmerged_files(work)
+            fleet_conflicts._git_rev_list_count(work, "origin/main..HEAD")
+            fleet_conflicts._git_ls_remote_sha(
+                work,
+                "origin",
+                "feature",
+                raise_on_error=True,
+            )
+
+        unmerged.assert_called_once_with(work)
+        rev_count.assert_called_once_with(work, "origin/main..HEAD")
+        remote.assert_called_once_with(work, "origin", "feature", raise_on_error=True)
 
     def test_gh_delegates_to_gh_call_and_scopes_repo(self) -> None:
         """_gh routes through gh_call with repo scoping and NETWORK_TIMEOUT."""
@@ -604,9 +798,17 @@ class TestTimeoutHandling:
             yield SimpleNamespace(text="unreachable")
 
         sdk = SimpleNamespace(ClaudeCodeOptions=SimpleNamespace, query=query)
-        monkeypatch.setattr(fleet_conflicts, "agent_rebase_timeout", lambda: 0.001)
         with patch.dict(sys.modules, {"claude_code_sdk": sdk}):
-            assert fleet_conflicts._run_conflict_agent("claude", "prompt", Path("/repo"), 7) is None
+            assert (
+                fleet_conflicts._run_conflict_agent(
+                    "claude",
+                    "prompt",
+                    Path("/repo"),
+                    7,
+                    timeouts=fleet_models.FleetTimeouts(rebase=0),
+                )
+                is None
+            )
 
 
 def _pr(number: int, status: PRStatus, head: str = "feat") -> PRInfo:
@@ -676,7 +878,7 @@ class TestResolveConflictWithAgent:
             capture_output=True,
             text=True,
             check=False,
-            timeout=NETWORK_TIMEOUT,
+            timeout=fleet_models.DEFAULT_FLEET_TIMEOUTS.rebase,
         )
         assert unmerged.call_count == 2
         assert ["rebase", "--continue"] not in [call.args[0] for call in raw_git.call_args_list]
@@ -1987,7 +2189,8 @@ class TestCloneReuseAndWorktrees:
     def test_ensure_repo_clone_clones_when_absent(self, tmp_path: Path) -> None:
         calls: list[list[str]] = []
 
-        def fake_git(args, cwd, dry_run=False, check=True):
+        def fake_git(args, cwd, dry_run=False, check=True, **kwargs):
+            del kwargs
             calls.append(args)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2003,7 +2206,8 @@ class TestCloneReuseAndWorktrees:
         (tmp_path / "RepoA" / ".git").mkdir(parents=True)
         calls: list[list[str]] = []
 
-        def fake_git(args, cwd, dry_run=False, check=True):
+        def fake_git(args, cwd, dry_run=False, check=True, **kwargs):
+            del kwargs
             calls.append(args)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2020,7 +2224,8 @@ class TestCloneReuseAndWorktrees:
         work = tmp_path / "RepoA-7"
         calls: list[list[str]] = []
 
-        def fake_git(args, cwd, dry_run=False, check=True):
+        def fake_git(args, cwd, dry_run=False, check=True, **kwargs):
+            del kwargs
             calls.append(args)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2042,7 +2247,8 @@ class TestCloneReuseAndWorktrees:
         (tmp_path / "RepoA-7").mkdir(parents=True)
         calls: list[list[str]] = []
 
-        def fake_git(args, cwd, dry_run=False, check=True):
+        def fake_git(args, cwd, dry_run=False, check=True, **kwargs):
+            del kwargs
             calls.append(args)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2063,7 +2269,8 @@ class TestCloneReuseAndWorktrees:
         prs = [_pr(n, PRStatus.OUTDATED, head=f"feat{n}") for n in (1, 2, 3)]
         clone_count = [0]
 
-        def fake_ensure(repo, org, clone_dir, dry_run=False):
+        def fake_ensure(repo, org, clone_dir, dry_run=False, **kwargs):
+            del kwargs
             clone_count[0] += 1
             return clone_dir / repo
 
@@ -2084,7 +2291,8 @@ class TestCloneReuseAndWorktrees:
         prs = [_pr(1, PRStatus.READY, head="feat1")]
         clone_count = [0]
 
-        def fake_ensure(repo, org, clone_dir, dry_run=False):
+        def fake_ensure(repo, org, clone_dir, dry_run=False, **kwargs):
+            del kwargs
             clone_count[0] += 1
             return clone_dir / repo
 
@@ -2418,7 +2626,7 @@ class TestListPrsAuthorScope:
         monkeypatch.setattr(
             fleet_pr_api,
             "_fetch_pr_ci_state",
-            lambda repo, number, org=None: "SUCCESS",
+            lambda repo, number, org=None, **kwargs: "SUCCESS",
         )
 
         def fake_gh(args, repo=None, org=None, **kwargs):
@@ -2560,3 +2768,11 @@ class TestAsciiFlag:
         help_text = dry_run_action.help or ""
         assert "GitHub" in help_text
         assert "agent" in help_text
+
+
+def test_fleet_parser_accepts_explicit_log_format() -> None:
+    """Fleet logging is selected explicitly and remains separate from --json."""
+    args = fleet_cli._build_parser().parse_args(["--log-format", "json"])
+
+    assert args.log_format == "json"
+    assert args.json is False

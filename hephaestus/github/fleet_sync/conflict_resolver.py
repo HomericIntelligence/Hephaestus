@@ -10,7 +10,6 @@ import tempfile
 from pathlib import Path
 
 from hephaestus.agents.runtime import uses_direct_agent_runner
-from hephaestus.constants import agent_rebase_timeout
 from hephaestus.github.fleet_sync.git_ops import (
     _git,
     add_pr_worktree,
@@ -18,7 +17,13 @@ from hephaestus.github.fleet_sync.git_ops import (
     remove_worktree,
 )
 from hephaestus.github.fleet_sync.gpg import get_resign_exec
-from hephaestus.github.fleet_sync.models import UNICODE_SYMBOLS, PRInfo, Symbols
+from hephaestus.github.fleet_sync.models import (
+    DEFAULT_FLEET_TIMEOUTS,
+    UNICODE_SYMBOLS,
+    FleetTimeouts,
+    PRInfo,
+    Symbols,
+)
 from hephaestus.github.git_ops import (
     git_ls_remote_sha,
     git_rev_list_count,
@@ -27,9 +32,51 @@ from hephaestus.github.git_ops import (
 )
 from hephaestus.logging.utils import get_logger
 from hephaestus.prompts import PromptCatalog
-from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
+
+
+def _git_unmerged_files(
+    work: Path,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> list[str]:
+    """Read conflicts with an explicit metadata budget when one was supplied."""
+    if timeouts is None:
+        return git_unmerged_files(work)
+    return git_unmerged_files(work, timeout=timeouts.metadata)
+
+
+def _git_rev_list_count(
+    work: Path,
+    revspec: str,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> int:
+    """Count revisions with an explicit metadata budget when one was supplied."""
+    if timeouts is None:
+        return git_rev_list_count(work, revspec)
+    return git_rev_list_count(work, revspec, timeout=timeouts.metadata)
+
+
+def _git_ls_remote_sha(
+    work: Path,
+    remote: str,
+    ref: str,
+    *,
+    raise_on_error: bool = False,
+    timeouts: FleetTimeouts | None = None,
+) -> str | None:
+    """Read a remote ref with an explicit network budget when one was supplied."""
+    if timeouts is None:
+        return git_ls_remote_sha(work, remote, ref, raise_on_error=raise_on_error)
+    return git_ls_remote_sha(
+        work,
+        remote,
+        ref,
+        raise_on_error=raise_on_error,
+        timeout=timeouts.network,
+    )
 
 
 def _fence_untrusted(label: str, content: str, nonce: str) -> str:
@@ -63,7 +110,14 @@ def _conflict_metadata_block(
     )
 
 
-def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> str | None:
+def _run_conflict_agent(
+    agent: str,
+    prompt: str,
+    work: Path,
+    pr_number: int,
+    *,
+    timeouts: FleetTimeouts = DEFAULT_FLEET_TIMEOUTS,
+) -> str | None:
     """Run the selected conflict-resolution agent."""
     if uses_direct_agent_runner(agent):
         logger.warning(
@@ -102,21 +156,29 @@ def _run_conflict_agent(agent: str, prompt: str, work: Path, pr_number: int) -> 
     import asyncio
 
     try:
-        asyncio.run(asyncio.wait_for(_drain(), timeout=agent_rebase_timeout()))
+        asyncio.run(asyncio.wait_for(_drain(), timeout=timeouts.rebase))
     except TimeoutError:
         logger.warning("  Claude conflict agent timed out for PR #%d", pr_number)
         return None
     return "\n".join(output) or None
 
 
-def _origin_urls(work: Path) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+def _origin_urls(
+    work: Path,
+    *,
+    timeouts: FleetTimeouts = DEFAULT_FLEET_TIMEOUTS,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     """Read all fetch and push URLs without emitting endpoint values to logs."""
     try:
-        fetch = run_git(["remote", "get-url", "--all", "origin"], cwd=work, timeout=NETWORK_TIMEOUT)
+        fetch = run_git(
+            ["remote", "get-url", "--all", "origin"],
+            cwd=work,
+            timeout=timeouts.network,
+        )
         push = run_git(
             ["remote", "get-url", "--push", "--all", "origin"],
             cwd=work,
-            timeout=NETWORK_TIMEOUT,
+            timeout=timeouts.network,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return None
@@ -128,9 +190,17 @@ def _origin_urls(work: Path) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     return fetch_urls, push_urls
 
 
-def _verify_origin_urls(work: Path, expected: tuple[tuple[str, ...], tuple[str, ...]]) -> bool:
+def _verify_origin_urls(
+    work: Path,
+    expected: tuple[tuple[str, ...], tuple[str, ...]],
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> bool:
     """Reject coordinator work if an agent changed the remote endpoint configuration."""
-    current = _origin_urls(work)
+    current = _origin_urls(
+        work,
+        **({"timeouts": timeouts} if timeouts is not None else {}),
+    )
     if current == expected:
         return True
     logger.warning("  Remote configuration changed during conflict resolution")
@@ -142,11 +212,31 @@ def _start_conflict_rebase(
     org: str,
     repo_clone: Path,
     work: Path,
+    *,
+    timeouts: FleetTimeouts | None = None,
 ) -> tuple[Path, list[str], bool, str, tuple[tuple[str, ...], tuple[str, ...]]]:
     """Prepare the conflict worktree and report whether rebase completed."""
-    repo_clone = ensure_repo_clone(pr.repo, org, repo_clone.parent, dry_run=False)
-    add_pr_worktree(repo_clone, work, pr.head_ref, pr.base_ref, dry_run=False)
-    initial_head = run_git(["rev-parse", "HEAD"], cwd=work, timeout=NETWORK_TIMEOUT).stdout.strip()
+    budget = timeouts or DEFAULT_FLEET_TIMEOUTS
+    repo_clone = ensure_repo_clone(
+        pr.repo,
+        org,
+        repo_clone.parent,
+        dry_run=False,
+        **({"timeouts": timeouts} if timeouts is not None else {}),
+    )
+    add_pr_worktree(
+        repo_clone,
+        work,
+        pr.head_ref,
+        pr.base_ref,
+        dry_run=False,
+        **({"timeouts": timeouts} if timeouts is not None else {}),
+    )
+    initial_head = run_git(
+        ["rev-parse", "HEAD"],
+        cwd=work,
+        timeout=budget.network,
+    ).stdout.strip()
     if pr.head_sha and initial_head != pr.head_sha:
         raise RuntimeError(
             f"PR #{pr.number} head changed during setup: expected {pr.head_sha}, got {initial_head}"
@@ -157,28 +247,54 @@ def _start_conflict_rebase(
         capture_output=True,
         text=True,
         check=False,
-        timeout=NETWORK_TIMEOUT,
+        timeout=budget.rebase,
     )
-    conflict_files = git_unmerged_files(work)
+    conflict_files = _git_unmerged_files(work, timeouts=timeouts)
     if rebase_result.returncode != 0 and not conflict_files:
         raise RuntimeError(f"rebase failed without reported conflicts for PR #{pr.number}")
     if rebase_result.returncode == 0 and conflict_files:
         raise RuntimeError(f"rebase reported conflicts after success for PR #{pr.number}")
-    origin_urls = _origin_urls(work)
+    origin_urls = _origin_urls(
+        work,
+        **({"timeouts": timeouts} if timeouts is not None else {}),
+    )
     if origin_urls is None:
         raise RuntimeError(f"origin remote unavailable for PR #{pr.number}")
     return repo_clone, conflict_files, rebase_result.returncode == 0, initial_head, origin_urls
 
 
-def _resign_and_push(pr: PRInfo, work: Path, expected_remote_head: str) -> bool:
+def _resign_and_push(
+    pr: PRInfo,
+    work: Path,
+    expected_remote_head: str,
+    *,
+    timeouts: FleetTimeouts | None = None,
+    resign_email: str | None = None,
+    skip_email_key_check: bool = False,
+) -> bool:
     """Re-sign and push only if the remote still has the discovered branch head."""
-    commit_count = git_rev_list_count(work, f"origin/{pr.base_ref}..HEAD")
+    budget = timeouts or DEFAULT_FLEET_TIMEOUTS
+    commit_count = _git_rev_list_count(
+        work,
+        f"origin/{pr.base_ref}..HEAD",
+        timeouts=timeouts,
+    )
     if commit_count:
         resign = _git(
-            ["rebase", f"HEAD~{commit_count}", "--exec", get_resign_exec()],
+            [
+                "rebase",
+                f"HEAD~{commit_count}",
+                "--exec",
+                get_resign_exec(
+                    resign_email=resign_email,
+                    skip_email_key_check=skip_email_key_check,
+                    **({"metadata_timeout": budget.metadata} if timeouts is not None else {}),
+                ),
+            ],
             cwd=work,
             dry_run=False,
             check=False,
+            **({"timeout": budget.rebase} if timeouts is not None else {}),
         )
         if resign.returncode != 0:
             logger.warning("  Re-signing failed for PR #%d", pr.number)
@@ -194,6 +310,7 @@ def _resign_and_push(pr: PRInfo, work: Path, expected_remote_head: str) -> bool:
         cwd=work,
         dry_run=False,
         check=False,
+        **({"timeout": budget.network} if timeouts is not None else {}),
     )
     if push.returncode != 0:
         logger.warning("  Push failed for PR #%d", pr.number)
@@ -224,6 +341,8 @@ def _resolve_conflict_files(
     work: Path,
     conflict_files: list[str],
     agent: str,
+    *,
+    timeouts: FleetTimeouts | None = None,
 ) -> bool:
     """Resolve conflicts in an isolated file copy, then continue the host rebase."""
     current_files = conflict_files
@@ -244,7 +363,13 @@ def _resolve_conflict_files(
                     agent,
                     len(current_files),
                 )
-                agent_output = _run_conflict_agent(agent, prompt, isolated_work, pr.number)
+                agent_output = _run_conflict_agent(
+                    agent,
+                    prompt,
+                    isolated_work,
+                    pr.number,
+                    **({"timeouts": timeouts} if timeouts is not None else {}),
+                )
                 if agent_output is None:
                     return False
                 if not _apply_agent_edits(work, current_files, agent_output):
@@ -257,7 +382,13 @@ def _resolve_conflict_files(
             )
             return False
 
-        staged = _git(["add", "--", *current_files], cwd=work, dry_run=False, check=False)
+        staged = _git(
+            ["add", "--", *current_files],
+            cwd=work,
+            dry_run=False,
+            check=False,
+            **({"timeout": timeouts.network} if timeouts is not None else {}),
+        )
         if staged.returncode != 0:
             logger.warning("  Could not stage conflict files for PR #%d", pr.number)
             return False
@@ -281,8 +412,9 @@ def _resolve_conflict_files(
             cwd=work,
             dry_run=False,
             check=False,
+            **({"timeout": timeouts.rebase} if timeouts is not None else {}),
         )
-        remaining = git_unmerged_files(work)
+        remaining = _git_unmerged_files(work, timeouts=timeouts)
         if continued.returncode == 0 and not remaining:
             return True
         if not remaining:
@@ -431,13 +563,20 @@ def _rebase_in_progress(work: Path) -> bool:
         return True
 
 
-def _verify_rebased_checkout(pr: PRInfo, work: Path, initial_head: str) -> str | None:
+def _verify_rebased_checkout(
+    pr: PRInfo,
+    work: Path,
+    initial_head: str,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> str | None:
     """Verify local rebase state and topology before any push is attempted."""
+    budget = timeouts or DEFAULT_FLEET_TIMEOUTS
     try:
         if _rebase_in_progress(work):
             logger.warning("  Rebase is still active for PR #%d", pr.number)
             return None
-        remaining_conflicts = git_unmerged_files(work)
+        remaining_conflicts = _git_unmerged_files(work, timeouts=timeouts)
         if remaining_conflicts:
             logger.warning(
                 "  Conflict agent left unresolved files for PR #%d: %r",
@@ -448,7 +587,7 @@ def _verify_rebased_checkout(pr: PRInfo, work: Path, initial_head: str) -> str |
         ancestry = run_git(
             ["merge-base", "--is-ancestor", f"origin/{pr.base_ref}", "HEAD"],
             cwd=work,
-            timeout=NETWORK_TIMEOUT,
+            timeout=budget.network,
             check=False,
             log_on_error=False,
         )
@@ -456,7 +595,7 @@ def _verify_rebased_checkout(pr: PRInfo, work: Path, initial_head: str) -> str |
             logger.warning("  Rebase did not contain base for PR #%d", pr.number)
             return None
         branch = run_git(
-            ["branch", "--show-current"], cwd=work, timeout=NETWORK_TIMEOUT
+            ["branch", "--show-current"], cwd=work, timeout=budget.network
         ).stdout.strip()
         if branch != pr.head_ref:
             logger.warning(
@@ -465,11 +604,17 @@ def _verify_rebased_checkout(pr: PRInfo, work: Path, initial_head: str) -> str |
                 branch or "<detached>",
             )
             return None
-        local_head = run_git(
-            ["rev-parse", "HEAD"], cwd=work, timeout=NETWORK_TIMEOUT
-        ).stdout.strip()
-        expected_count = git_rev_list_count(work, f"origin/{pr.base_ref}..{initial_head}")
-        actual_count = git_rev_list_count(work, f"origin/{pr.base_ref}..HEAD")
+        local_head = run_git(["rev-parse", "HEAD"], cwd=work, timeout=budget.network).stdout.strip()
+        expected_count = _git_rev_list_count(
+            work,
+            f"origin/{pr.base_ref}..{initial_head}",
+            timeouts=timeouts,
+        )
+        actual_count = _git_rev_list_count(
+            work,
+            f"origin/{pr.base_ref}..HEAD",
+            timeouts=timeouts,
+        )
         if actual_count != expected_count:
             logger.warning(
                 "  Rebase changed commit count for PR #%d: expected %d, got %d",
@@ -492,13 +637,23 @@ def _verify_rebased_checkout(pr: PRInfo, work: Path, initial_head: str) -> str |
     return local_head
 
 
-def _verify_rebased_push(pr: PRInfo, work: Path) -> bool:
+def _verify_rebased_push(
+    pr: PRInfo,
+    work: Path,
+    *,
+    timeouts: FleetTimeouts | None = None,
+) -> bool:
     """Verify a completed rebase, rewritten topology, and exact remote head."""
+    budget = timeouts or DEFAULT_FLEET_TIMEOUTS
     try:
-        local_head = run_git(
-            ["rev-parse", "HEAD"], cwd=work, timeout=NETWORK_TIMEOUT
-        ).stdout.strip()
-        remote_head = git_ls_remote_sha(work, "origin", pr.head_ref, raise_on_error=True)
+        local_head = run_git(["rev-parse", "HEAD"], cwd=work, timeout=budget.network).stdout.strip()
+        remote_head = _git_ls_remote_sha(
+            work,
+            "origin",
+            pr.head_ref,
+            raise_on_error=True,
+            timeouts=timeouts,
+        )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.warning("  Could not verify coordinator push for PR #%d: %s", pr.number, e)
         return False
@@ -517,6 +672,36 @@ def _verify_rebased_push(pr: PRInfo, work: Path) -> bool:
     return False
 
 
+def _finalize_conflict_resolution(
+    pr: PRInfo,
+    work: Path,
+    initial_head: str,
+    *,
+    timeouts: FleetTimeouts | None,
+    resign_email: str | None,
+    skip_email_key_check: bool,
+) -> bool:
+    """Re-sign, publish, and verify one resolved conflict branch."""
+    if timeouts is None and resign_email is None and not skip_email_key_check:
+        finalized = _resign_and_push(pr, work, initial_head)
+    else:
+        finalized = _resign_and_push(
+            pr,
+            work,
+            initial_head,
+            timeouts=timeouts,
+            resign_email=resign_email,
+            skip_email_key_check=skip_email_key_check,
+        )
+    if not finalized:
+        return False
+    return _verify_rebased_push(
+        pr,
+        work,
+        **({"timeouts": timeouts} if timeouts is not None else {}),
+    )
+
+
 def resolve_conflict_with_agent(
     pr: PRInfo,
     org: str,
@@ -525,6 +710,9 @@ def resolve_conflict_with_agent(
     agent: str = "claude",
     *,
     symbols: Symbols = UNICODE_SYMBOLS,
+    timeouts: FleetTimeouts | None = None,
+    resign_email: str | None = None,
+    skip_email_key_check: bool = False,
 ) -> bool:
     """Spawn the selected agent to semantically resolve merge conflicts, then re-sign."""
     if dry_run:
@@ -540,20 +728,44 @@ def resolve_conflict_with_agent(
             rebase_completed,
             initial_head,
             origin_urls,
-        ) = _start_conflict_rebase(pr, org, repo_clone, work)
+        ) = _start_conflict_rebase(
+            pr,
+            org,
+            repo_clone,
+            work,
+            **({"timeouts": timeouts} if timeouts is not None else {}),
+        )
         if not rebase_completed and not _resolve_conflict_files(
-            pr, org, work, conflict_files, agent
+            pr,
+            org,
+            work,
+            conflict_files,
+            agent,
+            **({"timeouts": timeouts} if timeouts is not None else {}),
         ):
             return False
-        if not _verify_origin_urls(work, origin_urls):
+        if not _verify_origin_urls(
+            work,
+            origin_urls,
+            **({"timeouts": timeouts} if timeouts is not None else {}),
+        ):
             return False
-        local_head = _verify_rebased_checkout(pr, work, initial_head)
+        local_head = _verify_rebased_checkout(
+            pr,
+            work,
+            initial_head,
+            **({"timeouts": timeouts} if timeouts is not None else {}),
+        )
         if local_head is None:
             return False
-        if not _resign_and_push(pr, work, initial_head):
-            return False
-
-        if _verify_rebased_push(pr, work):
+        if _finalize_conflict_resolution(
+            pr,
+            work,
+            initial_head,
+            timeouts=timeouts,
+            resign_email=resign_email,
+            skip_email_key_check=skip_email_key_check,
+        ):
             logger.info("  %s Conflict resolved and pushed for PR #%d", symbols.check, pr.number)
             return True
         return False
@@ -568,7 +780,18 @@ def resolve_conflict_with_agent(
             type(error).__name__,
         )
         with contextlib.suppress(Exception):
-            _git(["rebase", "--abort"], cwd=work, dry_run=False, check=False)
+            _git(
+                ["rebase", "--abort"],
+                cwd=work,
+                dry_run=False,
+                check=False,
+                **({"timeout": timeouts.rebase} if timeouts is not None else {}),
+            )
         return False
     finally:
-        remove_worktree(repo_clone, work, dry_run=dry_run)
+        remove_worktree(
+            repo_clone,
+            work,
+            dry_run=dry_run,
+            **({"timeouts": timeouts} if timeouts is not None else {}),
+        )

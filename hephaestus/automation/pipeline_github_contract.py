@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         dry_run: bool
         _repo_root: Path
         _arming: ArmingStateStore
+        _gh_timeout: int
 
         @property
         def _repo_slug(self) -> str | None:

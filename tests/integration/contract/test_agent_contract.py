@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
@@ -14,10 +13,10 @@ from hephaestus.automation.session_naming import AGENT_ADVISE
 
 pytestmark = [pytest.mark.integration, pytest.mark.contract]
 
-CONTRACT_MODEL = os.environ.get("HEPHAESTUS_CONTRACT_MODEL", "haiku")
 
-
-def test_invoke_and_resume_session(agent_lane_enabled: None, tmp_path: Path) -> None:
+def test_invoke_and_resume_session(
+    agent_lane_enabled: None, contract_model: str, tmp_path: Path
+) -> None:
     """Create a real session and then resume its deterministic lineage."""
     if not is_agent_authenticated("claude"):
         pytest.skip("claude CLI not installed/authenticated")
@@ -28,7 +27,7 @@ def test_invoke_and_resume_session(agent_lane_enabled: None, tmp_path: Path) -> 
         issue=issue,
         agent=AGENT_ADVISE,
         prompt="Reply with exactly the word OK and nothing else.",
-        model=CONTRACT_MODEL,
+        model=contract_model,
         cwd=tmp_path,
         timeout=300,
         allowed_tools="",
@@ -41,7 +40,7 @@ def test_invoke_and_resume_session(agent_lane_enabled: None, tmp_path: Path) -> 
         issue=issue,
         agent=AGENT_ADVISE,
         prompt="Reply with exactly the word RESUMED and nothing else.",
-        model=CONTRACT_MODEL,
+        model=contract_model,
         cwd=tmp_path,
         timeout=300,
         allowed_tools="",

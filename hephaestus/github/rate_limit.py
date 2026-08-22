@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo
 
+from hephaestus.github.environment import gh_child_environment
 from hephaestus.utils.helpers import run_subprocess
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ def gh_rate_limit_reset_epoch(resource: str = "graphql") -> int | None:
             check=True,
             timeout=10,
             log_on_error=False,
+            env=gh_child_environment(),
         )
         payload = json.loads(result.stdout)
         reset_val = payload.get("resources", {}).get(resource, {}).get("reset")

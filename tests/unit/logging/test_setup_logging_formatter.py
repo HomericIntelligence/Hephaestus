@@ -3,10 +3,33 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 
 import pytest
 
 from hephaestus.logging.utils import setup_logging
+
+
+def test_log_format_environment_is_ignored() -> None:
+    """Structured logging is selected only through explicit parameters."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from hephaestus.logging.utils import get_logger; "
+                "print(type(get_logger('test.explicit-only').logger.handlers[0].formatter).__name__)"
+            ),
+        ],
+        capture_output=True,
+        check=True,
+        env={"PATH": os.defpath, "HEPHAESTUS_LOG_FORMAT": "json"},
+        text=True,
+    )
+
+    assert result.stdout.strip() == "Formatter"
 
 
 def test_custom_datefmt_is_forwarded_to_formatter() -> None:

@@ -310,23 +310,42 @@ class PipelineConfig:
     grace_s: float = _DEFAULT_GRACE_S
     phase_timeout_s: float | None = None
     agent: str = "claude"
+    disable_pi_automation: bool = False
+    auth_status_timeout: int = 10
+    pi_isolation_adapter: str | None = None
+    pi_dir: Path | None = None
     model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
+    fallback_model: str = ""
     planner_reasoning_effort: str = ""
     reviewer_reasoning_effort: str = ""
     implementer_reasoning_effort: str = ""
-    gh_extra_path_root: Path | None = None  # Explicit CLI bin/gh root; never env-derived.
+    gh_extra_path_root: Path | None = None
+    rate_guard_enabled: bool = True
+    rate_guard_threshold: int = 200
+    plugin_skills_dir: Path | None = None
+    planner_timeout: int = 1200
+    reviewer_timeout: int = 1200
+    implementer_timeout: int = 1800
+    address_review_timeout: int = 7200
+    git_message_timeout: int = 1200
+    poll_max_wait: int = 1200
+    clone_timeout: int = 120
+    network_timeout: int = 120
+    gh_timeout: int = 120
+    metadata_timeout: int = 10
+    rebase_timeout: int = 2400
+    diff_collect_timeout: int = 60
+    pre_pr_test_timeout: int = 600
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
     include_bot_prs: bool = True
     include_all_authors: bool = False
-    # Per-budget overrides applied on top of the ROUTES defaults by the
-    # coordinator's budget accessor.
+    # Per-budget overrides applied on top of the ROUTES defaults.
     budget_overrides: dict[str, int] = field(default_factory=dict)
-    # Optional pre-PR test gate argv; repositories can opt into custom layouts.
     pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
     run_pre_pr_tests: bool = False
     serialize_file_overlap: bool = True
@@ -377,13 +396,33 @@ class _StageRunConfig:
     run_pre_pr_tests: bool = False
     force: bool = False
     agent: str = "claude"
+    disable_pi_automation: bool = False
+    auth_status_timeout: int = 10
+    pi_isolation_adapter: str | None = None
+    pi_dir: Path | None = None
     model: str = ""
     planner_model: str = ""
     reviewer_model: str = ""
     implementer_model: str = ""
+    fallback_model: str = ""
     planner_reasoning_effort: str = ""
     reviewer_reasoning_effort: str = ""
     implementer_reasoning_effort: str = ""
+    rate_guard_enabled: bool = True
+    rate_guard_threshold: int = 200
+    planner_timeout: int = 1200
+    reviewer_timeout: int = 1200
+    implementer_timeout: int = 1800
+    address_review_timeout: int = 7200
+    git_message_timeout: int = 1200
+    poll_max_wait: int = 1200
+    clone_timeout: int = 120
+    network_timeout: int = 120
+    gh_timeout: int = 120
+    metadata_timeout: int = 10
+    rebase_timeout: int = 2400
+    diff_collect_timeout: int = 60
+    pre_pr_test_timeout: int = 600
     dry_run: bool = False
     nitpick: bool = False
     drive_green_all: bool = False
@@ -485,7 +524,6 @@ def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
 
 
-# Keep this compact so mypy sees the exports without exceeding the file budget.
 # fmt: off
 __all__ = [
     'DIRECT_SCOPE_BASE_SHA_KEY', 'DIRECT_SCOPE_BOOTSTRAP_KEY', 'DIRECT_SCOPE_WORKTREE_NONCE_KEY', 'PIPELINE_ORDER', 'PRE_PR_TEST_ARGV', 'ROUTES', 'STATE_IMPLEMENTATION_GO', 'STATE_PLAN_BLOCKED', 'WAVE_LEASE_PAYLOAD', 'WORKTREE_MATERIALIZED_KEY',  # noqa: E501

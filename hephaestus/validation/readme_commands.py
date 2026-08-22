@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.utils.helpers import get_repo_root
 
 # Command classification by language tag — only these fenced languages are run;
@@ -374,6 +375,7 @@ class ReadmeValidator:
                 cwd=get_repo_root(),
                 shell=False,
                 check=False,
+                env=build_python_phase_env(get_repo_root()),
             )
             return ValidationResult(
                 command=command,

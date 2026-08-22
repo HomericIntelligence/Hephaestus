@@ -31,6 +31,8 @@ def _args(tmp_path: Path, *, agent: str = "claude") -> argparse.Namespace:
         sandbox="workspace-write",
         approval="never",
         timeout=30,
+        disable_pi_automation=False,
+        auth_status_timeout=10,
         debug=False,
     )
 
@@ -276,9 +278,10 @@ def test_run_agent_resolves_pi_against_repo_root(
     launcher_cwd.mkdir()
     seen: dict[str, object] = {}
 
-    def fake_resolve(agent: str | None, *, cwd: Path | None = None) -> str:
+    def fake_resolve(agent: str | None, *, cwd: Path | None = None, **kwargs: object) -> str:
         seen["agent"] = agent
         seen["cwd"] = cwd
+        seen.update(kwargs)
         return "pi"
 
     monkeypatch.chdir(launcher_cwd)
@@ -292,7 +295,14 @@ def test_run_agent_resolves_pi_against_repo_root(
     args = _args(repo_root, agent="pi")
 
     assert agent_stage.run_agent(args) == 0
-    assert seen == {"agent": "pi", "cwd": repo_root.resolve()}
+    assert seen == {
+        "agent": "pi",
+        "cwd": repo_root.resolve(),
+        "disable_pi_automation": False,
+        "auth_status_timeout": 10,
+        "pi_isolation_adapter": None,
+        "pi_dir": None,
+    }
 
 
 def test_run_agent_rejects_unsupported_direct_agent_value(tmp_path: Path) -> None:
