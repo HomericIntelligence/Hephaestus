@@ -8,7 +8,10 @@ from collections.abc import Mapping
 from contextlib import suppress
 from urllib.parse import quote
 
-from hephaestus.automation.github_api import gh_call
+from hephaestus.automation.github_api import (
+    gh_call,
+    merge_authorization_reviews_page_query,
+)
 from hephaestus.automation.merge_authorization import normalize_review_database_id
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -152,22 +155,8 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
         """Read one complete, repository-scoped native-review traversal."""
         if self._repo_slug is None or pr_number <= 0:
             raise RuntimeError("merge authorization requires a repo-scoped positive PR")
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-            " repository(owner:$owner,name:$name){"
-            "  id name owner{login}"
-            "  pullRequest(number:$number){"
-            "   id number headRefOid"
-            "   reviews(first:100,after:$after){"
-            "    totalCount pageInfo{hasNextPage endCursor}"
-            "    nodes{id fullDatabaseId body state submittedAt updatedAt "
-            "includesCreatedEdit lastEditedAt viewerDidAuthor "
-            "author{login __typename} commit{oid}}"
-            "   }"
-            "  }"
-            " }"
-            "}"
-        )
+        owner, name = self._owner_name()
+        spec = merge_authorization_reviews_page_query(owner, name, pr_number)
         reviews: list[dict[str, object]] = []
         seen_cursors: set[str] = set()
         seen_review_ids: set[str] = set()
@@ -177,33 +166,7 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
             fields: dict[str, int | str] = {"number": pr_number}
             if after is not None:
                 fields["after"] = after
-            response = self._graphql(query, **fields)
-            if not isinstance(response, Mapping):
-                raise RuntimeError("merge authorization GraphQL response is unavailable")
-            errors = response.get("errors")
-            if errors not in (None, []):
-                raise RuntimeError("merge authorization GraphQL response contains errors")
-            data = response.get("data") if isinstance(response, dict) else None
-            repository = data.get("repository") if isinstance(data, dict) else None
-            if not isinstance(repository, dict):
-                raise RuntimeError("merge authorization repository envelope is unavailable")
-            if (
-                not isinstance(repository.get("id"), str)
-                or repository.get("name") != self.repo
-                or not isinstance(repository.get("owner"), dict)
-                or repository["owner"].get("login") != self.org
-            ):
-                raise RuntimeError("merge authorization repository identity is malformed")
-            pull_request = repository.get("pullRequest")
-            if not isinstance(pull_request, dict):
-                raise RuntimeError("merge authorization pull-request is unavailable")
-            if (
-                not isinstance(pull_request.get("id"), str)
-                or pull_request.get("number") != pr_number
-                or not isinstance(pull_request.get("headRefOid"), str)
-                or not pull_request["headRefOid"]
-            ):
-                raise RuntimeError("merge authorization pull-request identity is malformed")
+            pull_request = self._graphql(spec, **fields)
             connection = pull_request.get("reviews")
             if not isinstance(connection, dict):
                 raise RuntimeError("merge authorization review connection is unavailable")

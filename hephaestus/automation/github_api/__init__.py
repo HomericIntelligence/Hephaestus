@@ -80,6 +80,7 @@ from .graphql import (  # noqa: E402
     inline_review_threads_page_query as inline_review_threads_page_query,
     issue_comment_ids_query as issue_comment_ids_query,
     issue_comments_query as issue_comments_query,
+    merge_authorization_reviews_page_query as merge_authorization_reviews_page_query,
     pipeline_thread_snapshot_page_query as pipeline_thread_snapshot_page_query,
     pipeline_unresolved_threads_page_query as pipeline_unresolved_threads_page_query,
     resolve_thread_mutation as resolve_thread_mutation,
