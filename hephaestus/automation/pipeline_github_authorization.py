@@ -8,8 +8,8 @@ from collections.abc import Mapping
 from contextlib import suppress
 from urllib.parse import quote
 
+from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.merge_authorization import normalize_review_database_id
-from hephaestus.github.client import gh_call
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *  # noqa: F403
