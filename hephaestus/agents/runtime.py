@@ -376,7 +376,7 @@ AGENT_CAPABILITIES: dict[AgentName, AgentCapabilities] = {
     "opencode": AgentCapabilities(
         direct_runner=True,
         supports_approval=False,
-        supports_sandbox=False,
+        supports_sandbox=True,
         supports_sessions=True,
     ),
 }
@@ -1594,16 +1594,6 @@ def _run_codex_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
 
 
-def _opencode_base_cmd(*, session_id: str | None = None, model: str = "") -> list[str]:
-    """Build an OpenCode run command that reads the prompt from stdin."""
-    cmd = ["opencode", "run", "--format", "json"]
-    if model:
-        cmd.extend(["--model", model])
-    if session_id:
-        cmd.extend(["--session", session_id])
-    return cmd
-
-
 def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
     """Extract OpenCode session id and final assistant text from JSONL output."""
     session_id: str | None = None
@@ -1744,20 +1734,42 @@ def _run_opencode_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text or "", session_id=session_id)
 
 
-def _reject_unenforceable_opencode_sandbox(sandbox: str) -> None:
-    """Fail closed when a stage requests an isolation OpenCode cannot enforce.
+OPENCODE_PLAN_AGENT = "plan"
 
-    Codex maps ``read-only`` to ``--sandbox`` and Pi to ``--tools``; OpenCode
-    exposes no equivalent flag, so silently ignoring the request would grant
-    write-capable tools to read-only stages (reviewers, classifiers, commit
-    message generation). Raising matches the #773 precedent of rejecting
-    unsupported policy values loudly instead of no-oping them.
+
+def _opencode_base_cmd(
+    *,
+    session_id: str | None = None,
+    model: str = "",
+    sandbox: str = "workspace-write",
+) -> list[str]:
+    """Build an OpenCode run command that reads the prompt from stdin."""
+    cmd = ["opencode", "run", "--format", "json"]
+    if model:
+        cmd.extend(["--model", model])
+    if session_id:
+        cmd.extend(["--session", session_id])
+    cmd.extend(_opencode_sandbox_args(sandbox))
+    return cmd
+
+
+def _opencode_sandbox_args(sandbox: str) -> list[str]:
+    """Return the OpenCode enforcement args for a requested sandbox mode.
+
+    Verified against v1.18.21 built-ins: ``--agent plan`` denies ``edit`` on
+    every project path (the model confirmed refusal and no file was written),
+    giving real read-only enforcement; the default build agent is full-access
+    within the workspace. ``danger-full-access`` has no distinct CLI surface
+    and stays fail-closed (#773 precedent).
     """
-    if sandbox != "workspace-write":
-        raise AgentExecutionError(
-            f"OpenCode cannot enforce sandbox mode {sandbox!r}; select claude, "
-            "codex, or pi for stages that require enforced isolation"
-        )
+    if sandbox == "read-only":
+        return ["--agent", OPENCODE_PLAN_AGENT]
+    if sandbox == "workspace-write":
+        return []
+    raise AgentExecutionError(
+        f"OpenCode cannot enforce sandbox mode {sandbox!r}; select claude, "
+        "codex, or pi for stages that require this isolation level"
+    )
 
 
 def run_opencode_session(
@@ -1774,13 +1786,11 @@ def run_opencode_session(
 
     Model values pass through verbatim in ``provider/model`` form; when empty
     OpenCode applies its own configured default. The CLI exposes no approval
-    flag, so that compatibility input is accepted but unused. Sandbox modes
-    other than ``workspace-write`` are rejected because they cannot be
-    enforced on this backend.
+    flag, so that compatibility input is accepted but unused. ``read-only``
+    is enforced via the built-in ``plan`` agent (verified edit-deny).
     """
-    _reject_unenforceable_opencode_sandbox(sandbox)
     del approval
-    cmd = _opencode_base_cmd(model=model)
+    cmd = _opencode_base_cmd(model=model, sandbox=sandbox)
     return _run_opencode_command(
         cmd,
         prompt=prompt,
@@ -1808,9 +1818,8 @@ def resume_opencode_session(
     requested model instead of being locked or rejected — so the pass-through
     is safe for automation flows that switch phase models between calls.
     """
-    _reject_unenforceable_opencode_sandbox(sandbox)
     del approval
-    cmd = _opencode_base_cmd(session_id=session_id, model=model)
+    cmd = _opencode_base_cmd(session_id=session_id, model=model, sandbox=sandbox)
     return _run_opencode_command(
         cmd,
         prompt=prompt,

@@ -1178,7 +1178,7 @@ def test_opencode_registry_contract() -> None:
     assert capabilities.direct_runner is True
     assert capabilities.supports_sessions is True
     assert capabilities.supports_approval is False
-    assert capabilities.supports_sandbox is False
+    assert capabilities.supports_sandbox is True
     assert agent_runtime.uses_direct_agent_runner("opencode") is True
     assert agent_runtime.agent_supports_model_reasoning_effort("opencode") is False
 
@@ -1201,6 +1201,21 @@ def test_opencode_base_cmd_passes_model_through_and_omits_empty() -> None:
         "json",
         "--session",
         "ses_abc",
+    ]
+
+    assert agent_runtime._opencode_base_cmd(sandbox="read-only") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--agent",
+        "plan",
+    ]
+    assert agent_runtime._opencode_base_cmd(sandbox="workspace-write") == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
     ]
 
 
@@ -1433,6 +1448,25 @@ def test_resume_opencode_session_uses_the_session_flag(tmp_path: Path) -> None:
     assert result.session_id == "ses_fd61"
 
 
+def test_run_opencode_read_only_enforces_via_plan_agent(tmp_path: Path) -> None:
+    """sandbox=read-only runs under the edit-denying plan built-in."""
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured_cmd.extend(cmd)
+        stdout = '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"ok"}}\n'
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        result = agent_runtime.run_opencode_session(
+            "prompt", cwd=tmp_path, timeout=30, sandbox="read-only"
+        )
+
+    assert "--agent" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--agent") + 1] == "plan"
+    assert result.stdout == "ok"
+
+
 def test_agent_dispatch_routes_opencode_sessions(tmp_path: Path) -> None:
     """run_agent_session/resume dispatch OpenCode through its own runners."""
     stdout = '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"OK"}}\n'
@@ -1471,15 +1505,13 @@ def test_agent_dispatch_routes_opencode_sessions(tmp_path: Path) -> None:
     assert text.stdout == "OK"
 
 
-@pytest.mark.parametrize("sandbox", ["read-only", "danger-full-access"])
 @pytest.mark.parametrize(
     "runner",
     ["session", "resume", "agent_session", "agent_resume", "agent_text"],
 )
-def test_opencode_runners_reject_unenforceable_sandboxes(
-    tmp_path: Path, sandbox: str, runner: str
-) -> None:
-    """OpenCode cannot enforce isolation; unsupported modes must fail closed."""
+def test_opencode_runners_reject_unenforceable_sandboxes(tmp_path: Path, runner: str) -> None:
+    """danger-full-access has no OpenCode surface; unsupported modes fail closed."""
+    sandbox = "danger-full-access"
 
     def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
         raise AssertionError("no provider process may start for an unenforceable sandbox")

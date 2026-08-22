@@ -545,7 +545,6 @@ def test_main_rejects_approval_with_pi_agent(
     [
         ("--approval", "on-request"),
         ("--approval", "untrusted"),
-        ("--sandbox", "read-only"),
         ("--sandbox", "danger-full-access"),
     ],
 )

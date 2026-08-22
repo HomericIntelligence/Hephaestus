@@ -1172,8 +1172,8 @@ class TestCoAuthorLine:
         assert "Implemented-By: Pi" in commit_msg
         mock_model.assert_not_called()
 
-    def test_opencode_unenforceable_sandbox_degrades_to_fallback_message(self) -> None:
-        """read-only git-message generation fails closed on OpenCode; the commit survives."""
+    def test_opencode_git_message_sandbox_is_now_enforced_not_fatal(self) -> None:
+        """read-only git-message generation succeeds under the plan agent (#2806)."""
         porcelain = _porcelain(" M foo.py")
         run_mock = MagicMock(
             side_effect=[
@@ -1192,12 +1192,17 @@ class TestCoAuthorLine:
             patch.object(pr_manager, "run", run_mock),
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
+            patch.object(
+                pr_manager,
+                "_invoke_git_message_agent",
+                return_value='{"subject":"docs: update notices","body":"Refresh metadata."}',
+            ) as invoke,
         ):
             pr_manager.commit_changes(40, Path("/tmp/wt"), agent="opencode")
 
+        assert invoke.call_args.kwargs["agent"] == "opencode"
         commit_msg = run_mock.call_args_list[-1].args[0][-1]
-        assert commit_msg.startswith("feat: Implement #40")
-        assert "Implemented-By: OpenCode" in commit_msg
+        assert commit_msg.startswith("docs: update notices")
         assert f"Co-Authored-By: OpenCode-AI <{_TEST_AGENT_EMAIL}>" in commit_msg
 
 
