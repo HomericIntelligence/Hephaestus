@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, assert_never
 
+from hephaestus.automation.merge_authorization import (
+    MergeAuthorization,
+    MergeAuthorizationStatus,
+    resolve_merge_authorization,
+)
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -336,6 +341,32 @@ class PipelineGitHubJobRunner:
         unsafe = conversation_safety(base_branch)
         if unsafe is not None:
             return complete(unsafe)
+
+        def authorization() -> MergeAuthorization | str:
+            """Resolve the trusted exact-head operator approval."""
+            try:
+                repository = github._repo_slug
+                if not isinstance(repository, str) or not repository:
+                    raise RuntimeError("repository identity is unavailable")
+                resolution = resolve_merge_authorization(
+                    github.merge_authorization_reviews(request.pr_number),
+                    repository=repository,
+                    pr_number=request.pr_number,
+                    head_sha=request.reviewed_head_sha,
+                    automation_login=github._viewer_login(),
+                    permission_for_actor=github.repository_permission_for_actor,
+                )
+            except Exception:
+                return "merge_authorization_unavailable"
+            if resolution.status is not MergeAuthorizationStatus.AUTHORIZED:
+                return f"merge_authorization_{resolution.status.value}"
+            if resolution.authorization is None:
+                return "merge_authorization_unavailable"
+            return resolution.authorization
+
+        initial_authorization = authorization()
+        if isinstance(initial_authorization, str):
+            return complete(initial_authorization)
         try:
             readiness = github.gh_pr_merge_readiness(request.pr_number)
         except Exception:
@@ -356,10 +387,17 @@ class PipelineGitHubJobRunner:
         if unsafe is not None:
             return complete(unsafe)
 
+        final_authorization = authorization()
+        if isinstance(final_authorization, str):
+            return complete(final_authorization)
+        if final_authorization != initial_authorization:
+            return complete("merge_authorization_changed")
+
         try:
             result = github.merge_pr_if_head(
                 request.pr_number,
                 request.reviewed_head_sha,
+                final_authorization,
             )
         except Exception:
             return complete("merge_request_transport_error", attempted=True, can_retry=True)

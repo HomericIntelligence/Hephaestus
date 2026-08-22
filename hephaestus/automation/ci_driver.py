@@ -266,7 +266,8 @@ def main() -> int:
             issues=issues,
             prs=prs,
             # A single loop pass is sufficient: in-loop review either applies
-            # the approval label or routes back; merge_wait consumes that label.
+            # the eligibility label or routes back; merge_wait separately
+            # consumes the current proof and operator authorization.
             loops=1,
             # --max-workers maps to the pipeline worker-pool size.
             max_workers=args.max_workers,

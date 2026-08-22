@@ -310,6 +310,23 @@ def test_pipeline_stages_have_no_auto_merge_mutation_capability() -> None:
     assert callers == set()
 
 
+def test_conditional_merge_has_one_production_call_site() -> None:
+    """Only the closed merge-wait job may spend the authorized capability."""
+    calls: list[tuple[str, int]] = []
+    for path in sorted(_AUTOMATION.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "merge_pr_if_head"
+            ):
+                calls.append((str(path.relative_to(_AUTOMATION)), node.lineno))
+
+    assert len(calls) == 1, f"unexpected conditional merge call sites: {calls}"
+    assert calls[0][0] == "pipeline_github_jobs.py"
+
+
 def _sleep_violations(tree: ast.AST, filename: str, *, allow_time_import: bool) -> list[str]:
     """AST-collect time.sleep usage/imports (issue #1816, AC1).
 

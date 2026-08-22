@@ -1,5 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.merge_authorization import MergeAuthorization
+
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 from .review_journal import has_exact_leading_marker
@@ -8,7 +10,12 @@ from .review_journal import has_exact_leading_marker
 class PipelineGitHubMutations(_PipelineGitHubHost):
     """Own coordinator-approved non-review GitHub mutations."""
 
-    def merge_pr_if_head(self, pr_number: int, reviewed_sha: str) -> ConditionalMergeResult:
+    def merge_pr_if_head(
+        self,
+        pr_number: int,
+        reviewed_sha: str,
+        authorization: MergeAuthorization,
+    ) -> ConditionalMergeResult:
         """Attempt one immediate squash merge conditional on the reviewed SHA.
 
         The request deliberately avoids the GitHub CLI PR-merge subcommand,
@@ -16,7 +23,18 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         stage-owned lifecycle read decides whether an ambiguous request may be
         retried later.
         """
-        if pr_number <= 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", reviewed_sha):
+        if (
+            not isinstance(authorization, MergeAuthorization)
+            or authorization.repository != self._repo_slug
+            or authorization.pr_number != pr_number
+            or authorization.head_sha != reviewed_sha
+        ):
+            return ConditionalMergeResult(status=None, body=None, malformed=True)
+        if (
+            pr_number <= 0
+            or not isinstance(reviewed_sha, str)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}", reviewed_sha)
+        ):
             return ConditionalMergeResult(status=None, body=None, malformed=True)
         owner, name = self._owner_name()
         if self._skip(f"conditionally squash merge PR #{pr_number} at {reviewed_sha}"):

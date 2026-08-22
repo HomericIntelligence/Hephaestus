@@ -21,6 +21,7 @@ from typing import Any, cast
 import pytest
 
 from hephaestus.automation.direct_review_recovery import record_direct_review_recovery
+from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     _FAIL_BACK_CAP,
@@ -48,6 +49,7 @@ from hephaestus.automation.pipeline.routing import (
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages.base import JobRequest
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
+from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.resilience import (
     all_circuit_breaker_snapshots,
     get_circuit_breaker,
@@ -68,6 +70,23 @@ def _agent_job(repo: str = "repo-a", issue: int = 1) -> AgentJob:
         timeout_s=10,
         descr="stub agent job",
     )
+
+
+def _authorization_review(review_id: str, head_sha: str = "a" * 40) -> dict[str, object]:
+    """Build one durable exact-head operator approval for coordinator tests."""
+    return {
+        "id": review_id,
+        "fullDatabaseId": 1,
+        "body": MERGE_AUTHORIZATION_MARKER,
+        "state": "APPROVED",
+        "submittedAt": "2026-08-08T00:00:00Z",
+        "updatedAt": "2026-08-08T00:00:00Z",
+        "includesCreatedEdit": False,
+        "lastEditedAt": None,
+        "viewerDidAuthor": False,
+        "author": {"login": "operator", "__typename": "User"},
+        "commit": {"oid": head_sha},
+    }
 
 
 class StubStage:
@@ -115,6 +134,8 @@ def make_coordinator(
     serialize_file_overlap: bool = True,
     github: FakeStageGitHub | None = None,
     rate_budget_ok: Callable[[], tuple[bool, float]] | None = None,
+    github_job_runner: Any | None = None,
+    enable_learn: bool = True,
 ) -> tuple[Coordinator, FakeWorkerPool, FakeStageGitHub]:
     """Build a Coordinator wired to fakes, with seeding scripted per pass."""
     config = PipelineConfig(
@@ -126,10 +147,11 @@ def make_coordinator(
         parallel_repos=parallel_repos,
         dry_run=dry_run,
         serialize_file_overlap=serialize_file_overlap,
+        enable_learn=enable_learn,
         projects_dir=tmp_path,
     )
     gh = github or FakeStageGitHub()
-    pool = FakeWorkerPool()
+    pool = FakeWorkerPool(github_job_runner=github_job_runner)
     passes = deque(seed_entries or [[]])
 
     def fake_seed(repos_arg: Any, issues_arg: Any, prs_arg: Any) -> list[SeedEntry]:
@@ -1060,6 +1082,104 @@ class TestAdmission:
         assert coordinator.inflight_per_repo["repo-a"] == 1
         assert coordinator.inflight_per_repo["repo-b"] == 0
         assert coordinator.queues[StageName.PR_REVIEW].snapshot() == []
+
+
+class TestMergeAuthorizationRestart:
+    """Durable operator reviews survive restart without reviving local proof."""
+
+    def test_restart_reuses_durable_authorization_after_fresh_review_proof(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A restarted coordinator needs fresh review proof, not a new approval."""
+        github = FakeStageGitHub(
+            pr_impl_state=(True, False),
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "a" * 40,
+                "baseRefName": "main",
+                "autoMergeRequest": None,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            },
+            authorization_reviews=(_authorization_review("R1"),),
+        )
+        first, _, _ = make_coordinator(tmp_path, monkeypatch, github=github)
+        first.stages[StageName.PR_REVIEW] = StubStage(
+            StageOutcome(Disposition.FINISH_FAIL, "fresh review required")
+        )
+        without_proof = _issue_item(12, StageName.MERGE_WAIT)
+        without_proof.pr = 12
+        without_proof.state = "MERGE"
+        first._push_item(without_proof, StageName.MERGE_WAIT, enter=False)
+        first._drain_queues()
+
+        assert github.merge_attempts == []
+        assert without_proof.result is not None
+        assert without_proof.result.reason == "fresh review required"
+
+        runner = PipelineGitHubJobRunner(org="org", dry_run=False)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline_github_jobs.PipelineGitHub",
+            lambda *args, **kwargs: github,
+        )
+        restarted, _, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            github=github,
+            github_job_runner=runner,
+            enable_learn=False,
+        )
+        reviewed = _issue_item(12, StageName.MERGE_WAIT)
+        reviewed.pr = 12
+        reviewed.state = "MERGE"
+        reviewed.payload["reviewed_pr_head_sha"] = "a" * 40
+        restarted._push_item(reviewed, StageName.MERGE_WAIT, enter=False)
+        restarted._drain_queues()
+        restarted._drain_completions()
+
+        assert github.merge_attempts == [(12, "a" * 40, "R1")]
+        assert reviewed.result is not None
+        assert reviewed.result.passed is True
+
+    def test_changed_head_makes_durable_authorization_stale_without_put(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exact-head review cannot authorize a later PR head."""
+        github = FakeStageGitHub(
+            pr_impl_state=(True, False),
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": "b" * 40,
+                "baseRefName": "main",
+                "autoMergeRequest": None,
+                "mergeStateStatus": "CLEAN",
+                "mergeable": "MERGEABLE",
+            },
+            authorization_reviews=(_authorization_review("R1", "a" * 40),),
+        )
+        runner = PipelineGitHubJobRunner(org="org", dry_run=False)
+        monkeypatch.setattr(
+            "hephaestus.automation.pipeline_github_jobs.PipelineGitHub",
+            lambda *args, **kwargs: github,
+        )
+        coordinator, _, _ = make_coordinator(
+            tmp_path,
+            monkeypatch,
+            github=github,
+            github_job_runner=runner,
+            enable_learn=False,
+        )
+        item = _issue_item(12, StageName.MERGE_WAIT)
+        item.pr = 12
+        item.state = "MERGE"
+        item.payload["reviewed_pr_head_sha"] = "b" * 40
+        coordinator._push_item(item, StageName.MERGE_WAIT, enter=False)
+        coordinator._drain_queues()
+        coordinator._drain_completions()
+
+        assert github.merge_attempts == []
+        assert item.result is not None
+        assert item.result.reason == "blocked: merge_authorization_stale"
 
 
 class TestRateBudget:

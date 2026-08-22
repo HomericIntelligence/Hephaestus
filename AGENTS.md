@@ -359,15 +359,18 @@ grades, and decision-shaped output are audit evidence, not authorization.
 `pr_review` applies `state:implementation-go` only after its structural audit
 and fresh live GitHub facts confirm the reviewed open, unarmed head, complete
 thread state, and an exclusive label transition by readback. That GitHub label
-is the loop's sole durable implementation-state authority. `merge_wait`
-revalidates the process-local reviewed-head proof and conditionally
-squash-merges that exact head; no queue stage mutates native auto-merge.
+is automated implementation eligibility. Before each SHA-conditional merge
+request, `merge_wait` also requires one unedited marked `APPROVED` review for
+the exact head from a trusted `User` identity distinct from the automation
+actor, plus the current-process reviewed-head proof. None of these artifacts
+substitutes for another, and no queue stage mutates native auto-merge.
 Normal review may collect CI/CD evidence as context, but the loop does not
 change CI/CD. CI workflows and external artifacts never independently grant
 the loop-owned label authority. Branch protection and required CI/CD checks
 are the merge contract. This single-maintainer repository intentionally keeps
-the GitHub required-approving-review count at zero; a human approval is not a
-merge gate.
+the GitHub required-approving-review count at zero. Generic or unmarked human
+approvals are not branch-protection merge gates; the separately required exact
+marked approval from a trusted `User` is a queue-owned merge gate.
 
 ```bash
 # 1. Create feature branch
@@ -554,9 +557,9 @@ structural audit plus fresh live GitHub head, thread, and exclusive-label facts
 may write `state:implementation-go`; review prose, grades, and decision-shaped
 output do not authorize it. Normal review may collect CI/CD evidence as
 context, but the loop does not change CI/CD and no workflow, status, artifact,
-or lease independently authorizes it. `merge_wait` verifies the process-local
-reviewed-head proof and conditionally merges that exact head; no queue stage
-mutates native auto-merge.
+or lease independently authorizes it. `merge_wait` additionally requires one
+trusted, unedited marked `APPROVED` review bound to that exact head before the
+conditional merge; no queue stage mutates native auto-merge.
 
 | Queue stage | Module | Purpose |
 |-------------|--------|---------|

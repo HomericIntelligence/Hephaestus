@@ -1,5 +1,8 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+import json
+from urllib.parse import quote
+
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
 from .review_journal import (
