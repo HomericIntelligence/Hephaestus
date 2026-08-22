@@ -2517,6 +2517,67 @@ class TestMergeAuthorizationQueries:
             ["api", "--method", "GET", "repos/org/repo/pulls/7/reviews/1"], check=False
         )
 
+    def test_nullable_database_id_binds_through_matching_rest_node_id(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A nullable GraphQL database ID uses the REST collection node-ID binding."""
+        page = _authorization_review_page(
+            [_authorization_review_node(database_id=None)], total_count=1
+        )
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: page)
+        call_mock = MagicMock(
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "node_id": "R1",
+                            "commit_id": "a" * 40,
+                        }
+                    ]
+                ),
+            )
+        )
+        monkeypatch.setattr(authorization_mod, "gh_call", call_mock)
+
+        reviews = adapter.merge_authorization_reviews(7)
+
+        assert reviews[0]["fullDatabaseId"] is None
+        assert call_mock.call_count == 2
+        call_mock.assert_called_with(
+            [
+                "api",
+                "--method",
+                "GET",
+                "repos/org/repo/pulls/7/reviews?per_page=100&page=1",
+            ],
+            check=False,
+        )
+
+    def test_nullable_database_id_requires_rest_node_commit_agreement(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A node-ID match alone cannot bind a different REST review head."""
+        page = _authorization_review_page(
+            [_authorization_review_node(database_id=None)], total_count=1
+        )
+        adapter.repo = "repo"
+        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: page)
+        monkeypatch.setattr(
+            authorization_mod,
+            "gh_call",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([{"node_id": "R1", "commit_id": "b" * 40}]),
+                )
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="commit changed"):
+            adapter.merge_authorization_reviews(7)
+
 
 class TestMergeAuthorizationPermissions:
     """Collaborator permissions are parsed separately from review resolution."""

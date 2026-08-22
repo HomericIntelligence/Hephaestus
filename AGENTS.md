@@ -368,8 +368,9 @@ Normal review may collect CI/CD evidence as context, but the loop does not
 change CI/CD. CI workflows and external artifacts never independently grant
 the loop-owned label authority. Branch protection and required CI/CD checks
 are the merge contract. This single-maintainer repository intentionally keeps
-the GitHub required-approving-review count at zero; a human approval is not a
-merge gate.
+the GitHub required-approving-review count at zero. Generic or unmarked human
+approvals are not branch-protection merge gates; the separately required exact
+marked approval from a trusted `User` is a queue-owned merge gate.
 
 ```bash
 # 1. Create feature branch

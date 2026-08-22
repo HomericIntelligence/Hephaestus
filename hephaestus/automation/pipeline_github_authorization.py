@@ -46,19 +46,103 @@ class PipelineGitHubAuthorization(_PipelineGitHubHost):
             raise RuntimeError("merge authorization review commit is malformed")
         return commit_id
 
+    def _rest_review_page(self, pr_number: int, page_number: int) -> list[object]:
+        """Read one bounded REST review-list page or fail closed."""
+        owner, name = self._owner_name()
+        route = f"repos/{owner}/{name}/pulls/{pr_number}/reviews?per_page=100&page={page_number}"
+        result = gh_call(["api", "--method", "GET", route], check=False)
+        if result.returncode != 0:
+            raise RuntimeError("merge authorization review list is unavailable")
+        try:
+            reviews = json.loads(result.stdout or "null")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("merge authorization review list is malformed") from exc
+        if not isinstance(reviews, list) or len(reviews) > 100:
+            raise RuntimeError("merge authorization review list is malformed")
+        return reviews
+
+    @staticmethod
+    def _matching_rest_review_commit(
+        review: object, review_node_ids: set[str]
+    ) -> tuple[str, str] | None:
+        """Extract one requested REST review's node-bound commit identity."""
+        if not isinstance(review, Mapping):
+            raise RuntimeError("merge authorization review list is malformed")
+        node_id = review.get("node_id")
+        if not isinstance(node_id, str) or node_id not in review_node_ids:
+            return None
+        commit_id = review.get("commit_id")
+        if not isinstance(commit_id, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_id):
+            raise RuntimeError("merge authorization review commit is malformed")
+        return node_id, commit_id
+
+    def _review_commit_ids_for_node_ids(
+        self, pr_number: int, review_node_ids: set[str]
+    ) -> dict[str, str]:
+        """Bind nullable GraphQL review database IDs through REST node IDs.
+
+        A GraphQL review's database ID can be null; the individual REST
+        endpoint accepts only its numeric ID. Its collection exposes the same
+        immutable GraphQL node ID as ``node_id``. Only matching node and commit
+        IDs bind; absent, duplicate, malformed, and over-bound results fail closed.
+        """
+        if not review_node_ids:
+            return {}
+        if self._repo_slug is None or pr_number <= 0:
+            raise RuntimeError("review commits require repo-scoped review identities")
+        commits: dict[str, str] = {}
+        for page_number in range(100):
+            reviews = self._rest_review_page(pr_number, page_number + 1)
+            for review in reviews:
+                matched = self._matching_rest_review_commit(review, review_node_ids)
+                if matched is None:
+                    continue
+                node_id, commit_id = matched
+                if node_id in commits:
+                    raise RuntimeError("merge authorization review list identity is malformed")
+                commits[node_id] = commit_id
+            if len(reviews) < 100:
+                if commits.keys() != review_node_ids:
+                    raise RuntimeError("merge authorization review is unavailable")
+                return commits
+        raise RuntimeError("merge authorization review list exceeded its bound")
+
     def _bind_rest_review_commits(
         self, pr_number: int, reviews: list[dict[str, object]]
     ) -> tuple[dict[str, object], ...]:
         """Require REST and GraphQL to agree on every marked review's head."""
+        nullable_node_ids: set[str] = set()
         for review in reviews:
             if review.get("body") != "<!-- hephaestus-merge-authorization:v1 -->":
                 continue
+            if "fullDatabaseId" not in review:
+                raise RuntimeError("merge authorization review database id is unavailable")
             database_id = review.get("fullDatabaseId")
+            if database_id is None:
+                review_node_id = review.get("id")
+                if not isinstance(review_node_id, str) or not review_node_id:
+                    raise RuntimeError("merge authorization review node id is unavailable")
+                nullable_node_ids.add(review_node_id)
+                continue
             if isinstance(database_id, bool) or not isinstance(database_id, int):
                 raise RuntimeError("merge authorization review database id is unavailable")
             commit_id = self._review_commit_id(pr_number, database_id)
             graph_commit = review.get("commit")
             if not isinstance(graph_commit, Mapping) or graph_commit.get("oid") != commit_id:
+                raise RuntimeError("merge authorization review commit changed during admission")
+        nullable_commits = self._review_commit_ids_for_node_ids(pr_number, nullable_node_ids)
+        for review in reviews:
+            if review.get("body") != "<!-- hephaestus-merge-authorization:v1 -->":
+                continue
+            if review.get("fullDatabaseId") is not None:
+                continue
+            review_node_id = review["id"]
+            graph_commit = review.get("commit")
+            if (
+                not isinstance(review_node_id, str)
+                or not isinstance(graph_commit, Mapping)
+                or graph_commit.get("oid") != nullable_commits.get(review_node_id)
+            ):
                 raise RuntimeError("merge authorization review commit changed during admission")
         return tuple(reviews)
 

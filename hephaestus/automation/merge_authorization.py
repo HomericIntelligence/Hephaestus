@@ -6,6 +6,7 @@ import hashlib
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
@@ -14,6 +15,7 @@ MERGE_AUTHORIZATION_MARKER: Final = "<!-- hephaestus-merge-authorization:v1 -->"
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _VALID_STATES = frozenset({"APPROVED", "DISMISSED", "COMMENTED", "PENDING", "CHANGES_REQUESTED"})
+_OPINIONATED_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 _VALID_PERMISSIONS = frozenset({"NONE", "READ", "TRIAGE", "WRITE", "MAINTAIN", "ADMIN"})
 
 
@@ -270,6 +272,20 @@ def _candidate_metadata(
     )
 
 
+def _submitted_timestamp(review: Mapping[str, object]) -> datetime:
+    """Return a timezone-aware timestamp suitable for review chronology."""
+    submitted_at = review.get("submittedAt")
+    if not isinstance(submitted_at, str) or not submitted_at:
+        raise ValueError("review submittedAt is malformed")
+    try:
+        parsed = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("review submittedAt is malformed") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("review submittedAt must include a timezone")
+    return parsed.astimezone(UTC)
+
+
 def resolve_merge_authorization(  # noqa: C901
     reviews: Sequence[Mapping[str, object]],
     *,
@@ -294,13 +310,14 @@ def resolve_merge_authorization(  # noqa: C901
     if not isinstance(automation_login, str) or not automation_login:
         raise ValueError("automation_login must be a non-empty string")
 
-    active: list[MergeAuthorization] = []
     replayed = False
     revoked = False
     stale = False
     untrusted = False
     marked_ids: set[str] = set()
     permission_cache: dict[str, str] = {}
+    latest_opinionated: dict[str, tuple[datetime, str]] = {}
+    latest_marked_approvals: dict[str, tuple[datetime, list[MergeAuthorization]]] = {}
 
     def cached_permission(login: str) -> str:
         """Read a relevant human actor once, case-insensitively per resolution."""
@@ -313,20 +330,29 @@ def resolve_merge_authorization(  # noqa: C901
         if not isinstance(review, Mapping):
             raise ValueError("review node is unavailable")
         body = review.get("body")
-        if body != MERGE_AUTHORIZATION_MARKER:
+        marked = body == MERGE_AUTHORIZATION_MARKER
+        raw_state = review.get("state")
+        state = raw_state.upper() if isinstance(raw_state, str) else None
+        opinionated = state in _OPINIONATED_STATES
+        # An unmarked approval cannot grant authorization, but a trusted
+        # opinionated review still participates in GitHub's per-author latest
+        # review state and may supersede an earlier marked approval.
+        if not marked and not opinionated:
             continue
-        review_id = review.get("id")
-        if isinstance(review_id, str) and review_id:
-            if review_id in marked_ids:
-                replayed = True
-                continue
-            marked_ids.add(review_id)
+        if marked:
+            review_id = review.get("id")
+            if isinstance(review_id, str) and review_id:
+                if review_id in marked_ids:
+                    replayed = True
+                    continue
+                marked_ids.add(review_id)
         login, actor_type, viewer_did_author, commit_oid = _provenance(review)
         current_head = commit_oid == head_sha
         if not current_head:
-            stale = stale or _eligible_actor_without_permission(
-                login, actor_type, viewer_did_author, automation_login=automation_login
-            )
+            if marked:
+                stale = stale or _eligible_actor_without_permission(
+                    login, actor_type, viewer_did_author, automation_login=automation_login
+                )
             continue
         trusted, permission = _trusted_actor(
             login,
@@ -336,32 +362,63 @@ def resolve_merge_authorization(  # noqa: C901
             permission_for_actor=cached_permission,
         )
         if not trusted:
-            if current_head:
+            if marked:
                 untrusted = True
             continue
+        candidate: MergeAuthorization | None = None
+        if marked:
+            try:
+                candidate = _candidate_metadata(
+                    review,
+                    MERGE_AUTHORIZATION_MARKER,
+                    permission,
+                    repository=repository,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                )
+            except ValueError:
+                replayed = True
+                continue
+            if candidate.includes_created_edit or candidate.last_edited_at is not None:
+                replayed = True
+                continue
+            if state == "DISMISSED":
+                revoked = True
+        if not opinionated or login is None or state is None:
+            continue
         try:
-            candidate = _candidate_metadata(
-                review,
-                body,
-                permission,
-                repository=repository,
-                pr_number=pr_number,
-                head_sha=head_sha,
-            )
+            submitted_at = _submitted_timestamp(review)
         except ValueError:
             replayed = True
             continue
-        if candidate.includes_created_edit or candidate.last_edited_at is not None:
+        author_key = login.casefold()
+        prior_opinion = latest_opinionated.get(author_key)
+        if (
+            prior_opinion is not None
+            and prior_opinion[0] == submitted_at
+            and prior_opinion[1] != state
+        ):
             replayed = True
             continue
-        state = str(review["state"]).upper()
-        if state == "APPROVED":
-            active.append(candidate)
-        elif state == "DISMISSED":
-            revoked = True
+        if prior_opinion is None or submitted_at > prior_opinion[0]:
+            latest_opinionated[author_key] = (submitted_at, state)
+        if state == "APPROVED" and candidate is not None:
+            prior_approval = latest_marked_approvals.get(author_key)
+            if prior_approval is None or submitted_at > prior_approval[0]:
+                latest_marked_approvals[author_key] = (submitted_at, [candidate])
+            elif submitted_at == prior_approval[0]:
+                prior_approval[1].append(candidate)
 
     if replayed:
         return MergeAuthorizationResolution(MergeAuthorizationStatus.REPLAYED)
+    if any(state == "CHANGES_REQUESTED" for _, state in latest_opinionated.values()):
+        return MergeAuthorizationResolution(MergeAuthorizationStatus.REVOKED)
+    active = [
+        candidate
+        for author, (_, state) in latest_opinionated.items()
+        if state == "APPROVED" and author in latest_marked_approvals
+        for candidate in latest_marked_approvals[author][1]
+    ]
     if len(active) > 1:
         return MergeAuthorizationResolution(MergeAuthorizationStatus.AMBIGUOUS)
     if active:

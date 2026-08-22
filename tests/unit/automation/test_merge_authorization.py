@@ -107,8 +107,8 @@ def test_permission_lookup_is_deferred_and_casefold_cached() -> None:
         (
             _review("stale", head="b" * 40, author="Stale"),
             _review("bot", author="automation[bot]"),
-            _review("one", author="Operator"),
-            _review("two", author="operator"),
+            _review("one", author="Operator", submitted_at="2026-08-08T00:00:00Z"),
+            _review("two", author="operator", submitted_at="2026-08-08T00:01:00Z"),
         ),
         repository="org/repo",
         pr_number=12,
@@ -117,7 +117,9 @@ def test_permission_lookup_is_deferred_and_casefold_cached() -> None:
         permission_for_actor=permission_for_actor,
     )
 
-    assert resolution.status is MergeAuthorizationStatus.AMBIGUOUS
+    assert resolution.status is MergeAuthorizationStatus.AUTHORIZED
+    assert resolution.authorization is not None
+    assert resolution.authorization.review_id == "two"
     assert calls == ["Operator"]
 
 
@@ -174,9 +176,32 @@ def test_dismissed_review_is_revoked() -> None:
     assert resolution.status is MergeAuthorizationStatus.REVOKED
 
 
+def test_later_changes_requested_supersedes_marked_approval() -> None:
+    """The author's latest opinionated current-head review controls authorization."""
+    marked_approval = _review(
+        "R1",
+        submitted_at="2026-08-08T00:00:00Z",
+        updated_at="2026-08-08T00:00:00Z",
+    )
+    later_changes_requested = _review(
+        "R2",
+        state="CHANGES_REQUESTED",
+        body="Blocking changes remain.",
+        submitted_at="2026-08-08T00:01:00Z",
+        updated_at="2026-08-08T00:01:00Z",
+    )
+
+    # Deliberately reverse snapshot order: submittedAt, not input position,
+    # establishes which opinionated review is latest.
+    resolution = _resolve((later_changes_requested, marked_approval))
+
+    assert resolution.status is MergeAuthorizationStatus.REVOKED
+    assert resolution.authorization is None
+
+
 def test_multiple_active_trusted_reviews_are_ambiguous() -> None:
     """Two distinct current-head approvals require operator cleanup."""
-    resolution = _resolve((_review("R1"), _review("R2", database_id="2")))
+    resolution = _resolve((_review("R1"), _review("R2", author="second-operator", database_id="2")))
 
     assert resolution.status is MergeAuthorizationStatus.AMBIGUOUS
 

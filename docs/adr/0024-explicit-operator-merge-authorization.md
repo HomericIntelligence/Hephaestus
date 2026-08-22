@@ -51,14 +51,18 @@ or `admin` collaborator permission is trusted. `maintain` normalizes to
 operated by a person; repository administrators own that trust assumption and
 must keep the automation identity separate.
 
-The resolver is deterministic. Unmarked reviews are inert. Duplicate marked
-review IDs in one snapshot, edited trusted current-head reviews, and malformed
-trusted current-head metadata resolve to `REPLAYED`. Multiple valid active
-trusted current-head approvals resolve to `AMBIGUOUS`; one resolves to
-`AUTHORIZED`. In the absence of an active current approval, current dismissed
-reviews resolve to `REVOKED`, trusted old-head reviews to `STALE`, current
-untrusted reviews to `UNTRUSTED`, and no participating review to `ABSENT`.
-Untrusted candidates never veto a valid trusted authorization.
+The resolver is deterministic. Unmarked reviews cannot grant authorization,
+but trusted current-head `APPROVED` and `CHANGES_REQUESTED` reviews participate
+in validated submission chronology so only each author's latest opinionated
+state controls a marked approval. Duplicate marked review IDs in one snapshot,
+edited trusted current-head reviews, ambiguous chronology, and malformed trusted
+current-head metadata resolve to `REPLAYED`. Multiple valid active trusted
+current-head approvals resolve to `AMBIGUOUS`; one resolves to `AUTHORIZED`.
+A latest trusted `CHANGES_REQUESTED` state or, in the absence of an active
+current approval, a current dismissed review resolves to `REVOKED`; trusted
+old-head reviews resolve to `STALE`, current untrusted reviews to `UNTRUSTED`,
+and no participating review to `ABSENT`. Untrusted candidates never veto a
+valid trusted authorization.
 
 Review traversal is repository-scoped, bounded to 100 pages and 10,000
 reviews, and validates repository/PR identity, counts, cursors, and page
