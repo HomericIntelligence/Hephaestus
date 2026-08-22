@@ -326,20 +326,17 @@ class TestMain:
         """The direct path keeps /dev/tty usable in a PTY-backed session."""
         pid, master_fd = os.forkpty()
         if pid == 0:
-            try:
-                os.environ["RUN_UNDER_GDB"] = "0"
-                rc = main(
-                    [
-                        "--timeout",
-                        "5",
-                        "unused-cores",
-                        sys.executable,
-                        "-c",
-                        "with open('/dev/tty', 'rb') as tty: assert tty.isatty()",
-                    ]
-                )
-            except BaseException:
-                rc = 125
+            os.environ["RUN_UNDER_GDB"] = "0"
+            rc = main(
+                [
+                    "--timeout",
+                    "5",
+                    "unused-cores",
+                    sys.executable,
+                    "-c",
+                    "with open('/dev/tty', 'rb') as tty: assert tty.isatty()",
+                ]
+            )
             os._exit(rc)
 
         try:
