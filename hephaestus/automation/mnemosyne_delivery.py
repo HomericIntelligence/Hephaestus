@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
@@ -114,13 +115,22 @@ def _validate_delivery_text(text: str, field: str) -> None:
 
 
 def _origin_matches_repository(origin: str, repository: str) -> bool:
-    """Return whether a Git remote URL identifies an expected repository slug."""
-    normalized = origin.strip().removesuffix(".git")
-    return (
-        normalized == repository
-        or normalized.endswith(f"/{repository}")
-        or normalized.endswith(f":{repository}")
-    )
+    """Return whether ``origin`` is the exact repository on GitHub's endpoint."""
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        return False
+    value = origin.strip()
+    scp_style = re.fullmatch(r"(?:[^@:/]+@)?github\.com:([^/]+)/([^/]+?)(?:\.git)?/?", value)
+    if scp_style is not None:
+        return scp_style.group(1) == owner and scp_style.group(2) == name
+    parsed = urlparse(value)
+    if parsed.scheme not in {"https", "ssh"} or parsed.hostname != "github.com":
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 2:
+        return False
+    remote_owner, remote_name = parts
+    return remote_owner == owner and remote_name.removesuffix(".git") == name
 
 
 class LearnDeliveryService:
@@ -144,6 +154,16 @@ class LearnDeliveryService:
         _validate_delivery_text(request.commit_message, "commit message")
         _validate_delivery_text(request.pr_title, "PR title")
         _validate_delivery_text(request.pr_body, "PR body")
+        origin = _require_success(
+            self.git(
+                request.worktree_path,
+                ("remote", "get-url", "origin"),
+                self.timeout_s,
+            ),
+            "delivery origin read",
+        )
+        if not _origin_matches_repository(origin, request.repository):
+            raise LearnDeliveryError("delivery repository does not match worktree origin")
         existing_pr = self._bind_existing_pr_worktree(request)
         changed_paths = self._changed_paths(request.worktree_path)
         outside = sorted(set(changed_paths).difference(request.allowed_paths))
@@ -298,7 +318,21 @@ class LearnDeliveryService:
             self.git(worktree_path, ("diff", "--name-only", "HEAD"), self.timeout_s),
             "changed path discovery",
         )
-        return tuple(line.strip() for line in output.splitlines() if line.strip())
+        untracked = _require_success(
+            self.git(
+                worktree_path,
+                ("ls-files", "--others", "--exclude-standard"),
+                self.timeout_s,
+            ),
+            "untracked path discovery",
+        )
+        return tuple(
+            dict.fromkeys(
+                line.strip()
+                for line in (*output.splitlines(), *untracked.splitlines())
+                if line.strip()
+            )
+        )
 
 
 def valid_delivery_receipt(value: object) -> bool:
