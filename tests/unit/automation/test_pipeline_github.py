@@ -8,8 +8,10 @@ place the ``StageGitHub`` protocol's dry-run contract is honored.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from itertools import repeat
 from multiprocessing import get_context
 from pathlib import Path
 from time import sleep
@@ -2413,6 +2415,26 @@ def _bind_authorization_review_commits(
     monkeypatch.setattr(adapter, "_review_commit_id", lambda _pr, _review: "a" * 40)
 
 
+def _authorization_graphql_pages(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    responses: Iterator[dict[str, object]],
+    calls: list[dict[str, str | int]] | None = None,
+) -> None:
+    """Feed raw GraphQL envelopes through the real merge-authorization validator."""
+    spec = github_api_mod.merge_authorization_reviews_page_query("org", "repo", 7)
+
+    def graphql(_spec: object, **fields: str | int) -> dict[str, object]:
+        if calls is not None:
+            calls.append(fields)
+        envelope = next(responses)
+        data = envelope.get("data")
+        assert isinstance(data, dict)
+        return spec.validate(data)
+
+    monkeypatch.setattr(adapter, "_graphql", graphql)
+
+
 class TestMergeAuthorizationQueries:
     """Repository-scoped review pagination and permission reads fail closed."""
 
@@ -2431,12 +2453,8 @@ class TestMergeAuthorizationQueries:
         responses = iter([page_one, page_two, page_one, page_two])
         calls: list[dict[str, str | int]] = []
 
-        def graphql(_query: str, **fields: str | int) -> dict[str, object]:
-            calls.append(fields)
-            return next(responses)
-
         adapter.repo = "repo"
-        monkeypatch.setattr(adapter, "_graphql", graphql)
+        _authorization_graphql_pages(adapter, monkeypatch, responses, calls)
         _bind_authorization_review_commits(adapter, monkeypatch)
 
         reviews = adapter.merge_authorization_reviews(7)
@@ -2462,7 +2480,7 @@ class TestMergeAuthorizationQueries:
         )
         responses = iter([page_one, page_two])
         adapter.repo = "repo"
-        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+        _authorization_graphql_pages(adapter, monkeypatch, responses)
         _bind_authorization_review_commits(adapter, monkeypatch)
 
         with pytest.raises(RuntimeError, match="duplicated"):
@@ -2477,7 +2495,7 @@ class TestMergeAuthorizationQueries:
         )
         responses = iter([first, changed])
         adapter.repo = "repo"
-        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+        _authorization_graphql_pages(adapter, monkeypatch, responses)
         _bind_authorization_review_commits(adapter, monkeypatch)
 
         with pytest.raises(RuntimeError, match="snapshot changed"):
@@ -2519,7 +2537,7 @@ class TestMergeAuthorizationQueries:
                 end_cursor="cursor-1",
             )
             responses = iter([page, repeated])
-        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: next(responses))
+        _authorization_graphql_pages(adapter, monkeypatch, responses)
         _bind_authorization_review_commits(adapter, monkeypatch)
 
         with pytest.raises(RuntimeError, match=message):
@@ -2531,7 +2549,7 @@ class TestMergeAuthorizationQueries:
         """The authorization head is bound to the reviews API commit_id."""
         page = _authorization_review_page([_authorization_review_node()], total_count=1)
         adapter.repo = "repo"
-        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: page)
+        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
         call_mock = MagicMock(
             return_value=SimpleNamespace(
                 returncode=0,
@@ -2554,7 +2572,7 @@ class TestMergeAuthorizationQueries:
             [_authorization_review_node(database_id=None)], total_count=1
         )
         adapter.repo = "repo"
-        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: page)
+        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
         call_mock = MagicMock(
             return_value=SimpleNamespace(
                 returncode=0,
@@ -2592,7 +2610,7 @@ class TestMergeAuthorizationQueries:
             [_authorization_review_node(database_id=None)], total_count=1
         )
         adapter.repo = "repo"
-        monkeypatch.setattr(adapter, "_graphql", lambda _query, **_fields: page)
+        _authorization_graphql_pages(adapter, monkeypatch, repeat(page))
         monkeypatch.setattr(
             authorization_mod,
             "gh_call",
