@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -677,24 +678,28 @@ class MnemosynePluginValidator:
         self._runner = runner
 
     def validate(self, path: Path) -> tuple[str, ...]:
-        """Run the fixed no-network validator command without a shell."""
-        cache = path / "build" / "uv-cache"
-        cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "UV_CACHE_DIR": str(cache),
-        }
-        result = self._runner(
-            list(VALIDATOR_ARGV),
-            cwd=path,
-            timeout=VALIDATOR_TIMEOUT_S,
-            check=False,
-            log_on_error=False,
-            env=env,
-            track_process_group=True,
-        )
+        """Run the fixed no-network validator command without a shell.
+
+        The uv cache lives in a host-owned temporary directory so the
+        prepared worktree gains no untracked cache entries: the delivery
+        diff allows only generated ``skills/*.md`` artifacts.
+        """
+        with tempfile.TemporaryDirectory(prefix="hephaestus-uv-cache-") as cache_dir:
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "UV_CACHE_DIR": str(Path(cache_dir)),
+            }
+            result = self._runner(
+                list(VALIDATOR_ARGV),
+                cwd=path,
+                timeout=VALIDATOR_TIMEOUT_S,
+                check=False,
+                log_on_error=False,
+                env=env,
+                track_process_group=True,
+            )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             detail = _safe_validator_diagnostic(detail)
