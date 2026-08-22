@@ -1488,20 +1488,6 @@ def _parse_pi_json_events(text: str) -> tuple[str | None, str]:
     return session_id, final_message.strip()
 
 
-def _has_pi_json_event(text: str) -> bool:
-    """Return whether Pi JSON-mode output contains at least one event object."""
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event: Any = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and isinstance(event.get("type"), str) and event["type"].strip():
-            return True
-    return False
-
-
 def run_codex_session(
     prompt: str,
     *,
@@ -1644,8 +1630,8 @@ def _parse_opencode_json_events(text: str) -> tuple[str | None, str]:
     return session_id, final_message.strip()
 
 
-def _has_opencode_json_event(text: str) -> bool:
-    """Return whether OpenCode JSON-mode output contains at least one event object."""
+def _has_jsonl_event(text: str) -> bool:
+    """Return whether JSONL output contains at least one event object."""
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -1707,11 +1693,27 @@ def _run_opencode_command(
     session_id, event_message = _parse_opencode_json_events(stdout_text or "")
     if event_message:
         stdout: str = event_message.strip()
-    elif _has_opencode_json_event(stdout_text or ""):
+    elif _has_jsonl_event(stdout_text or ""):
         stdout = ""
     else:
         stdout = (stdout_text or "").strip()
     return AgentRunResult(stdout=stdout, stderr=stderr_text or "", session_id=session_id)
+
+
+def _reject_unenforceable_opencode_sandbox(sandbox: str) -> None:
+    """Fail closed when a stage requests an isolation OpenCode cannot enforce.
+
+    Codex maps ``read-only`` to ``--sandbox`` and Pi to ``--tools``; OpenCode
+    exposes no equivalent flag, so silently ignoring the request would grant
+    write-capable tools to read-only stages (reviewers, classifiers, commit
+    message generation). Raising matches the #773 precedent of rejecting
+    unsupported policy values loudly instead of no-oping them.
+    """
+    if sandbox != "workspace-write":
+        raise AgentExecutionError(
+            f"OpenCode cannot enforce sandbox mode {sandbox!r}; select claude, "
+            "codex, or pi for stages that require enforced isolation"
+        )
 
 
 def run_opencode_session(
@@ -1727,10 +1729,13 @@ def run_opencode_session(
     """Run a new OpenCode JSON-event session and capture its id.
 
     Model values pass through verbatim in ``provider/model`` form; when empty
-    OpenCode applies its own configured default. The CLI exposes no sandbox or
-    approval flags, so those compatibility inputs are accepted but unused.
+    OpenCode applies its own configured default. The CLI exposes no approval
+    flag, so that compatibility input is accepted but unused. Sandbox modes
+    other than ``workspace-write`` are rejected because they cannot be
+    enforced on this backend.
     """
-    del sandbox, approval
+    _reject_unenforceable_opencode_sandbox(sandbox)
+    del approval
     cmd = _opencode_base_cmd(model=model)
     return _run_opencode_command(
         cmd,
@@ -1753,7 +1758,8 @@ def resume_opencode_session(
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Resume an OpenCode session by id via ``--session``."""
-    del sandbox, approval
+    _reject_unenforceable_opencode_sandbox(sandbox)
+    del approval
     cmd = _opencode_base_cmd(session_id=session_id, model=model)
     return _run_opencode_command(
         cmd,
@@ -2015,7 +2021,7 @@ def _invoke_pi_session(
     )
     raw_stdout = result.stdout or ""
     observed_session_ids = _pi_json_session_ids(raw_stdout)
-    if require_json_event and not _has_pi_json_event(raw_stdout):
+    if require_json_event and not _has_jsonl_event(raw_stdout):
         raise RuntimeError("Pi smoke did not emit a JSON event")
     parsed_session_id, event_message = _parse_pi_json_events(raw_stdout)
     if require_json_event and not event_message:

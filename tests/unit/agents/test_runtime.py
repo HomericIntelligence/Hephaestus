@@ -1368,7 +1368,6 @@ def test_agent_dispatch_routes_opencode_sessions(tmp_path: Path) -> None:
             "prompt",
             cwd=tmp_path,
             timeout=30,
-            sandbox="read-only",
         )
         resumed = agent_runtime.resume_agent_session(
             "opencode",
@@ -1392,6 +1391,43 @@ def test_agent_dispatch_routes_opencode_sessions(tmp_path: Path) -> None:
     assert isinstance(text, subprocess.CompletedProcess)
     assert text.args == ["opencode", "run", "--format", "json"]
     assert text.stdout == "OK"
+
+
+@pytest.mark.parametrize("sandbox", ["read-only", "danger-full-access"])
+@pytest.mark.parametrize(
+    "runner",
+    ["session", "resume", "agent_session", "agent_resume", "agent_text"],
+)
+def test_opencode_runners_reject_unenforceable_sandboxes(
+    tmp_path: Path, sandbox: str, runner: str
+) -> None:
+    """OpenCode cannot enforce isolation; unsupported modes must fail closed."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        raise AssertionError("no provider process may start for an unenforceable sandbox")
+
+    with (
+        patch("subprocess.Popen", side_effect=fake_popen),
+        pytest.raises(agent_runtime.AgentExecutionError, match="cannot enforce sandbox"),
+    ):
+        if runner == "session":
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30, sandbox=sandbox)
+        elif runner == "resume":
+            agent_runtime.resume_opencode_session(
+                "ses_fd61", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        elif runner == "agent_session":
+            agent_runtime.run_agent_session(
+                "opencode", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        elif runner == "agent_resume":
+            agent_runtime.resume_agent_session(
+                "opencode", "ses_fd61", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
+        else:
+            agent_runtime.run_agent_text(
+                "opencode", "prompt", cwd=tmp_path, timeout=30, sandbox=sandbox
+            )
 
 
 def test_resolve_agent_accepts_explicit_authenticated_opencode() -> None:

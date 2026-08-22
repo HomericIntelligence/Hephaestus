@@ -1172,6 +1172,34 @@ class TestCoAuthorLine:
         assert "Implemented-By: Pi" in commit_msg
         mock_model.assert_not_called()
 
+    def test_opencode_unenforceable_sandbox_degrades_to_fallback_message(self) -> None:
+        """read-only git-message generation fails closed on OpenCode; the commit survives."""
+        porcelain = _porcelain(" M foo.py")
+        run_mock = MagicMock(
+            side_effect=[
+                _status(porcelain),  # git status
+                _status(""),  # git add
+                _status("M\tfoo.py\n"),  # changed files context
+                _status(" foo.py | 1 +\n"),  # stat context
+                _status(""),  # git config --unset user.email
+                _status(""),  # git config --unset user.name
+                _status(""),  # git commit
+            ]
+        )
+        issue = MagicMock(title="opencode sandbox fallback")
+
+        with (
+            patch.object(pr_manager, "run", run_mock),
+            patch.object(pr_manager, "fetch_issue_info", return_value=issue),
+            patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
+        ):
+            pr_manager.commit_changes(40, Path("/tmp/wt"), agent="opencode")
+
+        commit_msg = run_mock.call_args_list[-1].args[0][-1]
+        assert commit_msg.startswith("feat: Implement #40")
+        assert "Implemented-By: OpenCode" in commit_msg
+        assert f"Co-Authored-By: OpenCode-AI <{_TEST_AGENT_EMAIL}>" in commit_msg
+
 
 class TestAgenticCommitEmail:
     """The shared agentic co-author email resolves from git, never a pinned address (#2806)."""
