@@ -1644,6 +1644,46 @@ def _has_jsonl_event(text: str) -> bool:
     return False
 
 
+def _opencode_failure_diagnostic(*texts: str | None) -> str | None:
+    """Return a bounded diagnostic when an OpenCode stream carries a fatal error.
+
+    OpenCode v1.18.21 emits structured ``{"type":"error", "error":{"name":...,
+    "data":{"message":..., "ref":...}}}`` JSON events (observed for provider
+    and model failures) with a non-zero exit, and plain-text errors such as
+    ``Error: Session not found`` on stderr for resume failures. Recognizing the
+    structured shape converts CLI crashes into actionable automation errors
+    instead of opaque exit codes; the message is bounded like the Codex path.
+    """
+    for text in texts:
+        if not text:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                event: Any = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "error":
+                continue
+            error = event.get("error")
+            if not isinstance(error, dict):
+                continue
+            name = error.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            data = error.get("data")
+            message = ""
+            if isinstance(data, dict):
+                raw_message = data.get("message")
+                if isinstance(raw_message, str):
+                    message = f": {raw_message[:300]}"
+            ref = error.get("ref")
+            suffix = f" [{ref}]" if isinstance(ref, str) and ref else ""
+            return f"opencode_fatal_error_event: {name}{message}{suffix}"
+    return None
+
+
 def _run_opencode_command(
     cmd: list[str],
     *,
@@ -1656,9 +1696,10 @@ def _run_opencode_command(
 
     When the CLI emits a well-formed event stream that carries no assistant
     text, the result is empty rather than the raw event stream, so downstream
-    verdict parsers never see JSONL as prose. Unlike the Codex path there is
-    deliberately no fatal-event classifier yet: OpenCode's failure-event shapes
-    are not contractual, so none are invented here.
+    verdict parsers never see JSONL as prose. A structured ``type:"error"``
+    event raises :class:`AgentExecutionError` with a bounded diagnostic — both
+    on a non-zero exit and defensively on an exit-0 stream that reports an
+    error without one.
     """
     proc = subprocess.Popen(
         cmd,
@@ -1683,7 +1724,10 @@ def _run_opencode_command(
     except subprocess.TimeoutExpired:
         _terminate_process_group(proc)
         raise
-    if proc.returncode != 0:
+    diagnostic = _opencode_failure_diagnostic(stdout_text, stderr_text)
+    if proc.returncode != 0 or diagnostic is not None:
+        if diagnostic is not None:
+            raise AgentExecutionError(diagnostic)
         raise subprocess.CalledProcessError(
             proc.returncode,
             cmd,
@@ -1757,7 +1801,13 @@ def resume_opencode_session(
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
-    """Resume an OpenCode session by id via ``--session``."""
+    """Resume an OpenCode session by id via ``--session``.
+
+    Verified against opencode v1.18.21: resuming an existing session with an
+    explicitly different ``--model`` is accepted — the run completes on the
+    requested model instead of being locked or rejected — so the pass-through
+    is safe for automation flows that switch phase models between calls.
+    """
     _reject_unenforceable_opencode_sandbox(sandbox)
     del approval
     cmd = _opencode_base_cmd(session_id=session_id, model=model)

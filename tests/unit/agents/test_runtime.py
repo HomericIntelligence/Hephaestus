@@ -1262,6 +1262,84 @@ def test_run_opencode_session_returns_empty_when_events_carry_no_text(tmp_path: 
     assert result.stdout == ""
 
 
+def test_run_opencode_session_raises_on_structured_error_event(tmp_path: Path) -> None:
+    """Observed v1.18.21 provider failures emit type:error JSON with rc=1."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"error","timestamp":1787434544443,"sessionID":"ses_fd61",'
+            '"error":{"name":"UnknownError","data":{"message":"Unexpected server error."},'
+            '"ref":"err_4889701c"}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, returncode=1, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(agent_runtime.AgentExecutionError) as excinfo:
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+    message = str(excinfo.value)
+    assert "opencode_fatal_error_event: UnknownError" in message
+    assert "Unexpected server error." in message
+    assert "[err_4889701c]" in message
+
+
+def test_run_opencode_session_raises_on_exit0_error_event(tmp_path: Path) -> None:
+    """An exit-0 stream that reports an error must not masquerade as success."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        stdout = (
+            '{"type":"error","sessionID":"ses_fd61",'
+            '"error":{"name":"ProviderAuthError","data":{"message":"bad key"}}}\n'
+        )
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, returncode=0, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(agent_runtime.AgentExecutionError, match="ProviderAuthError"):
+            agent_runtime.run_opencode_session("prompt", cwd=tmp_path, timeout=30)
+
+
+def test_run_opencode_session_preserves_plain_text_stderr_failures(tmp_path: Path) -> None:
+    """Resume failures surface as plain stderr text; keep CalledProcessError."""
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        return _FakeOpenCodePopen(
+            cmd,
+            proc_stdout="",
+            proc_stderr="Error: Session not found",
+            returncode=1,
+            **kwargs,
+        )
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            agent_runtime.resume_opencode_session("ses_missing", "prompt", cwd=tmp_path, timeout=30)
+
+    assert excinfo.value.stderr == "Error: Session not found"
+
+
+def test_resume_opencode_session_passes_model_through(tmp_path: Path) -> None:
+    """Verified v1.18.21 behavior: --model is honored on resumed sessions."""
+    captured_cmd: list[str] = []
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeOpenCodePopen:
+        captured_cmd.extend(cmd)
+        stdout = '{"type":"text","sessionID":"ses_fd61","part":{"type":"text","text":"ok"}}\n'
+        return _FakeOpenCodePopen(cmd, proc_stdout=stdout, **kwargs)
+
+    with patch("subprocess.Popen", side_effect=fake_popen):
+        agent_runtime.resume_opencode_session(
+            "ses_fd61",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+            model="opencode/hy3-free",
+        )
+
+    assert "--model" in captured_cmd
+    assert captured_cmd[captured_cmd.index("--model") + 1] == "opencode/hy3-free"
+    assert "--session" in captured_cmd
+
+
 def test_run_opencode_session_strips_null_byte_from_stdin(tmp_path: Path) -> None:
     """#1661: a NUL in the prompt must not crash the OpenCode stdin path."""
     captured_input: list[str | None] = []
