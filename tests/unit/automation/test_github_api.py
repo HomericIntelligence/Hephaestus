@@ -1,5 +1,6 @@
 """Tests for GitHub API utilities."""
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -18,6 +19,7 @@ from hephaestus.automation.github_api import (
     fetch_issue_info,
     gh_create_label,
     gh_issue_add_labels,
+    gh_issue_body_edited_by_viewer,
     gh_issue_comment,
     gh_issue_create,
     gh_issue_delete_comment,
@@ -70,11 +72,58 @@ class TestGhIssueJson:
         assert data["number"] == 123
         assert data["title"] == "Test issue"
         assert data["state"] == "OPEN"
+        assert data["bodyDigest"] == hashlib.sha256(b"Test body").hexdigest()
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_body_digest_preserves_authority_when_fetched_body_is_sanitized(
+        self, mock_gh_call: Any
+    ) -> None:
+        """Prompt sanitization cannot collapse distinct authority-bearing bodies."""
+        raw_body = "bad\x00body"
+        mock_gh_call.return_value = Mock(
+            stdout=json.dumps(
+                {
+                    "number": 123,
+                    "title": "Test issue",
+                    "state": "OPEN",
+                    "labels": [],
+                    "body": raw_body,
+                }
+            )
+        )
+
+        data = gh_issue_json(123)
+
+        assert data["body"] == "badbody"
+        assert data["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
+        assert data["authoritySanitized"] is True
+
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_malformed_issue_json_is_normalized_to_runtime_error(self, mock_gh_call: Any) -> None:
+        mock_gh_call.return_value = Mock(stdout="not-json")
+
+        with pytest.raises(RuntimeError, match="Failed to fetch issue"):
+            gh_issue_json(123)
 
     @patch("hephaestus.automation.github_api._gh_call")
     def test_failed_fetch(self, mock_gh_call: Any) -> None:
         """Test failed issue fetch."""
         mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+
+        with pytest.raises(RuntimeError, match="Failed to fetch issue"):
+            gh_issue_json(123)
+
+    @pytest.mark.parametrize(
+        "error",
+        [subprocess.TimeoutExpired("gh", 30), OSError("gh unavailable")],
+        ids=["timeout", "os-error"],
+    )
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_transport_failures_are_normalized(
+        self, mock_gh_call: Any, error: BaseException
+    ) -> None:
+        """Issue authority reads expose one bounded adapter error contract."""
+        mock_gh_call.side_effect = error
 
         with pytest.raises(RuntimeError, match="Failed to fetch issue"):
             gh_issue_json(123)
@@ -124,6 +173,64 @@ class TestGhIssueJson:
 
         assert data["title"] == 123
         assert "body" not in data
+
+
+@pytest.mark.parametrize(
+    ("editor", "expected"),
+    [("maintainer", True), ("contributor", False), (None, False)],
+)
+@patch("hephaestus.automation.github_api._gh_call")
+def test_issue_body_editor_matches_authenticated_viewer(
+    mock_gh_call: Any,
+    editor: str | None,
+    expected: bool,
+) -> None:
+    """Standalone finalization checks fail closed for foreign or absent editors."""
+    mock_gh_call.return_value = Mock(
+        stdout=json.dumps(
+            {
+                "data": {
+                    "viewer": {"login": "maintainer"},
+                    "repository": {
+                        "issue": {"editor": {"login": editor} if editor is not None else None}
+                    },
+                }
+            }
+        )
+    )
+
+    assert gh_issue_body_edited_by_viewer(2795, ("owner", "repo")) is expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(1, "gh"),
+        subprocess.TimeoutExpired("gh", 1),
+        OSError("transport unavailable"),
+        None,
+    ],
+)
+@patch("hephaestus.automation.github_api._gh_call")
+def test_issue_body_editor_normalizes_transport_and_json_failures(
+    mock_gh_call: Any,
+    failure: subprocess.SubprocessError | OSError | None,
+) -> None:
+    """Editor authentication exposes transport and decoding failures uniformly."""
+    if failure is not None:
+        mock_gh_call.side_effect = failure
+    else:
+        mock_gh_call.return_value = Mock(stdout="not-json")
+
+    with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
+        gh_issue_body_edited_by_viewer(2795, ("owner", "repo"))
+
+
+@patch("hephaestus.automation.github_api.get_repo_info", side_effect=OSError("no repository"))
+def test_issue_body_editor_normalizes_repository_resolution_failure(_repo_info: Any) -> None:
+    """Ambient repository lookup failures enter the same bounded error path."""
+    with pytest.raises(RuntimeError, match="Failed to authenticate issue body editor"):
+        gh_issue_body_edited_by_viewer(2795)
 
 
 class TestParseIssueDependencies:
@@ -219,6 +326,7 @@ class TestFetchIssueInfo:
             "state": "OPEN",
             "labels": [{"name": "bug"}, {"name": "priority"}],
             "body": "Depends on #100",
+            "authoritySanitized": True,
         }
 
         issue = fetch_issue_info(123)
@@ -228,6 +336,7 @@ class TestFetchIssueInfo:
         assert issue.state == IssueState.OPEN
         assert "bug" in issue.labels
         assert 100 in issue.dependencies
+        assert issue.authority_sanitized is True
 
 
 class TestIsIssueClosed:

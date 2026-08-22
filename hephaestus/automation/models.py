@@ -66,6 +66,7 @@ class IssueInfo(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependencies: list[int] = Field(default_factory=list)
     priority: int = 0
+    authority_sanitized: bool = False
 
     def __hash__(self) -> int:
         """Make IssueInfo hashable for use in sets."""

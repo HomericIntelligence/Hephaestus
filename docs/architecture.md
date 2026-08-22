@@ -56,14 +56,15 @@ Optimization"), file paths are repo-relative.
 - **Durable journals.** GitHub labels, comments, and PR state are the normal
  crash-resistant truth. `LearningJournalStore` records auxiliary intent
  claims and terminal results. The repository-scoped issue-wave checkpoint
- records only immutable selected issue identifiers, terminal outcomes, merge
- receipts, and verified main revisions. Stages may not persist any other
- state. Restart =
+ records only immutable selected issue identifiers, pending or retired
+ reviewed non-code intents, terminal outcomes, merge receipts, and verified
+ main revisions. Stages may not persist any other state. Restart =
 re-run: queue reconstruction reads the journal
 ([`coordinator._seed_pass`](../hephaestus/automation/pipeline/coordinator.py),
 [`seed_from_cli`](../hephaestus/automation/pipeline/seeding.py)) — distinct from
 the per-repo seed-side [`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py)
-in §5.1, which tags `state:skip` on epics before any other durable mutation.
+in §5.1. Both paths classify tracker labels as semantic-review candidates;
+neither writes `state:skip` during seeding.
 - **Interrupt = resumable, never failed.** A SIGINT/SIGTERM/SIGHUP during a
  run parks the touched item with `ItemResult(passed=False,
  reason="resumable at <stage>", …)`. A subsequent restart seeds it back
@@ -607,14 +608,16 @@ absolute operator state:
 | `state:plan-blocked` | planner-scope| [`plan_review._eval`](../hephaestus/automation/pipeline/stages/plan_review.py) |
 | `state:implementation-no-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) |
 | `state:implementation-go` | review-scope | [`pr_review._eval`](../hephaestus/automation/pipeline/stages/pr_review.py) — automated implementation eligibility |
-| `state:skip` | absolute | operator / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
+| `state:skip` | absolute | operator / confirmed semantic disposition in [`planning`](../hephaestus/automation/pipeline/stages/planning.py) / exhaustion in [`pr_review`](../hephaestus/automation/pipeline/stages/pr_review.py) / [`implementation`](../hephaestus/automation/pipeline/stages/implementation.py) |
 
 Every **stage-issued** `state:skip` write uses the label as its durable
 authority and emits the reason to structured run logs. It does not add an
-issue comment. Epic tagging in
-[`repo._seed_pass`](../hephaestus/automation/pipeline/stages/repo.py) remains
-the sole sanctioned seeding write and adds only the skip label before
-excluding the epic from the rest of the pipeline.
+issue comment, except that a confirmed obsolete disposition retains one
+bounded actor-owned explanation comment as audit context. Both seeding paths
+are read-only for tracker and epic candidates. Only
+[`planning`](../hephaestus/automation/pipeline/stages/planning.py) may add the
+skip and supplemental semantic labels after two independent model decisions
+and exact label readback.
 
 Label colors per [`STATE_LABEL_SPECS`](../hephaestus/automation/state_labels.py).
 Provisioning script
@@ -770,18 +773,29 @@ Architectural contract:
 
 ### 5.2 Planning
 
-Planning produces one canonical implementation plan from the issue, latest
-canonical plan, and latest canonical review. Superseded revisions are replaced,
-not appended. Bounded hidden fingerprints preserve oscillation detection
-without exposing old plans or raw patches. A blocked plan is an automation stop: only
-an external actor may resolve the dependency and replace `state:plan-blocked`
-with exactly one next plan-state label.
+Planning first establishes that the issue body contains requirements rather
+than a copied canonical plan, review, or history artifact. Exact derived
+markers at the start of the body trigger an evidence-bound reconstruction by
+the planner model and an independent reviewer-model decision. A successful
+recovery writes an actor-owned provenance comment and immediately begins a
+fresh plan/review epoch; it never replaces the issue body.
+Planning then produces one canonical implementation plan from the issue,
+latest canonical plan, and latest canonical review. Superseded revisions are
+replaced, not appended. Bounded hidden fingerprints preserve oscillation
+detection without exposing old plans or raw patches. A blocked plan is an
+automation stop: only an external actor may resolve the dependency and replace
+`state:plan-blocked` with exactly one next plan-state label.
 
 #### Boundary diagram
 
 ```mermaid
 flowchart LR
-    Issue["Issue text"] --> Context
+    Issue["Issue text"] --> RecoveryGate
+    RecoveryGate -->|"canonical derived marker"| Recover["Requirements reconstruction"]
+    Recover --> IndependentReview["Independent recovery review"]
+    IndependentReview -->|"GO + provenance upsert"| Provenance["Recovered requirements comment"]
+    Provenance --> Context
+    RecoveryGate -->|"requirements"| Context
     History["Current rejected plan/review"] --> Context
     Context --> Planner --> Canonical["Canonical plan comment"]
     Canonical --> PlanReview["Plan review"]
@@ -792,7 +806,14 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> Eligibility
-    Eligibility --> Skipped: excluded or already implemented
+    Eligibility --> RecoverRequirements: derived body or semantic skip candidate
+    RecoverRequirements --> ReviewRecovery: typed proposal
+    ReviewRecovery --> RecoverRequirements: NOGO; retry remains
+    ReviewRecovery --> Failed: NOGO exhausted; state:plan-no-go retained
+    ReviewRecovery --> Failed: unavailable evidence; state:plan-no-go retained
+    ReviewRecovery --> Skipped: independently confirmed tracker or obsolete issue
+    ReviewRecovery --> BuildContext: requirements GO; digest/readback confirmed
+    Eligibility --> Skipped: state:skip
     Eligibility --> Ready: approved plan exists
     Eligibility --> AwaitOperator: state:plan-blocked present
     Eligibility --> BuildContext: eligible plan-state label
@@ -827,9 +848,26 @@ Architectural contract:
   instead of silently dropping old plan/review revisions.
 - Raw patches (`diff --git`, unified hunks, or fenced `diff` blocks) are
   rejected before publication.
+- Requirements recovery is a planning substate, not a separate queue. The
+  hidden provenance marker records the source-body, reconstructed-requirements,
+  and evidence-binding SHA-256 digests in one actor-owned comment. Publication
+  is read back by the role upsert; restart accepts it only when GitHub proves
+  its ownership and its source digest matches the current issue body. GitHub
+  exposes no atomic issue-body compare-and-swap, so automation never replaces
+  the body and cannot overwrite a concurrent human edit.
+- Tracker and obsolete dispositions require matching planner and independent
+  reviewer decisions. Both apply `state:skip`; tracker confirmation also adds
+  `epic`. An obsolete outcome retains exactly one actor-owned explanation
+  comment beside the label; it is audit context only, and labels remain the
+  restart-routing authority. The issue remains open.
+- Ordinary recovery-review or plan-review exhaustion leaves
+  `state:plan-no-go`; `state:plan-blocked` remains exceptional rather than a
+  third ordinary review outcome.
 - Each durable state transition is published with its corresponding canonical
   artifact, and restart routing reads the label rather than comment prose.
-- `state:plan-blocked` is never removed or replaced by automation. Comments do
+- `state:plan-blocked` is never removed or replaced by ordinary planning. An
+  authenticated Athena-finalized body is the narrow exception because it
+  proves the planning decision already completed. Comments otherwise do
   not revive it. After resolving the dependency, an external actor sets exactly
   one next state: ordinarily `state:plan-no-go` to request amendment,
   `state:plan-go` to approve, or `state:needs-plan` only when no canonical plan
@@ -1355,24 +1393,23 @@ PR-probe failure cannot misclassify toward IMPLEMENTATION).
 
 | GitHub state | Entry stage |
 |-------------------------------------------------------|----------------------------------|
-| `state:skip`/`epic` | excluded (`stage = None`) |
+| `state:skip` | excluded (`stage = None`) |
 | Closed issue with a merged PR carrying exact `Closes #N` | `FINISHED` (pass, idempotent) |
 | Open/reopened issue with a historic merged PR | Treat as no open PR; route by current state label |
 | Direct PR already closed | excluded |
-| Open PR carries PR-level `state:implementation-go` | `MERGE_WAIT` |
-| Any other open PR, including one carrying only issue-level `state:implementation-go` | `PR_REVIEW` |
+| Valid Athena-finalized issue body | `PLANNING` no-model editor authentication, then normal downstream routing without replanning |
+| Exact derived marker, explicit tracker label, title-inferred tracker, or narrow obsolete candidate | `PLANNING` independent recovery/semantic review |
+| Open PR without exclusive issue-level `state:plan-go` | `PLANNING` |
+| Open PR with plan-GO and PR-level `state:implementation-go` | `MERGE_WAIT` |
+| Any other open PR with plan-GO | `PR_REVIEW` |
 | No PR, at-or-past `state:plan-go` | `IMPLEMENTATION` |
 | No PR, `state:plan-no-go` | `PLANNING` (amend path) |
-| No PR, `state:plan-blocked` | excluded until an external actor resolves the block and replaces the label; comments alone are inert |
+| No PR, `state:plan-blocked` | excluded until an external actor resolves the block; an authenticated Athena-finalized body is the sole automatic exception |
 | No state label / `state:needs-plan` | `PLANNING` |
 
-Epic tagging is the **ONE sanctioned seeding write**. GitHub mutations are
-forbidden in `seeding.py`, so
-[`EpicSkipTagObligation`](../hephaestus/automation/pipeline/seeding.py)
-is discharged by the coordinator through
-[`ctx.github.skip_epics`](../hephaestus/automation/pipeline/stages/base.py)
-BEFORE the exclusion is honored
-([`_seed_pass`](../hephaestus/automation/pipeline/coordinator.py)).
+Seeding is read-only. Explicit tracker labels are semantic candidates rather
+than exclusion authority; only the independently reviewed planning disposition
+may add `state:skip`.
 
 ### Seeding and re-seed scope
 
@@ -1854,6 +1891,7 @@ Exit-code priority is:
  short-circuit through earlier stages when it carries a later-stage
  label. Never equality.
 - **Head-bound** — an artifact or check whose correctness depends on
+- **Head-bound** — an artifact or check whose correctness depends on
   matching the live `headRefOid` of the PR. `pr_review` creates its
   process-local proof only after a GitHub snapshot and a clean checkout agree
   on that SHA; it rechecks the proof before writing the GO label. `merge_wait`
@@ -1861,7 +1899,7 @@ Exit-code priority is:
   `commit.oid` matches that SHA, then compares the complete proof set with the
   confirmed-unarmed live PR and issues a normal SHA-conditional merge rather
   than arming or polling auto-merge.
-- **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New skip reasons are recorded in run logs.
+- **Skip-reason marker (legacy)** — the retired `<!-- hephaestus-state-skip-reason -->` marker retained only so the compaction tool can safely identify actor-owned comments from older releases. New tracker reasons are recorded in run logs; a confirmed obsolete disposition uses its distinct bounded actor-owned explanation role under ADR-0031.
 - **File-system loader** — the Jinja `FileSystemLoader` resolved from `__file__`-relative paths in [`prompts/catalog.py`](../hephaestus/prompts/catalog.py); deliberately NOT `PackageLoader` to avoid importlib editable-install staleness (#2308).
 - **Advise-skipped breadcrumb** — the [`advise_skipped(reason)`](../hephaestus/automation/advise_runner.py) marker string returned by [`run_advise`](../hephaestus/automation/advise_runner.py) when Mnemosyne is unavailable, so a stage aborts as `SKIP` rather than failing; the reason is forwarded verbatim from [`resolve_marketplace`](../hephaestus/automation/advise_runner.py) (e.g. `clone_failed`, `manifest_missing`).
 - **Tool scope** — the explicit `(allowed_tools, permission_mode)` pair in [`AGENT_TOOL_SCOPES`](../hephaestus/automation/pipeline/tool_scopes.py) for one of the 9 pipeline agent roles (advise, planner, plan-reviewer, implementer, pr-reviewer, comment-classifier, address-review, ci-driver, learnings); unmapped roles fall through to the read-only [`DEFAULT_TOOL_SCOPE`](../hephaestus/automation/pipeline/tool_scopes.py) per the fail-closed security contract (#2319).

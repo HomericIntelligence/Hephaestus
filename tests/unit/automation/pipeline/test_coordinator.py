@@ -3681,6 +3681,28 @@ class TestPipelineScopeWiring:
         assert entries[0].stage is StageName.PLANNING
         assert "force re-plan" in entries[0].reason
 
+    def test_force_reroutes_open_pr_with_plan_go_to_planning(self, tmp_path: Path) -> None:
+        """An existing PR cannot suppress an explicitly requested fresh plan epoch."""
+        gh = FakeStageGitHub(labels=["state:plan-go"], open_pr=77)
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+        coordinator = Coordinator(config, github=gh, pool=FakeWorkerPool(), install_signals=False)
+
+        entries = coordinator._seed_direct_scope("repo-a")
+
+        assert len(entries) == 1
+        assert entries[0].stage is StageName.PLANNING
+        assert "force re-plan" in entries[0].reason
+
+    def test_force_is_propagated_to_stage_context(self, tmp_path: Path) -> None:
+        """The stage sees the same force value that changed seed routing."""
+        config = self._scoped_config(tmp_path, issues=[1], force=True)
+
+        coordinator = Coordinator(
+            config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        )
+
+        assert coordinator._stage_config.force is True
+
     def test_force_leaves_pre_scope_stage_untouched(self, tmp_path: Path) -> None:
         """--force must NOT pull a PRE-scope stage forward into the scope.
 

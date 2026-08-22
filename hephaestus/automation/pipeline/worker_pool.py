@@ -568,6 +568,7 @@ def _host_verification_profile(
         Path("/opt/homebrew"),
         Path("/usr/local"),
     )
+    canonical_tmp = Path(os.path.sep) / "tmp"
     return "\n".join(
         (
             "(version 1)",
@@ -578,9 +579,10 @@ def _host_verification_profile(
             # writes only to the disposable scratch directory below.
             '(import "system.sb")',
             "(allow process*)",
-            # Tests may stop only child processes they created; no signals to
-            # unrelated host processes are allowed.
-            "(allow signal (target children))",
+            # Every process in this one-off sandbox instance belongs to the
+            # verifier command. Permit process-group cleanup across descendants
+            # without granting signals to unrelated host processes.
+            "(allow signal (target same-sandbox))",
             # Python multiprocessing names its spawned semaphores ``/mp-``.
             # Limit cross-process synchronization to that private namespace.
             '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))',
@@ -607,6 +609,12 @@ def _host_verification_profile(
                     executable,
                 )
             ),
+            # Tests and validation helpers commonly use the stable ``/tmp``
+            # spelling for inert fixture paths.  macOS resolves that symlink
+            # through ``/private/tmp`` before a mocked boundary can observe
+            # it, so permit metadata for the directory itself without
+            # granting reads of its contents.
+            f'(allow file-read-metadata (literal "{_sandbox_string(canonical_tmp)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
             f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
             "(deny network*)",
@@ -997,7 +1005,12 @@ def _prepare_host_output_aliases(source: Path, scratch: Path) -> None:
         target = scratch / "build"
         target.mkdir()
         alias.symlink_to(target, target_is_directory=True)
-        coverage_alias.symlink_to(scratch / "coverage.xml")
+        coverage_target = scratch / "coverage.xml"
+        # Keep the source-tree alias non-dangling while pytest is still
+        # running. Repository inventory tests may encounter it before the
+        # coverage plugin writes its final report.
+        coverage_target.touch(mode=0o600)
+        coverage_alias.symlink_to(coverage_target)
     except OSError as exc:
         raise _HostVerificationBoundaryError("host_verification_output_alias_failed") from exc
 

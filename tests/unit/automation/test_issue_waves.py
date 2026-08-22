@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ from hephaestus.automation.pipeline.stages.repo import (
     RepoStage,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
+from hephaestus.automation.requirements_recovery import evidence_digest
 
 BASE = "a" * 40
 HEAD = "b" * 40
@@ -243,6 +245,10 @@ def test_wave_value_objects_fail_closed_on_invalid_data() -> None:
         WaveIssueOutcome(1, True, "")
     with pytest.raises(IssueWaveValidationError):
         WaveIssueOutcome(1, True, "done", 0)
+    with pytest.raises(IssueWaveValidationError):
+        WaveIssueOutcome(1, False, "failed", non_code=True)
+    with pytest.raises(IssueWaveValidationError):
+        WaveIssueOutcome(1, True, "done", 2, non_code=True)
 
 
 def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
@@ -256,6 +262,9 @@ def test_wave_record_and_checkpoint_invariants_are_strict() -> None:
         WaveRecord(0, 1, (1,), BASE, "nonce", outcomes=(outcome, outcome))
     with pytest.raises(IssueWaveValidationError):
         WaveRecord(0, 1, (1,), BASE, "nonce", merge_receipts=(receipt, receipt))
+    orphaned_non_code = WaveIssueOutcome(1, True, "reviewed tracker", non_code=True)
+    with pytest.raises(IssueWaveValidationError, match="matching active intent"):
+        WaveRecord(0, 1, (1,), BASE, "nonce", outcomes=(orphaned_non_code,))
     with pytest.raises(IssueWaveValidationError):
         WaveRecord(0, 1, (1,), BASE, "nonce", verified_main_sha="bad")
     record = WaveRecord(0, 1, (1,), BASE, "nonce")
@@ -295,6 +304,43 @@ def test_wave_store_rejects_bad_selectors_and_malformed_checkpoint(tmp_path: Pat
         store.load()
 
 
+def test_non_code_intent_retired_field_is_backward_compatible_and_strict(
+    tmp_path: Path,
+) -> None:
+    """Legacy omission stays active while malformed retirement fails closed."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission(BASE, 1), [19])
+    store.record_non_code_intent(
+        lease,
+        issue_number=19,
+        reason="independently confirmed tracker",
+        evidence_digest=evidence_digest("hephaestus", 19, BASE, "A task", ""),
+        repository_revision=BASE,
+        extra_labels=("epic",),
+    )
+    checkpoint_path = tmp_path / DEFAULT_STATE_DIR / "issue-wave-checkpoint.json"
+    raw = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    intent = raw["waves"][0]["non_code_intents"][0]
+    intent.pop("retired")
+    checkpoint_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    legacy = IssueWaveStore(tmp_path, "acme", "hephaestus").non_code_intent_for(lease, 19)
+
+    assert legacy is not None and not legacy.retired
+
+    intent["retired"] = 1
+    checkpoint_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(IssueWaveValidationError, match="retired must be boolean"):
+        IssueWaveStore(tmp_path, "acme", "hephaestus").load()
+
+    intent["retired"] = False
+    for malformed_labels in ("epic", {"epic": True}, 1, None):
+        intent["extra_labels"] = malformed_labels
+        checkpoint_path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(IssueWaveValidationError, match="extra_labels must be a list"):
+            IssueWaveStore(tmp_path, "acme", "hephaestus").load()
+
+
 def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None:
     """Fresh GitHub facts and ancestry callbacks gate durable advancement."""
     store = IssueWaveStore(tmp_path, "acme", "hephaestus")
@@ -332,6 +378,166 @@ def test_wave_receipts_facts_and_ancestry_are_reconciled(tmp_path: Path) -> None
         store.validate_prior_wave_facts(
             lease, {19: SimpleNamespace(**{**vars(facts), "labels": {"state:skip"}})}
         )
+
+
+def test_reviewed_non_code_issue_completes_wave_without_merge_receipt(tmp_path: Path) -> None:
+    """A model-confirmed tracker is durable success, not a poisoned wave."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission(BASE, 1), [19])
+    reason = "independently confirmed tracker"
+    store.record_non_code_intent(
+        lease,
+        issue_number=19,
+        reason=reason,
+        evidence_digest=evidence_digest("hephaestus", 19, BASE, "A task", ""),
+        repository_revision=BASE,
+        extra_labels=("epic",),
+    )
+    pending_facts = SimpleNamespace(
+        number=19,
+        title="A task",
+        body="",
+        labels=set(),
+        is_epic=False,
+        pr_number=None,
+        pr_is_merged=False,
+        issue_is_closed=False,
+    )
+    pending = wave_entry_from_facts(
+        lease,
+        pending_facts,
+        SeedEntry("issue", 19, StageName.PLANNING, "pending"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert pending.stage is StageName.PLANNING
+    assert pending.non_code and pending.non_code_labels == ("epic",)
+
+    facts = SimpleNamespace(
+        number=19,
+        title="A task",
+        body="",
+        labels={"state:skip", "epic"},
+        is_epic=True,
+        pr_number=None,
+        pr_is_merged=False,
+        issue_is_closed=False,
+    )
+    applied = wave_entry_from_facts(
+        lease,
+        facts,
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert applied.stage is StageName.FINISHED
+    assert applied.passed and applied.non_code
+
+    sanitized = wave_entry_from_facts(
+        lease,
+        SimpleNamespace(**{**vars(facts), "authority_sanitized": True}),
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert sanitized.stage is StageName.PLANNING
+
+    store.record_terminal_outcome(
+        lease,
+        issue_number=19,
+        passed=True,
+        reason=reason,
+        non_code=True,
+    )
+    store.validate_prior_wave_facts(lease, {19: facts})
+    verified = store.verify_prior_wave(
+        lease,
+        current_main_sha=BASE,
+        ancestry_verified=True,
+        facts_by_issue={19: facts},
+    )
+    assert verified.current_wave.verified_main_sha == BASE
+    assert store.plan_admission(BASE, 2).mode == "select"
+
+    resumed = wave_entry_from_facts(
+        lease,
+        facts,
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert resumed.stage is StageName.FINISHED
+    assert resumed.passed and resumed.non_code and resumed.reason == reason
+
+    missing_epic = wave_entry_from_facts(
+        lease,
+        SimpleNamespace(**{**vars(facts), "labels": {"state:skip"}}),
+        SeedEntry("issue", 19, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert missing_epic.stage is StageName.FINISHED
+    assert missing_epic.passed is False
+    assert "lost its reviewed non-code skip" in missing_epic.reason
+
+    with pytest.raises(IssueWaveBlockedError, match="non-code skip"):
+        store.validate_prior_wave_facts(
+            lease,
+            {19: SimpleNamespace(**{**vars(facts), "labels": {"epic"}})},
+        )
+
+
+def test_retired_non_code_intent_reopens_only_for_cleanup(tmp_path: Path) -> None:
+    """A revoked intent survives restart as cleanup provenance, never skip authority."""
+    store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    lease = store.seal_selection(store.plan_admission(BASE, 1), [21])
+    store.record_non_code_intent(
+        lease,
+        issue_number=21,
+        reason="independently confirmed tracker",
+        evidence_digest=evidence_digest("hephaestus", 21, BASE, "A task", "Old body"),
+        repository_revision=BASE,
+        extra_labels=("epic",),
+    )
+    active = store.non_code_intent_for(lease, 21)
+    assert active is not None
+
+    store.retire_non_code_intent(lease, active)
+    store.retire_non_code_intent(lease, active)
+
+    reopened = IssueWaveStore(tmp_path, "acme", "hephaestus")
+    retired = reopened.non_code_intent_for(lease, 21)
+    assert retired is not None and retired.retired
+    facts = SimpleNamespace(
+        number=21,
+        title="A task",
+        body="Implement the worker.",
+        labels={"state:skip", "epic"},
+        is_epic=True,
+        pr_number=None,
+        pr_is_merged=False,
+        issue_is_closed=False,
+    )
+
+    entry = wave_entry_from_facts(
+        lease,
+        facts,
+        SeedEntry("issue", 21, None, "state:skip"),
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+
+    assert entry.stage is StageName.PLANNING
+    assert entry.non_code and entry.non_code_retired
+    reopened.complete_non_code_intent_retirement(lease, retired)
+    reopened.complete_non_code_intent_retirement(lease, retired)
+    assert reopened.non_code_intent_for(lease, 21) is None
 
 
 def test_wave_entry_reconciles_post_seal_drift_without_mutation(tmp_path: Path) -> None:
@@ -375,6 +581,17 @@ def test_wave_entry_reconciles_post_seal_drift_without_mutation(tmp_path: Path) 
         repo="hephaestus",
     )
     assert pending.stage is StageName.PLANNING
+    tracker = wave_entry_from_facts(
+        lease,
+        SimpleNamespace(
+            number=19, pr_is_merged=False, pr_number=None, issue_is_closed=False, is_epic=True
+        ),
+        entry,
+        repo_root=tmp_path,
+        org="acme",
+        repo="hephaestus",
+    )
+    assert tracker.stage is StageName.PLANNING
     closed = wave_entry_from_facts(
         lease,
         SimpleNamespace(

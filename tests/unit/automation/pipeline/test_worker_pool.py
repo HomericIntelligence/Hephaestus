@@ -1261,10 +1261,12 @@ class TestWorkerPoolSubmitComplete:
         pi_smoke_logs_entry = f'(subpath "{pi_smoke_logs.resolve()}")'
         assert '(import "system.sb")' in profile
         assert "(deny network*)" in profile
-        assert "(allow signal (target children))" in profile
+        assert "(allow signal (target same-sandbox))" in profile
+        assert "(allow signal)" not in profile
         assert '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))' in profile
         assert f'(subpath "{Path("/bin").resolve()}")' in profile
         assert f'  (literal "{Path("/tmp").resolve()}")' not in profile
+        assert f'(allow file-read-metadata (literal "{Path("/tmp").resolve()}"))' in profile
         assert f'(allow file-read-metadata (path-ancestors "{source.resolve()}"))' in profile
         assert source_entry in profile
         assert f"(allow file-write* {source_entry})" not in profile
@@ -1613,6 +1615,7 @@ class TestWorkerPoolSubmitComplete:
         _prepare_host_output_aliases(source, scratch)
 
         assert (source / "coverage.xml").is_symlink()
+        assert (source / "coverage.xml").read_text(encoding="utf-8") == ""
         (source / "coverage.xml").write_text("<coverage />", encoding="utf-8")
         assert (scratch / "coverage.xml").read_text(encoding="utf-8") == "<coverage />"
 

@@ -540,7 +540,7 @@ class TestCrashMatrixJournal:
                 None,
                 False,
                 False,
-                StageName.PR_REVIEW,
+                StageName.PLANNING,
             ),
             (
                 "open PR with issue-level implementation-go",
@@ -549,11 +549,28 @@ class TestCrashMatrixJournal:
                 None,
                 False,
                 False,
+                StageName.PLANNING,
+            ),
+            (
+                "open PR with approved issue plan",
+                [STATE_PLAN_GO],
+                80,
+                None,
+                False,
+                False,
                 StageName.PR_REVIEW,
             ),
             ("closed issue with merged PR", [], None, 79, True, False, StageName.FINISHED),
             ("state:skip", [STATE_SKIP], None, None, False, False, None),
-            ("untagged epic", [], None, None, False, True, None),
+            (
+                "title-inferred tracker needs independent review",
+                [],
+                None,
+                None,
+                False,
+                True,
+                StageName.PLANNING,
+            ),
         ],
     )
     def test_reconstruction_table_covers_every_github_journal_row(
@@ -646,7 +663,10 @@ class TestCrashMatrixJournal:
         entry = _classify_from_fake(gh, 1)
 
         assert entry is StageName.PLANNING  # same stage — never lost
-        assert ("gh_issue_add_labels", (1, ("state:needs-plan",))) in gh.mutation_log
+        assert any(
+            operation == "edit_labels" and args[1] == (STATE_NEEDS_PLAN,)
+            for operation, args in gh.mutation_log
+        )
 
     def test_crash_after_plan_comment_upsert_stays_at_or_before_plan_review(self) -> None:
         """S2: crash after the durable plan-comment upsert -> same-or-earlier."""

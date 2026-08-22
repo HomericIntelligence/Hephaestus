@@ -190,6 +190,19 @@ class TestPerTargetPatternInvariants:
         assert _is_service_failure(ConnectionError("reset by peer"))
         assert _is_service_failure(TimeoutError())
 
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _gh_error("gh: HTTP 422: body is too long"),
+            _gh_error("gh: HTTP 422: validation failed"),
+        ],
+    )
+    def test_other_422_errors_remain_service_failures(
+        self, error: subprocess.CalledProcessError
+    ) -> None:
+        """Only the exact issue-body size rejection is breaker-neutral."""
+        assert _is_service_failure(error)
+
 
 class TestBreakerIgnoresPerTargetErrors:
     """Deterministic per-target errors must not open the breaker (#2048).

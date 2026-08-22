@@ -1,5 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+import subprocess
+
 from hephaestus.automation.merge_authorization import MergeAuthorization
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -107,6 +109,13 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
 
     def edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
         """Atomically add+remove labels in a single ``gh issue edit``."""
+        try:
+            self._edit_labels(issue_number, add=add, remove=remove)
+        except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
+            raise RuntimeError(f"failed to edit labels on issue #{issue_number}: {exc}") from exc
+
+    def _edit_labels(self, issue_number: int, *, add: list[str], remove: list[str]) -> None:
+        """Execute the label mutation after the public error boundary."""
         if self._skip(f"edit labels on #{issue_number} (+{add} -{remove})"):
             return
         if self._repo_slug is not None:
@@ -157,6 +166,8 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         issue_number: int,
         marker: str,
         body: str,
+        *,
+        legacy_marker: str | None = None,
     ) -> None:
         """Upsert one actor-owned canonical comment keyed on an opaque marker.
 
@@ -164,26 +175,46 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         patched, deleted, nor allowed to deny service. Historical
         human-readable heading-only comments are never migration candidates.
         """
-        if not has_exact_leading_marker(body, marker):
-            raise ValueError(f"canonical comment body must start with marker {marker!r}")
-        if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
-            return
-        comments = self._repo_issue_comments(issue_number)
-        exact = [c for c in comments if has_exact_leading_marker(str(c.get("body", "")), marker)]
-        owned = [comment for comment in exact if self._comment_owned_by_viewer(comment)]
-        if not owned:
-            self._post_issue_comment(issue_number, body)
-            comments = self._repo_issue_comments(issue_number)
-            owned = [
+        try:
+            self._upsert_issue_comment(
+                issue_number,
+                marker,
+                body,
+                legacy_marker=legacy_marker,
+            )
+        except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"failed to upsert issue #{issue_number} comment {marker!r}: {exc}"
+            ) from exc
+
+    def _upsert_issue_comment(
+        self,
+        issue_number: int,
+        marker: str,
+        body: str,
+        *,
+        legacy_marker: str | None = None,
+    ) -> None:
+        """Execute canonical comment upsert after the public error boundary."""
+
+        def owned_matching(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
                 comment
                 for comment in comments
                 if has_exact_leading_marker(str(comment.get("body", "")), marker)
                 and self._comment_owned_by_viewer(comment)
             ]
+
+        if not has_exact_leading_marker(body, marker):
+            raise ValueError(f"canonical comment body must start with marker {marker!r}")
+        if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
+            return
+        owned = owned_matching(self._repo_issue_comments(issue_number))
+        if not owned:
+            self._post_issue_comment(issue_number, body)
+            owned = owned_matching(self._repo_issue_comments(issue_number))
             if not owned:
-                # GitHub may be briefly read-after-write stale. The next
-                # idempotent pass will discover and converge the new pointer.
-                return
+                raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
 
         target_id = owned[-1].get("databaseId")
         if target_id is None:
@@ -193,6 +224,9 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         )
         if str(owned[-1].get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
+            owned = owned_matching(self._repo_issue_comments(issue_number))
+        if not owned or str(owned[-1].get("body", "")) != body:
+            raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
         for duplicate in owned[:-1]:
             duplicate_id = duplicate.get("databaseId")
             if duplicate_id is not None:
@@ -405,22 +439,6 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             raise RuntimeError(
                 f"could not verify drive-green learn result for issue #{issue_number}"
             )
-
-    def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
-        """Tag epics ``state:skip`` via the sanctioned chokepoint.
-
-        The ONE seeding write (doc row "Epic tagging is the one seeding
-        write; done BEFORE excluding"), executed by the coordinator through
-        ``github_api.skip_epics``.
-        """
-        if self._skip(f"tag epics {sorted(epics_labels)} {STATE_SKIP}"):
-            return
-        if self._repo_slug is not None:
-            for number, labels in epics_labels.items():
-                if STATE_SKIP not in labels:
-                    self._add_labels(number, [STATE_SKIP])
-            return
-        github_api.skip_epics(epics_labels)
 
     def ensure_state_labels(self) -> None:
         """Ensure the ``state:*`` label vocabulary exists on the repo.

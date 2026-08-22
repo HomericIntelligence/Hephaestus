@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import stat
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -21,6 +21,15 @@ from typing import Any, Literal, cast
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import SeedEntry
+from hephaestus.automation.requirements_recovery import (
+    evidence_digest as recovery_evidence_digest,
+)
+from hephaestus.automation.state_labels import (
+    ALL_IMPLEMENTATION_STATE_LABELS,
+    ALL_STATE_LABELS,
+    ATHENA_FINALIZED_PLAN_LABEL,
+    STATE_SKIP,
+)
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
@@ -31,6 +40,8 @@ _LOCK_NAME = "issue-wave-checkpoint.lock"
 _SHA_LENGTHS = (40, 64)
 
 WAVE_LEASE_PAYLOAD = "_issue_wave_lease"
+WAVE_NON_CODE_PAYLOAD = "_issue_wave_non_code"
+WAVE_NON_CODE_INTENT_PAYLOAD = "_issue_wave_non_code_intent"
 
 
 class IssueWaveError(RuntimeError):
@@ -161,6 +172,7 @@ class WaveIssueOutcome:
     passed: bool
     reason: str
     pr_number: int | None = None
+    non_code: bool = False
 
     def __post_init__(self) -> None:
         """Validate the terminal issue result."""
@@ -170,12 +182,151 @@ class WaveIssueOutcome:
             raise IssueWaveValidationError("wave outcome passed must be boolean")
         if not isinstance(self.reason, str) or not self.reason:
             raise IssueWaveValidationError("wave outcome reason must be non-empty")
+        if not isinstance(self.non_code, bool) or (self.non_code and not self.passed):
+            raise IssueWaveValidationError("non-code wave outcome must be a passing boolean")
+        if self.non_code and self.pr_number is not None:
+            raise IssueWaveValidationError("non-code wave outcome cannot reference a PR")
         if self.pr_number is not None and (
             isinstance(self.pr_number, bool)
             or not isinstance(self.pr_number, int)
             or self.pr_number <= 0
         ):
             raise IssueWaveValidationError("wave outcome pr_number must be positive or null")
+
+
+@dataclass(frozen=True)
+class WaveNonCodeIntent:
+    """Durable reviewed intent written before a non-code label transition."""
+
+    issue_number: int
+    reason: str
+    evidence_digest: str
+    repository_revision: str
+    extra_labels: tuple[str, ...] = ()
+    explanation: str = ""
+    retired: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the reviewed semantic-disposition intent."""
+        if isinstance(self.issue_number, bool) or self.issue_number <= 0:
+            raise IssueWaveValidationError("non-code intent issue_number must be positive")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise IssueWaveValidationError("non-code intent reason must be non-empty")
+        if not (
+            isinstance(self.evidence_digest, str)
+            and len(self.evidence_digest) == 64
+            and all(character in "0123456789abcdef" for character in self.evidence_digest)
+        ):
+            raise IssueWaveValidationError("non-code intent evidence_digest is invalid")
+        if not is_full_commit_sha(self.repository_revision):
+            raise IssueWaveValidationError("non-code intent repository_revision is invalid")
+        if not isinstance(self.extra_labels, tuple) or any(
+            not isinstance(label, str) or not label or label.startswith("state:")
+            for label in self.extra_labels
+        ):
+            raise IssueWaveValidationError("non-code intent extra labels are invalid")
+        if len(set(self.extra_labels)) != len(self.extra_labels):
+            raise IssueWaveValidationError("non-code intent extra labels contain duplicates")
+        if not isinstance(self.explanation, str):
+            raise IssueWaveValidationError("non-code intent explanation must be text")
+        if not isinstance(self.retired, bool):
+            raise IssueWaveValidationError("non-code intent retired must be boolean")
+
+
+def _non_code_intent_matches_facts(
+    intent: WaveNonCodeIntent,
+    facts: Any,
+    repository: str,
+) -> bool:
+    """Return whether fresh issue text matches the independently reviewed evidence."""
+    if intent.retired or facts is None or getattr(facts, "authority_sanitized", False) is True:
+        return False
+    title = getattr(facts, "title", None)
+    body = getattr(facts, "body", None)
+    if not isinstance(title, str) or not isinstance(body, str):
+        return False
+    return intent.evidence_digest == recovery_evidence_digest(
+        repository,
+        intent.issue_number,
+        intent.repository_revision,
+        title,
+        body,
+    )
+
+
+def _require_reviewed_non_code_skip(
+    outcome: WaveIssueOutcome,
+    facts: Any,
+    *,
+    drift: str,
+    intent: WaveNonCodeIntent | None = None,
+    repository: str,
+) -> None:
+    """Require the durable skip label that proves a reviewed non-code outcome."""
+    if intent is None or not (
+        _non_code_intent_matches_facts(intent, facts, repository)
+        and _non_code_intent_is_applied(intent, facts)
+    ):
+        raise IssueWaveBlockedError(f"issue #{outcome.issue_number} {drift}")
+
+
+def non_code_intent_skip_is_applied(
+    intent: WaveNonCodeIntent,
+    labels: Collection[str],
+) -> bool:
+    """Return whether labels confirm the skip written for one durable intent."""
+    label_set = set(labels)
+    return (
+        STATE_SKIP in label_set
+        and set(intent.extra_labels).issubset(label_set)
+        and not label_set.intersection(ALL_STATE_LABELS)
+        and not label_set.intersection(ALL_IMPLEMENTATION_STATE_LABELS)
+        and ATHENA_FINALIZED_PLAN_LABEL not in label_set
+    )
+
+
+def _non_code_intent_is_applied(intent: WaveNonCodeIntent, facts: Any) -> bool:
+    """Return whether fresh facts exactly confirm an active non-code transition."""
+    labels = set(getattr(facts, "labels", set())) if facts is not None else set()
+    return not intent.retired and non_code_intent_skip_is_applied(intent, labels)
+
+
+def _validate_verified_outcome_facts(
+    record: WaveRecord,
+    facts_by_issue: Mapping[int, Any],
+    repository: str,
+) -> None:
+    """Validate GitHub facts for a complete passing wave under the caller's lock."""
+    for outcome in record.outcomes:
+        facts = facts_by_issue.get(outcome.issue_number)
+        if outcome.non_code:
+            intent = next(
+                (
+                    item
+                    for item in record.non_code_intents
+                    if item.issue_number == outcome.issue_number
+                ),
+                None,
+            )
+            _require_reviewed_non_code_skip(
+                outcome,
+                facts,
+                drift="lost its reviewed non-code skip",
+                intent=intent,
+                repository=repository,
+            )
+            continue
+        receipt = next(
+            item for item in record.merge_receipts if item.issue_number == outcome.issue_number
+        )
+        if (
+            facts is None
+            or getattr(facts, "pr_number", None) != receipt.pr_number
+            or not bool(getattr(facts, "pr_is_merged", False))
+        ):
+            raise IssueWaveBlockedError(
+                f"issue #{outcome.issue_number} is closed/unmerged or externally changed"
+            )
 
 
 @dataclass(frozen=True)
@@ -189,6 +340,7 @@ class WaveRecord:
     lease_nonce: str
     outcomes: tuple[WaveIssueOutcome, ...] = ()
     merge_receipts: tuple[WaveMergeReceipt, ...] = ()
+    non_code_intents: tuple[WaveNonCodeIntent, ...] = ()
     verified_main_sha: str | None = None
 
     def __post_init__(self) -> None:
@@ -204,6 +356,7 @@ class WaveRecord:
         _required_text(self.lease_nonce, "wave record lease_nonce")
         outcome_ids = [outcome.issue_number for outcome in self.outcomes]
         receipt_ids = [receipt.issue_number for receipt in self.merge_receipts]
+        intent_ids = [intent.issue_number for intent in self.non_code_intents]
         if len(set(outcome_ids)) != len(outcome_ids) or not set(outcome_ids).issubset(
             set(self.issue_numbers)
         ):
@@ -212,6 +365,19 @@ class WaveRecord:
             set(self.issue_numbers)
         ):
             raise IssueWaveValidationError("wave receipts do not match the immutable selection")
+        if len(set(intent_ids)) != len(intent_ids) or not set(intent_ids).issubset(
+            set(self.issue_numbers)
+        ):
+            raise IssueWaveValidationError("wave non-code intents do not match the selection")
+        intents_by_issue = {intent.issue_number: intent for intent in self.non_code_intents}
+        for outcome in self.outcomes:
+            if not outcome.non_code:
+                continue
+            intent = intents_by_issue.get(outcome.issue_number)
+            if intent is None or intent.retired or intent.reason != outcome.reason:
+                raise IssueWaveValidationError(
+                    "wave non-code outcome requires one matching active intent"
+                )
         if self.verified_main_sha is not None and not is_full_commit_sha(self.verified_main_sha):
             raise IssueWaveValidationError("wave verified_main_sha is invalid")
 
@@ -302,6 +468,7 @@ def _outcome_to_json(outcome: WaveIssueOutcome) -> dict[str, Any]:
         "passed": outcome.passed,
         "reason": outcome.reason,
         "pr_number": outcome.pr_number,
+        "non_code": outcome.non_code,
     }
 
 
@@ -314,6 +481,18 @@ def _receipt_to_json(receipt: WaveMergeReceipt) -> dict[str, Any]:
     }
 
 
+def _non_code_intent_to_json(intent: WaveNonCodeIntent) -> dict[str, Any]:
+    return {
+        "issue_number": intent.issue_number,
+        "reason": intent.reason,
+        "evidence_digest": intent.evidence_digest,
+        "repository_revision": intent.repository_revision,
+        "extra_labels": list(intent.extra_labels),
+        "explanation": intent.explanation,
+        "retired": intent.retired,
+    }
+
+
 def _wave_to_json(wave: WaveRecord) -> dict[str, Any]:
     return {
         "wave_index": wave.wave_index,
@@ -323,6 +502,7 @@ def _wave_to_json(wave: WaveRecord) -> dict[str, Any]:
         "lease_nonce": wave.lease_nonce,
         "outcomes": [_outcome_to_json(item) for item in wave.outcomes],
         "merge_receipts": [_receipt_to_json(item) for item in wave.merge_receipts],
+        "non_code_intents": [_non_code_intent_to_json(item) for item in wave.non_code_intents],
         "verified_main_sha": wave.verified_main_sha,
     }
 
@@ -352,14 +532,18 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
             raise IssueWaveValidationError("checkpoint wave must be an object")
         outcomes_raw = value.get("outcomes", [])
         receipts_raw = value.get("merge_receipts", [])
-        if not isinstance(outcomes_raw, list) or not isinstance(receipts_raw, list):
-            raise IssueWaveValidationError("checkpoint outcomes and receipts must be lists")
+        intents_raw = value.get("non_code_intents", [])
+        if not all(isinstance(items, list) for items in (outcomes_raw, receipts_raw, intents_raw)):
+            raise IssueWaveValidationError(
+                "checkpoint outcomes, receipts, and non-code intents must be lists"
+            )
         outcomes = tuple(
             WaveIssueOutcome(
                 issue_number=cast(int, item.get("issue_number")),
                 passed=cast(bool, item.get("passed")),
                 reason=cast(str, item.get("reason")),
                 pr_number=cast(int | None, item.get("pr_number")),
+                non_code=cast(bool, item.get("non_code", False)),
             )
             for item in outcomes_raw
             if isinstance(item, dict)
@@ -378,6 +562,26 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
         )
         if len(receipts) != len(receipts_raw):
             raise IssueWaveValidationError("checkpoint merge receipt must be an object")
+        for item in intents_raw:
+            if not isinstance(item, dict):
+                raise IssueWaveValidationError("checkpoint non-code intent must be an object")
+            if not isinstance(item.get("extra_labels", []), list):
+                raise IssueWaveValidationError(
+                    "checkpoint non-code intent extra_labels must be a list"
+                )
+        intents = tuple(
+            WaveNonCodeIntent(
+                issue_number=cast(int, item.get("issue_number")),
+                reason=cast(str, item.get("reason")),
+                evidence_digest=cast(str, item.get("evidence_digest")),
+                repository_revision=cast(str, item.get("repository_revision")),
+                extra_labels=tuple(item.get("extra_labels", [])),
+                explanation=cast(str, item.get("explanation", "")),
+                retired=cast(bool, item.get("retired", False)),
+            )
+            for item in intents_raw
+            if isinstance(item, dict)
+        )
         waves.append(
             WaveRecord(
                 wave_index=cast(int, value.get("wave_index")),
@@ -387,6 +591,7 @@ def _decode_checkpoint(raw: Any) -> WaveCheckpoint:
                 lease_nonce=cast(str, value.get("lease_nonce")),
                 outcomes=outcomes,
                 merge_receipts=receipts,
+                non_code_intents=intents,
                 verified_main_sha=value.get("verified_main_sha"),
             )
         )
@@ -758,6 +963,183 @@ class IssueWaveStore:
                 (item for item in record.merge_receipts if item.issue_number == issue_number), None
             )
 
+    def outcome_for(self, lease: WaveLease, issue_number: int) -> WaveIssueOutcome | None:
+        """Return a recorded terminal outcome for an issue, if one exists."""
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                return None
+            record = self._current_record(checkpoint, lease)
+            return next(
+                (item for item in record.outcomes if item.issue_number == issue_number), None
+            )
+
+    def non_code_intent_for(
+        self,
+        lease: WaveLease,
+        issue_number: int,
+    ) -> WaveNonCodeIntent | None:
+        """Return a durable reviewed non-code transition intent, if present."""
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                return None
+            record = self._current_record(checkpoint, lease)
+            return next(
+                (item for item in record.non_code_intents if item.issue_number == issue_number),
+                None,
+            )
+
+    def record_non_code_intent(
+        self,
+        lease: WaveLease,
+        *,
+        issue_number: int,
+        reason: str,
+        evidence_digest: str,
+        repository_revision: str,
+        extra_labels: tuple[str, ...] = (),
+        explanation: str = "",
+    ) -> WaveLease:
+        """Persist reviewed non-code authority before mutating GitHub labels."""
+        intent = WaveNonCodeIntent(
+            issue_number=issue_number,
+            reason=reason,
+            evidence_digest=evidence_digest,
+            repository_revision=repository_revision,
+            extra_labels=extra_labels,
+            explanation=explanation,
+        )
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveConflictError("cannot record an intent without a checkpoint")
+            record = self._current_record(checkpoint, lease)
+            existing = next(
+                (item for item in record.non_code_intents if item.issue_number == issue_number),
+                None,
+            )
+            if existing is not None:
+                if existing == intent:
+                    return lease
+                if any(
+                    outcome.issue_number == issue_number and outcome.passed
+                    for outcome in record.outcomes
+                ):
+                    raise IssueWaveConflictError("a completed non-code intent cannot be replaced")
+                intents = tuple(
+                    intent if item.issue_number == issue_number else item
+                    for item in record.non_code_intents
+                )
+            else:
+                intents = (*record.non_code_intents, intent)
+            updated = replace(
+                record,
+                non_code_intents=intents,
+            )
+            waves = (
+                *checkpoint.waves[: record.wave_index],
+                updated,
+                *checkpoint.waves[record.wave_index + 1 :],
+            )
+            self._write_unlocked(
+                replace(checkpoint, generation=checkpoint.generation + 1, waves=waves)
+            )
+            return lease
+
+    def retire_non_code_intent(
+        self,
+        lease: WaveLease,
+        intent: WaveNonCodeIntent,
+    ) -> WaveLease:
+        """Durably revoke one drifted intent while retaining cleanup provenance."""
+        if intent.retired:
+            expected_active = replace(intent, retired=False)
+            retired = intent
+        else:
+            expected_active = intent
+            retired = replace(intent, retired=True)
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveConflictError("cannot retire an intent without a checkpoint")
+            record = self._current_record(checkpoint, lease)
+            existing = next(
+                (
+                    item
+                    for item in record.non_code_intents
+                    if item.issue_number == intent.issue_number
+                ),
+                None,
+            )
+            if existing == retired:
+                return lease
+            if existing != expected_active:
+                raise IssueWaveConflictError(
+                    "non-code intent changed before its retirement was recorded"
+                )
+            if any(
+                outcome.issue_number == intent.issue_number and outcome.passed
+                for outcome in record.outcomes
+            ):
+                raise IssueWaveConflictError("a completed non-code intent cannot be retired")
+            intents = tuple(
+                retired if item.issue_number == intent.issue_number else item
+                for item in record.non_code_intents
+            )
+            updated = replace(record, non_code_intents=intents)
+            waves = (
+                *checkpoint.waves[: record.wave_index],
+                updated,
+                *checkpoint.waves[record.wave_index + 1 :],
+            )
+            self._write_unlocked(
+                replace(checkpoint, generation=checkpoint.generation + 1, waves=waves)
+            )
+            return lease
+
+    def complete_non_code_intent_retirement(
+        self,
+        lease: WaveLease,
+        intent: WaveNonCodeIntent,
+    ) -> WaveLease:
+        """Remove retired cleanup provenance after exact GitHub readback."""
+        expected = intent if intent.retired else replace(intent, retired=True)
+        with self._locked():
+            checkpoint = self._read_unlocked()
+            if checkpoint is None:
+                raise IssueWaveConflictError(
+                    "cannot complete intent retirement without a checkpoint"
+                )
+            record = self._current_record(checkpoint, lease)
+            existing = next(
+                (
+                    item
+                    for item in record.non_code_intents
+                    if item.issue_number == intent.issue_number
+                ),
+                None,
+            )
+            if existing is None:
+                return lease
+            if existing != expected:
+                raise IssueWaveConflictError(
+                    "non-code intent changed before its retirement completed"
+                )
+            intents = tuple(
+                item for item in record.non_code_intents if item.issue_number != intent.issue_number
+            )
+            updated = replace(record, non_code_intents=intents)
+            waves = (
+                *checkpoint.waves[: record.wave_index],
+                updated,
+                *checkpoint.waves[record.wave_index + 1 :],
+            )
+            self._write_unlocked(
+                replace(checkpoint, generation=checkpoint.generation + 1, waves=waves)
+            )
+            return lease
+
     def record_merge_receipt(
         self,
         lease: WaveLease,
@@ -802,16 +1184,27 @@ class IssueWaveStore:
         passed: bool,
         reason: str,
         pr_number: int | None = None,
+        non_code: bool = False,
     ) -> WaveLease:
         """Persist a terminal issue outcome before it reaches the ledger."""
-        outcome = WaveIssueOutcome(issue_number, passed, reason, pr_number)
+        outcome = WaveIssueOutcome(issue_number, passed, reason, pr_number, non_code)
         with self._locked():
             checkpoint = self._read_unlocked()
             if checkpoint is None:
                 raise IssueWaveConflictError("cannot record an outcome without a checkpoint")
             record = self._current_record(checkpoint, lease)
-            if passed and not any(
-                item.issue_number == issue_number for item in record.merge_receipts
+            intent = next(
+                (item for item in record.non_code_intents if item.issue_number == issue_number),
+                None,
+            )
+            if non_code and (intent is None or intent.retired or intent.reason != reason):
+                raise IssueWaveBlockedError(
+                    f"cannot record non-code outcome for #{issue_number} without matching intent"
+                )
+            if (
+                passed
+                and not non_code
+                and not any(item.issue_number == issue_number for item in record.merge_receipts)
             ):
                 raise IssueWaveBlockedError(
                     "cannot record passed outcome for "
@@ -897,6 +1290,24 @@ class IssueWaveStore:
                     raise IssueWaveBlockedError(
                         f"issue #{outcome.issue_number} failed in prior wave: {outcome.reason}"
                     )
+                if outcome.non_code:
+                    facts = facts_by_issue.get(outcome.issue_number)
+                    intent = next(
+                        (
+                            item
+                            for item in record.non_code_intents
+                            if item.issue_number == outcome.issue_number
+                        ),
+                        None,
+                    )
+                    _require_reviewed_non_code_skip(
+                        outcome,
+                        facts,
+                        drift="no longer has its reviewed non-code skip",
+                        intent=intent,
+                        repository=self.repo,
+                    )
+                    continue
                 receipt = next(
                     (
                         item
@@ -934,7 +1345,8 @@ class IssueWaveStore:
                 )
             if not record.passed:
                 raise IssueWaveBlockedError("prior wave contains failed terminal outcomes")
-            if len(record.merge_receipts) != len(record.issue_numbers):
+            merge_outcomes = [outcome for outcome in record.outcomes if not outcome.non_code]
+            if len(record.merge_receipts) != len(merge_outcomes):
                 raise IssueWaveBlockedError(
                     "prior wave is missing one or more loop-owned merge receipts"
                 )
@@ -950,22 +1362,7 @@ class IssueWaveStore:
             if facts_by_issue is not None:
                 # The lock is already held; validate the facts inline to avoid
                 # recursively acquiring the stable sibling lock.
-                for outcome in record.outcomes:
-                    facts = facts_by_issue.get(outcome.issue_number)
-                    receipt = next(
-                        item
-                        for item in record.merge_receipts
-                        if item.issue_number == outcome.issue_number
-                    )
-                    if (
-                        facts is None
-                        or getattr(facts, "pr_number", None) != receipt.pr_number
-                        or not bool(getattr(facts, "pr_is_merged", False))
-                    ):
-                        raise IssueWaveBlockedError(
-                            f"issue #{outcome.issue_number} is closed/unmerged or "
-                            "externally changed"
-                        )
+                _validate_verified_outcome_facts(record, facts_by_issue, self.repo)
             if not ancestry_verified and record.issue_numbers:
                 raise IssueWaveBlockedError(
                     "prior-wave merge ancestry was not verified against synchronized main"
@@ -1033,9 +1430,69 @@ def wave_entry_from_facts(
             stage=StageName.FINISHED,
             reason=f"issue #{facts.number} is outside the sealed issue wave",
             passed=False,
-            skip_tag_obligation=None,
         )
-    receipt = IssueWaveStore(repo_root, org, repo).receipt_for(lease, facts.number)
+    store = IssueWaveStore(repo_root, org, repo)
+    receipt = store.receipt_for(lease, facts.number)
+    outcome = store.outcome_for(lease, facts.number)
+    if outcome is not None and outcome.non_code:
+        intent = store.non_code_intent_for(lease, facts.number)
+        exact_skip = intent is not None and (
+            _non_code_intent_matches_facts(intent, facts, repo)
+            and _non_code_intent_is_applied(intent, facts)
+        )
+        if exact_skip:
+            return replace(
+                entry,
+                stage=StageName.FINISHED,
+                reason=outcome.reason,
+                passed=True,
+                non_code=True,
+            )
+        return replace(
+            entry,
+            stage=StageName.FINISHED,
+            reason=f"issue #{facts.number} lost its reviewed non-code skip",
+            passed=False,
+        )
+    intent = store.non_code_intent_for(lease, facts.number)
+    if intent is not None:
+        if intent.retired:
+            return replace(
+                entry,
+                stage=StageName.PLANNING,
+                reason="retired non-code intent requires cleanup",
+                passed=True,
+                non_code=True,
+                non_code_labels=intent.extra_labels,
+                non_code_evidence_digest=intent.evidence_digest,
+                non_code_repository_revision=intent.repository_revision,
+                non_code_explanation=intent.explanation,
+                non_code_retired=True,
+            )
+        evidence_matches = _non_code_intent_matches_facts(intent, facts, repo)
+        if evidence_matches and _non_code_intent_is_applied(intent, facts):
+            return replace(
+                entry,
+                stage=StageName.FINISHED,
+                reason=intent.reason,
+                passed=True,
+                non_code=True,
+                non_code_labels=intent.extra_labels,
+                non_code_evidence_digest=intent.evidence_digest,
+                non_code_repository_revision=intent.repository_revision,
+                non_code_explanation=intent.explanation,
+            )
+        return replace(
+            entry,
+            stage=StageName.PLANNING,
+            reason=intent.reason,
+            passed=True,
+            non_code=True,
+            non_code_labels=intent.extra_labels,
+            non_code_evidence_digest=intent.evidence_digest,
+            non_code_repository_revision=intent.repository_revision,
+            non_code_explanation=intent.explanation,
+        )
     if facts.pr_is_merged and receipt is not None and facts.pr_number == receipt.pr_number:
         return replace(
             entry,
@@ -1043,24 +1500,23 @@ def wave_entry_from_facts(
             reason=f"issue #{facts.number} already has its recorded loop-owned merge",
             passed=True,
             pr_number=receipt.pr_number,
-            skip_tag_obligation=None,
         )
     if facts.issue_is_closed:
         reason = f"issue #{facts.number} closed without its recorded loop-owned merge"
-    elif facts.is_epic or entry.stage is None:
-        reason = f"issue #{facts.number} became skipped, blocked, or epic after wave selection"
+    elif entry.stage is None:
+        reason = f"issue #{facts.number} became skipped or blocked after wave selection"
     elif entry.stage is StageName.FINISHED:
         reason = f"issue #{facts.number} reached a terminal state without a wave receipt"
     else:
         return entry
-    return replace(
-        entry, stage=StageName.FINISHED, reason=reason, passed=False, skip_tag_obligation=None
-    )
+    return replace(entry, stage=StageName.FINISHED, reason=reason, passed=False)
 
 
 __all__ = [
     "WAVE_LEASE_PAYLOAD",
     "WAVE_LIMITS",
+    "WAVE_NON_CODE_INTENT_PAYLOAD",
+    "WAVE_NON_CODE_PAYLOAD",
     "IssueWaveBlockedError",
     "IssueWaveConflictError",
     "IssueWaveError",
@@ -1072,6 +1528,8 @@ __all__ = [
     "WaveIssueOutcome",
     "WaveLease",
     "WaveMergeReceipt",
+    "WaveNonCodeIntent",
     "WaveRecord",
     "is_full_commit_sha",
+    "non_code_intent_skip_is_applied",
 ]

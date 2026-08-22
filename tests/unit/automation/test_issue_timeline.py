@@ -13,7 +13,13 @@ from hephaestus.automation.protocol import (
     PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
 )
+from hephaestus.automation.requirements_recovery import (
+    OBSOLETE_EXPLANATION_MARKER,
+    render_obsolete_explanation,
+    render_recovered_requirements,
+)
 from hephaestus.automation.review_journal import (
+    FORCED_PLANNING_EPOCH_MARKER,
     HISTORY_MARKER,
     IssueComment,
     archive_plan_body,
@@ -63,6 +69,48 @@ def test_compaction_keeps_only_latest_owned_plan_and_review() -> None:
     assert result.review_body.startswith(PLAN_REVIEW_CANONICAL_MARKER)
     assert "GO" in result.review_body
     assert result.delete_comment_ids == (2, 3, 4, 5, 8, 9)
+
+
+def test_compaction_preserves_forced_planning_epoch_marker() -> None:
+    """A compacted forced plan remains restart authority for --force."""
+    comments = [
+        _comment(1, render_current_plan("Old plan", revision=1)),
+        _comment(
+            2,
+            render_current_plan(
+                "Forced replacement",
+                revision=2,
+                forced_planning_epoch=True,
+            ),
+        ),
+        _comment(3, render_current_review("Pending", revision=2)),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.plan_body is not None
+    assert FORCED_PLANNING_EPOCH_MARKER in result.plan_body
+
+
+def test_compaction_preserves_recovery_source_epoch_marker() -> None:
+    """Compaction cannot make a recovered plan look older than its source."""
+    source_digest = "c" * 64
+    comments = [
+        _comment(
+            1,
+            render_current_plan(
+                "Recovered plan",
+                revision=2,
+                recovery_source_digest=source_digest,
+            ),
+        ),
+        _comment(2, render_current_review("Pending", revision=2)),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.plan_body is not None
+    assert source_digest in result.plan_body
 
 
 def test_compaction_never_claims_or_deletes_foreign_marker_comments() -> None:
@@ -212,3 +260,32 @@ def test_compaction_deletes_complete_three_revision_history_chain() -> None:
     result = plan_issue_timeline_compaction(comments)
 
     assert result.delete_comment_ids == (3, 4, 5, 6)
+
+
+def test_compaction_keeps_one_valid_recovery_or_obsolete_role_per_issue() -> None:
+    """Actor-owned recovery roles stay bounded without touching foreign comments."""
+    recovery = render_recovered_requirements("derived body", "Recovered requirements", "a" * 64)
+    obsolete = render_obsolete_explanation("Superseded by #42")
+    comments = [
+        _comment(1, recovery),
+        _comment(2, recovery),
+        _comment(3, obsolete),
+        _comment(4, obsolete),
+        _comment(5, recovery, owned=False),
+    ]
+
+    result = plan_issue_timeline_compaction(comments)
+
+    assert result.delete_comment_ids == (1, 3)
+    assert OBSOLETE_EXPLANATION_MARKER in comments[3].body
+
+
+def test_malformed_owned_recovery_provenance_fails_before_deletion() -> None:
+    """A bad owned recovery marker requires manual review rather than deletion."""
+    comments = [
+        _comment(1, "<!-- hephaestus-recovered-requirements:v=1:source=bad -->\ntext"),
+        _comment(2, render_obsolete_explanation("Superseded by #42")),
+    ]
+
+    with pytest.raises(RuntimeError, match="malformed recovered requirements marker"):
+        plan_issue_timeline_compaction(comments)

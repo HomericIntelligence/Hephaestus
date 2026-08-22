@@ -16,6 +16,11 @@ from unittest.mock import patch
 
 import pytest
 
+from hephaestus.automation.issue_waves import (
+    WAVE_LEASE_PAYLOAD,
+    WAVE_NON_CODE_PAYLOAD,
+    IssueWaveStore,
+)
 from hephaestus.automation.pipeline.jobs import GitJob, JobResult
 from hephaestus.automation.pipeline.routing import Disposition, StageName
 from hephaestus.automation.pipeline.stages import finished as finished_module
@@ -143,6 +148,46 @@ class TestRecord:
         assert len(ledger) == 1
         assert not ledger[0].passed
         assert "no result" in ledger[0].reason
+
+    def test_reviewed_non_code_result_completes_wave_without_merge_receipt(
+        self,
+        tmp_path: Path,
+        stage: FinishedStage,
+        make_ctx: Any,
+    ) -> None:
+        """A reviewed tracker/obsolete issue is a durable passing wave outcome."""
+        store = IssueWaveStore(tmp_path, "acme", "hephaestus")
+        lease = store.seal_selection(store.plan_admission("a" * 40, 1), [42])
+        reason = "independently confirmed tracker"
+        store.record_non_code_intent(
+            lease,
+            issue_number=42,
+            reason=reason,
+            evidence_digest="b" * 64,
+            repository_revision="a" * 40,
+            extra_labels=("epic",),
+        )
+        item = _item(state="RECORD", reason=reason, pr=99)
+        item.repo = "hephaestus"
+        item.payload[WAVE_LEASE_PAYLOAD] = lease
+        item.payload[WAVE_NON_CODE_PAYLOAD] = True
+        ctx = make_ctx(
+            org="acme",
+            paths=SimpleNamespace(repo_root=tmp_path, worktree=tmp_path / "worktree"),
+        )
+
+        result = stage.step(item, ctx)
+
+        checkpoint = store.load()
+        assert isinstance(result, Continue) and result.next_state == "CLEANUP"
+        assert checkpoint is not None
+        assert len(checkpoint.current_wave.outcomes) == 1
+        outcome = checkpoint.current_wave.outcomes[0]
+        assert outcome.issue_number == 42
+        assert outcome.passed is True
+        assert outcome.non_code is True
+        assert outcome.pr_number is None
+        assert checkpoint.current_wave.merge_receipts == ()
 
 
 class TestCleanup:

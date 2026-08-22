@@ -286,6 +286,7 @@ class Coordinator(
         self._stage_config = _StageRunConfig(
             enable_advise=not config.no_advise,
             enable_learn=config.enable_learn,
+            force=config.force,
             agent=config.agent,
             model=config.model,
             planner_model=config.planner_model,

@@ -34,7 +34,7 @@ numbered, and listed here.
 | [0019](0019-pi-provider-parity-contract.md) | Provider-neutral Pi parity contract | Accepted |
 | [0020](0020-pi-runtime-and-console-inventory.md) | Exhaustive Pi runtime and console inventory | Accepted |
 | [0021](0021-durable-issue-wave-checkpoints.md) | Durable merge-checkpointed issue waves | Accepted |
-| [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Accepted |
+| [0022](0022-canonical-issue-timeline.md) | Canonical two-comment issue timeline | Superseded by ADR-0031 |
 | [0023](0023-pi-package-bootstrap-and-preflight.md) | Pi package bootstrap and preflight | Accepted |
 | [0024](0024-explicit-operator-merge-authorization.md) | Explicit operator authorization before queue merge | Accepted |
 | [0025](0025-athena-mnemosyne-pi-semantics.md) | Provider-neutral Athena and Mnemosyne semantics | Accepted |
@@ -42,3 +42,5 @@ numbered, and listed here.
 | [0027](0027-durable-plan-review-conversations.md) | Durable plan-review conversations | Accepted |
 | [0028](0028-source-reading-agent-workspace-isolation.md) | Deterministic source-reading agent workspace isolation | Accepted |
 | [0029](0029-explicit-pi-isolation-adapter-bootstrap.md) | Explicit Pi isolation-adapter bootstrap | Accepted |
+| [0030](0030-autonomous-issue-requirements-recovery.md) | Autonomous issue requirements recovery precedes planning | Accepted |
+| [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Accepted |

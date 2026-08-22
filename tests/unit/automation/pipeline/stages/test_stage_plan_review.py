@@ -39,6 +39,8 @@ from hephaestus.automation.review_journal import (
 )
 from hephaestus.automation.review_types import ReviewVerdict
 from hephaestus.automation.state_labels import (
+    STATE_IMPLEMENTATION_GO,
+    STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
@@ -1141,7 +1143,16 @@ class TestPlanReviewStageOnJobDone:
             ("gh_issue_upsert_comment", (2, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (2, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+                (
+                    2,
+                    (STATE_NEEDS_PLAN,),
+                    (
+                        STATE_PLAN_NO_GO,
+                        STATE_PLAN_GO,
+                        STATE_IMPLEMENTATION_NO_GO,
+                        STATE_IMPLEMENTATION_GO,
+                    ),
+                ),
             ),
         ]
 
@@ -1620,7 +1631,16 @@ class TestStaleVerdictAndErrorAccounting:
             ("gh_issue_upsert_comment", (30, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (30, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+                (
+                    30,
+                    (STATE_NEEDS_PLAN,),
+                    (
+                        STATE_PLAN_NO_GO,
+                        STATE_PLAN_GO,
+                        STATE_IMPLEMENTATION_NO_GO,
+                        STATE_IMPLEMENTATION_GO,
+                    ),
+                ),
             ),
         ]  # NOGO and amended-plan states persist; ERROR adds no mutation
 
@@ -1931,7 +1951,16 @@ class TestReviewFlowWithFakePool:
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (
                 "edit_labels",
-                (21, (STATE_NEEDS_PLAN,), (STATE_PLAN_NO_GO, STATE_PLAN_GO)),
+                (
+                    21,
+                    (STATE_NEEDS_PLAN,),
+                    (
+                        STATE_PLAN_NO_GO,
+                        STATE_PLAN_GO,
+                        STATE_IMPLEMENTATION_NO_GO,
+                        STATE_IMPLEMENTATION_GO,
+                    ),
+                ),
             ),
             ("gh_issue_upsert_comment", (21, PLAN_REVIEW_CANONICAL_MARKER)),
             (

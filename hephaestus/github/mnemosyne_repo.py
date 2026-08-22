@@ -21,6 +21,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
+from threading import Event, Lock
 from typing import Any
 
 from hephaestus.github.client import gh_call
@@ -37,6 +38,8 @@ LEGACY_OWNER_ENV_VAR = "HEPH_MNEMOSYNE_OWNER"
 _OWNER_RE = re.compile(r"(?=.{1,39}\Z)[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*")
 _WRITE_PERMISSIONS = frozenset({"WRITE", "MAINTAIN", "ADMIN"})
 _NOT_FOUND_MARKERS = ("not found", "could not resolve", "404")
+_legacy_owner_warning_lock = Lock()
+_legacy_owner_warning_emitted = Event()
 
 
 class MnemosyneResolutionError(RuntimeError):
@@ -259,6 +262,20 @@ def fork_upstream(owner: str, *, timeout: int = METADATA_TIMEOUT) -> bool:
     return False
 
 
+def _warn_legacy_owner_once(legacy_owner: str) -> None:
+    """Warn once per process when the ignored legacy owner variable is set."""
+    with _legacy_owner_warning_lock:
+        if _legacy_owner_warning_emitted.is_set():
+            return
+        _legacy_owner_warning_emitted.set()
+    logger.warning(
+        "%s is ignored; use %s=%s to make an explicit Mnemosyne trust decision",
+        LEGACY_OWNER_ENV_VAR,
+        OWNER_ENV_VAR,
+        legacy_owner,
+    )
+
+
 def resolve_mnemosyne_target(
     *,
     override_owner: str | None = None,
@@ -275,12 +292,7 @@ def resolve_mnemosyne_target(
         return _target_from_metadata(owner, metadata, MnemosyneTrustBasis.EXPLICIT_OVERRIDE)
 
     if legacy := os.environ.get(LEGACY_OWNER_ENV_VAR):
-        logger.warning(
-            "%s is ignored; use %s=%s to make an explicit Mnemosyne trust decision",
-            LEGACY_OWNER_ENV_VAR,
-            OWNER_ENV_VAR,
-            legacy,
-        )
+        _warn_legacy_owner_once(legacy)
 
     current = fetch_current_repository_metadata()
     if (

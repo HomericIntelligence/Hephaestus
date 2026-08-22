@@ -1,0 +1,24 @@
+{{ untrusted_notice }}
+
+Recover the original requirements for issue #{{ issue_number }} in {{ repository }}.
+Repository evidence is pinned to revision `{{ repository_revision }}` and this request is
+bound by evidence digest `{{ evidence_binding }}`. Inspect only that repository checkout
+and the fenced GitHub evidence below. Do not ask a human to select a source.
+
+{{ issue_title_block }}
+
+{{ issue_body_block }}
+
+Return exactly one JSON object with these fields:
+`{"disposition":"REQUIREMENTS|TRACKER|OBSOLETE","requirements":"...","reason":"...","evidence":"..."}`.
+
+The `evidence` value MUST be exactly `{{ evidence_binding }}`. Put concise
+human-readable evidence in `reason`; do not replace the opaque binding token.
+
+- REQUIREMENTS reconstructs user-visible intent, constraints, acceptance criteria, and
+  verification. Keep implementation detail proportional to available evidence.
+- TRACKER is only for an issue whose deliverable is tracking child work rather than a code change.
+- OBSOLETE is only when evidence proves the requested outcome is already supplied or superseded.
+- For TRACKER or OBSOLETE, `requirements` must be empty.
+- Do not include diffs. Keep code snippets minimal, especially when source text already contains them.
+- Do not invent facts. Explain uncertainty in `reason` and cite concise repository evidence.

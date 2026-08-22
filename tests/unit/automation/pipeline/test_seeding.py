@@ -7,6 +7,7 @@ detection, and the CLI seed mapping.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from types import SimpleNamespace
@@ -20,8 +21,6 @@ from hephaestus.automation.implementation_go_audit_receipt import PendingImpleme
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
-    _LABEL_RANK,
-    EpicSkipTagObligation,
     IssueFacts,
     SeedEntry,
     _label_at_or_past,
@@ -33,6 +32,7 @@ from hephaestus.automation.pipeline.seeding import (
 )
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
+    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -41,6 +41,16 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+
+
+def _finalized_body() -> str:
+    placeholder = (
+        "## Why\n\nUse the reviewed implementation plan.\n\n"
+        f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
+        f"V=987654321:{'c' * 64} F=<F> -->"
+    )
+    digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+    return placeholder.replace("F=<F>", f"F={digest}")
 
 
 def _facts(
@@ -56,6 +66,7 @@ def _facts(
     issue_is_closed: bool = False,
     pr_has_implementation_go: bool = False,
     pr_has_implementation_no_go: bool = False,
+    authority_sanitized: bool = False,
 ) -> IssueFacts:
     """Build IssueFacts with defaults for classifier-matrix tests."""
     return IssueFacts(
@@ -70,6 +81,7 @@ def _facts(
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         body=body,
+        authority_sanitized=authority_sanitized,
     )
 
 
@@ -84,15 +96,208 @@ class TestClassifyIssue:
         assert "state:skip" in reason
         assert any("excluded" in record.message for record in caplog.records)
 
-    def test_untagged_epic_is_excluded_without_encoding_a_mutation_in_reason(
+    def test_labeled_epic_routes_to_independent_planning_review(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The pure classifier describes exclusion; seeding carries obligations separately."""
         with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.seeding"):
-            stage, reason = classify_issue(_facts(is_epic=True))
-        assert stage is None
-        assert reason == "#1 is an epic tracking issue"
-        assert any("excluded" in record.message for record in caplog.records)
+            stage, reason = classify_issue(_facts(is_epic=True, labels={"epic"}))
+        assert stage is StageName.PLANNING
+        assert "semantic disposition review" in reason
+        assert not any("excluded" in record.message for record in caplog.records)
+
+    def test_title_inferred_epic_routes_to_independent_planning_review(self) -> None:
+        stage, reason = classify_issue(_facts(title="Epic: reliability", is_epic=True))
+
+        assert stage is StageName.PLANNING
+        assert "semantic disposition review" in reason
+
+    def test_contaminated_plan_go_body_routes_back_to_planning(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO},
+                body="<!-- hephaestus-plan:canonical -->\nStale plan",
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
+    def test_finalized_plan_without_evidence_routes_to_authentication(self) -> None:
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=_finalized_body()))
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_indented_invalid_finalization_cannot_use_stale_plan_go(self) -> None:
+        body = _finalized_body().replace(
+            "<!-- athena:finalize-plan ",
+            "  <!-- athena:finalize-plan ",
+        )
+
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
+    def test_invalid_backtick_fence_cannot_hide_claim_from_stale_plan_go(self) -> None:
+        marker = _finalized_body().splitlines()[-1]
+        body = f"```bad`info\n  {marker}\n```"
+
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
+    def test_list_fence_cannot_hide_dedented_claim_from_stale_plan_go(self) -> None:
+        marker = _finalized_body().splitlines()[-1]
+        body = f"- example\n\n  ```text\n  fenced text\n{marker}"
+
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
+    def test_unicode_separator_cannot_hide_claim_from_stale_plan_go(self) -> None:
+        marker = _finalized_body().splitlines()[-1]
+        body = f"prefix\u2028same CommonMark line\n{marker}"
+
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_GO}, body=body))
+
+        assert stage is StageName.PLANNING
+        assert "requirements recovery" in reason
+
+    def test_nested_raw_html_marker_invalidates_finalized_epoch_evidence(self) -> None:
+        placeholder = (
+            "<!--\n"
+            f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
+            f"V=987654321:{'c' * 64} F=<F> -->\n"
+            "-->"
+        )
+        digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+        body = placeholder.replace("F=<F>", f"F={digest}")
+
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=body,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
+
+    def test_shared_plan_review_comment_invalidates_finalized_epoch_evidence(self) -> None:
+        placeholder = (
+            "## Why\n\nPreserve independently reviewed authority.\n\n"
+            f"<!-- athena:finalize-plan R={'a' * 64} P=123456789:{'b' * 64} "
+            f"V=123456789:{'c' * 64} F=<F> -->"
+        )
+        digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
+        body = placeholder.replace("F=<F>", f"F={digest}")
+
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=body,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
+
+    def test_finalized_plan_with_evidence_routes_to_no_model_authentication(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=_finalized_body(),
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_finalized_plan_with_open_pr_still_routes_to_authentication(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=_finalized_body(),
+                pr_number=88,
+                pr_is_open=True,
+                pr_has_implementation_go=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_finalized_plan_supersedes_blocked_only_after_planning_authentication(self) -> None:
+        stage, reason = classify_issue(_facts(labels={STATE_PLAN_BLOCKED}, body=_finalized_body()))
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_finalized_plan_with_stale_sibling_labels_routes_to_authentication(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_NEEDS_PLAN, STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=_finalized_body(),
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "authentication" in reason
+
+    def test_removed_finalized_marker_invalidates_stale_plan_go(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body="## Revised requirements\n\nThe behavior materially changed.",
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
+
+    def test_drifted_finalized_marker_with_open_pr_still_routes_to_recovery(self) -> None:
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO, ATHENA_FINALIZED_PLAN_LABEL},
+                body=f"{_finalized_body()}\nchanged",
+                pr_number=88,
+                pr_is_open=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "finalized planning epoch changed" in reason
+
+    @pytest.mark.parametrize(
+        ("pr_number", "pr_is_open", "pr_has_implementation_go"),
+        [
+            (None, False, False),
+            (88, True, True),
+        ],
+    )
+    def test_sanitized_plan_go_authority_always_reenters_planning(
+        self,
+        pr_number: int | None,
+        pr_is_open: bool,
+        pr_has_implementation_go: bool,
+    ) -> None:
+        """Sanitized issue text cannot authorize implementation or merge-wait."""
+        stage, reason = classify_issue(
+            _facts(
+                labels={STATE_PLAN_GO},
+                body="Human requirements with a stripped transport byte",
+                authority_sanitized=True,
+                pr_number=pr_number,
+                pr_is_open=pr_is_open,
+                pr_has_implementation_go=pr_has_implementation_go,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "sanitized authority" in reason
 
     def test_epic_already_tagged_skip_needs_no_retag(self) -> None:
         """An epic that already carries state:skip excludes via skip — no tag flag."""
@@ -100,7 +305,6 @@ class TestClassifyIssue:
         stage, reason = classify_issue(facts)
         assert stage is None
         assert STATE_SKIP in reason
-        assert seed_entry_from_facts(facts).skip_tag_obligation is None
 
     def test_skip_wins_over_plan_go(self) -> None:
         """state:skip + state:plan-go → excluded; skip is absolute and never ranked."""
@@ -142,12 +346,12 @@ class TestClassifyIssue:
         assert stage is StageName.IMPLEMENTATION
         assert reason == f"#1 at-or-past {STATE_PLAN_GO}, no PR yet"
 
-    def test_open_pr_with_issue_impl_go_uses_generic_pr_review_route(self) -> None:
-        """An issue label alone cannot route an open PR to merge wait."""
+    def test_open_pr_with_issue_impl_go_without_plan_go_routes_to_planning(self) -> None:
+        """A downstream issue label cannot replace exact plan approval."""
         stage, _reason = classify_issue(
             _facts(labels={STATE_IMPLEMENTATION_GO}, pr_number=42, pr_is_open=True)
         )
-        assert stage is StageName.PR_REVIEW
+        assert stage is StageName.PLANNING
 
     def test_open_pr_with_pr_impl_go_routes_to_merge_wait(self) -> None:
         """Only the PR-level loop approval routes directly to merge wait."""
@@ -169,16 +373,34 @@ class TestClassifyIssue:
         assert stage is StageName.PR_REVIEW
         assert "review" in reason
 
-    def test_open_pr_with_impl_no_go_routes_to_pr_review(self) -> None:
-        """Open PR + issue-level state:implementation-no-go re-enters the review cycle."""
+    @pytest.mark.parametrize(
+        "labels",
+        [set(), {STATE_NEEDS_PLAN}, {STATE_PLAN_NO_GO}, {STATE_IMPLEMENTATION_NO_GO}],
+    )
+    def test_open_pr_without_exclusive_plan_go_routes_to_planning(self, labels: set[str]) -> None:
+        """An implementation PR cannot substitute for an approved issue plan."""
+        stage, reason = classify_issue(
+            _facts(
+                labels=labels,
+                pr_number=42,
+                pr_is_open=True,
+                pr_has_implementation_go=True,
+            )
+        )
+
+        assert stage is StageName.PLANNING
+        assert "plan" in reason
+
+    def test_open_pr_with_impl_no_go_without_plan_go_routes_to_planning(self) -> None:
+        """Issue implementation rejection cannot replace exact plan approval."""
         stage, reason = classify_issue(
             _facts(labels={STATE_IMPLEMENTATION_NO_GO}, pr_number=42, pr_is_open=True)
         )
-        assert stage is StageName.PR_REVIEW
-        assert "review" in reason
+        assert stage is StageName.PLANNING
+        assert "plan" in reason
 
-    def test_pr_impl_no_go_with_issue_impl_go_routes_to_pr_review(self) -> None:
-        """A PR-level no-GO remains an ordinary open-PR review route."""
+    def test_pr_impl_no_go_without_issue_plan_go_routes_to_planning(self) -> None:
+        """A PR rejection cannot bypass the missing issue-plan approval."""
         stage, _reason = classify_issue(
             _facts(
                 labels={STATE_IMPLEMENTATION_GO},
@@ -188,7 +410,7 @@ class TestClassifyIssue:
             )
         )
 
-        assert stage is StageName.PR_REVIEW
+        assert stage is StageName.PLANNING
 
     def test_no_pr_at_plan_go_routes_to_implementation(self) -> None:
         """No PR, at-or-past state:plan-go → ready for implementation."""
@@ -197,9 +419,9 @@ class TestClassifyIssue:
         assert "at-or-past" in reason
 
     def test_no_pr_past_plan_go_routes_to_implementation(self) -> None:
-        """No PR, past state:plan-go (e.g., impl-no-go) → implementation (at-or-past)."""
+        """A legacy issue-level implementation label cannot substitute for plan-go."""
         stage, _reason = classify_issue(_facts(labels={STATE_IMPLEMENTATION_NO_GO}))
-        assert stage is StageName.IMPLEMENTATION
+        assert stage is StageName.PLANNING
 
     def test_no_pr_plan_no_go_routes_to_planning(self) -> None:
         """No PR, state:plan-no-go → planning (amend path)."""
@@ -251,6 +473,17 @@ class TestClassifyIssue:
         assert any("unknown state labels ignored" in record.message for record in caplog.records)
         assert not any("contradictory state labels" in record.message for record in caplog.records)
 
+    def test_legacy_in_progress_warning_is_emitted_once_per_process(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A stale legacy label cannot flood an autonomous multi-pass run."""
+        with caplog.at_level(logging.WARNING, logger="hephaestus.automation.pipeline.seeding"):
+            classify_issue(_facts(labels={"state:in-progress"}))
+            classify_issue(_facts(labels={"state:in-progress"}))
+
+        matching = [record for record in caplog.records if "state:in-progress" in record.message]
+        assert len(matching) == 1
+
 
 _STATE_LABEL_SETS: tuple[frozenset[str], ...] = (
     frozenset(),
@@ -289,7 +522,11 @@ class TestClassificationIsStageNameSSOT:
         for labels in _STATE_LABEL_SETS:
             for pr_state in _PR_STATES:
                 stage, _ = classify_issue(_facts(labels=set(labels), **pr_state))
-                known = {label for label in labels if label in _LABEL_RANK}
+                known = {
+                    label
+                    for label in labels
+                    if label in {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO}
+                }
                 if STATE_SKIP in labels or len(known) > 1:
                     assert stage is None
                 else:
@@ -322,12 +559,16 @@ def _issue_info(
     labels: list[str],
     title: str = "A task",
     state: IssueState = IssueState.OPEN,
+    *,
+    authority_sanitized: bool = False,
 ) -> MagicMock:
     info = MagicMock()
     info.number = number
     info.labels = labels
     info.title = title
     info.state = state
+    info.body = ""
+    info.authority_sanitized = authority_sanitized
     return info
 
 
@@ -342,11 +583,17 @@ class TestSeedIssueFetchLayer:
         *,
         pr_labels: list[str] | None = None,
         issue_state: IssueState = IssueState.OPEN,
+        authority_sanitized: bool = False,
     ) -> IssueFacts:
         with (
             patch(
                 "hephaestus.automation.pipeline.seeding.fetch_issue_info",
-                return_value=_issue_info(issue, labels, state=issue_state),
+                return_value=_issue_info(
+                    issue,
+                    labels,
+                    state=issue_state,
+                    authority_sanitized=authority_sanitized,
+                ),
             ),
             patch(
                 "hephaestus.automation._review_utils._gh_call",
@@ -457,6 +704,11 @@ class TestSeedIssueFetchLayer:
         assert facts.number == 101
         assert {STATE_PLAN_GO, "other-label"} <= facts.labels
 
+    def test_global_issue_seed_preserves_sanitized_authority_flag(self) -> None:
+        facts = self._seed(101, [STATE_NEEDS_PLAN], [], authority_sanitized=True)
+
+        assert facts.authority_sanitized is True
+
     def test_blocked_comment_without_blocked_label_cannot_control_restart(self) -> None:
         """Seeding never infers BLOCKED from review prose after a label-write failure."""
         github = MagicMock()
@@ -466,6 +718,7 @@ class TestSeedIssueFetchLayer:
             "body": "",
             "state": "OPEN",
             "labels": [{"name": STATE_NEEDS_PLAN}],
+            "authoritySanitized": True,
         }
         github.issue_comments.side_effect = AssertionError("comments are not state authority")
         github.find_pr_for_issue.return_value = None
@@ -476,6 +729,7 @@ class TestSeedIssueFetchLayer:
 
         assert stage is StageName.PLANNING
         assert STATE_PLAN_BLOCKED not in facts.labels
+        assert facts.authority_sanitized is True
         github.issue_comments.assert_not_called()
 
     def test_pending_go_audit_receipt_routes_restart_back_to_pr_review(self) -> None:
@@ -488,7 +742,7 @@ class TestSeedIssueFetchLayer:
                     "title": "A task",
                     "body": "",
                     "state": "OPEN",
-                    "labels": [],
+                    "labels": [{"name": STATE_PLAN_GO}],
                 }
 
             def find_pr_for_issue(self, issue_number: int) -> int:
@@ -666,13 +920,19 @@ class TestSeedFromCli:
             entries = seed_from_cli([], [10], [])
         assert entries[0].stage is None
 
-    def test_untagged_epic_surfaces_a_typed_skip_tag_obligation(self) -> None:
-        """The coordinator receives an explicit durable-write obligation, not a reason prefix."""
-        facts = _facts(number=10, is_epic=True)
+    def test_labeled_epic_has_no_skip_obligation_before_model_review(self) -> None:
+        facts = _facts(number=10, is_epic=True, labels={"epic"})
         with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
             entry = seed_from_cli([], [10], [])[0]
 
-        assert entry.skip_tag_obligation == EpicSkipTagObligation(issue=10)
+        assert entry.stage is StageName.PLANNING
+
+    def test_title_inferred_epic_has_no_skip_obligation_before_model_review(self) -> None:
+        facts = _facts(number=10, title="Epic: queue work", is_epic=True)
+        with patch("hephaestus.automation.pipeline.seeding.seed_issue", return_value=facts):
+            entry = seed_from_cli([], [10], [])[0]
+
+        assert entry.stage is StageName.PLANNING
 
     def test_prs_with_impl_go_route_to_merge_wait_for_fresh_admission(self) -> None:
         """The durable label routes work; merge_wait still requires both proofs."""
@@ -841,11 +1101,9 @@ class TestLabelRank:
             _label_at_or_past(STATE_PLAN_GO, "state:typo")
 
     def test_issue_already_past_plan_go_not_requeued_to_planning(self) -> None:
-        """AC: issue with state:implementation-go is NOT re-routed to planning."""
-        # This is the critical AC from the plan: "`==` strands items already past the target".
-        # Our fix: use at-or-past (>=) not equality (==).
+        """A legacy issue implementation-go label is ignored during seeding."""
         stage, _ = classify_issue(_facts(labels={STATE_IMPLEMENTATION_GO}))
-        assert stage is StageName.IMPLEMENTATION
+        assert stage is StageName.PLANNING
 
     def test_reconstruction_is_idempotent(self) -> None:
         """Classifying the same facts twice yields the same result (restart safety)."""

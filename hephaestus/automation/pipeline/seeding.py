@@ -10,25 +10,21 @@ Pure classifier: (labels, PR existence/state) → entry stage, using **ordered l
 Entry routing (the binding contract is the classification table in
 ``docs/architecture.md`` §7 "Seeding and restart reconstruction"):
 
-- ``state:skip`` or epic → excluded (stage ``None``, logged)
+- ``state:skip`` → excluded (stage ``None``, logged)
 - Closed issue + merged PR carrying an exact ``Closes #N`` line → finished
   (pass, idempotent)
-- Open PR + PR-level ``state:implementation-go`` → merge_wait
-- Any other open PR → pr_review (including an issue-level implementation-GO)
+- Open PR without an exclusive issue-level ``state:plan-go`` → planning
+- Open PR + issue plan-GO + PR-level ``state:implementation-go`` → merge_wait
+- Any other open PR with issue plan-GO → pr_review
 - No PR, at-or-past ``state:plan-go`` → implementation
 - No PR, ``state:plan-no-go`` → planning (amend path)
 - No PR, ``state:plan-blocked`` → excluded until an external operator resolves
   the block and replaces the label with exactly one eligible plan state
 - ``state:needs-plan`` / no state label → planning
 
-Write-path boundary (epic tagging)
-----------------------------------
-Per the doc row "Epic tagging is the one seeding write; done BEFORE excluding",
-an untagged epic must receive ``state:skip``. The pipeline mutator guard
-(``tests/unit/automation/pipeline/test_pipeline_architecture.py``) forbids
-GitHub mutations in this module, so seeding returns an explicit
-:class:`EpicSkipTagObligation` for the caller to discharge through the existing
-``github_api.skip_epics`` chokepoint before honoring the exclusion.
+Tracker labels and title inference are candidates, not skip authority. Seeding
+routes both through planning so the independent semantic reviewer owns the only
+automatic ``state:skip`` transition.
 """
 
 from __future__ import annotations
@@ -36,6 +32,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Literal
 
 from hephaestus.automation._review_utils import find_merged_pr_for_issue, find_pr_for_issue
@@ -47,7 +44,13 @@ from hephaestus.automation.github_api import (
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
+from hephaestus.automation.requirements_recovery import (
+    has_contaminated_issue_body,
+    is_semantic_disposition_candidate,
+    verified_finalized_plan,
+)
 from hephaestus.automation.state_labels import (
+    ATHENA_FINALIZED_PLAN_LABEL,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -61,6 +64,8 @@ from hephaestus.automation.state_labels import (
 )
 
 LOG = logging.getLogger(__name__)
+_WARNED_UNKNOWN_STATE_LABELS: set[str] = set()
+_UNKNOWN_LABEL_WARNING_LOCK = Lock()
 
 # Ordered label rank for at-or-past comparisons.
 # Lower rank = earlier stage; higher rank = later stage.
@@ -71,6 +76,7 @@ _LABEL_RANK = {
     STATE_IMPLEMENTATION_NO_GO: 3,
     STATE_IMPLEMENTATION_GO: 4,
 }
+_ISSUE_PLAN_STATE_LABELS = frozenset({STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO})
 
 
 def read_pending_implementation_go_audit(
@@ -87,7 +93,7 @@ def read_pending_implementation_go_audit(
 
 
 #: Classification result: ``(stage, reason)``. ``stage is None`` means the
-#: issue is EXCLUDED from the pipeline (state:skip / epic) — exclusion is NOT
+#: issue is EXCLUDED from the pipeline (state:skip) — exclusion is NOT
 #: completion, so it is deliberately distinct from ``StageName.FINISHED``.
 Classification = tuple[StageName | None, str]
 
@@ -99,7 +105,7 @@ class IssueFacts:
     Attributes:
         number: GitHub issue number.
         title: Issue title (feeds the epic title-marker signal, #1669).
-        is_epic: Whether this issue is an epic/roadmap (excluded from queuing).
+        is_epic: Whether this issue is an epic/roadmap semantic-review candidate.
         labels: Set of labels currently on this issue.
         body: Issue body used to hydrate downstream task prompts.
         pr_number: GitHub PR number if one exists and is live (open or
@@ -111,6 +117,8 @@ class IssueFacts:
             ``state:implementation-go``.
         pr_has_implementation_no_go: True iff the open PR carries
             ``state:implementation-no-go``.
+        authority_sanitized: Whether title/body text required prompt-safe
+            sanitization and therefore cannot serve as exact authority.
 
     Invariants (established by :func:`seed_issue`'s tri-state fetch):
         - Exactly one of {no live PR, open PR, merged PR} holds:
@@ -135,6 +143,7 @@ class IssueFacts:
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
     body: str = ""
+    authority_sanitized: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,8 +173,18 @@ class SeedEntry:
             planner/reviewer/implementer prompts.
         pr_description: PR body copied into a direct PR review payload.
         passed: Terminal result for entries clamped directly to ``finished``.
-        skip_tag_obligation: Durable write that must complete before this
-            entry's exclusion can be honored, when it is an untagged epic.
+        non_code: Whether a passing terminal entry was semantically confirmed
+            as non-code and therefore needs no merge receipt.
+        non_code_labels: Supplemental labels required by a pending reviewed
+            non-code disposition; ``state:skip`` is implicit.
+        non_code_evidence_digest: Digest binding a pending non-code disposition
+            to its independently reviewed issue and repository evidence.
+        non_code_repository_revision: Exact repository revision included in
+            the pending non-code evidence binding.
+        non_code_explanation: Actor-owned rationale that must be restored
+            before an obsolete disposition may apply ``state:skip``.
+        non_code_retired: Whether the durable intent has been revoked and is
+            retained only to finish provenance-bound skip cleanup.
 
     """
 
@@ -182,14 +201,21 @@ class SeedEntry:
     skip_tag_obligation: EpicSkipTagObligation | None = None
     pending_implementation_go_audit: PendingImplementationGoAudit | None = None
     pending_implementation_go_label_confirmed: bool = False
+    non_code: bool = False
+    non_code_labels: tuple[str, ...] = ()
+    non_code_evidence_digest: str = ""
+    non_code_repository_revision: str = ""
+    non_code_explanation: str = ""
+    non_code_retired: bool = False
 
 
 def _get_state_label(labels: set[str]) -> str | None:
-    """Extract the single active known ``state:*`` label, or None when absent.
+    """Extract the single active issue plan-state label, or None when absent.
 
-    Contradictory combinations are rejected by :func:`classify_issue` before
-    this helper is called. Unknown ``state:*`` labels are ignored after warning
-    because they have no rank in the automation state machine.
+    Contradictory plan-state combinations are rejected by
+    :func:`classify_issue` before this helper is called. Legacy issue-scoped
+    implementation labels are ignored because implementation authority lives
+    on pull requests. Unknown ``state:*`` labels are ignored after warning.
 
     Args:
         labels: Set of label names on an issue.
@@ -202,10 +228,17 @@ def _get_state_label(labels: set[str]) -> str | None:
     if not state_labels:
         return None
 
-    known_state_labels = [lbl for lbl in state_labels if lbl in _LABEL_RANK]
-    unknown_state_labels = [lbl for lbl in state_labels if lbl not in _LABEL_RANK]
-    if unknown_state_labels:
-        LOG.warning("Issue has unknown state labels ignored: %s", unknown_state_labels)
+    known_state_labels = [lbl for lbl in state_labels if lbl in _ISSUE_PLAN_STATE_LABELS]
+    unknown_state_labels = [
+        lbl
+        for lbl in state_labels
+        if lbl not in _LABEL_RANK and lbl not in _ISSUE_PLAN_STATE_LABELS
+    ]
+    with _UNKNOWN_LABEL_WARNING_LOCK:
+        newly_seen = sorted(set(unknown_state_labels) - _WARNED_UNKNOWN_STATE_LABELS)
+        _WARNED_UNKNOWN_STATE_LABELS.update(newly_seen)
+    if newly_seen:
+        LOG.warning("Issue has unknown state labels ignored: %s", newly_seen)
 
     if not known_state_labels:
         return None
@@ -246,10 +279,73 @@ def _label_at_or_past(label: str | None, target: str) -> bool:
     return label_rank >= target_rank
 
 
+def _requirements_recovery_reason(
+    facts: IssueFacts,
+) -> str | None:
+    """Return the planning-admission reason for semantic recovery, if any."""
+    if facts.authority_sanitized:
+        # GitHub transport normalization may make the body safe to pass to
+        # subprocesses, but that projection is not planning authority. Route
+        # through planning's fresh fail-closed snapshot before a stale
+        # plan-GO or PR verdict can select implementation or merge-wait.
+        return f"#{facts.number} requires unsanitized authority authentication"
+    issue_body = facts.body if isinstance(facts.body, str) else ""
+    issue_title = facts.title if isinstance(facts.title, str) else ""
+    finalized = verified_finalized_plan(issue_body)
+    has_finalized_evidence = ATHENA_FINALIZED_PLAN_LABEL in facts.labels
+    if finalized is not None:
+        # Seeding cannot authenticate the latest issue-body editor. Always
+        # enter planning's no-model verification fast path, even after an
+        # earlier observation added the metadata label.
+        return f"#{facts.number} requires finalized-plan authentication"
+    if finalized is None and has_finalized_evidence:
+        return f"#{facts.number} finalized planning epoch changed"
+    if has_contaminated_issue_body(issue_body):
+        return f"#{facts.number} requires autonomous requirements recovery"
+    if facts.is_epic or is_semantic_disposition_candidate(issue_title, issue_body):
+        return f"#{facts.number} requires semantic disposition review"
+    return None
+
+
+def _issue_exclusion_reason(facts: IssueFacts) -> str | None:
+    """Return an operator/external exclusion reason before state routing."""
+    if STATE_SKIP in facts.labels:
+        return f"#{facts.number} tagged {STATE_SKIP}"
+    if STATE_PLAN_BLOCKED in facts.labels and verified_finalized_plan(facts.body) is None:
+        return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
+    return None
+
+
+def _classify_open_pr(facts: IssueFacts, state_label: str | None) -> Classification:
+    """Route one open PR; only an approved issue plan reaches special routes."""
+    # An implementation artifact cannot substitute for an approved issue
+    # plan.  Keep planning authoritative even when a PR already exists or
+    # carries a downstream implementation verdict.
+    if state_label != STATE_PLAN_GO:
+        return StageName.PLANNING, f"#{facts.number} open PR missing {STATE_PLAN_GO}"
+    # The loop-owned approval label records review eligibility, not durable
+    # merge authority.  A restart sends it to merge_wait, which confirms an
+    # unarmed PR before returning to review; a matching current-process
+    # proof attempts one ordinary conditional merge. No queue stage
+    # creates, disables, adopts, or polls automatic merge.
+    if facts.pending_implementation_go_audit is not None:
+        return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
+    if facts.pr_has_implementation_go:
+        return (
+            StageName.MERGE_WAIT,
+            f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
+        )
+    if facts.pr_has_implementation_no_go:
+        return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
+    # Only the PR-level label above has approval semantics.  Issue labels
+    # never select a special open-PR route.
+    return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
+
+
 def classify_issue(facts: IssueFacts) -> Classification:
     """Classify an issue into a single entry stage based on GitHub state.
 
-    Exclusion (``state:skip`` / epic) is distinct from completion: excluded
+    Exclusion (``state:skip``) is distinct from completion: excluded
     issues return ``stage=None`` (and are logged), while genuinely finished
     work (merged PR) returns :attr:`StageName.FINISHED`.
 
@@ -263,20 +359,17 @@ def classify_issue(facts: IssueFacts) -> Classification:
     """
     # Exclusions: skip wins over everything (operator-only, absolute — it
     # carries no rank and never enters the rank comparison).
-    if STATE_SKIP in facts.labels:
-        reason = f"#{facts.number} tagged {STATE_SKIP}"
-        LOG.info("issue excluded: %s", reason)
-        return None, reason
-    if STATE_PLAN_BLOCKED in facts.labels:
-        reason = f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
-        LOG.info("issue excluded: %s", reason)
-        return None, reason
-    if facts.is_epic:
-        reason = f"#{facts.number} is an epic tracking issue"
+    if reason := _issue_exclusion_reason(facts):
         LOG.info("issue excluded: %s", reason)
         return None, reason
 
-    active_states = sorted(label for label in facts.labels if label in _LABEL_RANK)
+    if verified_finalized_plan(facts.body) is not None:
+        # A self-verifying finalized body must reach planning's authenticated
+        # no-model path even when a stale sibling label survived an earlier
+        # interrupted normalization. Planning owns the atomic label repair.
+        return StageName.PLANNING, f"#{facts.number} requires finalized-plan authentication"
+
+    active_states = sorted(label for label in facts.labels if label in _ISSUE_PLAN_STATE_LABELS)
     if len(active_states) > 1:
         reason = f"#{facts.number} has contradictory state labels: {active_states}"
         LOG.warning("issue excluded: %s", reason)
@@ -288,28 +381,15 @@ def classify_issue(facts: IssueFacts) -> Classification:
     if facts.issue_is_closed and facts.pr_is_merged:
         return StageName.FINISHED, f"#{facts.number} PR merged (idempotent)"
 
+    if recovery_reason := _requirements_recovery_reason(facts):
+        return StageName.PLANNING, recovery_reason
+
     # Extract the active state label
     state_label = _get_state_label(facts.labels)
 
     # Routing logic: open PR path
     if facts.pr_is_open:
-        # The loop-owned approval label records review eligibility, not durable
-        # merge authority.  A restart sends it to merge_wait, which confirms an
-        # unarmed PR before returning to review; a matching current-process
-        # proof attempts one ordinary conditional merge. No queue stage
-        # creates, disables, adopts, or polls automatic merge.
-        if facts.pending_implementation_go_audit is not None:
-            return StageName.PR_REVIEW, f"#{facts.number} pending implementation-go audit"
-        if facts.pr_has_implementation_go:
-            return (
-                StageName.MERGE_WAIT,
-                f"#{facts.number} open PR with {STATE_IMPLEMENTATION_GO}",
-            )
-        if facts.pr_has_implementation_no_go:
-            return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
-        # Only the PR-level label above has approval semantics.  Issue labels
-        # never select a special open-PR route.
-        return StageName.PR_REVIEW, f"#{facts.number} open PR awaiting review"
+        return _classify_open_pr(facts, state_label)
 
     # No PR path: check implementation readiness
     if _label_at_or_past(state_label, STATE_PLAN_GO):
@@ -383,6 +463,7 @@ def seed_issue(issue_number: int) -> IssueFacts:
         issue_is_closed=issue_info.state == IssueState.CLOSED,
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
+        authority_sanitized=issue_info.authority_sanitized,
     )
 
 
@@ -467,6 +548,7 @@ def seed_issue_from_github(issue_number: int, github: Any) -> IssueFacts:
         pr_has_implementation_go=pr_has_implementation_go,
         pr_has_implementation_no_go=pr_has_implementation_no_go,
         pending_implementation_go_audit=pending_implementation_go_audit,
+        authority_sanitized=issue_data.get("authoritySanitized") is True,
     )
 
 
@@ -628,7 +710,6 @@ def seed_from_cli(
 
 __all__ = [
     "Classification",
-    "EpicSkipTagObligation",
     "IssueFacts",
     "SeedEntry",
     "classify_issue",

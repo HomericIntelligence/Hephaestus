@@ -60,6 +60,7 @@ nats = [
 # pydantic. CI verifies the library-side import surface stays clean via
 # tests/unit/validation/test_import_surface.py.
 automation = [
+    "markdown-it-py>=4.0,<5",
     "pydantic>=2.12.5,<3",
 ]
 all = [
@@ -98,6 +99,7 @@ dev = [
     "pytest-watcher>=0.4,<1",
 ]
 automation = [
+    "markdown-it-py>=4.0,<5",
     "pydantic>=2.12.5,<3",
 ]
 

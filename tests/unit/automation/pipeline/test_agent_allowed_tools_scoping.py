@@ -27,6 +27,16 @@ READ_ONLY_SCOPES = frozenset({READ_ONLY, PR_REVIEW})
 # The primary PR review retains the additional read-only helper capabilities
 # required by the normal review workflow; it does not grant write tools.
 EXPECTED_SCOPES = {
+    (
+        "stages/planning.py",
+        "_requirements_recovery_step",
+        "build_recovery_prompt",
+    ): READ_ONLY,
+    (
+        "stages/planning.py",
+        "_requirements_recovery_step",
+        "build_recovery_review_prompt",
+    ): READ_ONLY,
     ("stages/planning.py", "step", "build_plan_prompt"): READ_ONLY,
     ("stages/plan_review.py", "step", "get_plan_loop_review_prompt"): READ_ONLY,
     ("stages/plan_review.py", "step", "build_amend_prompt"): READ_ONLY,

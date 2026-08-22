@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from threading import Event
 from unittest.mock import patch
 
 import pytest
@@ -35,6 +36,7 @@ UPSTREAM_METADATA = RepositoryMetadata(
 def _clear_owner_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(OWNER_ENV_VAR, raising=False)
     monkeypatch.delenv(LEGACY_OWNER_ENV_VAR, raising=False)
+    monkeypatch.setattr(mnemosyne_repo, "_legacy_owner_warning_emitted", Event())
 
 
 def _repo_metadata(slug: str, *, missing_ok: bool = False) -> RepositoryMetadata | None:
@@ -200,3 +202,23 @@ def test_github_api_failure_is_fatal_when_trust_cannot_be_decided() -> None:
     ):
         with pytest.raises(MnemosyneResolutionError, match="auth failed"):
             resolve_mnemosyne_target()
+
+
+def test_legacy_owner_warning_is_emitted_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv(LEGACY_OWNER_ENV_VAR, "legacy-owner")
+    current = CurrentRepositoryMetadata("mvillmow", "User", "ADMIN")
+
+    with (
+        patch.object(mnemosyne_repo, "fetch_current_repository_metadata", return_value=current),
+        patch.object(mnemosyne_repo, "fetch_repository_metadata", side_effect=_repo_metadata),
+    ):
+        resolve_mnemosyne_target()
+        resolve_mnemosyne_target()
+
+    messages = [
+        record.message for record in caplog.records if LEGACY_OWNER_ENV_VAR in record.message
+    ]
+    assert len(messages) == 1

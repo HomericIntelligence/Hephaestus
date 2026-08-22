@@ -364,11 +364,13 @@ dependencies = [
 all = [
     { name = "defusedxml" },
     { name = "jsonschema" },
+    { name = "markdown-it-py" },
     { name = "nats-py" },
     { name = "pydantic" },
     { name = "pygithub" },
 ]
 automation = [
+    { name = "markdown-it-py" },
     { name = "pydantic" },
 ]
 github = [
@@ -386,6 +388,7 @@ xml = [
 
 [package.dev-dependencies]
 automation = [
+    { name = "markdown-it-py" },
     { name = "pydantic" },
 ]
 dev = [
@@ -414,6 +417,8 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "jsonschema", marker = "extra == 'all'", specifier = ">=4.0,<5" },
     { name = "jsonschema", marker = "extra == 'schema'", specifier = ">=4.0,<5" },
+    { name = "markdown-it-py", marker = "extra == 'all'", specifier = ">=4.0,<5" },
+    { name = "markdown-it-py", marker = "extra == 'automation'", specifier = ">=4.0,<5" },
     { name = "nats-py", marker = "extra == 'all'", specifier = ">=2.6,<3" },
     { name = "nats-py", marker = "extra == 'nats'", specifier = ">=2.6,<3" },
     { name = "packaging", specifier = ">=21.0,<27" },
@@ -427,7 +432,10 @@ requires-dist = [
 provides-extras = ["all", "automation", "github", "nats", "schema", "toml", "xml"]
 
 [package.metadata.requires-dev]
-automation = [{ name = "pydantic", specifier = ">=2.12.5,<3" }]
+automation = [
+    { name = "markdown-it-py", specifier = ">=4.0,<5" },
+    { name = "pydantic", specifier = ">=2.12.5,<3" },
+]
 dev = [
     { name = "bandit", specifier = ">=1.9.4,<2" },
     { name = "build", specifier = ">=1.0,<2" },
