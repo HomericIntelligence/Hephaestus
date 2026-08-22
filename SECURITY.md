@@ -119,20 +119,27 @@ security analysis is not limited to the Python surface:
 | Surface | Tool | Gate |
 |---------|------|------|
 | Python (`hephaestus/`, `scripts/`) | Bandit (medium+) | pre-commit hook + required `security/sast-scan` |
-| GitHub Actions workflows | zizmor (medium+, offline; online audits weekly) | pre-commit hook + required `security/workflow-scan` |
+| GitHub Actions workflows and composite actions | zizmor (medium+, offline; online audits weekly) | pre-commit hook + required `security/workflow-scan` |
 | Shell scripts (`**/*.sh`) | ShellCheck | pre-commit hook (all `.sh`) + required `shellcheck` job (`--severity=error`) |
 | Secrets | gitleaks + detect-private-key | required `security/secrets-scan` + pre-commit |
 | Dependencies | pip-audit | required `security/dependency-scan` + weekly schedule |
 
-For the workflow surface (issue #2151), zizmor is used instead of
-CodeQL/Semgrep: it is purpose-built for GitHub Actions security (template
-injection, credential persistence, cache poisoning, unpinned/vulnerable
-actions, excessive permissions), ships as a PyPI wheel locked in `uv.lock`
-under the uv-only toolchain, and runs offline for a deterministic,
-network-free PR gate. The
-weekly `Security` workflow drops the offline flag to add the API-backed online
-audits. Suppressions use inline `# zizmor: ignore[rule]` comments and must
-carry a rationale.
+For the GitHub Actions surface (issues #2151 and #2565), zizmor is used
+instead of CodeQL/Semgrep: it is purpose-built for GitHub Actions security
+(template injection, credential persistence, cache poisoning,
+unpinned/vulnerable actions, and excessive permissions), ships as a PyPI wheel
+locked in `uv.lock` under the uv-only toolchain, and runs offline against
+workflow and composite-action definitions for a deterministic, network-free PR
+gate. The weekly `Security` workflow drops the offline flag to add the
+API-backed online audits. Pinning checks apply to external `uses:` references
+in both definition types. Token-permission declarations are audited on
+workflows because composite actions inherit their caller's permissions.
+
+zizmor analyzes workflow and Action manifests but does not follow external
+shell scripts referenced by those definitions. Network installation commands
+therefore remain subject to exact dependency pinning and shell-specific review.
+Suppressions use inline `# zizmor: ignore[rule]` comments and must carry a
+rationale; required audits must not be disabled or severity-remapped.
 
 #### Bandit LOW-severity baseline maintenance
 

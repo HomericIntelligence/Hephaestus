@@ -124,7 +124,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   workflow-scan:
-    name: GitHub Actions workflow security scan
+    name: GitHub Actions workflow and composite-action security scan
     # PR-time scan runs in _required.yml (security/workflow-scan). This weekly
     # run additionally enables the online, API-backed audits (e.g.
     # known-vulnerable-actions) that the offline PR gate cannot perform.
@@ -148,11 +148,11 @@ jobs:
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run zizmor (workflow SAST with online audits, in container)
+      - name: Run zizmor (GitHub Actions SAST with online audits, in container)
         id: zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-        run: podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 -e GH_TOKEN hephaestus-ci:local uv run zizmor --min-severity medium .github/workflows/
+        run: podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000 -e GH_TOKEN hephaestus-ci:local uv run zizmor --min-severity medium .github/workflows/ .github/actions/
 
       - name: Post zizmor summary
         if: always()
@@ -160,12 +160,12 @@ jobs:
           ZIZMOR_OUTCOME: ${{ steps.zizmor.outcome }}
         run: |
           {
-            echo "## zizmor GitHub Actions Workflow SAST"
+            echo "## zizmor GitHub Actions SAST"
             echo ""
             if [ "$ZIZMOR_OUTCOME" = "success" ]; then
-              echo "No workflow security findings at medium+ severity."
+              echo "No workflow or composite-action findings at medium+ severity."
             else
-              echo "Workflow security findings detected — see job logs for details."
+              echo "GitHub Actions security findings detected — see job logs."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -132,7 +132,7 @@ def test_scheduled_zizmor_step_forwards_its_token_to_the_container(tmp_path: Pat
     step_definition = _workflow_step_definition(
         "security.yml",
         "workflow-scan",
-        "Run zizmor (workflow SAST with online audits, in container)",
+        "Run zizmor (GitHub Actions SAST with online audits, in container)",
     )
     assert step_definition["env"] == {"GH_TOKEN": "${{ github.token }}"}
     step = step_definition["run"]

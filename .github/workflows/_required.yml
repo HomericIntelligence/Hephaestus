@@ -1145,16 +1145,16 @@ jobs:
       - name: Build CI image (podman)
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
-      - name: Run zizmor (workflow SAST)
+      - name: Run zizmor (GitHub Actions SAST)
         id: zizmor
         # Offline + medium threshold: deterministic, network-free PR gate.
         # Online audits (e.g. known-vulnerable-actions) run weekly in
-        # security.yml. Keep these flags identical to the zizmor pre-commit
-        # hook (drift-guarded by tests/unit/ci/test_zizmor_config.py).
+        # security.yml. Keep these flags and targets identical to the zizmor
+        # pre-commit hook (drift-guarded by tests/unit/ci/test_zizmor_config.py).
         run: >
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
           hephaestus-ci:local uv run zizmor --no-online-audits --min-severity medium
-          .github/workflows/
+          .github/workflows/ .github/actions/
 
       - name: Post zizmor summary
         if: always()
@@ -1162,12 +1162,12 @@ jobs:
           ZIZMOR_OUTCOME: ${{ steps.zizmor.outcome }}
         run: |
           {
-            echo "## zizmor GitHub Actions Workflow SAST"
+            echo "## zizmor GitHub Actions SAST"
             echo ""
             if [ "$ZIZMOR_OUTCOME" = "success" ]; then
-              echo "No workflow security findings at medium+ severity."
+              echo "No workflow or composite-action findings at medium+ severity."
             else
-              echo "Workflow security findings detected — see job logs for details."
+              echo "GitHub Actions security findings detected — see job logs."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
