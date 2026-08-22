@@ -4171,10 +4171,10 @@ class TestEvalVerdicts:
         assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
         assert not any(name == "mark_pr_implementation_go" for name, _ in github.mutation_log)
 
-    def test_go_with_zero_threads_marks_implementation_go_and_advances_to_merge_wait(
+    def test_go_with_zero_threads_posts_a_public_audit_and_advances_to_merge_wait(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """The PR-review gate marks GO; merge_wait later verifies the exact head."""
+        """A clean GO has a human-readable, head-bound public audit record."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
@@ -4186,10 +4186,144 @@ class TestEvalVerdicts:
 
         assert isinstance(result, StageOutcome)
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
-        assert not github.comments.get(1001)
+        assert github.mutation_log[0][0] == "persist_pending_implementation_go_audit"
+        assert github.mutation_log[1] == ("mark_pr_implementation_go", (1001,))
+        assert github.mutation_log[2][0] == "gh_issue_upsert_comment"
+        assert github.mutation_log[3][0] == "publish_implementation_go_audit"
+        public_comments = github.comments.get(1001, [])
+        assert any(
+            isinstance(comment, str)
+            and comment.startswith(
+                "<!-- hephaestus-implementation-go-audit:"
+                "pr=1001:head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+            )
+            and "## Automated PR review" in comment
+            and "Review summary: fixture audit" in comment
+            for comment in public_comments
+        )
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
         assert item.attempts["pr_review_iter"] == 1  # real verdict counted
+
+    def test_go_removes_only_the_matching_recovery_handoff_after_public_audit(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A published audit makes its exact-head recovery receipt disposable."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = _valid_audit()
+        matching_handoff = (
+            "<!-- hephaestus-implementation-reply-handoff:"
+            "pr=1001:head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:"
+            "batch=0123456789abcdef0123456789abcdef -->\n"
+            "<!-- {} -->"
+        )
+        other_handoff = (
+            "<!-- hephaestus-implementation-reply-handoff:"
+            "pr=1001:head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:"
+            "batch=fedcba9876543210fedcba9876543210 -->\n"
+            "<!-- {} -->"
+        )
+        github.comments[1001] = [matching_handoff, other_handoff]
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "review audit; merge wait pending"
+        )
+        assert not any(
+            isinstance(comment, str) and "head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:" in comment
+            for comment in github.comments[1001]
+        )
+        assert any(
+            isinstance(comment, str) and "head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:" in comment
+            for comment in github.comments[1001]
+        )
+
+    def test_go_retries_when_the_public_audit_is_not_durable(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """GO remains retryable when its required public audit write fails."""
+
+        class AuditWriteFailsGitHub(FakeStageGitHub):
+            def publish_implementation_go_audit(
+                self, pr_number: int, head_sha: str, audit: ReviewAudit
+            ) -> None:
+                del pr_number, head_sha, audit
+                raise RuntimeError("comment unavailable")
+
+        stage = PrReviewStage()
+        github = AuditWriteFailsGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = _valid_audit()
+
+        assert stage.step(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.RETRY, "implementation_go_audit_retry"
+        )
+        assert [name for name, _args in github.mutation_log] == [
+            "persist_pending_implementation_go_audit",
+            "mark_pr_implementation_go",
+        ]
+        assert 1001 in github.pending_go_audits
+
+    def test_go_audit_publication_retries_are_bounded_backed_off_and_do_not_rereview(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Repeated publication failures stay in the receipt-backed publish state."""
+
+        class AuditWriteFailsGitHub(FakeStageGitHub):
+            def publish_implementation_go_audit(
+                self, pr_number: int, head_sha: str, audit: ReviewAudit
+            ) -> None:
+                del pr_number, head_sha, audit
+                raise RuntimeError("comment unavailable")
+
+        stage = PrReviewStage()
+        github = AuditWriteFailsGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = _valid_audit()
+        ctx = make_ctx(github=github)
+
+        for expected_delay in (1.0, 2.0, 4.0):
+            assert stage.step(item, ctx) == StageOutcome(
+                Disposition.RETRY, "implementation_go_audit_retry"
+            )
+            assert item.state == "GO_AUDIT_PUBLISH"
+            assert item.payload["retry_delay_s"] == expected_delay
+
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.FINISH_FAIL, "implementation_go_audit_failed"
+        )
+        names = [name for name, _args in github.mutation_log]
+        assert names.count("persist_pending_implementation_go_audit") == 1
+        assert names.count("mark_pr_implementation_go") == 1
+        assert item.attempts["pr_review_iter"] == 1
+        assert 1001 in github.pending_go_audits
+
+    def test_restart_resumes_pending_audit_without_reviewer_or_label_rewrite(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reseeded exact-head receipt resumes directly at publication recovery."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)], pr_impl_state=(True, False))
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item.payload.update(
+            {
+                "pending_implementation_go_audit": _valid_audit(),
+                "pending_implementation_go_audit_head": "a" * 40,
+                "pending_implementation_go_label_confirmed": True,
+            }
+        )
+        ctx = make_ctx(github=github)
+
+        assert stage.step(item, ctx) == Continue(next_state="GO_AUDIT_RECEIPT")
+        item.state = "GO_AUDIT_RECEIPT"
+        assert stage.step(item, ctx) == StageOutcome(
+            Disposition.ADVANCE, "review audit; merge wait pending"
+        )
+        names = [name for name, _args in github.mutation_log]
+        assert "mark_pr_implementation_go" not in names
+        assert "publish_implementation_go_audit" in names
+        assert item.attempts["pr_review_iter"] == 0
 
     def test_thread_added_during_go_write_preserves_external_labels_and_restarts_review(
         self, make_ctx: Any, make_work_item: Any
@@ -4258,7 +4392,7 @@ class TestEvalVerdicts:
         assert stage.step(item, ctx) == StageOutcome(
             Disposition.ADVANCE, "review audit; merge wait pending"
         )
-        assert 1001 not in github.comments
+        assert not any(name == "arm_auto_merge" for name, _args in github.mutation_log)
 
     def test_clean_go_marks_the_loop_owned_approval_label(
         self, make_ctx: Any, make_work_item: Any
@@ -4274,7 +4408,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
         assert ("arm_auto_merge", (1001,)) not in github.mutation_log
 
     def test_clean_go_applies_the_approval_label(self, make_ctx: Any, make_work_item: Any) -> None:
@@ -4317,7 +4451,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
     def test_post_go_label_head_drift_restarts_review_without_clearing_labels(
         self, make_ctx: Any, make_work_item: Any
@@ -4389,7 +4523,7 @@ class TestEvalVerdicts:
         assert result == Continue(next_state="REVIEW_WAIT")
         assert "reviewed_pr_head_sha" not in item.payload
         assert github.pr_has_implementation_state_label(1001) == (True, False)
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
     def test_post_go_label_auto_merge_arm_stands_down_without_clearing(
         self, make_ctx: Any, make_work_item: Any
@@ -4472,7 +4606,7 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-        assert github.mutation_log == [("mark_pr_implementation_go", (1001,))]
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
     def test_go_with_preexisting_thread_reenters_remediation_cycle(
         self, make_ctx: Any, make_work_item: Any

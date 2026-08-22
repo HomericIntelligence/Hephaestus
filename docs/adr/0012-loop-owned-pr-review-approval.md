@@ -26,10 +26,12 @@ it belongs in that stage rather than in GitHub Actions.
 2. Remove the separate reviewer stage, its worktree/evidence/guard
    machinery, and its tests. `pr_review` invokes `$athena:pr-review` with its
    normal default behavior when available, otherwise performs the inline
-   fallback. It posts inline findings and a final total grade with GO/NOGO;
-   a GO applies the loop-owned `state:implementation-go` label. It neither
-   publishes a GitHub artifact nor changes CI/CD state; normal review may
-   collect CI/CD evidence and incorporate it into its binary verdict, but CI
+   fallback. It posts inline findings and, after the Go-label proof, one
+   ordinary public PR comment with the informational audit summary. The label,
+   not prose, is the loop-owned `state:implementation-go` authority. Once that
+   public comment is read back, the stage deletes only its exact-head,
+   actor-owned implementation-reply recovery journals. It does not change
+   CI/CD state; normal review may collect CI/CD evidence as context, but CI
    never independently authorizes the loop.
 3. `merge_wait` consumes the loop-owned label only with the current process's
    reviewed-head proof. Pending the separately reviewed #2419 conditional

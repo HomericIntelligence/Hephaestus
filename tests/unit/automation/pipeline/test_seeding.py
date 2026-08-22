@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation import state_labels
+from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.models import IssueState
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.seeding import (
@@ -30,6 +31,7 @@ from hephaestus.automation.pipeline.seeding import (
     seed_issue,
     seed_issue_from_github,
 )
+from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
@@ -475,6 +477,47 @@ class TestSeedIssueFetchLayer:
         assert stage is StageName.PLANNING
         assert STATE_PLAN_BLOCKED not in facts.labels
         github.issue_comments.assert_not_called()
+
+    def test_pending_go_audit_receipt_routes_restart_back_to_pr_review(self) -> None:
+        """A durable receipt outranks the GO label until publication completes."""
+
+        class RestartGitHub:
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                return {
+                    "number": issue_number,
+                    "title": "A task",
+                    "body": "",
+                    "state": "OPEN",
+                    "labels": [],
+                }
+
+            def find_pr_for_issue(self, issue_number: int) -> int:
+                del issue_number
+                return 44
+
+            def find_merged_pr_for_issue(self, issue_number: int) -> None:
+                del issue_number
+                return None
+
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                del pr_number
+                return True, False
+
+            def pending_implementation_go_audit(
+                self, pr_number: int
+            ) -> PendingImplementationGoAudit:
+                return PendingImplementationGoAudit(
+                    pr_number=pr_number,
+                    head_sha="a" * 40,
+                    audit=ReviewAudit("A", "clean", (), "", valid=True),
+                )
+
+        facts = seed_issue_from_github(102, RestartGitHub())
+        entry = seed_entry_from_facts(facts)
+
+        assert entry.stage is StageName.PR_REVIEW
+        assert entry.pending_implementation_go_audit is not None
+        assert entry.pending_implementation_go_label_confirmed is True
 
 
 class TestSeedIssueEpicDetection:

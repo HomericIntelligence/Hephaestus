@@ -174,17 +174,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
         if str(owned[-1].get("body", "")) != body:
-            with github_api._body_file(body) as path:
-                gh_call(
-                    [
-                        "api",
-                        "--method",
-                        "PATCH",
-                        f"/repos/{owner}/{name}/issues/comments/{int(target_id)}",
-                        "-F",
-                        f"body=@{path}",
-                    ]
-                )
+            self._patch_issue_comment(int(target_id), body, repo=(owner, name))
         for duplicate in owned[:-1]:
             duplicate_id = duplicate.get("databaseId")
             if duplicate_id is not None:
@@ -197,6 +187,29 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
                 self._gh(["issue", "comment", str(issue_number), "--body-file", path])
             return
         github_api.gh_issue_comment(issue_number, body)
+
+    def _patch_issue_comment(
+        self,
+        comment_id: int,
+        body: str,
+        *,
+        repo: tuple[str, str] | None = None,
+    ) -> None:
+        """Replace one known actor-owned comment body."""
+        owner, name = repo or (
+            self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
+        )
+        with github_api._body_file(body) as path:
+            gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{comment_id}",
+                    "-F",
+                    f"body=@{path}",
+                ]
+            )
 
     def _delete_issue_comment(self, comment_id: int) -> None:
         """Delete one duplicate actor-owned comment in the configured repository."""
@@ -397,9 +410,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         Repo-stage step 1 [M] (doc section 1): idempotent
         ``_ensure_labels_exist`` over the full ``state_labels`` vocabulary.
         """
-        # Keep provisioning driven by the one shared vocabulary.  In
-        # particular, the orthogonal issue-work guard must be created without
-        # accidentally joining the plan-state routing groups.
+        # The shared vocabulary includes the orthogonal issue-work guard.
         wanted = list(STATE_LABEL_SPECS)
         if self._skip(f"ensure state labels exist: {wanted}"):
             return

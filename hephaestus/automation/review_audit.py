@@ -36,6 +36,7 @@ _SEVERITY_MARKER_RE = re.compile(r"(?im)^[ \t]*<!--\s*hephaestus-severity\s*:")
 MAX_REVIEW_SUMMARY_CHARS = 200
 MAX_RAW_FEEDBACK_CHARS = 4000
 _INVALID_SUMMARY = "No structured reviewer summary was provided."
+_FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 @dataclass(frozen=True)
@@ -240,3 +241,16 @@ def render_review_audit(audit: ReviewAudit) -> str:
         "Eligibility is represented only by the live GitHub implementation-state label; "
         "this audit comment is informational."
     )
+
+
+def render_implementation_go_audit(
+    audit: ReviewAudit, *, pr_number: int, head_sha: str
+) -> tuple[str, str]:
+    """Render one public, idempotent audit comment for an approved PR head."""
+    if pr_number <= 0:
+        raise ValueError("pr_number must be positive")
+    if _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:
+        raise ValueError("head_sha must be a full commit SHA")
+    marker = f"<!-- hephaestus-implementation-go-audit:pr={pr_number}:head={head_sha} -->"
+    body = f"{marker}\n\n{render_review_audit(audit)}\n\nReviewed head: `{head_sha}`."
+    return marker, body

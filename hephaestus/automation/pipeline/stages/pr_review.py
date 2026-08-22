@@ -2,6 +2,7 @@
 # ruff: noqa: F403
 import typing as _typing
 
+from .pr_review_audit import PrReviewAudit
 from .pr_review_gate import PrReviewGate
 from .pr_review_jobs import PrReviewJobs
 
@@ -12,10 +13,13 @@ if _typing.TYPE_CHECKING:
         CLEANUP_REVIEW_WORKTREE_WAIT as CLEANUP_REVIEW_WORKTREE_WAIT,
         DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP as DIRECT_PUSH_REMOTE_CHANGED_RESTART_CAP,
         DIRECT_PUSH_RETRY_CAP as DIRECT_PUSH_RETRY_CAP,
+        ENTER as ENTER,
+        GO_AUDIT_RECEIPT as GO_AUDIT_RECEIPT,
         HOST_VERIFICATION_WAIT as HOST_VERIFICATION_WAIT,
         REVIEW_CHECKOUT_WAIT as REVIEW_CHECKOUT_WAIT,
         REVIEW_ERROR_RETRY_CAP as REVIEW_ERROR_RETRY_CAP,
         Callable,
+        Continue,
         Disposition,
         ItemKind,
         StageContext,
@@ -41,7 +45,7 @@ else:
     from .pr_review_threads import *
 
 
-class PrReviewStage(PrReviewJobs, PrReviewGate):
+class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
     """Public stage façade over review jobs and the approval gate."""
 
     @staticmethod
@@ -74,6 +78,8 @@ class PrReviewStage(PrReviewJobs, PrReviewGate):
             # PR_CREATE step is the designated (re)creation path.
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
+        if item.state == ENTER and item.payload.get("pending_implementation_go_audit"):
+            return Continue(next_state=GO_AUDIT_RECEIPT)
         if (
             item.state == "ENTER"
             and not item.worktree
