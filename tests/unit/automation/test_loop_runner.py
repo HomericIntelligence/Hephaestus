@@ -14,6 +14,7 @@ import json
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +29,7 @@ from hephaestus.automation.loop_runner import (
     _validate_phases,
     main,
 )
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 # ---------------------------------------------------------------------------
@@ -138,6 +140,18 @@ def test_parse_args_rejects_negative_event_log_retention_limits(flag: str) -> No
     """Retention limits reject negative values at the CLI boundary."""
     with pytest.raises(SystemExit):
         loop_runner._parse_args([flag, "-1"])
+
+
+def test_main_wires_private_evidence_receipt_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The normal loop can opt into bounded worker receipts for an evidence run."""
+    config = cast(
+        PipelineConfig,
+        _capture_config(["--agent", "codex", "--evidence-receipt-dir", str(tmp_path)], monkeypatch),
+    )
+
+    assert config.evidence_receipt_dir == tmp_path
 
 
 def test_loop_help_documents_explicit_gh_root_override() -> None:

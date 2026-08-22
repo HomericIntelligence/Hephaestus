@@ -2120,6 +2120,35 @@ def test_resume_agent_session_rejects_unadmitted_pi_before_dispatch(tmp_path: Pa
     resume_pi_session.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "invoke",
+    (
+        lambda cwd: agent_runtime.run_agent_text("pi", "prompt", cwd=cwd, timeout=30),
+        lambda cwd: agent_runtime.run_agent_session("pi", "prompt", cwd=cwd, timeout=30),
+        lambda cwd: agent_runtime.resume_agent_session(
+            "pi", "pi-session-123", "prompt", cwd=cwd, timeout=30
+        ),
+    ),
+    ids=("text", "session", "resume"),
+)
+def test_admitted_pi_requires_execution_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invoke: Any,
+) -> None:
+    """Admitted Pi dispatches preserve the missing-request policy error."""
+    monkeypatch.setattr(agent_runtime, "_require_pi_automation_admission", lambda _cwd: None)
+
+    with patch("hephaestus.agents.runtime._run_pi_with_policy") as run_pi:
+        with pytest.raises(
+            ExecutionPolicyError,
+            match="Pi automation requires an ExecutionRequest",
+        ):
+            invoke(tmp_path)
+
+    run_pi.assert_not_called()
+
+
 def test_run_claude_text_builds_stage_command(tmp_path: Path) -> None:
     """Claude stage execution should share the agents runtime boundary."""
     captured: dict[str, Any] = {}
@@ -2352,7 +2381,7 @@ def test_resolve_pi_reports_package_preflight_remediation(tmp_path: Path) -> Non
         with pytest.raises(RuntimeError, match="hephaestus-install-pi-plugins"):
             agent_runtime.resolve_agent("pi", cwd=tmp_path)
 
-    preflight.assert_called_once_with(tmp_path)
+    preflight.assert_called_once_with(tmp_path, trust_override="--no-approve")
 
 
 def test_resolve_pi_is_na_without_a_host_isolation_adapter(tmp_path: Path) -> None:
@@ -2395,7 +2424,7 @@ def test_direct_pi_helpers_preflight_effective_cwd_before_subprocess(tmp_path: P
     ) as preflight:
         with pytest.raises(RuntimeError, match="package_inventory_mismatch"):
             agent_runtime.run_agent_text("pi", "prompt", cwd=tmp_path, timeout=30)
-    preflight.assert_called_once_with(tmp_path)
+    preflight.assert_called_once_with(tmp_path, trust_override="--no-approve")
 
 
 def test_resolve_agent_explicit_rejects_uninstalled_pi() -> None:

@@ -1,8 +1,13 @@
 # ADR-0029: Explicit Pi isolation-adapter bootstrap
 
 - Status: Accepted
+<<<<<<< HEAD
 - Date: 2026-08-19
 - Tracks: #2791, #2738
+=======
+- Date: 2026-08-10
+- Tracks: #2519, #2738
+>>>>>>> 13d70500 (fix(agents): bootstrap external Pi isolation adapters)
 - Extends: ADR-0019, ADR-0020
 
 ## Context
@@ -36,7 +41,25 @@ The existing in-process `register_pi_isolation_adapter()` seam remains
 available to embedding applications. Both bootstrap paths end at the same
 `PiIsolationAdapter.invoke()` boundary; the external implementation remains
 responsible for enforcing every filesystem and network grant in the resolved
-`ExecutionPolicy`.
+`ExecutionPolicy`. Hephaestus supplies the complete minimized child environment
+at that boundary. It points `PI_CODING_AGENT_DIR` at a disposable profile that
+contains only the preflight-proven package roots plus copied `models.json` and
+`auth.json` files. Actual automation uses explicit offline, no-context, and
+no-approval flags, so ambient extensions, checkout instructions, and saved
+trust cannot change the proven capability set. Adapters must not inherit the
+ambient host environment. An adapter may inject credentials only from its own
+reviewed secret store; it must not recover them from ambient variables.
+Admitted execution uses the exact absolute Pi executable proven by preflight,
+disables ambient skill discovery with `--no-skills`, and adds only
+preflight-proven Athena skill directories through repeatable `--skill`
+arguments. One-shot operations use `--no-session`; resumable operations alone
+may create or reopen durable sessions. Provider output and failures are
+redacted before they cross the shared runtime boundary.
+
+Package admission also rejects dirty Git roots and records a symlink-free
+content digest for every package. Immediately before dispatch, the runtime
+revalidates those digests and copies only the verified content into the
+disposable profile; Pi never executes package code from mutable install roots.
 
 ## Alternatives considered
 
@@ -58,6 +81,11 @@ responsible for enforcing every filesystem and network grant in the resolved
   Hephaestus console entry point without modifying pipeline code.
 - Stock installations and installed-but-unselected broker packages remain
   fail-closed.
+- The adapter must launch the supplied non-interactive command with the
+  supplied child environment so the exact operator-local Pi profile and model
+  selection survive external isolation without forwarding host credentials.
+- The adapter must return trusted observed skill-call identifiers separately
+  from model output and requested command grants.
 - Broker implementation, OS-level enforcement, adversarial validation, and
   deployment remain a separate deliverable tracked by #2738; this decision
   adds no claim that Stage 6 evidence is complete.

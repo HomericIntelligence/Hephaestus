@@ -110,8 +110,24 @@ The factory must return an object implementing
 activate it, and Hephaestus never auto-selects among installed adapters. A
 missing, duplicate, unloadable, or invalid selected entry point fails before a
 Pi provider process starts. The external package remains responsible for
-reviewed enforcement of every filesystem and network grant it receives. See
-[ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md).
+reviewed enforcement of every filesystem and network grant it receives. It
+must launch the supplied command with the supplied minimized environment. That
+Pi-only environment carries a disposable `PI_CODING_AGENT_DIR` containing only
+the preflight-proven packages and the operator's private model/auth files while
+excluding ambient GitHub, cloud, and operator-specific variables. The broker
+may inject an API credential from its own reviewed secret store; it must not
+inherit arbitrary host variables. It must also return trusted observed
+skill-call identifiers separately from provider text and requested grants.
+Hephaestus passes the exact absolute Pi executable proven by preflight,
+disables ambient skills with `--no-skills`, and supplies only allowed,
+preflight-proven Athena directories through repeatable `--skill` arguments.
+One-shot operations use `--no-session`. Successful output and failure
+diagnostics are redacted before queue parsing, logging, or publication.
+Preflight rejects dirty Athena content and hashes every admitted package tree;
+dispatch revalidates each digest and executes only a copied disposable
+snapshot. Modified package content therefore fails before Pi starts.
+See [ADR-0029](adr/0029-explicit-pi-isolation-adapter-bootstrap.md) for the
+bootstrap decision and rejected automatic-loading alternatives.
 
 ## Athena package acceptance
 
@@ -150,6 +166,11 @@ actually executes through `--agent pi`.
 The reviewed external capabilities remain separate catalog-pinned packages:
 `pi-subagents` supplies delegation and `pi-web-access` supplies explicitly
 scoped web access. Athena bundles neither package.
+
+Issue #2519 captures the live Pi/Codex conformance evidence for this provider
+boundary. The private run artifacts live under `build/pi-e2e-2519/<run-id>/`
+and the reproducible publication outputs are `docs/pi-e2e-2519-report.md`
+and `docs/runbooks/pi-e2e-2519.md`.
 
 ### Acceptance collection and publication
 

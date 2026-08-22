@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+import inspect
 import json
 import os
 import shutil
@@ -14,12 +15,12 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from hephaestus.agents.execution_policy import (
     AgentOperation,
@@ -32,7 +33,9 @@ from hephaestus.agents.execution_policy import (
 )
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
+    package_tree_digest,
     preflight_pi_environment,
+    prove_athena_skill_command,
 )
 from hephaestus.agents.pi_session import (
     AgentSessionBinding,
@@ -43,6 +46,7 @@ from hephaestus.agents.pi_session import (
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
+from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import strip_null_bytes
 
 AgentName = Literal["claude", "codex", "pi"]
@@ -135,6 +139,7 @@ class AgentRunResult:
     stderr: str
     session_id: str | None = None
     session_binding: AgentSessionBinding | None = None
+    observed_skill_invocations: tuple[str, ...] = ()
 
 
 class AgentExecutionError(RuntimeError):
@@ -154,7 +159,15 @@ class PiIsolationAdapter(Protocol):
 
     Pi's native tool allowlist is model-visible only.  An implementation of
     this protocol must enforce the filesystem mount and network relay named by
-    ``policy`` before it starts the provider process.
+    ``policy`` before it starts the provider process.  It must also enter the
+    supplied ``process_tracker`` around each live provider child when the host
+    supplies one, so queue shutdown can terminate the child's process group.
+    The provider must be launched with ``command`` and ``environment`` exactly
+    as supplied; inheriting the adapter process environment would reintroduce
+    ambient credentials outside the reviewed Pi profile. Broker-owned secrets
+    may be injected from the adapter's own credential store, but never copied
+    from ambient variables. The adapter returns trusted skill-call events in
+    ``AgentRunResult.observed_skill_invocations``.
     """
 
     def invoke(
@@ -162,13 +175,15 @@ class PiIsolationAdapter(Protocol):
         *,
         policy: ExecutionPolicy,
         command: list[str],
+        environment: dict[str, str],
         prompt: str,
         cwd: Path,
         timeout: int,
         model: str,
         session_id: str | None,
+        process_tracker: ProcessTracker | None,
     ) -> AgentRunResult:
-        """Start Pi with externally enforced filesystem and network constraints."""
+        """Start Pi with external constraints and host-owned process tracking."""
         raise NotImplementedError
 
 
@@ -236,7 +251,33 @@ def register_pi_isolation_adapter(adapter: PiIsolationAdapter) -> None:
     integration opt in without exposing an unscoped provider runner.
     """
     global _PI_ISOLATION_ADAPTER
+    if not _supports_pi_isolation_adapter_invoke_contract(adapter):
+        raise PiIsolationUnavailableError(
+            "Pi isolation adapter does not implement invoke() with the required keyword contract"
+        )
     _PI_ISOLATION_ADAPTER = adapter
+
+
+def _supports_pi_isolation_adapter_invoke_contract(adapter: object) -> bool:
+    """Return whether ``adapter.invoke`` accepts the runtime's keyword call."""
+    try:
+        invoke = getattr(adapter, "invoke", None)
+        if not callable(invoke):
+            return False
+        inspect.signature(invoke).bind(
+            policy=object(),
+            command=[],
+            environment={},
+            prompt="",
+            cwd=Path("."),
+            timeout=0,
+            model="",
+            session_id=None,
+            process_tracker=None,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def _load_configured_pi_isolation_adapter() -> None:
@@ -263,14 +304,14 @@ def _load_configured_pi_isolation_adapter() -> None:
     try:
         factory = matches[0].load()
         adapter = factory()
-        invoke = getattr(adapter, "invoke", None)
     except Exception:
         raise PiIsolationUnavailableError(
             f"Pi isolation adapter {adapter_name!r} could not be initialized"
         ) from None
-    if not callable(invoke):
+    if not _supports_pi_isolation_adapter_invoke_contract(adapter):
         raise PiIsolationUnavailableError(
-            f"Pi isolation adapter {adapter_name!r} does not implement invoke()"
+            f"Pi isolation adapter {adapter_name!r} does not implement invoke() with the "
+            "required keyword contract"
         )
     register_pi_isolation_adapter(adapter)
 
@@ -445,7 +486,7 @@ def _require_pi_automation_admission(cwd: Path) -> PiPreflightResult:
             "Pi automation disabled by HEPH_DISABLE_PI_AUTOMATION=1; "
             "no Pi or broker process was started"
         )
-    result = preflight_pi_environment(cwd)
+    result = preflight_pi_environment(cwd, trust_override="--no-approve")
     if not result.ready:
         raise AgentExecutionError(f"{PI_AUTOMATION_PREFLIGHT_ERROR} {result.remediation_message()}")
     return result
@@ -1588,11 +1629,55 @@ def _run_codex_command(
     return AgentRunResult(stdout=stdout, stderr=stderr_text, session_id=session_id)
 
 
-def _pi_base_cmd(*, session_id: str | None = None) -> list[str]:
-    """Build a Pi JSON-mode command without alias values in argv."""
-    cmd = ["pi", "--mode", "json"]
-    if session_id:
+def _pi_base_cmd(
+    executable: Path,
+    *,
+    lifecycle: SessionLifecycle,
+    session_id: str | None = None,
+) -> list[str]:
+    """Build the common Pi JSON-mode command."""
+    cmd = [str(executable), "--mode", "json"]
+    if lifecycle is SessionLifecycle.ONE_SHOT:
+        cmd.append("--no-session")
+    elif session_id:
         cmd.extend(["--session", session_id])
+    return cmd
+
+
+def _pi_automation_cmd(
+    executable: Path,
+    *,
+    model: str,
+    lifecycle: SessionLifecycle,
+    session_id: str | None = None,
+) -> list[str]:
+    """Build a non-interactive Pi command with explicit private selection."""
+    provider = os.environ.get(PI_PROVIDER_ENV, "").strip()
+    selected_model = model.strip() or os.environ.get(PI_MODEL_ENV, "").strip()
+    missing: list[str] = []
+    if not provider:
+        missing.append(PI_PROVIDER_ENV)
+    if not selected_model:
+        missing.append(PI_MODEL_ENV)
+    if missing:
+        raise AgentExecutionError(
+            "Pi automation requires operator-local provider selection: " + ", ".join(missing)
+        )
+    cmd = _pi_base_cmd(executable, lifecycle=lifecycle, session_id=session_id)
+    cmd.extend(
+        [
+            "--print",
+            "--offline",
+            "--no-approve",
+            "--no-context-files",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--provider",
+            provider,
+            "--model",
+            selected_model,
+        ]
+    )
     return cmd
 
 
@@ -1644,6 +1729,80 @@ def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
     env["PI_TELEMETRY"] = "0"
     env["PI_SKIP_VERSION_CHECK"] = "1"
     return env
+
+
+def _pi_automation_env(profile_dir: Path) -> dict[str, str]:
+    """Return the explicit child environment for an admitted Pi process."""
+    safe_names = (
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "COMSPEC",
+        "PATHEXT",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "PI_CODING_AGENT_SESSION_DIR",
+        "PI_PACKAGE_DIR",
+    )
+    env = {name: value for name in safe_names if (value := os.environ.get(name))}
+    env.setdefault("PATH", os.defpath)
+    env["PI_CODING_AGENT_DIR"] = str(profile_dir)
+    env["PI_OFFLINE"] = "1"
+    env["PI_TELEMETRY"] = "0"
+    env["PI_SKIP_VERSION_CHECK"] = "1"
+    return env
+
+
+@contextlib.contextmanager
+def _pi_automation_profile(
+    preflight: PiPreflightResult,
+) -> Iterator[tuple[Path, dict[str, Path]]]:
+    """Materialize the exact preflight-proven packages plus private model/auth data."""
+    inventory = preflight.inventory
+    if inventory is None or not inventory.ready:
+        raise AgentExecutionError("Pi automation lacks a verified package inventory")
+    source_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent")).expanduser()
+    with tempfile.TemporaryDirectory(prefix="pi-automation-") as temporary:
+        profile_dir = Path(temporary)
+        profile_dir.chmod(0o700)
+        snapshot_roots: dict[str, Path] = {}
+        for key, source in sorted(inventory.roots.items()):
+            expected = inventory.content_sha256.get(key)
+            if not expected or package_tree_digest(source) != expected:
+                raise AgentExecutionError(f"Pi package {key!r} content changed after preflight")
+            destination = profile_dir / "packages" / key
+            shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git"))
+            if package_tree_digest(destination) != expected:
+                raise AgentExecutionError(f"Pi package {key!r} snapshot integrity failed")
+            snapshot_roots[key] = destination
+        write_secure(
+            profile_dir / "settings.json",
+            json.dumps(
+                {"packages": [str(root) for _, root in sorted(snapshot_roots.items())]},
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        for filename in ("models.json", "auth.json"):
+            source = source_dir / filename
+            if not source.is_file() or source.is_symlink() or source.stat().st_size > 1024 * 1024:
+                continue
+            destination = profile_dir / filename
+            write_secure(destination, source.read_text(encoding="utf-8"))
+        yield profile_dir, snapshot_roots
 
 
 def _pi_json_session_ids(text: str) -> tuple[str, ...]:
@@ -1910,16 +2069,38 @@ def _require_pi_request(execution_request: ExecutionRequest | None) -> Execution
     return resolve_policy(execution_request)
 
 
-def _pi_policy_args(policy: ExecutionPolicy) -> list[str]:
+def _require_admitted_pi_policy(
+    cwd: Path, execution_request: ExecutionRequest | None
+) -> tuple[ExecutionPolicy, PiPreflightResult]:
+    """Require Pi admission before resolving its caller-supplied execution policy."""
+    preflight = _require_pi_automation_admission(cwd)
+    return _require_pi_request(execution_request), preflight
+
+
+def _pi_policy_args(
+    policy: ExecutionPolicy,
+    preflight: PiPreflightResult,
+    package_roots: dict[str, Path],
+) -> list[str]:
     """Translate a reviewed policy to Pi's model-visible capability flags.
 
     These flags are intentionally only a second layer.  The runtime's external
     isolation adapter remains the authority for filesystem and network access.
     """
-    args = ["--tools", ",".join(sorted(policy.builtins))]
+    args = ["--tools", ",".join(sorted(policy.builtins)), "--no-skills"]
     if policy.skills:
-        commands = ",".join(f"skill:{skill.split(':', 1)[1]}" for skill in policy.skills)
-        args.extend(["--commands", commands])
+        for skill in sorted(policy.skills):
+            command = f"skill:{skill.split(':', 1)[1]}"
+            prove_athena_skill_command(command, preflight)
+            skill_path = package_roots["athena"] / "skills" / command.removeprefix("skill:")
+            try:
+                resolved = skill_path.resolve(strict=True)
+                package_root = package_roots["athena"].resolve(strict=True)
+            except OSError as exc:
+                raise AgentExecutionError(f"Pi skill {command!r} is unavailable") from exc
+            if not resolved.is_relative_to(package_root) or not (resolved / "SKILL.md").is_file():
+                raise AgentExecutionError(f"Pi skill {command!r} escaped its proven package")
+            args.extend(["--skill", str(resolved)])
     return args
 
 
@@ -1930,17 +2111,16 @@ def _run_pi_with_policy(
     timeout: int,
     model: str,
     policy: ExecutionPolicy,
+    preflight: PiPreflightResult,
+    lifecycle: SessionLifecycle,
     session_id: str | None = None,
+    process_tracker: ProcessTracker | None = None,
 ) -> AgentRunResult:
     """Run Pi through the verified OS-isolation adapter for ``policy``.
 
     No fallback invokes Pi directly: its native ``--tools`` flags cannot
     enforce the policy's filesystem mount or network-relay boundary.
     """
-    command = _pi_base_cmd(session_id=session_id)
-    command.extend(_pi_policy_args(policy))
-    if _PI_ISOLATION_ADAPTER is None:
-        _load_configured_pi_isolation_adapter()
     adapter = _PI_ISOLATION_ADAPTER
     if adapter is None:
         raise PiIsolationUnavailableError(
@@ -1948,15 +2128,82 @@ def _run_pi_with_policy(
             f"filesystem={policy.filesystem.value} network={policy.network.value}; "
             "no Pi provider process was started"
         )
-    return adapter.invoke(
-        policy=policy,
-        command=command,
-        prompt=prompt,
-        cwd=cwd,
-        timeout=timeout,
-        model=model,
-        session_id=session_id,
+    if preflight.executable is None:
+        raise AgentExecutionError("Pi automation lacks a preflight-proven executable")
+    try:
+        executable = preflight.executable.resolve(strict=True)
+        metadata = executable.stat()
+    except OSError as exc:
+        raise AgentExecutionError("Pi preflight-proven executable is unavailable") from exc
+    if executable != preflight.executable:
+        raise AgentExecutionError("Pi preflight-proven executable identity drifted")
+    fingerprint = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+    if fingerprint != preflight.executable_fingerprint:
+        raise AgentExecutionError("Pi preflight-proven executable identity drifted")
+    tokens = pi_private_redaction_tokens(cwd, model)
+    try:
+        with _pi_automation_profile(preflight) as (profile_dir, package_roots):
+            command = _pi_automation_cmd(
+                executable,
+                model=model,
+                lifecycle=lifecycle,
+                session_id=session_id,
+            )
+            command.extend(_pi_policy_args(policy, preflight, package_roots))
+            result = adapter.invoke(
+                policy=policy,
+                command=command,
+                environment=_pi_automation_env(profile_dir),
+                prompt=prompt,
+                cwd=cwd,
+                timeout=timeout,
+                model=model,
+                session_id=session_id,
+                process_tracker=process_tracker,
+            )
+    except subprocess.CalledProcessError as exc:
+        raise subprocess.CalledProcessError(
+            exc.returncode,
+            _redact_pi_command_args(exc.cmd, tokens),
+            output=_redact_pi_exception_output(exc.stdout, tokens),
+            stderr=_redact_pi_exception_output(exc.stderr, tokens),
+        ) from None
+    except subprocess.TimeoutExpired as exc:
+        raise subprocess.TimeoutExpired(
+            _redact_pi_command_args(exc.cmd, tokens),
+            exc.timeout,
+            output=_redact_pi_exception_output(exc.stdout, tokens),
+            stderr=_redact_pi_exception_output(exc.stderr, tokens),
+        ) from None
+    except Exception as exc:
+        detail = redact_pi_private_values(str(exc), tokens)
+        raise AgentExecutionError(f"Pi isolation adapter invocation failed: {detail}") from None
+    allowed_skills = set(policy.skills)
+    observed = tuple(dict.fromkeys(result.observed_skill_invocations))
+    if any(skill not in allowed_skills for skill in observed):
+        raise AgentExecutionError("Pi isolation adapter reported an ungranted skill invocation")
+    return AgentRunResult(
+        stdout=redact_pi_private_values(result.stdout, tokens),
+        stderr=redact_pi_private_values(result.stderr, tokens),
+        session_id=result.session_id,
+        session_binding=result.session_binding,
+        observed_skill_invocations=observed,
     )
+
+
+def _redact_pi_exception_output(
+    value: str | bytes | None, tokens: Iterable[str]
+) -> str | bytes | None:
+    """Redact private Pi values while preserving subprocess output types."""
+    if isinstance(value, bytes):
+        redacted = value
+        for token in tokens:
+            if token:
+                redacted = redacted.replace(token.encode(), PI_PRIVATE_REDACTION.encode())
+        return redacted
+    if isinstance(value, str):
+        return redact_pi_private_values(value, tokens)
+    return None
 
 
 def run_agent_text(
@@ -1972,12 +2219,9 @@ def run_agent_text(
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
     if is_pi(agent):
-        _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
-        if (
-            execution_request is None
-            or execution_request.lifecycle is not SessionLifecycle.ONE_SHOT
-        ):
+        policy, preflight = _require_admitted_pi_policy(cwd, execution_request)
+        pi_request = cast(ExecutionRequest, execution_request)
+        if pi_request.lifecycle is not SessionLifecycle.ONE_SHOT:
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
     if is_codex(agent):
         return run_codex_text(
@@ -1997,6 +2241,8 @@ def run_agent_text(
             timeout=timeout,
             model=model,
             policy=policy,
+            preflight=preflight,
+            lifecycle=execution_request.lifecycle,
         )
         return subprocess.CompletedProcess(
             args=["pi", "--mode", "json"], returncode=0, stdout=result.stdout, stderr=result.stderr
@@ -2019,16 +2265,14 @@ def run_agent_session(
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     if is_pi(agent):
-        _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
-        if execution_request is None:
-            raise AssertionError("unreachable")
-        if execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
+        policy, preflight = _require_admitted_pi_policy(cwd, execution_request)
+        pi_request = cast(ExecutionRequest, execution_request)
+        if pi_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
                 raise PiSessionBindingError(
                     "Pi resume-required execution is missing a session binding"
                 )
-            validate_pi_binding(resume_binding, cwd=cwd, role=execution_request.role, model=model)
+            validate_pi_binding(resume_binding, cwd=cwd, role=pi_request.role, model=model)
         elif resume_binding is not None:
             raise PiSessionBindingError(
                 "Pi start-new or one-shot execution must not receive a session binding"
@@ -2052,16 +2296,24 @@ def run_agent_session(
             timeout=timeout,
             model=model,
             policy=policy,
+            preflight=preflight,
+            lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id if resume_binding is not None else None,
+            process_tracker=process_tracker,
         )
         if execution_request.lifecycle is SessionLifecycle.ONE_SHOT:
-            return AgentRunResult(stdout=result.stdout, stderr=result.stderr)
+            return AgentRunResult(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                observed_skill_invocations=result.observed_skill_invocations,
+            )
         if not result.session_id:
             raise PiSessionBindingError("Pi did not emit a session id for a resumable operation")
         return AgentRunResult(
             stdout=result.stdout,
             stderr=result.stderr,
             session_id=result.session_id,
+            observed_skill_invocations=result.observed_skill_invocations,
             session_binding=create_pi_binding(
                 session_id=result.session_id,
                 cwd=cwd,
@@ -2088,18 +2340,15 @@ def resume_agent_session(
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     if is_pi(agent):
-        _require_pi_automation_admission(cwd)
-        policy = _require_pi_request(execution_request)
-        if (
-            execution_request is None
-            or execution_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED
-        ):
+        policy, preflight = _require_admitted_pi_policy(cwd, execution_request)
+        pi_request = cast(ExecutionRequest, execution_request)
+        if pi_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(
                 "Pi session resume requires a RESUME_REQUIRED ExecutionRequest"
             )
         if resume_binding is None:
             raise PiSessionBindingError("Pi session resume requires a complete session binding")
-        validate_pi_binding(resume_binding, cwd=cwd, role=execution_request.role, model=model)
+        validate_pi_binding(resume_binding, cwd=cwd, role=pi_request.role, model=model)
         if session_id != resume_binding.session_id:
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
     if is_codex(agent):
@@ -2122,12 +2371,16 @@ def resume_agent_session(
             timeout=timeout,
             model=model,
             policy=policy,
+            preflight=preflight,
+            lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id,
+            process_tracker=process_tracker,
         )
         return AgentRunResult(
             stdout=result.stdout,
             stderr=result.stderr,
             session_id=result.session_id or resume_binding.session_id,
+            observed_skill_invocations=result.observed_skill_invocations,
             session_binding=create_pi_binding(
                 session_id=result.session_id or resume_binding.session_id,
                 cwd=cwd,

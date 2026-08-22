@@ -22,12 +22,15 @@ from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
+from hephaestus.agents import runtime as agent_runtime
 from hephaestus.agents.execution_policy import (
     AgentOperation,
     AgentRole,
+    ExecutionPolicy,
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.pi_plugins import InventoryResult, PiPreflightResult
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.agents.runtime import AgentExecutionError, AgentRunResult
 from hephaestus.automation import git_utils, subprocess_registry
@@ -82,6 +85,91 @@ from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
+_TEST_AGENT_CWD = Path(__file__).resolve().parents[4] / "build" / "worker-pool-tests"
+
+
+def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) -> None:
+    """Opt-in evidence records the queue result without exposing provider output."""
+    receipt_dir = tmp_path / "receipts"
+    request = ExecutionRequest(
+        AgentRole.PLANNER,
+        AgentOperation.PLAN,
+        SessionLifecycle.START_NEW,
+    )
+    job = AgentJob(
+        repo="Hephaestus",
+        issue=2519,
+        agent="pi",
+        model="pi-model",
+        prompt_builder=lambda: "private prompt",
+        cwd=tmp_path,
+        timeout_s=60,
+        execution_request=request,
+        descr="plan",
+    )
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+        evidence_receipt_dir=receipt_dir,
+    )
+    try:
+        with patch.object(
+            pool,
+            "_run_agent",
+            return_value=JobResult(ok=True, session_id="pi-session-2519"),
+        ):
+            result = pool._run(job, claim_key="Hephaestus#2519", claim_stage="planning")
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    assert result.ok is True
+    receipts = list(receipt_dir.glob("*.json"))
+    assert len(receipts) == 1
+    payload = json.loads(receipts[0].read_text())
+    assert payload["job_type"] == "agent"
+    assert payload["provider"] == "pi"
+    assert payload["session_id"] == "pi-session-2519"
+    assert payload["execution_request"] == {
+        "role": "planner",
+        "operation": "plan",
+        "lifecycle": "start_new",
+    }
+    assert payload["tool_scopes"] == ["find", "grep", "ls", "read"]
+    assert "private prompt" not in receipts[0].read_text()
+
+
+def test_evidence_receipts_cover_host_lifecycle_jobs(tmp_path: Path) -> None:
+    """The private sink records build, Git, and GitHub lifecycle boundaries."""
+    receipt_dir = tmp_path / "receipts"
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        lock_dir=tmp_path,
+        evidence_receipt_dir=receipt_dir,
+    )
+    jobs: list[BuildTestJob | GitJob] = [
+        BuildTestJob("Hephaestus", tmp_path, ("uv", "run", "pytest"), 60, descr="tests"),
+        GitJob("Hephaestus", "push", 60, descr="push"),
+    ]
+    try:
+        for job in jobs:
+            pool._persist_evidence_receipt(
+                job,
+                JobResult(ok=True),
+                "Hephaestus#2519",
+                "implementation",
+            )
+    finally:
+        pool.shutdown(mark_interrupted=False)
+
+    payloads = [json.loads(path.read_text()) for path in receipt_dir.glob("*.json")]
+    assert {payload["job_type"] for payload in payloads} == {"build_test", "git"}
+    assert all(payload["claim_key"] == "Hephaestus#2519" for payload in payloads)
+    assert all(payload["claim_stage"] == "implementation" for payload in payloads)
+    assert all(payload["interrupted"] is False for payload in payloads)
 
 
 def _executable_path(name: str, *, path: str | None = None) -> str:
@@ -194,13 +282,14 @@ def _agent_job(model: str = "opus-4-8", **overrides: object) -> AgentJob:
     Failing-path tests pass a unique ``model`` to keep their invocation
     details distinct while the runtime circuit breaker remains shared.
     """
+    _TEST_AGENT_CWD.mkdir(parents=True, exist_ok=True)
     defaults: dict[str, object] = {
         "repo": "test/repo",
         "issue": 123,
         "agent": "claude",
         "model": model,
         "prompt_builder": lambda: "test prompt",
-        "cwd": Path("/tmp"),
+        "cwd": _TEST_AGENT_CWD,
         "timeout_s": 60,
         "descr": "test job",
     }
@@ -6439,6 +6528,97 @@ class TestOnFutureDone:
 )
 class TestShutdownReapsSubprocess:
     """WorkerPool.shutdown() SIGTERMs in-flight agent process groups (#2059)."""
+
+    def test_shutdown_terminates_registered_pi_adapter_subprocess_fast(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A registered Pi adapter exposes its child to worker-pool cleanup."""
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+        class Adapter:
+            def invoke(
+                self,
+                *,
+                policy: ExecutionPolicy,
+                command: list[str],
+                environment: dict[str, str],
+                prompt: str,
+                cwd: Path,
+                timeout: int,
+                model: str,
+                session_id: str | None,
+                process_tracker: agent_runtime.ProcessTracker | None,
+            ) -> AgentRunResult:
+                del policy, environment, prompt, model, session_id
+                assert process_tracker is not None
+                process = subprocess.Popen(
+                    sleeper,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                with process_tracker(process.pid):
+                    stdout, stderr = process.communicate(timeout=timeout)
+                if process.returncode:
+                    raise subprocess.CalledProcessError(
+                        process.returncode,
+                        command,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+                return AgentRunResult(
+                    stdout=stdout,
+                    stderr=stderr,
+                    session_id="pi-session",
+                )
+
+        monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", None)
+        monkeypatch.setattr(
+            agent_runtime,
+            "_require_pi_automation_admission",
+            lambda _cwd: PiPreflightResult.ready_result(
+                InventoryResult(True, "ready", {}, {}),
+                executable=Path(sys.executable).resolve(),
+            ),
+        )
+        monkeypatch.setenv("HEPH_PI_PROVIDER", "operator-provider")
+        agent_runtime.register_pi_isolation_adapter(Adapter())
+        request = ExecutionRequest(
+            AgentRole.IMPLEMENTER,
+            AgentOperation.IMPLEMENT,
+            SessionLifecycle.START_NEW,
+        )
+        job = _agent_job(
+            agent="pi",
+            model="reap-test",
+            timeout_s=60,
+            session_agent="implementer",
+            cwd=tmp_path,
+            execution_request=request,
+        )
+
+        with patch(f"{_WP}.resolve_agent", return_value="pi"):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            deadline = time.monotonic() + 10
+            while subprocess_registry.live_count() == 0 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert subprocess_registry.live_count() == 1, "Pi subprocess never registered"
+
+            t0 = time.monotonic()
+            pool.shutdown()
+            _handle, result = completion_q.get(timeout=10)
+            elapsed = time.monotonic() - t0
+
+        assert elapsed < 15, f"shutdown did not reap Pi fast ({elapsed:.1f}s)"
+        assert subprocess_registry.live_count() == 0
+        assert result.ok is False
+        assert result.interrupted is True
 
     def test_shutdown_terminates_running_codex_subprocess_fast(
         self,

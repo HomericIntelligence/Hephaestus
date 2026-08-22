@@ -544,10 +544,11 @@ auxiliary queues.
 The default `hephaestus-automation-loop` path is the queue-based in-process
 pipeline in `hephaestus.automation.pipeline.coordinator`. The coordinator owns
 eight bounded stage queues. A main worker pool runs ordinary work. A separate
-host-only pool runs learning and terminal cleanup. Each agent job runs either
-**Claude Code** or **Codex**, chosen via the
-optional `--agent` CLI flag or auto-detected with a Claude preference when
-omitted (see `hephaestus.agents.runtime.add_agent_argument`).
+host-only pool runs learning and terminal cleanup. Each agent job runs
+**Claude Code**, **Codex**, or an explicitly admitted
+**Pi** host integration, chosen via the optional `--agent` CLI flag or
+auto-detected with a Claude preference when omitted (see
+`hephaestus.agents.runtime.add_agent_argument`). Pi is never auto-selected.
 
 **Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
 its normal default behavior when available, otherwise uses its inline-review

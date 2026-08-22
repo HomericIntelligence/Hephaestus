@@ -23,6 +23,7 @@ class JobResult:
     session_id: str | None = None
     session_binding: Any = None
     session_lost: bool = False
+    observed_skill_invocations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, eq=False)

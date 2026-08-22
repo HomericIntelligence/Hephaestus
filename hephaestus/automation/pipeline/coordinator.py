@@ -113,6 +113,7 @@ class Coordinator(
                     dry_run=config.dry_run,
                 ),
                 athena_skill_executor=athena_executor,
+                evidence_receipt_dir=config.evidence_receipt_dir,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

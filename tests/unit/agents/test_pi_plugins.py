@@ -208,6 +208,7 @@ def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
         catalog,
         pi_dir=pi_dir,
         git_head=lambda root: catalog.packages[0].pin if root == athena_root else "",
+        git_status=lambda _root: "",
     )
 
     assert result.ready is True
@@ -239,11 +240,62 @@ def test_project_inventory_uses_pi_npm_node_modules_layout(tmp_path: Path) -> No
         catalog,
         pi_dir=tmp_path / "pi-home",
         git_head=lambda root: catalog.packages[0].pin if root == athena_root else "",
+        git_status=lambda _root: "",
     )
 
     assert result.ready is True
     assert result.roots["pi-web-access"] == (project_npm_root / "pi-web-access").resolve()
     assert set(result.scopes.values()) == {"project"}
+
+
+def test_inventory_rejects_packages_outside_the_pinned_catalog(tmp_path: Path) -> None:
+    """Preflight and execution cannot observe different package sets."""
+    from hephaestus.agents import pi_plugins
+
+    pi_dir = tmp_path / "pi-home"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    catalog = pi_plugins.load_pi_package_catalog()
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        json.dumps({"packages": [*catalog.install_specs, "npm:extra-private-package@1.0.0"]}),
+        encoding="utf-8",
+    )
+
+    result = pi_plugins.inspect_pi_package_inventory(cwd, catalog, pi_dir=pi_dir)
+
+    assert result.ready is False
+    assert result.status == "package_inventory_mismatch"
+
+
+def test_inventory_rejects_dirty_git_package_at_pinned_head(tmp_path: Path) -> None:
+    """A pinned commit cannot hide modified or untracked executable content."""
+    from hephaestus.agents import pi_plugins
+
+    pi_dir = tmp_path / "pi-home"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    catalog = pi_plugins.load_pi_package_catalog()
+    pi_dir.mkdir()
+    (pi_dir / "settings.json").write_text(
+        json.dumps({"packages": list(catalog.install_specs)}), encoding="utf-8"
+    )
+    athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
+    npm_root = pi_dir / "npm" / "node_modules"
+    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(npm_root / "pi-subagents", "pi-subagents", "0.37.2")
+    _write_package(npm_root / "pi-web-access", "pi-web-access", "0.15.0")
+
+    result = pi_plugins.inspect_pi_package_inventory(
+        cwd,
+        catalog,
+        pi_dir=pi_dir,
+        git_head=lambda _root: catalog.packages[0].pin,
+        git_status=lambda _root: "?? skills/injected/SKILL.md",
+    )
+
+    assert result.ready is False
+    assert result.status == "package_content_mismatch"
 
 
 def test_probe_requires_verified_source_info_provenance(tmp_path: Path) -> None:
@@ -379,7 +431,7 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     cwd.mkdir()
     (pi_dir / "settings.json").parent.mkdir(parents=True)
     (pi_dir / "settings.json").write_text(
-        json.dumps({"packages": [*catalog.install_specs, "npm:unverified-package@1.0.0"]}),
+        json.dumps({"packages": list(catalog.install_specs)}),
         encoding="utf-8",
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
@@ -478,10 +530,13 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         pi_dir=pi_dir,
         runner=runner,
         git_head=lambda _root: catalog.packages[0].pin,
+        git_status=lambda _root: "",
     )
 
     assert result.ready is True
     assert result.status == "ready"
+    assert result.executable == executable.resolve()
+    assert result.executable_fingerprint is not None
     assert len(rpc_calls) == 1
     assert "--mode" in rpc_calls[0]
     assert "rpc" in rpc_calls[0]
@@ -908,6 +963,7 @@ def test_global_no_approve_inventory_ignores_project_package_shadow(tmp_path: Pa
         catalog,
         pi_dir=pi_dir,
         git_head=lambda _root: catalog.packages[0].pin,
+        git_status=lambda _root: "",
         include_project=False,
     )
 

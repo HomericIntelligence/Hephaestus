@@ -29,6 +29,7 @@ class _RecordingWorkerPool:
         gh_extra_path_root: Path | None = None,
         github_job_runner: Any = None,
         athena_skill_executor: Any = None,
+        evidence_receipt_dir: Path | None = None,
     ) -> None:
         del lock_dir
         self.size = size
@@ -37,6 +38,7 @@ class _RecordingWorkerPool:
         self.gh_extra_path_root = gh_extra_path_root
         self.github_job_runner = github_job_runner
         self.athena_skill_executor = athena_skill_executor
+        self.evidence_receipt_dir = evidence_receipt_dir
 
 
 def _config(
@@ -81,6 +83,7 @@ def test_coordinator_uses_independent_main_and_learning_capacities(
     assert coordinator.pool.gh_extra_path_root is None
     assert coordinator.pool.github_job_runner is not None
     assert coordinator.pool.athena_skill_executor is not None
+    assert coordinator.pool.evidence_receipt_dir is None
 
 
 def test_coordinator_passes_extra_gh_root_to_worker_pool(

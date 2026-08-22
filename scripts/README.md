@@ -84,28 +84,19 @@ through installed `hephaestus-*` console scripts.
 - **`publish_pi_package_acceptance.py`** — Publish and exactly read back the
   actor-owned Athena `v0.4.0` acceptance comment on issue #2515.
 
-Collection is read-only with respect to GitHub:
+### Pi end-to-end evidence
 
-```bash
-uv run python scripts/pi_package_acceptance.py collect \
-  --athena-checkout "$ATHENA_CHECKOUT" \
-  --implementation-pr "$HEPHAESTUS_PR_NUMBER" \
-  --pi-bin "$ATHENA_PI_BIN" \
-  --output-dir build/pi-acceptance
-```
+- **`pi_e2e_2519.py`** — Collect the live issue #2519 Pi/Codex evidence run,
+  keep the private raw records under `build/pi-e2e-2519/<run-id>/`, and render
+  the reproducible `docs/pi-e2e-2519-report.md` plus
+  `docs/runbooks/pi-e2e-2519.md` artifacts.
 
-Publication is the sole forge-write step and requires the generated evidence
-and comment artifacts:
-
-```bash
-uv run python scripts/publish_pi_package_acceptance.py \
-  --acceptance build/pi-acceptance/acceptance.json \
-  --comment build/pi-acceptance/issue-comment.md
-```
-
-Do not commit or hand-edit the generated files. See
-`docs/pi-private-provider.md` for the exact-ref update, rollback, removal, and
-acceptance/readback contract.
+The collector only performs GitHub readback. Commands passed to `capture` are
+the normal planner and automation loop and retain their ordinary GitHub
+mutation behavior. It enables their opt-in private receipt sink so provider
+sessions, resolved policy scopes, and host-owned Athena results come from the
+actual queue workers. Direct provider commands are rejected. See
+`docs/runbooks/pi-e2e-2519.md` for the exact commands and evidence contract.
 
 ## Usage
 
