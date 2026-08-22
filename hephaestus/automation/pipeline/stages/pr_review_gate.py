@@ -211,7 +211,7 @@ class PrReviewGate(_PrReviewHost):
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
         if not open_thread_count:
-            return self._handle_clean_go(item, ctx)
+            return self._handle_clean_go(item, ctx)  # type: ignore[attr-defined,no-any-return]
 
         return self._handle_non_go(
             item,
@@ -326,34 +326,6 @@ class PrReviewGate(_PrReviewHost):
         # the implement budget). No labels, no round burned.
         logger.warning("pr_review:%d: address step failed; failing back", item.issue)
         return self._fail_back_agent_error(item)
-
-    def _handle_clean_go(self, item: WorkItem, ctx: StageContext) -> StepResult:
-        """Apply review GO only after the complete unresolved-thread read is empty."""
-        if item.pr is None or item.issue is None:  # guarded by caller; narrowing
-            return self._fail_back_agent_error(item)
-        logger.info(
-            "pr_review:%d: clean structural audit; advancing PR #%d to merge wait",
-            item.issue,
-            item.pr,
-        )
-        outcome = self._write_go(item, ctx)
-        if isinstance(outcome, StageOutcome) and outcome.disposition is Disposition.ADVANCE:
-            audit = item.payload.get("review_audit")
-            head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
-            if not isinstance(audit, ReviewAudit) or not is_full_commit_sha(head_sha):
-                return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
-            try:
-                ctx.github.publish_implementation_go_audit(item.pr, head_sha, audit)
-            except Exception as error:
-                logger.warning(
-                    "pr_review:%d: failed to publish implementation-go audit (%s)",
-                    item.issue,
-                    type(error).__name__,
-                )
-                return StageOutcome(Disposition.RETRY, "implementation_go_audit_retry")
-        if isinstance(outcome, StageOutcome):
-            return self._cleanup_review_worktree_then(item, outcome)
-        return outcome
 
     @staticmethod
     def _gate_no_commit(item: WorkItem) -> Continue | None:
@@ -669,7 +641,8 @@ class PrReviewGate(_PrReviewHost):
             if not reviewed_head or reviewed_head != live_head:
                 item.payload.pop("reviewed_pr_head_sha", None)
                 return Continue(next_state=REVIEW_WAIT)
-            github.mark_pr_implementation_go(pr_number)
+            if not item.payload.get("pending_implementation_go_label_confirmed"):
+                github.mark_pr_implementation_go(pr_number)
             state = github.gh_pr_state(pr_number)
             if state is None:
                 return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_readback_failed")

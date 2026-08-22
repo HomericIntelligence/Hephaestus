@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.pipeline.events import StageEvent
 from hephaestus.automation.pipeline.routing import ROUTES, StageName
 from hephaestus.automation.pipeline.stages import (
@@ -173,6 +174,7 @@ class FakeStageGitHub(FakeGitHub):
         self._thread_replies: dict[str, list[dict[str, str]]] = {}
         self.learn_results: dict[int, bool] = {}
         self.learn_claims: set[int] = set()
+        self.pending_go_audits: dict[int, PendingImplementationGoAudit] = {}
 
     def _issue_labels(self, issue_number: int) -> set[str]:
         """Return the issue's label set, seeding it on first access."""
@@ -588,6 +590,30 @@ class FakeStageGitHub(FakeGitHub):
             )
         ]
         self._log("publish_implementation_go_audit", pr_number, head_sha)
+
+    def persist_pending_implementation_go_audit(
+        self, pr_number: int, head_sha: str, audit: ReviewAudit
+    ) -> None:
+        """Persist the exact-head recovery record before the label transition."""
+        self.pending_go_audits[pr_number] = PendingImplementationGoAudit(
+            pr_number=pr_number,
+            head_sha=head_sha,
+            audit=audit,
+        )
+        self._log("persist_pending_implementation_go_audit", pr_number, head_sha)
+
+    def pending_implementation_go_audit(
+        self, pr_number: int
+    ) -> PendingImplementationGoAudit | None:
+        """Return the fake durable recovery record."""
+        return self.pending_go_audits.get(pr_number)
+
+    def clear_pending_implementation_go_audit(self, pr_number: int, head_sha: str) -> None:
+        """Clear only a matching exact-head fake recovery record."""
+        receipt = self.pending_go_audits.get(pr_number)
+        if receipt is not None and receipt.head_sha == head_sha:
+            del self.pending_go_audits[pr_number]
+        self._log("clear_pending_implementation_go_audit", pr_number, head_sha)
 
     def mark_pr_implementation_no_go(self, pr_number: int) -> None:
         """Mirror pr_manager.mark_pr_implementation_no_go (records mutation)."""

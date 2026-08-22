@@ -21,6 +21,9 @@ import pytest
 import hephaestus.automation.github_api as github_api_mod
 import hephaestus.automation.pipeline_github as pg
 import hephaestus.automation.pipeline_github_transport as transport_mod
+from hephaestus.automation.implementation_go_audit_receipt import (
+    render_pending_implementation_go_audit,
+)
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
@@ -2724,7 +2727,7 @@ class TestMutatorMapping:
         """Recovery receipts are deleted only after an owned public audit readback."""
         head = "a" * 40
         audit = ReviewAudit("A", "Clean", (), "", valid=True)
-        marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
+        _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
             f"pr=5:head={head}:batch={'b' * 32} -->\n<!-- {{}} -->"
@@ -2741,7 +2744,7 @@ class TestMutatorMapping:
 
         adapter.publish_implementation_go_audit(5, head, audit)
 
-        upsert.assert_called_once_with(5, marker, body)
+        upsert.assert_not_called()
         delete.assert_called_once_with(11)
 
     def test_go_audit_readback_failure_preserves_recovery_handoff(
@@ -2767,6 +2770,115 @@ class TestMutatorMapping:
             adapter.publish_implementation_go_audit(5, head, audit)
 
         delete.assert_not_called()
+
+    def test_go_audit_commit_timeout_and_read_lag_converges_duplicates(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ambiguous committed POST converges to one audit before cleanup."""
+        head = "a" * 40
+        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
+        handoff = (
+            "<!-- hephaestus-implementation-reply-handoff:"
+            f"pr=5:head={head}:batch={'b' * 32} -->\n<!-- {{}} -->"
+        )
+        first = {"body": body, "databaseId": 12, "viewerDidAuthor": True}
+        second = {"body": body, "databaseId": 13, "viewerDidAuthor": True}
+        receipt = {"body": handoff, "databaseId": 11, "viewerDidAuthor": True}
+        fetch = MagicMock(
+            side_effect=[
+                [],
+                [],
+                [],
+                [],
+                [receipt, first],
+                [receipt, first, second],
+                [receipt, second],
+            ]
+        )
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        post = MagicMock(side_effect=[RuntimeError("response lost after commit"), None])
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        with pytest.raises(RuntimeError, match="response lost after commit"):
+            adapter.publish_implementation_go_audit(5, head, audit)
+
+        adapter.publish_implementation_go_audit(5, head, audit)
+
+        assert post.call_count == 2
+        assert fetch.call_count == 7
+        assert delete.call_args_list == [call(12), call(11)]
+
+    def test_go_audit_promotes_pending_receipt_after_ambiguous_patch(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A committed PATCH with a lost response retries one durable comment ID."""
+        head = "a" * 40
+        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
+        _pending_marker, pending_body = render_pending_implementation_go_audit(5, head, audit)
+        handoff = (
+            "<!-- hephaestus-implementation-reply-handoff:"
+            f"pr=5:head={head}:batch={'b' * 32} -->\n<!-- {{}} -->"
+        )
+        pending = {"body": pending_body, "databaseId": 12, "viewerDidAuthor": True}
+        public = {"body": body, "databaseId": 12, "viewerDidAuthor": True}
+        receipt = {"body": handoff, "databaseId": 11, "viewerDidAuthor": True}
+        fetch = MagicMock(
+            side_effect=[
+                [receipt, pending],
+                [receipt, pending],
+                [receipt, public],
+                [receipt, public],
+            ]
+        )
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        patch_comment = MagicMock(side_effect=[RuntimeError("response lost after commit"), None])
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_post_issue_comment", post)
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        with pytest.raises(RuntimeError, match="response lost after commit"):
+            adapter.publish_implementation_go_audit(5, head, audit)
+
+        adapter.publish_implementation_go_audit(5, head, audit)
+
+        assert patch_comment.call_args_list == [call(12, body), call(12, body)]
+        post.assert_not_called()
+        delete.assert_called_once_with(11)
+
+    def test_restart_recovers_public_audit_while_exact_head_handoff_remains(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A crash after receipt promotion still resumes required journal cleanup."""
+        head = "a" * 40
+        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
+        handoff = (
+            "<!-- hephaestus-implementation-reply-handoff:"
+            f"pr=5:head={head}:batch={'b' * 32} -->\n<!-- {{}} -->"
+        )
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[
+                    {"body": body, "databaseId": 12, "viewerDidAuthor": True},
+                    {"body": handoff, "databaseId": 11, "viewerDidAuthor": True},
+                ]
+            ),
+        )
+
+        receipt = adapter.pending_implementation_go_audit(5)
+
+        assert receipt is not None
+        assert receipt.head_sha == head
+        assert receipt.audit.grade == "A"
+        assert receipt.audit.summary == "Clean"
 
 
 def test_mark_go_uses_adapter_labels_and_readback(

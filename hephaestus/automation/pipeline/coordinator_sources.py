@@ -744,7 +744,28 @@ class SourceCoordinator(_CoordinatorHost):
                 )
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
-            if has_go:
+            pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
+            if pending_audit is not None:
+                stage, reason, passed = self._scope_seed_decision(
+                    scope_identifier,
+                    StageName.PR_REVIEW,
+                    f"PR #{pr} has a pending implementation-go audit",
+                    scope_stages,
+                )
+                entries.append(
+                    _seeding.SeedEntry(
+                        kind="pr",
+                        identifier=pr,
+                        stage=stage,
+                        reason=reason,
+                        pr_number=pr,
+                        issue_number=issue_number,
+                        passed=passed,
+                        pending_implementation_go_audit=pending_audit,
+                        pending_implementation_go_label_confirmed=has_go,
+                    )
+                )
+            elif has_go:
                 stage, reason, passed = self._scope_seed_decision(
                     scope_identifier,
                     StageName.MERGE_WAIT,
@@ -836,6 +857,16 @@ class SourceCoordinator(_CoordinatorHost):
             item.payload["issue_title"] = entry.issue_title
             item.payload["issue_body"] = entry.issue_body
             item.payload["pr_description"] = entry.pr_description
+            if entry.pending_implementation_go_audit is not None:
+                item.payload["pending_implementation_go_audit"] = (
+                    entry.pending_implementation_go_audit.audit
+                )
+                item.payload["pending_implementation_go_audit_head"] = (
+                    entry.pending_implementation_go_audit.head_sha
+                )
+                item.payload["pending_implementation_go_label_confirmed"] = (
+                    entry.pending_implementation_go_label_confirmed
+                )
         else:
             item = WorkItem(
                 repo=default_repo,
@@ -852,6 +883,16 @@ class SourceCoordinator(_CoordinatorHost):
             # repository root.
             if entry.stage is StageName.PR_REVIEW and entry.pr_number is not None:
                 item.payload["existing_pr"] = True
+            if entry.pending_implementation_go_audit is not None:
+                item.payload["pending_implementation_go_audit"] = (
+                    entry.pending_implementation_go_audit.audit
+                )
+                item.payload["pending_implementation_go_audit_head"] = (
+                    entry.pending_implementation_go_audit.head_sha
+                )
+                item.payload["pending_implementation_go_label_confirmed"] = (
+                    entry.pending_implementation_go_label_confirmed
+                )
         item.state = "ENTER"
         item.payload["entry_reason"] = entry.reason
         return item

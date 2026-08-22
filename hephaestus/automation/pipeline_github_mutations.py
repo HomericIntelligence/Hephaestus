@@ -1,6 +1,3 @@
-from hephaestus.automation.issue_timeline import _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE
-from hephaestus.automation.review_audit import ReviewAudit, render_implementation_go_audit
-
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -137,33 +134,6 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             body,
         )
 
-    def publish_implementation_go_audit(
-        self, pr_number: int, head_sha: str, audit: ReviewAudit
-    ) -> None:
-        """Publish the public audit, then remove only matching recovery journals."""
-        marker, body = render_implementation_go_audit(audit, pr_number=pr_number, head_sha=head_sha)
-        self.upsert_issue_comment(pr_number, marker, body)
-        comments = self._repo_issue_comments(pr_number)
-        published = any(
-            self._comment_owned_by_viewer(comment) and str(comment.get("body", "")) == body
-            for comment in comments
-        )
-        if not published:
-            raise RuntimeError("implementation-go audit comment was not visible after write")
-        for comment in comments:
-            if not self._comment_owned_by_viewer(comment):
-                continue
-            first_line = str(comment.get("body", "")).split("\n", 1)[0]
-            if (
-                _IMPLEMENTATION_REPLY_HANDOFF_MARKER_RE.fullmatch(first_line) is None
-                or f"pr={pr_number}:head={head_sha}:" not in first_line
-            ):
-                continue
-            comment_id = comment.get("databaseId")
-            if comment_id is None:
-                raise RuntimeError("owned implementation reply handoff has no database id")
-            self._delete_issue_comment(int(comment_id))
-
     def upsert_issue_comment(
         self,
         issue_number: int,
@@ -204,17 +174,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
         if str(owned[-1].get("body", "")) != body:
-            with github_api._body_file(body) as path:
-                gh_call(
-                    [
-                        "api",
-                        "--method",
-                        "PATCH",
-                        f"/repos/{owner}/{name}/issues/comments/{int(target_id)}",
-                        "-F",
-                        f"body=@{path}",
-                    ]
-                )
+            self._patch_issue_comment(int(target_id), body, repo=(owner, name))
         for duplicate in owned[:-1]:
             duplicate_id = duplicate.get("databaseId")
             if duplicate_id is not None:
@@ -227,6 +187,29 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
                 self._gh(["issue", "comment", str(issue_number), "--body-file", path])
             return
         github_api.gh_issue_comment(issue_number, body)
+
+    def _patch_issue_comment(
+        self,
+        comment_id: int,
+        body: str,
+        *,
+        repo: tuple[str, str] | None = None,
+    ) -> None:
+        """Replace one known actor-owned comment body."""
+        owner, name = repo or (
+            self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
+        )
+        with github_api._body_file(body) as path:
+            gh_call(
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"/repos/{owner}/{name}/issues/comments/{comment_id}",
+                    "-F",
+                    f"body=@{path}",
+                ]
+            )
 
     def _delete_issue_comment(self, comment_id: int) -> None:
         """Delete one duplicate actor-owned comment in the configured repository."""
