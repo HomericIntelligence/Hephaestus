@@ -618,7 +618,7 @@ package, policy, and isolation checks apply only when a job executes through
 that provider. Learning jobs carry a semantic intent; the host rebinds its
 approved-plan or merged-PR source, prepares one bounded validated skill change,
 then delegates the closed request to the signed PR-delivery service. See
-ADR-0025 and ADR-0029.
+ADR-0025 and ADR-0032.
 
 Per-agent model/session/timeout configuration is centralised in
 `hephaestus.automation.agent_config`, all operator-tunable via explicit CLI flags
