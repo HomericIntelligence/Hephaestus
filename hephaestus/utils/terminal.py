@@ -18,19 +18,33 @@ import sys
 import threading
 from collections.abc import Callable, Generator
 
+_TERMINAL_RESTORE_TIMEOUT_SECONDS = 2
+_TERMINAL_TIMEOUT_WARNING = "[hephaestus] WARNING: terminal restoration timed out"
+
 
 def restore_terminal() -> None:
-    """Restore terminal to sane state using stty.
+    """Restore terminal state without allowing cleanup to block indefinitely.
 
     No-ops when stdin is not a TTY or when called from a non-main thread
     (stty requires the controlling terminal, which only the main thread owns).
     Swallows all exceptions — safe to call in signal handlers and atexit callbacks.
     """
-    with contextlib.suppress(Exception):
+    try:
         if threading.current_thread() is not threading.main_thread():
             return
         if sys.stdin.isatty():
-            subprocess.run(["stty", "sane"], stdin=sys.stdin, check=False)
+            subprocess.run(
+                ["stty", "sane"],
+                stdin=sys.stdin,
+                check=False,
+                timeout=_TERMINAL_RESTORE_TIMEOUT_SECONDS,
+            )
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            print(_TERMINAL_TIMEOUT_WARNING, file=sys.stderr)
+    except Exception:
+        # Cleanup must not mask the caller's failure or process exit.
+        pass
     # Best effort — never raise during cleanup
 
 
