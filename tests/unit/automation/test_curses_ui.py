@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hephaestus.automation.status_tracker import StatusTracker
+from hephaestus.cli.colors import Colors
 
 if TYPE_CHECKING:
     import curses as curses_module
@@ -136,6 +137,7 @@ class TestCursesUI:
         assert ui.running is False
         assert ui.thread is None
         assert ui.stdscr is None
+        assert ui._colors_enabled is False
 
     def test_stop_when_not_running(self) -> None:
         """Test stop() is a no-op when not running."""
@@ -228,18 +230,53 @@ class TestCursesUI:
         resize.assert_called_once_with(24, 80)
         sleep.assert_not_called()
 
+    def test_no_color_prevents_curses_pair_initialization(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """NO_COLOR disables curses color pairs through the shared policy."""
+        ui = self._make_ui()
+        ui.running = False
+        monkeypatch.setenv("NO_COLOR", "1")
+        Colors.auto()
+
+        with (
+            patch("hephaestus.automation.curses_ui.curses.curs_set"),
+            patch(
+                "hephaestus.automation.curses_ui.curses.has_colors",
+                return_value=True,
+            ),
+            patch("hephaestus.automation.curses_ui.curses.start_color") as start_color,
+            patch("hephaestus.automation.curses_ui.curses.init_pair") as init_pair,
+        ):
+            ui._curses_main(MagicMock())
+
+        assert ui._colors_enabled is False
+        start_color.assert_not_called()
+        init_pair.assert_not_called()
+
+    def test_no_color_worker_text_retains_status_labels(self) -> None:
+        """Worker labels remain meaningful when curses colors are unavailable."""
+        ui = self._make_ui(num_workers=2)
+        ui.stdscr = MagicMock()
+        ui._colors_enabled = False
+        ui.status_tracker.update_slot(1, "failed")
+
+        with patch("hephaestus.automation.curses_ui.curses.color_pair") as color_pair:
+            ui._draw_workers(start_row=2, height=10, width=80)
+
+        color_pair.assert_not_called()
+        rendered = [call.args[2] for call in ui.stdscr.addstr.call_args_list]
+        assert rendered == ["Worker 0: [idle]", "Worker 1: failed"]
+
     def test_draw_workers_returns_next_row(self) -> None:
         """Test _draw_workers returns the next free row."""
         ui = self._make_ui(num_workers=2)
         ui.stdscr = MagicMock()
         ui.status_tracker.update_slot(0, "working")
         ui.status_tracker.update_slot(1, "idle")
+        ui._colors_enabled = False
 
-        with (
-            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
-            patch("hephaestus.automation.curses_ui.curses.color_pair"),
-        ):
-            next_row = ui._draw_workers(start_row=2, height=10, width=80)
+        next_row = ui._draw_workers(start_row=2, height=10, width=80)
 
         # Should have rendered 2 workers starting at row 2, so next row is 4
         assert next_row == 4
@@ -250,12 +287,9 @@ class TestCursesUI:
         ui.stdscr = MagicMock()
         for i in range(5):
             ui.status_tracker.update_slot(i, f"task {i}")
+        ui._colors_enabled = False
 
-        with (
-            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
-            patch("hephaestus.automation.curses_ui.curses.color_pair"),
-        ):
-            next_row = ui._draw_workers(start_row=8, height=10, width=80)
+        next_row = ui._draw_workers(start_row=8, height=10, width=80)
 
         # Only 1 worker can fit before height - 1 (9), so next row is 9
         assert next_row == 9
@@ -266,12 +300,9 @@ class TestCursesUI:
         ui.stdscr = MagicMock()
         long_status = "x" * 100
         ui.status_tracker.update_slot(0, long_status)
+        ui._colors_enabled = False
 
-        with (
-            patch("hephaestus.automation.curses_ui.curses.has_colors", return_value=False),
-            patch("hephaestus.automation.curses_ui.curses.color_pair"),
-        ):
-            ui._draw_workers(start_row=2, height=10, width=80)
+        ui._draw_workers(start_row=2, height=10, width=80)
 
         # Check that addstr was called with truncated text
         calls = ui.stdscr.addstr.call_args_list
