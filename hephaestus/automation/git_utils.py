@@ -41,13 +41,43 @@ class DetachedHeadPushError(RuntimeError):
 class DetachedHeadPushRemoteHeadChangedError(DetachedHeadPushError):
     """The remote branch changed after the reviewed-head proof was obtained."""
 
+    def __init__(
+        self,
+        message: str = "Detached review push observed a different remote head",
+        *,
+        failure_kind: str = "remote_head_changed",
+    ) -> None:
+        """Retain the safe post-failure ownership classification."""
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
 
 class DetachedHeadPushRemoteHeadUnchangedError(DetachedHeadPushError):
     """The detached push failed while the remote branch still matched its proof."""
 
+    def __init__(
+        self,
+        message: str = "Detached review push failed while the remote head remained unchanged",
+        *,
+        failure_kind: str = "remote_head_unchanged",
+    ) -> None:
+        """Retain the safe local publication-failure classification."""
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
 
 class DetachedHeadPushRemoteProbeError(DetachedHeadPushError):
     """The remote branch could not be checked after a detached push failure."""
+
+    def __init__(
+        self,
+        message: str = "Detached review push failed and the remote head could not be verified",
+        *,
+        failure_kind: str = "remote_probe_failed",
+    ) -> None:
+        """Retain whether the authoritative probe failed by timeout or transport."""
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 class DirectBranchReservationCollisionError(RuntimeError):
@@ -395,7 +425,10 @@ def push_head_to_branch(
             ).stdout.split()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as probe_exc:
             raise DetachedHeadPushRemoteProbeError(
-                "Detached review push failed and the remote head could not be verified"
+                "Detached review push failed and the remote head could not be verified",
+                failure_kind=(
+                    "timeout" if isinstance(probe_exc, subprocess.TimeoutExpired) else "transport"
+                ),
             ) from probe_exc
         if source_sha is not None and observed and observed[0] == source_sha:
             # A transport error can arrive after receive-pack accepted this
@@ -406,10 +439,25 @@ def push_head_to_branch(
             return
         if not observed or observed[0] != expected_remote_sha:
             raise DetachedHeadPushRemoteHeadChangedError(
-                "Detached review push observed a different remote head"
+                "Detached review push observed a different remote head",
+                failure_kind="lease_drift",
             ) from exc
+        if isinstance(exc, subprocess.TimeoutExpired):
+            failure_kind = "timeout"
+        elif exc.returncode == 1:
+            # A local pre-push hook rejection is NOT uniquely identified by
+            # ``returncode == 1``: a remote rejection (or another Git failure)
+            # can also return 1 while the remote ref remains unchanged.  Git's
+            # stderr is deliberately untrusted here, so there is no hook
+            # evidence to classify on.  Report the honest unknown category
+            # rather than misclassifying a remote/publication failure as a
+            # local hook rejection (#2779 keeps these distinct).
+            failure_kind = "unknown"
+        else:
+            failure_kind = "transport"
         raise DetachedHeadPushRemoteHeadUnchangedError(
-            "Detached review push failed while the remote head remained unchanged"
+            "Detached review push failed while the remote head remained unchanged",
+            failure_kind=failure_kind,
         ) from exc
 
 

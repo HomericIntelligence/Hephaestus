@@ -3389,6 +3389,57 @@ class TestDurableEventLog:
             "stderr_tail": "safe stderr",
         }
 
+    def test_event_log_redacts_nested_rebase_failure_diagnostics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Signing recovery evidence never leaks credentials into JSONL events."""
+        event_log_path = tmp_path / "pipeline-events.jsonl"
+        receipt_secret = "sk" + "-live_12345678901234567890"
+        stdout_secret = "AKIA" + "1234567890ABCDEF"
+        stderr_secret = "sk" + "_live_0123456789abcdef"
+        config = PipelineConfig(
+            org="org",
+            repos=["repo-a"],
+            loops=1,
+            projects_dir=tmp_path,
+            event_log_path=event_log_path,
+        )
+        monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
+        pool = FakeWorkerPool()
+        pool.queue_result(
+            JobResult(
+                ok=False,
+                error="host rebase continuation signing failed",
+                value={
+                    "failure_kind": "continuation",
+                    "phase": "rebase_continue",
+                    "returncode": 128,
+                    "receipt_error": f"receipt token={receipt_secret}",
+                },
+                stdout_tail=f"AWS credential {stdout_secret}",
+                stderr_tail=f"signing credential {stderr_secret}",
+            )
+        )
+        coordinator = Coordinator(
+            config,
+            github=FakeStageGitHub(),
+            pool=pool,
+            stages={StageName.PLANNING: StubStage()},
+            install_signals=False,
+        )
+        coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
+
+        coordinator._submit(
+            _issue_item(47, StageName.PLANNING), JobRequest(_agent_job(issue=47), "REVIEWED")
+        )
+        coordinator._drain_completions()
+
+        event_text = event_log_path.read_text()
+        assert receipt_secret not in event_text
+        assert stdout_secret not in event_text
+        assert stderr_secret not in event_text
+        assert "<redacted>" in event_text
+
     def test_submit_forwards_claim_context_to_worker_pool(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -2204,6 +2204,7 @@ class TestPrReviewStageStep:
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
     ) -> None:
         """A failed host check never turns the reviewer into a writer."""
+        secret = "sk" + "-live_12345678901234567890"
         stage = PrReviewStage()
         ctx = make_ctx()
         item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
@@ -2223,7 +2224,7 @@ class TestPrReviewStageStep:
             item,
             JobResult(
                 ok=False,
-                error="rc=1",
+                error=f"rc=1 token={secret}",
                 stdout_tail="Found 1 error.",
                 value={
                     "head_sha": "a" * 40,
@@ -2241,6 +2242,8 @@ class TestPrReviewStageStep:
         failure = item.payload["host_verification_failure"]
         assert failure["argv"] == ["uv", "run", "ruff", "check", "hephaestus/", "tests/"]
         assert failure["stdout_tail"] == "Found 1 error."
+        assert secret not in failure["error"]
+        assert "<redacted>" in failure["error"]
 
     def test_failed_host_verification_fails_closed_before_primary_reviewer(
         self, tmp_path: Path, make_ctx: Any, make_work_item: Any
