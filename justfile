@@ -29,6 +29,10 @@ test:
 test-unit:
     uv run pytest {{ unit_test_dir }}
 
+# Run unit tests in parallel across CPU cores (pytest-xdist)
+test-par:
+    uv run pytest {{ unit_test_dir }} -n auto
+
 # Run integration tests only
 test-integration:
     uv run pytest {{ integration_test_dir }}
