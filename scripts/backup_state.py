@@ -5,7 +5,7 @@ Disaster-recovery tooling for the local-only ("tier-3") automation state
 directory ``build/.issue_implementer/`` — arming records, CI-fix markers, and
 per-stage logs. Tier-1 state (issues, labels, PRs, branches, tags) is durable
 on GitHub and re-derived; tier-2 state (``.venv``, worktrees, caches) is
-recreated with ``uv sync``. See ``docs/adr/0012-backup-and-disaster-recovery-policy.md``
+recreated with ``uv sync``. See ``docs/adr/0013-backup-and-disaster-recovery-policy.md``
 and ``docs/runbooks/backup-restore.md``.
 
 This tool is deliberately stdlib-only and imports no ``hephaestus`` module: it
@@ -47,7 +47,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-# Tier-3, local-only state. Tiers 1-2 are re-derived, not archived (ADR-0012).
+# Tier-3, local-only state. Tiers 1-2 are re-derived, not archived (ADR-0013).
 INVENTORY: tuple[str, ...] = ("build/.issue_implementer",)
 
 # Manifest member name inside the archive; maps each member to its digest+size.

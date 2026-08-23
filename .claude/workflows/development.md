@@ -36,7 +36,9 @@ This file describes the typical development workflow for Hephaestus.
 
 ## Release Process
 
-1. **Version Bump**: Update version number according to semver
-2. **Tag Release**: Create Git tag for the release
-3. **Release Notes**: Generate via `gh release create --generate-notes`
-4. **Publish**: Publish to package repository if applicable
+1. **Tag Release**: Cut a signed `vX.Y.Z` git tag — hatch-vcs derives the
+   package version from the tag, so there is no version field to edit (see
+   `docs/RELEASING.md`)
+2. **Release Notes**: Generate via `gh release create --generate-notes`
+3. **Publish**: The `Release` workflow builds and publishes to PyPI with
+   PEP 740 attestations
