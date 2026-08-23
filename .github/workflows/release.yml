@@ -356,6 +356,30 @@ jobs:
             --expected-version "${TAG_VERSION}" \
             --verbose
 
+      - name: Generate CycloneDX SBOM
+        # Machine-readable component inventory for consumers of this library.
+        # Built from the locked dependency set (not the environment), pinned
+        # by exact version; kept out of dist/ so it is not uploaded to PyPI.
+        shell: bash
+        run: |
+          mkdir -p build/sbom
+          uv export --all-extras --no-dev --format requirements-txt --hashes \
+            --no-emit-project --output-file build/sbom/requirements.txt
+          uvx cyclonedx-py==1.0.1 requirements build/sbom/requirements.txt \
+            --of json --output-reproducible \
+            -o "build/sbom/hephaestus-${TAG}-sbom.cdx.json"
+        env:
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+
+      - name: Upload SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom
+          path: build/sbom/*.cdx.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
         with:
@@ -433,6 +457,20 @@ jobs:
             gh release edit "$TAG" --draft=false --notes "${RELEASE_BODY}
 
           ${MARKER}"
+          fi
+
+      - name: Attach SBOM to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          # Immutable releases reject uploads; the package and artifacts are
+          # already published, so treat that as informational, not failure.
+          if gh release upload "$TAG" build/sbom/*.cdx.json --clobber; then
+            echo "Attached SBOM to release $TAG."
+          else
+            echo "::notice::Release $TAG is immutable — SBOM not attached."
           fi
 
   deploy-docs:
