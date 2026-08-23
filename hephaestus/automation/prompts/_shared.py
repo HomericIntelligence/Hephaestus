@@ -13,7 +13,13 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from hephaestus.prompts.fencing import fence_untrusted as fence_untrusted
+
 _prompts_logger = logging.getLogger("hephaestus.automation.prompts")
+
+# Package-internal alias preserved for existing callers/tests; the canonical
+# primitive now lives in hephaestus.prompts.fencing.
+_fence_untrusted = fence_untrusted
 
 
 def _relativize_path(path: str, repo_root: str | None) -> str:
@@ -60,16 +66,6 @@ def get_untrusted_notice() -> str:
     from .catalog import PromptCatalog
 
     return PromptCatalog.current().render("shared/untrusted_notice.j2")
-
-
-def _fence_untrusted(label: str, content: str, nonce: str) -> str:
-    """Wrap untrusted content in nonce-delimited markers.
-
-    The nonce makes it infeasible for content to forge an end marker, even if
-    a malicious payload contains the literal string ``END_``. ``label`` makes
-    each block self-describing in logs.
-    """
-    return f"BEGIN_{nonce}_{label}\n{content}\nEND_{nonce}_{label}"
 
 
 @dataclass(frozen=True)
