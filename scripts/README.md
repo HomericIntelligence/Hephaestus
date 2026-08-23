@@ -30,6 +30,12 @@ through installed `hephaestus-*` console scripts.
 - **`check_security_policy_no_hardcoded_date.py`** — Reject hard-coded
   `As of YYYY-MM-DD` stamps in `SECURITY.md` (issue #730).
 
+### Benchmark analysis
+
+- **`compare_benchmarks.py`** — Compare current benchmark JSON against a
+  baseline and generate a Markdown regression report. Critical regressions are
+  report-only by default; pass `--fail-on-regression` to exit nonzero.
+
 ### Scaffolding / automation introspection
 
 - **`show_prompt.py`** — Display the automation-pipeline agent prompt for a
