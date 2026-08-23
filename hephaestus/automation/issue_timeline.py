@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.requirements_recovery import (
+    OBSOLETE_EXPLANATION_MARKER,
+    RECOVERY_PROVENANCE_PREFIX,
+    parse_recovery_provenance,
+)
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER_PREFIX,
     HISTORY_RE,
@@ -108,7 +113,26 @@ def _is_obsolete_automation_comment(body: str) -> bool:
         or HISTORY_RE.match(body) is not None
         or has_exact_leading_marker(body, SKIP_REASON_MARKER)
         or body.startswith(IMPLEMENTATION_REPLY_HANDOFF_MARKER_PREFIX)
+        or body.startswith(RECOVERY_PROVENANCE_PREFIX)
+        or body.startswith(OBSOLETE_EXPLANATION_MARKER)
     )
+
+
+def _validate_recovery_roles(comments: Sequence[IssueComment]) -> None:
+    """Reject malformed owned recovery provenance before a compaction delete."""
+    for comment in comments:
+        stripped = comment.body.lstrip()
+        if (
+            stripped.startswith(RECOVERY_PROVENANCE_PREFIX)
+            and parse_recovery_provenance(stripped) is None
+        ):
+            raise RuntimeError("malformed recovered requirements marker; manual review is required")
+
+
+def _latest_owned_role(comments: Sequence[IssueComment], marker: str) -> IssueComment | None:
+    """Return the latest owned comment for one exact actor-owned role."""
+    matches = [comment for comment in comments if comment.body.lstrip().startswith(marker)]
+    return matches[-1] if matches else None
 
 
 def _has_exact_leading_marker(body: str, marker: str) -> bool:
@@ -204,6 +228,7 @@ def plan_issue_timeline_compaction(
         return IssueTimelineCompaction()
 
     _validate_legacy_markers(owned)
+    _validate_recovery_roles(owned)
 
     # Parsing first makes conflicting or malformed legacy journal identities a
     # per-issue hard failure before a destructive action is planned.
@@ -228,6 +253,8 @@ def plan_issue_timeline_compaction(
         if canonical_reviews
         else (review_comments[-1] if review_comments else None)
     )
+    target_recovery = _latest_owned_role(owned, RECOVERY_PROVENANCE_PREFIX)
+    target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 
     prior_fingerprints = list(snapshot.prior_plan_fingerprints)
     for comment in plan_comments[:-1]:
@@ -243,6 +270,8 @@ def plan_issue_timeline_compaction(
             snapshot.current_plan,
             revision=snapshot.revision,
             prior_fingerprints=tuple(dict.fromkeys(prior_fingerprints)),
+            forced_planning_epoch=snapshot.forced_planning_epoch,
+            recovery_source_digest=snapshot.recovery_source_digest,
         )
         if target_plan is not None
         else None
@@ -258,7 +287,7 @@ def plan_issue_timeline_compaction(
 
     keep_ids = {
         comment.database_id
-        for comment in (target_plan, target_review)
+        for comment in (target_plan, target_review, target_recovery, target_obsolete)
         if comment is not None and comment.database_id is not None
     }
     delete_ids = _obsolete_comment_ids(

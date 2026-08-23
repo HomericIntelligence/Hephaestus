@@ -87,6 +87,125 @@ def test_restart_repairs_a_plan_written_before_pending_review() -> None:
     assert github.mutation_log == mutations_after_recovery
 
 
+def test_forced_publication_persists_restart_provenance() -> None:
+    """The canonical plan records that its pending review belongs to force."""
+    github = FakeStageGitHub()
+
+    publish_plan_revision(
+        10,
+        "Fresh forced plan",
+        github,
+        require_change=False,
+        forced_planning_epoch=True,
+    )
+
+    snapshot = journal_snapshot(github.issue_comments(10))
+    assert snapshot.current_plan == "Fresh forced plan"
+    assert snapshot.forced_planning_epoch is True
+
+
+def test_recovery_publication_persists_source_epoch() -> None:
+    """A canonical plan records which recovered source authorized its epoch."""
+    github = FakeStageGitHub()
+    source_digest = "a" * 64
+
+    publish_plan_revision(
+        11,
+        "Fresh recovered plan",
+        github,
+        require_change=False,
+        recovery_source_digest=source_digest,
+    )
+
+    snapshot = journal_snapshot(github.issue_comments(11))
+    assert snapshot.current_plan == "Fresh recovered plan"
+    assert snapshot.recovery_source_digest == source_digest
+
+
+def test_recovery_epoch_can_republish_identical_plan_text() -> None:
+    """New recovery provenance is progress even when the plan prose is unchanged."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+    github.comments[12] = [
+        render_current_plan("Same valid plan", revision=1),
+        render_current_review("Old source.\n\nstate:plan-no-go", revision=1),
+    ]
+    source_digest = "b" * 64
+
+    publication = publish_plan_revision(
+        12,
+        "Same valid plan",
+        github,
+        require_change=True,
+        recovery_source_digest=source_digest,
+    )
+
+    snapshot = journal_snapshot(github.issue_comments(12))
+    assert publication.changed is True
+    assert publication.revision == 2
+    assert snapshot.current_plan == "Same valid plan"
+    assert snapshot.recovery_source_digest == source_digest
+
+
+def test_recovery_epoch_digest_change_is_progress_for_identical_plan_text() -> None:
+    """A distinct recovered source starts a distinct plan epoch."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+    github.comments[13] = [
+        render_current_plan("Same valid plan", revision=1, recovery_source_digest="a" * 64),
+        render_current_review("Old source.\n\nstate:plan-no-go", revision=1),
+    ]
+
+    publication = publish_plan_revision(
+        13,
+        "Same valid plan",
+        github,
+        require_change=True,
+        recovery_source_digest="b" * 64,
+    )
+
+    assert publication.changed is True
+    assert publication.revision == 2
+    assert journal_snapshot(github.issue_comments(13)).recovery_source_digest == "b" * 64
+
+
+def test_same_recovery_epoch_digest_keeps_identical_plan_as_no_progress() -> None:
+    """Identical prose in the same recovery epoch remains stuck."""
+    github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+    github.comments[14] = [
+        render_current_plan("Same valid plan", revision=1, recovery_source_digest="a" * 64),
+        render_current_review("Needs work.\n\nstate:plan-no-go", revision=1),
+    ]
+
+    publication = publish_plan_revision(
+        14,
+        "Same valid plan",
+        github,
+        require_change=True,
+        recovery_source_digest="a" * 64,
+    )
+
+    assert publication.changed is False
+    assert publication.is_stuck is True
+
+
+def test_epoch_marker_examples_in_plan_prose_are_not_metadata() -> None:
+    """Only fixed host header positions carry restart authority."""
+    recovery_example = f"<!-- hephaestus-recovery-source-epoch: {'c' * 64} -->"
+    payload = (
+        "Keep these examples literal:\n\n"
+        "<!-- hephaestus-forced-planning-epoch -->\n\n"
+        "```markdown\n"
+        f"{recovery_example}\n"
+        "```"
+    )
+
+    rendered = render_current_plan(payload, revision=3)
+    snapshot = journal_snapshot([rendered])
+
+    assert snapshot.current_plan == payload
+    assert snapshot.forced_planning_epoch is False
+    assert snapshot.recovery_source_digest is None
+
+
 def test_failed_canonical_plan_write_preserves_the_previous_revision_for_retry() -> None:
     """A failed first write loses no public artifact and a clean retry can publish."""
     github = _CrashOnceJournalGitHub("canonical_plan")

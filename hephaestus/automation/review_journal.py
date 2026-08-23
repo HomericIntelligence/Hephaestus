@@ -32,6 +32,10 @@ REVISION_RE: Final[re.Pattern[str]] = re.compile(r"<!-- revision: (?P<revision>\
 PLAN_FINGERPRINTS_RE: Final[re.Pattern[str]] = re.compile(
     r"<!-- prior-plan-fingerprints: (?P<fingerprints>[0-9a-f,]*) -->"
 )
+FORCED_PLANNING_EPOCH_MARKER: Final[str] = "<!-- hephaestus-forced-planning-epoch -->"
+RECOVERY_SOURCE_EPOCH_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!-- hephaestus-recovery-source-epoch: (?P<source>[0-9a-f]{64}) -->"
+)
 RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
@@ -129,6 +133,8 @@ class JournalSnapshot:
     current_review_revision: int | None
     history: tuple[HistoryArtifact, ...]
     prior_plan_fingerprints: tuple[str, ...] = ()
+    forced_planning_epoch: bool = False
+    recovery_source_digest: str | None = None
 
 
 def as_issue_comment(comment: IssueComment | str) -> IssueComment:
@@ -278,12 +284,45 @@ def _without_fingerprint_line(text: str) -> str:
     return stripped
 
 
-def extract_current_plan(body: str) -> str:
-    """Return only the plan payload from a current or legacy plan comment."""
-    text = _without_leading_line(body, PLAN_CANONICAL_MARKER)
+def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | None]:
+    """Parse host metadata only from the canonical plan-comment header."""
+    stripped = body.lstrip()
+    canonical = stripped.startswith(PLAN_CANONICAL_MARKER) or stripped.startswith(
+        PLAN_COMMENT_MARKER
+    )
+    if not canonical:
+        return stripped.strip(), (), False, None
+
+    text = _without_leading_line(stripped, PLAN_CANONICAL_MARKER)
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
-    return _without_fingerprint_line(text).strip()
+    first = text.lstrip().partition("\n")[0].strip()
+    fingerprints_match = PLAN_FINGERPRINTS_RE.fullmatch(first)
+    fingerprints = (
+        tuple(value for value in fingerprints_match.group("fingerprints").split(",") if value)
+        if fingerprints_match is not None
+        else ()
+    )
+    if fingerprints_match is not None:
+        text = _without_fingerprint_line(text)
+
+    forced = False
+    recovery_source: str | None = None
+    first = text.lstrip().partition("\n")[0].strip()
+    if first == FORCED_PLANNING_EPOCH_MARKER:
+        forced = True
+        text = _without_leading_line(text, FORCED_PLANNING_EPOCH_MARKER)
+    first = text.lstrip().partition("\n")[0].strip()
+    recovery_match = RECOVERY_SOURCE_EPOCH_RE.fullmatch(first)
+    if recovery_match is not None:
+        recovery_source = recovery_match.group("source")
+        text = _without_leading_line(text, first)
+    return text.strip(), fingerprints, forced, recovery_source
+
+
+def extract_current_plan(body: str) -> str:
+    """Return only the plan payload from a current or legacy plan comment."""
+    return _current_plan_parts(body)[0]
 
 
 def extract_current_review(body: str) -> str:
@@ -298,6 +337,8 @@ def render_current_plan(
     *,
     revision: int = 1,
     prior_fingerprints: Sequence[str] = (),
+    forced_planning_epoch: bool = False,
+    recovery_source_digest: str | None = None,
 ) -> str:
     """Render the editable current plan with an opaque canonical marker."""
     payload = extract_current_plan(plan)
@@ -305,6 +346,12 @@ def render_current_plan(
     metadata = ""
     if fingerprints:
         metadata = f"\n<!-- prior-plan-fingerprints: {','.join(fingerprints)} -->"
+    if forced_planning_epoch:
+        metadata += f"\n{FORCED_PLANNING_EPOCH_MARKER}"
+    if recovery_source_digest is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", recovery_source_digest) is None:
+            raise ValueError("recovery source digest must be a lowercase SHA-256 digest")
+        metadata += f"\n<!-- hephaestus-recovery-source-epoch: {recovery_source_digest} -->"
     return (
         f"{PLAN_CANONICAL_MARKER}\n{PLAN_COMMENT_MARKER}\n"
         f"<!-- revision: {revision} -->{metadata}\n\n{payload}"
@@ -504,21 +551,20 @@ def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     explicit_revision = comment_revision(current_plan_body) if current_plan_body else None
     revision = explicit_revision or max(1, archived_max + 1)
     review_revision = comment_revision(current_review_body) if current_review_body else None
-    fingerprint_match = PLAN_FINGERPRINTS_RE.search(current_plan_body)
-    prior_fingerprints = (
-        tuple(value for value in fingerprint_match.group("fingerprints").split(",") if value)
-        if fingerprint_match
-        else ()
+    current_plan, prior_fingerprints, forced_epoch, recovery_source = _current_plan_parts(
+        current_plan_body
     )
     if current_review_body and review_revision is None and archived_max == 0:
         review_revision = revision
     return JournalSnapshot(
         revision=revision,
-        current_plan=extract_current_plan(current_plan_body) if current_plan_body else "",
+        current_plan=current_plan if current_plan_body else "",
         current_review=(extract_current_review(current_review_body) if current_review_body else ""),
         current_review_revision=review_revision,
         history=tuple(sorted(history, key=lambda item: (item.revision, item.kind != "plan"))),
         prior_plan_fingerprints=prior_fingerprints,
+        forced_planning_epoch=forced_epoch,
+        recovery_source_digest=recovery_source,
     )
 
 
@@ -553,7 +599,12 @@ def current_plan_context(
     snapshot = journal_snapshot(comments)
     if not snapshot.current_plan:
         return ""
-    plan = render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+    plan = render_current_plan(
+        snapshot.current_plan,
+        revision=snapshot.revision,
+        forced_planning_epoch=snapshot.forced_planning_epoch,
+        recovery_source_digest=snapshot.recovery_source_digest,
+    )
     return _bounded_excerpt(plan, max_chars)
 
 
@@ -573,7 +624,12 @@ def current_revision_context(
         return ""
     snapshot = journal_snapshot(comments)
     plan = (
-        render_current_plan(snapshot.current_plan, revision=snapshot.revision)
+        render_current_plan(
+            snapshot.current_plan,
+            revision=snapshot.revision,
+            forced_planning_epoch=snapshot.forced_planning_epoch,
+            recovery_source_digest=snapshot.recovery_source_digest,
+        )
         if snapshot.current_plan
         else ""
     )

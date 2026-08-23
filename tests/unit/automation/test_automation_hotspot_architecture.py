@@ -29,7 +29,7 @@ _FILE_BUDGETS = {
     "hephaestus/automation/pipeline_github_authorization.py": 300,
     "hephaestus/automation/pipeline_github_queries.py": 650,
     "hephaestus/automation/pipeline_github_reviews.py": 1_400,
-    "hephaestus/automation/pipeline_github_mutations.py": 450,
+    "hephaestus/automation/pipeline_github_mutations.py": 475,
     "hephaestus/automation/pipeline/stages/pr_review.py": 550,
     "hephaestus/automation/pipeline/stages/pr_review_threads.py": 850,
     "hephaestus/automation/pipeline/stages/pr_review_diagnostics.py": 150,

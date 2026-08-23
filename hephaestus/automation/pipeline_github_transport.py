@@ -84,11 +84,7 @@ _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 def _parse_included_http_response(
     stdout: str,
 ) -> tuple[int | None, dict[str, Any] | None, bool]:
-    """Parse the final status and JSON object from ``gh api --include`` output.
-
-    A missing HTTP status is ambiguous. Malformed or non-object JSON is
-    fail-closed instead of being treated as transport ambiguity.
-    """
+    """Parse ``gh api --include`` status/JSON and fail closed on malformed payloads."""
     matches = list(_HTTP_STATUS_RE.finditer(stdout))
     if not matches:
         return None, None, False
@@ -299,8 +295,10 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         argv = ["api", "graphql", "-f", f"query={query}"]
         for key, value in {"owner": owner, "name": name, **fields}.items():
             argv.extend(["-F" if isinstance(value, int) else "-f", f"{key}={value}"])
-        result = gh_call(argv)
-        data = json.loads(result.stdout or "{}")
+        try:
+            data = json.loads(gh_call(argv).stdout or "{}")
+        except (subprocess.SubprocessError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"repo-scoped pipeline GraphQL request failed: {exc}") from exc
         if not isinstance(data, dict):
             raise RuntimeError("GraphQL response was not an object")
         github_api._check_graphql_errors(data, "repo-scoped pipeline GraphQL")

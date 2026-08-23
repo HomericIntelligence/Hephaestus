@@ -73,6 +73,9 @@ def _confirm_publication(
     expected_plan: str,
     expected_revision: int,
     github: PlanJournalGitHub,
+    *,
+    forced_planning_epoch: bool,
+    recovery_source_digest: str | None,
 ) -> None:
     """Fail closed when a concurrent writer replaced the just-published pointer."""
     snapshot = journal_snapshot(github.issue_comments(issue_number))
@@ -81,6 +84,8 @@ def _confirm_publication(
         or plan_fingerprint(snapshot.current_plan) != plan_fingerprint(expected_plan)
         or snapshot.current_review_revision != expected_revision
         or not is_pending_review(snapshot.current_review, revision=expected_revision)
+        or snapshot.forced_planning_epoch is not forced_planning_epoch
+        or snapshot.recovery_source_digest != recovery_source_digest
     ):
         raise PlanRevisionOwnershipError(
             f"concurrent plan journal write detected for revision {expected_revision}; "
@@ -138,6 +143,8 @@ def reconcile_plan_journal(issue_number: int, github: PlanJournalGitHub) -> list
             next_plan,
             revision=pending.revision + 1,
             prior_fingerprints=prior_fingerprints,
+            forced_planning_epoch=snapshot.forced_planning_epoch,
+            recovery_source_digest=snapshot.recovery_source_digest,
         ),
     )
     _upsert_pending_review(issue_number, pending.revision + 1, github)
@@ -163,6 +170,8 @@ def publish_plan_revision(
     github: PlanJournalGitHub,
     *,
     require_change: bool,
+    forced_planning_epoch: bool = False,
+    recovery_source_digest: str | None = None,
 ) -> PlanPublication:
     """Publish a candidate using the append-pair-then-pointer transaction.
 
@@ -187,6 +196,9 @@ def publish_plan_revision(
     candidate_plan = normalized_plan(candidate)
     candidate_fingerprint = plan_fingerprint(candidate)
     current_fingerprint = plan_fingerprint(snapshot.current_plan)
+    recovery_epoch_changed = bool(
+        recovery_source_digest and recovery_source_digest != snapshot.recovery_source_digest
+    )
 
     if contains_raw_patch(candidate):
         return PlanPublication(
@@ -212,7 +224,11 @@ def publish_plan_revision(
             ),
         )
 
-    if snapshot.current_plan and candidate_fingerprint == current_fingerprint:
+    if (
+        snapshot.current_plan
+        and candidate_fingerprint == current_fingerprint
+        and not recovery_epoch_changed
+    ):
         if not require_change:
             return PlanPublication(
                 revision=snapshot.revision,
@@ -231,7 +247,7 @@ def publish_plan_revision(
             ),
         )
 
-    if candidate_fingerprint in known_plan_fingerprints(comments):
+    if candidate_fingerprint in known_plan_fingerprints(comments) and not recovery_epoch_changed:
         return PlanPublication(
             revision=snapshot.revision,
             plan=snapshot.current_plan,
@@ -247,7 +263,12 @@ def publish_plan_revision(
     if not snapshot.current_plan:
         github.upsert_plan_comment(
             issue_number,
-            render_current_plan(candidate_plan, revision=snapshot.revision),
+            render_current_plan(
+                candidate_plan,
+                revision=snapshot.revision,
+                forced_planning_epoch=forced_planning_epoch,
+                recovery_source_digest=recovery_source_digest,
+            ),
         )
         _upsert_pending_review(issue_number, snapshot.revision, github)
         _confirm_publication(
@@ -255,6 +276,8 @@ def publish_plan_revision(
             candidate_plan,
             snapshot.revision,
             github,
+            forced_planning_epoch=forced_planning_epoch,
+            recovery_source_digest=recovery_source_digest,
         )
         return PlanPublication(
             revision=snapshot.revision,
@@ -288,8 +311,17 @@ def publish_plan_revision(
             candidate_plan,
             revision=next_revision,
             prior_fingerprints=prior_fingerprints,
+            forced_planning_epoch=forced_planning_epoch,
+            recovery_source_digest=recovery_source_digest,
         ),
     )
     _upsert_pending_review(issue_number, next_revision, github)
-    _confirm_publication(issue_number, candidate_plan, next_revision, github)
+    _confirm_publication(
+        issue_number,
+        candidate_plan,
+        next_revision,
+        github,
+        forced_planning_epoch=forced_planning_epoch,
+        recovery_source_digest=recovery_source_digest,
+    )
     return PlanPublication(revision=next_revision, plan=candidate_plan, changed=True)

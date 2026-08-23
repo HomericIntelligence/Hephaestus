@@ -1,6 +1,7 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
 import json
+import subprocess
 from urllib.parse import quote
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -304,18 +305,65 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
     def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
         """Fetch issue JSON (``github_api.issues.gh_issue_json``)."""
         if self._repo_slug is not None:
-            result = self._gh(
-                ["issue", "view", str(issue_number), "--json", "number,title,state,labels,body"]
-            )
-            data = json.loads(result.stdout or "{}")
+            try:
+                result = self._gh(
+                    [
+                        "issue",
+                        "view",
+                        str(issue_number),
+                        "--json",
+                        "number,title,state,labels,body",
+                    ]
+                )
+            except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
+                raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
+            try:
+                data = json.loads(result.stdout or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
             if not isinstance(data, dict):
                 raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
+            raw_body = data.get("body")
+            authority_sanitized = False
             for field in ("title", "body"):
                 value = data.get(field)
                 if isinstance(value, str):
-                    data[field] = github_api.strip_null_bytes(value)
+                    cleaned = github_api.strip_null_bytes(value)
+                    authority_sanitized = authority_sanitized or cleaned != value
+                    data[field] = cleaned
+            if authority_sanitized:
+                data["authoritySanitized"] = True
+            if isinstance(raw_body, str):
+                data["bodyDigest"] = github_api.issue_body_digest(raw_body)
             return data
         return github_api.gh_issue_json(issue_number)
+
+    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
+        """Authenticate the body editor before trusting a finalized-plan seal."""
+        if self._repo_slug is None:
+            return github_api.gh_issue_body_edited_by_viewer(issue_number)
+        query = (
+            "query($owner:String!,$name:String!,$number:Int!){"
+            " viewer{ login }"
+            " repository(owner:$owner,name:$name){"
+            "  issue(number:$number){ editor{ login } }"
+            " }"
+            "}"
+        )
+        data = self._graphql(query, number=issue_number)
+        root = data.get("data") if isinstance(data, dict) else None
+        viewer = root.get("viewer") if isinstance(root, dict) else None
+        repository = root.get("repository") if isinstance(root, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        editor = issue.get("editor") if isinstance(issue, dict) else None
+        viewer_login = viewer.get("login") if isinstance(viewer, dict) else None
+        editor_login = editor.get("login") if isinstance(editor, dict) else None
+        return (
+            isinstance(viewer_login, str)
+            and bool(viewer_login)
+            and isinstance(editor_login, str)
+            and editor_login.lower() == viewer_login.lower()
+        )
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue (``_review_utils``)."""

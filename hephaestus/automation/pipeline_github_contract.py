@@ -56,6 +56,9 @@ if TYPE_CHECKING:
         def _skip(self, what: str) -> bool:
             pass
 
+        def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+            pass
+
         def _open_prs_for_branch(self, branch_name: str) -> list[tuple[int, str]]:
             pass
 

@@ -1,7 +1,10 @@
 import sys
 
+from hephaestus.automation.issue_waves import WAVE_NON_CODE_INTENT_PAYLOAD
+
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_types import *
+from .stages.repo import SYNCED_MAIN_SHA_KEY
 
 # This collaborator consumes the façade's shared type namespace by design.
 # ruff: noqa: F403, F405
@@ -72,10 +75,10 @@ class SourceCoordinator(_CoordinatorHost):
     ) -> bool:
         """Consume one detached repository cursor until one child is admitted.
 
-        Exclusions (notably epics) need no child capacity and are consumed in
-        order after their durable skip write.  An eligible pending row stays
-        in ``source.pending`` until every possible entry queue and the global
-        permit budget can accept it; no classified product is retained.
+        A pending row stays in ``source.pending`` until every possible entry
+        queue and the global permit budget can accept it; no classified
+        product is retained. Tracker-shaped issues are admitted for semantic
+        planning instead of being skipped from metadata alone.
 
         Returns:
             ``True`` while this cursor remains active, otherwise ``False``
@@ -99,8 +102,6 @@ class SourceCoordinator(_CoordinatorHost):
 
             try:
                 number = int(metadata["number"])
-                labels = list(metadata.get("labels") or [])
-                title = str(metadata.get("title") or "")
             except (KeyError, TypeError, ValueError) as exc:
                 self._record_repo_source_failure(
                     repo, f"discovery failed: malformed metadata: {exc}"
@@ -114,16 +115,6 @@ class SourceCoordinator(_CoordinatorHost):
                 return True
             github = self._ctx_for_repo(repo).github
             try:
-                if source.wave_lease is None and is_epic(labels, title):
-                    github.skip_epics({number: labels})
-                    logger.info(
-                        "repo:%s: #%d is an epic; tagged state:skip, excluded",
-                        repo,
-                        number,
-                    )
-                    source.pending = None
-                    self._progress = True
-                    return True
                 facts = _seeding.seed_issue_from_github(number, github)
                 if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
                     github.ensure_blocked_audit(number)
@@ -144,8 +135,6 @@ class SourceCoordinator(_CoordinatorHost):
                     )
                     entry = replace(entry, stage=stage, reason=reason, passed=passed)
                 if entry.stage is None:
-                    if source.wave_lease is None and entry.skip_tag_obligation is not None:
-                        github.skip_epics({entry.skip_tag_obligation.issue: []})
                     logger.info("[%s] excluded: %s", repo, entry.reason)
                     source.pending = None
                     self._progress = True
@@ -162,6 +151,20 @@ class SourceCoordinator(_CoordinatorHost):
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
                     new_item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+                    if entry.non_code:
+                        if entry.stage is StageName.FINISHED:
+                            new_item.payload[WAVE_NON_CODE_PAYLOAD] = True
+                        else:
+                            new_item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                                "reason": entry.reason,
+                                "extra_labels": list(entry.non_code_labels),
+                                "evidence_digest": entry.non_code_evidence_digest,
+                                "repository_revision": entry.non_code_repository_revision,
+                                "explanation": entry.non_code_explanation,
+                                "retired": entry.non_code_retired,
+                            }
+                if source.base_main_sha is not None:
+                    new_item.payload[SYNCED_MAIN_SHA_KEY] = source.base_main_sha
                 if self._push_item(new_item, new_item.stage, enter=True, defer_if_full=True):
                     source.pending = None
                     source.seeded_count += 1
@@ -327,12 +330,6 @@ class SourceCoordinator(_CoordinatorHost):
         pushed = 0
         for entry in entries:
             if entry.stage is None:
-                # Epic tagging is the ONE sanctioned seeding write, executed
-                # here through the skip_epics chokepoint BEFORE the exclusion
-                # is honored (seeding.py write-path boundary).
-                if entry.skip_tag_obligation is not None:
-                    issue = entry.skip_tag_obligation.issue
-                    self._ctx_for_repo(default_repo).github.skip_epics({issue: []})
                 logger.info("seed excluded: %s", entry.reason)
                 continue
             item = self._entry_to_item(entry, self.config.repos[0] if self.config.repos else "")
@@ -479,8 +476,6 @@ class SourceCoordinator(_CoordinatorHost):
                 repo=source.repo,
             )
         if entry.stage is None:
-            if entry.skip_tag_obligation is not None:
-                github.skip_epics({entry.skip_tag_obligation.issue: []})
             logger.info("seed excluded: %s", entry.reason)
             return None, False
         item = self._prepare_direct_item(entry, source.repo, source.base_sha, source.run_nonce)
@@ -489,6 +484,18 @@ class SourceCoordinator(_CoordinatorHost):
             item.branch = branch
         if source.wave_lease is not None:
             item.payload[WAVE_LEASE_PAYLOAD] = source.wave_lease
+            if entry.non_code:
+                if entry.stage is StageName.FINISHED:
+                    item.payload[WAVE_NON_CODE_PAYLOAD] = True
+                else:
+                    item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                        "reason": entry.reason,
+                        "extra_labels": list(entry.non_code_labels),
+                        "evidence_digest": entry.non_code_evidence_digest,
+                        "repository_revision": entry.non_code_repository_revision,
+                        "explanation": entry.non_code_explanation,
+                        "retired": entry.non_code_retired,
+                    }
         if overlap_enabled and item.stage is StageName.IMPLEMENTATION:
             repo = (self.config.org, item.repo)
             planned = _admission._fetch_planned_files(issue, repo=repo)
@@ -630,7 +637,7 @@ class SourceCoordinator(_CoordinatorHost):
           push it into an out-of-scope stage the trimmed route table has no row
           for. In-scope classifications (e.g. PLANNING/PLAN_REVIEW) are kept.
 
-        Exclusions (``stage is None``: ``state:skip`` / epic) are never
+        Exclusions (``stage is None``: ``state:skip``) are never
         overridden — force is a re-plan knob, not a skip bypass.
 
         Args:
@@ -745,12 +752,17 @@ class SourceCoordinator(_CoordinatorHost):
                 continue
             has_go, _has_no_go = github.pr_has_implementation_state_label(pr)
             pending_audit = _seeding.read_pending_implementation_go_audit(github, pr)
-            if pending_audit is not None:
+            if pending_audit is not None or has_go:
+                stage_name = (
+                    StageName.PR_REVIEW if pending_audit is not None else StageName.MERGE_WAIT
+                )
+                reason = (
+                    f"PR #{pr} has a pending implementation-go audit"
+                    if pending_audit is not None
+                    else f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}"
+                )
                 stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.PR_REVIEW,
-                    f"PR #{pr} has a pending implementation-go audit",
-                    scope_stages,
+                    scope_identifier, stage_name, reason, scope_stages
                 )
                 entries.append(
                     _seeding.SeedEntry(
@@ -763,24 +775,6 @@ class SourceCoordinator(_CoordinatorHost):
                         passed=passed,
                         pending_implementation_go_audit=pending_audit,
                         pending_implementation_go_label_confirmed=has_go,
-                    )
-                )
-            elif has_go:
-                stage, reason, passed = self._scope_seed_decision(
-                    scope_identifier,
-                    StageName.MERGE_WAIT,
-                    f"PR #{pr} carries {STATE_IMPLEMENTATION_GO}",
-                    scope_stages,
-                )
-                entries.append(
-                    _seeding.SeedEntry(
-                        kind="pr",
-                        identifier=pr,
-                        stage=stage,
-                        reason=reason,
-                        pr_number=pr,
-                        issue_number=issue_number,
-                        passed=passed,
                     )
                 )
             else:

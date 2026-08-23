@@ -27,10 +27,12 @@ State machine
                                                              re-plans or re-reviews)
 
 At most one of the four labels should be present on an issue at any time.
-Automation removes ordinary siblings while changing state, but it never
-removes ``state:plan-blocked``. If that operator-owned latch appears during a
-concurrent transition, exclusive-state confirmation fails and automation
-stops until an external actor resolves the block and replaces the label.
+Automation removes ordinary siblings while changing state, but ordinary
+transitions never remove ``state:plan-blocked``. If that operator-owned latch
+appears during a concurrent transition, exclusive-state confirmation fails and
+automation stops until an external actor resolves the block. An authenticated
+Athena finalized-plan body is that external resolution: planning may atomically
+replace the stale latch with exclusive ``state:plan-go``.
 """
 
 from __future__ import annotations
@@ -45,6 +47,13 @@ STATE_NEEDS_PLAN = "state:needs-plan"
 STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
 STATE_PLAN_BLOCKED = "state:plan-blocked"
+
+# Durable evidence that Hephaestus has observed and verified the exact Athena
+# finalization marker in the current issue body. This is metadata, not a plan
+# state: ``state:plan-go`` remains the sole implementation admission gate. The
+# evidence lets restart seeding detect a later body rewrite that removed or
+# invalidated the marker instead of trusting a stale plan-go label.
+ATHENA_FINALIZED_PLAN_LABEL = "athena:finalized-plan"
 
 #: All four state labels in one tuple — useful for "ensure none of these are
 #: present" / "remove all of these" operations.
@@ -145,6 +154,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
     STATE_SKIP: {
         "color": "ededed",  # grey — intentionally inert
         "description": "Automation normally skips this issue/PR in every phase.",
+    },
+    ATHENA_FINALIZED_PLAN_LABEL: {
+        "color": "5319e7",
+        "description": "Verified Athena finalized-plan marker for the current issue body.",
     },
 }
 
@@ -354,4 +367,8 @@ def enter_planning_transition() -> tuple[list[str], list[str]]:
         the two sibling labels to clear.
 
     """
-    return [STATE_NEEDS_PLAN], [STATE_PLAN_NO_GO, STATE_PLAN_GO]
+    return [STATE_NEEDS_PLAN], [
+        STATE_PLAN_NO_GO,
+        STATE_PLAN_GO,
+        *ALL_IMPLEMENTATION_STATE_LABELS,
+    ]
