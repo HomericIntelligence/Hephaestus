@@ -167,7 +167,7 @@ jobs:
         run: podman build -f ci/Containerfile -t hephaestus-ci:local .
 
       - name: Cache pre-commit environments
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -175,7 +175,7 @@ jobs:
             pre-commit-${{ runner.os }}-
 
       - name: Cache mypy incremental cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           # Persist incremental cache so the full-tree mypy hook (pass_filenames: false)
           # re-checks only changed modules across CI runs. See issue #1503.
@@ -834,6 +834,18 @@ jobs:
           podman run --rm --tmpfs /tmp:rw,size=4g,mode=1777 -v "$PWD:/workspace:Z" --userns=keep-id:uid=1000,gid=1000
           hephaestus-ci:local uv run hephaestus-check-coverage
           --coverage-file coverage.xml --config coverage.toml
+
+      - name: Persist coverage report
+        # The floor gate consumes coverage.xml in-container; persist it so
+        # per-module coverage history survives the run instead of being
+        # discarded with the container.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: unit-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
   integration-tests:
     name: integration-tests
