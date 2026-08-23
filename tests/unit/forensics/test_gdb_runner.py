@@ -31,10 +31,33 @@ from hephaestus.forensics.gdb_runner import (
 #: no-gdb fallback path of run_under_gdb without needing gdb installed.
 _UNRESOLVABLE_CMD = "definitely_not_a_real_command_xyz"
 
+
+def _gdb_supports_logging_enabled() -> bool:
+    """Return True when gdb accepts the batch script's logging syntax.
+
+    The generated batch script uses ``set logging enabled on``, which GDB
+    introduced in 12.0. Older gdb (e.g. Debian's 10.1) rejects it before any
+    hook runs, so genuinely invoking gdb there cannot succeed. Note that old
+    gdb still exits 0 from ``-batch`` after printing the error, so both the
+    exit status AND the diagnostic are checked.
+    """
+    if shutil.which("gdb") is None:
+        return False
+    probe = subprocess.run(
+        ["gdb", "-batch", "-nx", "-ex", "set logging enabled on", "-ex", "quit"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = probe.stdout + probe.stderr
+    return probe.returncode == 0 and "Undefined set logging" not in combined
+
+
 #: Skip marker for tests that genuinely invoke gdb (an integration concern;
-#: gdb is not guaranteed to be present in the unit-test environment).
+#: a capable gdb is not guaranteed to be present in the unit-test environment).
 _requires_gdb = pytest.mark.skipif(
-    shutil.which("gdb") is None, reason="gdb is not installed in this environment"
+    not _gdb_supports_logging_enabled(),
+    reason="gdb >= 12 (set logging enabled) is not available in this environment",
 )
 
 

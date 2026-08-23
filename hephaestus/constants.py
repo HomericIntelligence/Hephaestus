@@ -80,6 +80,13 @@ AGENT_REBASE_TIMEOUT: int = 2400
 DIFF_COLLECT_TIMEOUT: int = 60
 PRE_PR_TEST_TIMEOUT: int = 600
 
+# Canonical Claude Sonnet model ID shared by the automation model taxonomy
+# (hephaestus.automation.agent_config) and library-layer consumers that may
+# not import from hephaestus.automation (e.g. hephaestus.github.tidy's
+# conflict-resolution swarm). Defined once here so the two layers cannot
+# drift apart.
+CLAUDE_SONNET_MODEL: str = "claude-sonnet-4-6"
+
 # Marker file that identifies the repo root in a dev checkout.
 _REPO_ROOT_MARKER = "pyproject.toml"
 

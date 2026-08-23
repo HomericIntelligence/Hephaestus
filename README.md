@@ -77,7 +77,8 @@ Hephaestus ships two layers from one distribution:
 
 - **Library** — `hephaestus.{utils, io, config, logging, cli, system,
   github, validation, resilience, markdown, ci, benchmarks, datasets,
-  discovery, forensics, nats, version, agents}`. Loaded lazily by
+  discovery, forensics, nats, observability, prompts, scripts_lib, version,
+  agents}`. Loaded lazily by
   `import hephaestus`.
 - **Product** — `hephaestus.automation`. Opt-in via
   `pip install HomericIntelligence-Hephaestus[automation]`. Implements
@@ -108,6 +109,7 @@ ignored generated output such as `.git/`, `.venv/`, `.pytest_cache/`, and
 | [tests/](tests/) | Unit and integration test suites. |
 | [docs/](docs/) | User documentation, architecture decisions, roadmap, and release guidance. |
 | [scripts/](scripts/) | Maintenance, validation, demonstration, and operational scripts. |
+| [ci/](ci/) | Container build inputs for the pinned CI image (Containerfile). |
 | [.github/](.github/) | GitHub templates, ownership rules, dependency automation, and workflows. |
 | [.claude/](.claude/) | Repository-scoped Claude settings, security guidance, and development workflow. |
 | [.vscode/](.vscode/) | Shared VS Code extensions, settings, and debug configuration. |
@@ -480,11 +482,6 @@ process-group support does not prevent normal execution.
 | Command | Description |
 |---|---|
 | `hephaestus-scaffold-subpackage` | Scaffold a minimal importable subpackage with a structural unit test and no behavior stubs |
-
-### Configuration & Dependencies
-
-| Command | Description |
-|---|---|
 
 ### Version Management
 

@@ -4,6 +4,7 @@
 import contextlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
 # Repository policy requires generated files to live under build/. Hypothesis
@@ -17,6 +18,41 @@ import pytest
 import yaml
 
 CONTRACT_OPT_IN_ENV = "HEPHAESTUS_CONTRACT_TESTS"
+
+
+def _git_supports_path_format() -> bool:
+    """Return True when host git understands ``rev-parse --path-format``.
+
+    Probed from this checkout so ``--show-toplevel`` has a repository to
+    operate on. Output must be exactly one line holding the absolute
+    toplevel: capable git resolves the flag, while pre-2.31 git silently
+    echoes the unknown argument as an extra stdout line with exit 0.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    probe = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo_root,
+    )
+    if probe.returncode != 0:
+        return False
+    lines = probe.stdout.splitlines()
+    return len(lines) == 1 and Path(lines[0]).resolve() == repo_root.resolve()
+
+
+@pytest.fixture(scope="session")
+def require_git_path_format() -> None:
+    """Skip when host git lacks ``--path-format=absolute`` (git >= 2.31).
+
+    Production helpers (worktree metadata resolution, CI build-context
+    assembly) pass ``--path-format=absolute`` to ``git rev-parse``. On hosts
+    running older git those invocations fail outright — a host capability
+    gap, not a product defect — so affected tests skip instead of failing.
+    """
+    if not _git_supports_path_format():
+        pytest.skip("host git lacks --path-format=absolute (needs git >= 2.31)")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

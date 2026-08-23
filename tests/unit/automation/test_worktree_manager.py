@@ -1105,6 +1105,7 @@ class TestBaseBranchDetectionRaisesOnFailure:
         assert mgr.repo_root == tmp_path
 
 
+@pytest.mark.usefixtures("require_git_path_format")
 class TestCreateWorktreeBranchCollision:
     """create_worktree protects writer worktrees from cross-issue collisions."""
 

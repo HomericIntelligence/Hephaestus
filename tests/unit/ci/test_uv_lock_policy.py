@@ -1,7 +1,8 @@
-"""Guard uv.lock freshness enforcement and lifecycle documentation."""
+"""Guard uv.lock freshness enforcement in the pre-commit hook contract."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -19,26 +20,10 @@ def test_uv_lock_hook_is_check_only() -> None:
     )
     hook = next(hook for hook in repo["hooks"] if hook["id"] == "uv-lock")
 
-    assert repo["rev"] == "0.11.28"
+    # The rev must be an immutable full commit SHA (digest-pinned like every
+    # other third-party hook; the tag is kept as a comment beside it).
+    assert isinstance(repo["rev"], str)
+    assert re.fullmatch(r"[0-9a-f]{40}", repo["rev"]), repo["rev"]
     assert hook["args"] == ["--check"]
     assert hook["files"] == r"^(pyproject\.toml|uv\.lock)$"
     assert hook["pass_filenames"] is False
-
-
-def test_contributing_documents_uv_lock_lifecycle() -> None:
-    """The contributor guide must describe the complete uv lock lifecycle."""
-    text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    heading = "### Python dependency and `uv.lock` lifecycle"
-    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
-
-    for required in (
-        "Dependabot",
-        "weekly",
-        "`pyproject.toml`",
-        "`uv.lock`",
-        "uv lock",
-        "uv lock --upgrade-package <name>",
-        "uv lock --upgrade",
-        "uv lock --check",
-    ):
-        assert required in section

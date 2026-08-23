@@ -17,19 +17,17 @@ repos:
       - id: ruff-format-python
         name: Ruff Format Python
         description: Format Python files using ruff format
-        entry: uv run ruff format hephaestus/ scripts/ tests/
+        entry: uv run ruff format
         language: system
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
-        pass_filenames: false
       - id: ruff-check-python
         name: Ruff Check Python
         description: Lint Python files using ruff check
-        entry: uv run ruff check --fix hephaestus/ scripts/ tests/
+        entry: uv run ruff check --fix
         language: system
         files: ^(hephaestus|scripts|tests)/.*\.py$
         types: [python]
-        pass_filenames: false
       - id: mypy-check-python
         name: Mypy Type Check Python
         description: Type check Python files using mypy
@@ -41,7 +39,8 @@ repos:
 
   # Markdown linting
   - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.20.0
+    # v0.20.0
+    rev: 7339935a3036f096ee0d7f1f047a9ec41707d4c1
     hooks:
       - id: markdownlint-cli2
         name: Markdown Lint
@@ -55,7 +54,8 @@ repos:
 
   # YAML linting
   - repo: https://github.com/adrienverge/yamllint
-    rev: v1.38.0
+    # v1.38.0
+    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530
     hooks:
       - id: yamllint
         name: YAML Lint
@@ -77,7 +77,8 @@ repos:
   # Security: mandatory generic staged-secret scanning. Keep this release
   # aligned with the security/secrets-scan container in _required.yml.
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.0
+    # v8.30.0
+    rev: 6eaad039603a4de39fddd1cf5f727391efe9974e
     hooks:
       - id: gitleaks
         name: Gitleaks (generic staged-secret scan)
@@ -110,7 +111,8 @@ repos:
 
   # Lock file freshness
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.28
+    # 0.11.28
+    rev: d9fca3320346514799461a80b0753eb45d707d46
     hooks:
       - id: uv-lock
         name: Check uv lock file
@@ -151,6 +153,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^(.*\.md|pyproject\.toml|hephaestus/automation/pipeline(?:_github\.py|/.*\.py)|hephaestus/prompts/(?:catalog\.py|templates/.*|overrides/.*)|\.github/CODEOWNERS|\.github/workflows/(?:_required|test)\.yml)$
+
+  # Documentation/config consistency guard (coverage thresholds etc.)
+  - repo: local
+    hooks:
+      - id: check-doc-config
+        name: Check doc/config consistency
+        description: Reject drift between normative docs and pyproject.toml config (e.g. coverage thresholds)
+        entry: uv run hephaestus-check-doc-config --repo-root .
+        language: system
+        pass_filenames: false
+        files: ^(AGENTS\.md|CLAUDE\.md|docs/DEFINITION_OF_DONE\.md|pyproject\.toml)$
 
   # Claude settings permission path check
   - repo: local
@@ -368,7 +381,8 @@ repos:
         pass_filenames: true
   # Shellcheck for shell scripts
   - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.10.0.1
+    # v0.10.0.1
+    rev: a23f6b85d0fdd5bb9d564e2579e678033debbdff
     hooks:
       - id: shellcheck
         name: ShellCheck
@@ -380,7 +394,8 @@ repos:
 
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    # v6.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer

@@ -5,7 +5,6 @@
 AGENTS.md @mvillmow
 CLAUDE.md @mvillmow
 pyproject.toml @mvillmow
-pyproject.toml @mvillmow
 .pre-commit-config.yaml @mvillmow
 
 # CI/CD

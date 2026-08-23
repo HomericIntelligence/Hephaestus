@@ -27,14 +27,10 @@ from hephaestus.github.git_ops import (
 )
 from hephaestus.logging.utils import get_logger
 from hephaestus.prompts import PromptCatalog
+from hephaestus.prompts.fencing import fence_untrusted as _fence_untrusted
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
 logger = get_logger(__name__)
-
-
-def _fence_untrusted(label: str, content: str, nonce: str) -> str:
-    """Wrap prompt data so untrusted text cannot impersonate instructions."""
-    return f"BEGIN_{nonce}_{label}\n{content}\nEND_{nonce}_{label}"
 
 
 def _conflict_metadata_block(

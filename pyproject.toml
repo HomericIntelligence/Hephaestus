@@ -97,6 +97,8 @@ dev = [
     "zizmor>=1.27,<2",
     "pdoc>=14.0,<17",
     "pytest-watcher>=0.4,<1",
+    # Opt-in parallel unit runs (`just test-par`); not used by CI lanes.
+    "pytest-xdist>=3.6,<4",
 ]
 automation = [
     "markdown-it-py>=4.0,<5",

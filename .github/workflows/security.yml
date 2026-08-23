@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5.2.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.local/share/containers/storage
           key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
@@ -82,7 +82,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5.2.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.local/share/containers/storage
           key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
@@ -138,7 +138,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5.2.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.local/share/containers/storage
           key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
@@ -185,7 +185,7 @@ jobs:
           persist-credentials: false
 
       - name: Cache podman container storage
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5.2.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.local/share/containers/storage
           key: hephaestus-podman-${{ runner.os }}-${{ hashFiles('ci/Containerfile', 'uv.lock', 'pyproject.toml') }}
@@ -215,3 +215,36 @@ jobs:
               echo "Non-compatible license or coverage gap detected — see job logs and NOTICE."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  notify-failure:
+    name: Open or update failure tracking issue
+    needs: [pip-audit, sast, workflow-scan, license-scan]
+    # Only scheduled runs open issues — PR-time jobs are attended by the PR
+    # gate and manual dispatch runs are attended.
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          title="[scheduled-ci] ${WORKFLOW_NAME} failed on ${BRANCH}"
+          notice="_Automated notification from the scheduled \`${WORKFLOW_NAME}\` workflow._"
+          body="$(printf 'Scheduled lane `%s` failed on branch `%s`.\nRun: %s\n\n%s' \
+            "$WORKFLOW_NAME" "$BRANCH" "$RUN_URL" "$notice")"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${REPOSITORY}" \
+              --body "Failed again — run: ${RUN_URL}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "$title" --body "$body"
+          fi

@@ -37,7 +37,7 @@ from hephaestus.cli.utils import (
     create_parser,
     emit_json_status,
 )
-from hephaestus.constants import agent_rebase_timeout
+from hephaestus.constants import CLAUDE_SONNET_MODEL, agent_rebase_timeout
 from hephaestus.github.client import gh_call
 from hephaestus.github.git_ops import (
     in_git_repo as _shared_in_git_repo,
@@ -51,12 +51,11 @@ from hephaestus.prompts import PromptCatalog, add_prompt_dir_argument
 
 logger = logging.getLogger(__name__)
 
-# Model the tidy conflict-resolution swarm runs on. Defined locally rather than
-# imported from hephaestus.automation.claude_models because hephaestus.github
-# must not depend on hephaestus.automation (one-way layering boundary enforced
-# by tests/unit/utils/test_no_import_cycles.py). Keep this in sync with the
-# SONNET constant there.
-_TIDY_SWARM_MODEL = "claude-sonnet-4-6"
+# Model the tidy conflict-resolution swarm runs on. Sourced from
+# hephaestus.constants (not hephaestus.automation) so the library layer stays
+# inside the one-way boundary while sharing a single model ID with the
+# automation taxonomy.
+_TIDY_SWARM_MODEL = CLAUDE_SONNET_MODEL
 
 # ANSI escape sequence stripper
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")

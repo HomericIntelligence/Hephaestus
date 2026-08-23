@@ -492,13 +492,15 @@ def check_readmes_main() -> int:
     """
     parser = create_validation_parser(
         "Validate README files for required sections and formatting",
-        include_repo_root=False,
+        include_repo_root=True,
     )
+    # Legacy alias for --repo-root; either flag selects the directory to scan.
     parser.add_argument(
         "--directory",
+        dest="directory",
         type=Path,
         default=None,
-        help="Directory to scan (default: current working directory)",
+        help="Legacy alias for --repo-root (directory to scan)",
     )
     parser.add_argument(
         "--required-section",
@@ -514,7 +516,7 @@ def check_readmes_main() -> int:
     )
 
     args = parser.parse_args()
-    directory = args.directory or Path.cwd()
+    directory = args.directory or args.repo_root or Path.cwd()
 
     if not directory.is_dir():
         print(f"ERROR: Directory not found: {directory}", file=sys.stderr)

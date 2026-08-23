@@ -421,6 +421,7 @@ class TestTidyHandlers:
 class TestMain:
     """Smoke tests for hephaestus.github.tidy.main() covering --json branches."""
 
+    @pytest.mark.usefixtures("require_git_path_format")
     def test_cleanup_from_linked_worktree_never_targets_primary(
         self,
         tmp_path: Path,

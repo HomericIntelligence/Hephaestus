@@ -251,7 +251,7 @@ or `hephaestus/__init__.py`.
 - **Dependabot** owns the root Python dependency lifecycle through the `uv`
   ecosystem in [`.github/dependabot.yml`](.github/dependabot.yml):
   `pyproject.toml` declarations and the committed `uv.lock`. It opens grouped
-  Python dependency PRs weekly and also manages `github-actions` updates.
+  Python dependency PRs monthly and also manages `github-actions` updates.
 - Refresh the lockfile deliberately when updating dependencies:
 
   ```bash
@@ -265,7 +265,7 @@ or `hephaestus/__init__.py`.
 ### Python dependency and `uv.lock` lifecycle
 
 `uv.lock` is committed and must remain synchronized with the dependency
-declarations in `pyproject.toml`. Dependabot owns the routine weekly updates;
+declarations in `pyproject.toml`. Dependabot owns the routine monthly updates;
 when changing dependencies manually, regenerate and commit `uv.lock` with the
 same change:
 

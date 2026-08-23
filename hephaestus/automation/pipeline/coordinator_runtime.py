@@ -441,23 +441,23 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._terminal_summary.record(item)
         self._seen_item_ids.discard(id(item))
 
-        # Move a completed item to the tail so the bounded window is ordered
-        # by terminal completion rather than by its initial seed time.  An
-        # item can be absent in narrow direct unit tests; runtime items are
-        # always tracked by _push_item first.
+        # Single identity scan: locate the item; collect recorded indices.
+        item_index: int | None = None
+        recorded_indices: list[int] = []
         for index, candidate in enumerate(self.items):
             if candidate is item:
-                self.items.pop(index)
-                self.items.append(item)
-                break
+                item_index = index
+            elif candidate.payload.get("_summary_recorded", False):
+                recorded_indices.append(index)
 
         retained = self.config.terminal_detail_capacity
-        completed = [
-            index
-            for index, candidate in enumerate(self.items)
-            if candidate.payload.get("_summary_recorded", False)
-        ]
-        for index in reversed(completed[:-retained]):
+        keep_older = max(retained - (item_index is not None), 0)
+        if item_index is not None:
+            del self.items[item_index]
+            self.items.append(item)
+            recorded_indices = [i - (i > item_index) for i in recorded_indices]
+
+        for index in reversed(recorded_indices[:-keep_older] if keep_older else recorded_indices):
             self.items.pop(index)
 
         # The sink may record a result before a cleanup job completes.  At

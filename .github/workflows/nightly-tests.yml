@@ -35,3 +35,35 @@ jobs:
         run: >
           uv run pytest tests/unit tests/integration
           --override-ini="addopts=" -v --strict-markers -m "nightly"
+
+  notify-failure:
+    name: Open or update failure tracking issue
+    needs: [nightly-tests]
+    # Only scheduled runs open issues — manual dispatch runs are attended.
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          title="[scheduled-ci] ${WORKFLOW_NAME} failed on ${BRANCH}"
+          notice="_Automated notification from the scheduled \`${WORKFLOW_NAME}\` workflow._"
+          body="$(printf 'Scheduled lane `%s` failed on branch `%s`.\nRun: %s\n\n%s' \
+            "$WORKFLOW_NAME" "$BRANCH" "$RUN_URL" "$notice")"
+          existing="$(gh issue list --repo "${REPOSITORY}" --state open \
+            --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${REPOSITORY}" \
+              --body "Failed again — run: ${RUN_URL}"
+          else
+            gh issue create --repo "${REPOSITORY}" --title "$title" --body "$body"
+          fi
