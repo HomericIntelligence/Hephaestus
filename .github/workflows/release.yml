@@ -114,7 +114,10 @@ jobs:
           SOURCE_PROVENANCE_MATCHES=false
           SOURCE_PROVENANCE_MARKER="<!-- hephaestus-source-sha:${SHA} -->"
           if [ "$RELEASE_EXISTS" = "true" ] && [ "$IMMUTABLE" = "true" ]; then
-            if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$SOURCE_PROVENANCE_MARKER"; then
+            # Strip CRs before the whole-line match: release bodies have been
+            # observed stored with CRLF line endings (v0.10.4), which defeats
+            # -x against an LF-only needle and false-positives the retry guard.
+            if printf '%s\n' "$RELEASE_BODY" | tr -d '\r' | grep -Fqx "$SOURCE_PROVENANCE_MARKER"; then
               SOURCE_PROVENANCE_MATCHES=true
             # v0.10.0 predates the marker. Its immutable release, signed tag,
             # successful PyPI deployment, and release job were independently
@@ -451,7 +454,9 @@ jobs:
         run: |
           MARKER="<!-- hephaestus-source-sha:${SHA} -->"
           RELEASE_BODY="$(gh release view "$TAG" --json body -q .body)"
-          if printf '%s\n' "$RELEASE_BODY" | grep -Fqx "$MARKER"; then
+          # CR-tolerant for the same reason as the resolve-step guard: stored
+          # bodies may be CRLF while the needle is LF-only.
+          if printf '%s\n' "$RELEASE_BODY" | tr -d '\r' | grep -Fqx "$MARKER"; then
             gh release edit "$TAG" --draft=false
           else
             gh release edit "$TAG" --draft=false --notes "${RELEASE_BODY}
