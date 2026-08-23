@@ -128,7 +128,8 @@ in §5.1, which tags `state:skip` on epics before any other durable mutation.
  [`hephaestus.automation`](../hephaestus/automation/), as defined by
  [`ADR-0001`](adr/0001-automation-library-boundary.md).
 - **SOLID / substitutable providers.** [`hephaestus.agents.runtime`](../hephaestus/agents/runtime.py)
- abstracts over Claude Code and Codex behind a uniform `--agent` flag.
+ abstracts over Claude Code, Codex, Pi (admission-gated), and OpenCode
+ behind a uniform `--agent` flag.
 - **POLA. Least privilege, least astonishment.** Per-call
  `--allowedTools`, scoped worktrees, fenced untrusted GitHub content
  via `_fence_untrusted` in
@@ -147,7 +148,8 @@ in-process pipeline whose coordinator lives at
 The coordinator owns **eight bounded in-memory stage queues**. It dispatches
 ordinary agent, build-test, Git, and GitHub jobs to `WorkerPool`. It dispatches
 host learning and terminal cleanup to `AuxiliaryWorkerPool`. Each agent
-job runs Claude or Codex, chosen by `--agent` (default Claude).
+job runs Claude, Codex, admission-gated Pi, or OpenCode, chosen by `--agent`
+(default Claude).
 
 #### Main and auxiliary queue block diagram
 
@@ -188,7 +190,8 @@ The main thread (coordinator) OWNS:
 It NEVER launches agents, builds/tests or git/network operations. It never
 sleeps — wakeups are the timer's responsibility.
 The main worker pool ([`WorkerPool`](../hephaestus/automation/pipeline/worker_pool.py))
-executes everything else: agent invocations (Claude or Codex), build/test
+executes everything else: agent invocations (Claude, Codex, Pi, or
+OpenCode), build/test
 subprocesses, git operations, and the closed worker-owned GitHub operations.
 `StageContext.github` remains coordinator-thread-owned and never crosses this
 boundary. Each [`GitHubJob`](../hephaestus/automation/pipeline/github_jobs.py)
@@ -1445,8 +1448,8 @@ learning or cleanup obligations are preserved.
 The exhaustive classification is maintained in the
 [source-agent workspace inventory](source-agent-workspace-inventory.md).
 
-- [`AgentJob`](../hephaestus/automation/pipeline/jobs.py) — Claude or
- Codex (`agent = resolve_agent(job.agent)`) with
+- [`AgentJob`](../hephaestus/automation/pipeline/jobs.py) — Claude, Codex,
+ admission-gated Pi, or OpenCode (`agent = resolve_agent(job.agent)`) with
  `prompt_builder(**prompt_kwargs)` composed in-worker.
  `resume_session_id`, when set for a direct runner, selects its persisted
  session instead of creating a fresh one; its returned id is carried in the
