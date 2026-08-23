@@ -1183,39 +1183,46 @@ def test_opencode_registry_contract() -> None:
     assert agent_runtime.agent_supports_model_reasoning_effort("opencode") is False
 
 
-def test_opencode_base_cmd_passes_model_through_and_omits_empty() -> None:
-    """Model values pass through verbatim; empty model uses OpenCode's default."""
-    assert agent_runtime._opencode_base_cmd() == ["opencode", "run", "--format", "json"]
-    assert agent_runtime._opencode_base_cmd(model="anthropic/claude-sonnet-4-5") == [
+def test_opencode_base_cmd_passes_model_through_and_omits_empty(tmp_path: Path) -> None:
+    """Model values pass through verbatim; --dir pins the project anchor."""
+    assert agent_runtime._opencode_base_cmd(cwd=tmp_path) == [
         "opencode",
         "run",
+        "--dir",
+        str(tmp_path),
+        "--format",
+        "json",
+    ]
+    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, model="anthropic/claude-sonnet-4-5") == [
+        "opencode",
+        "run",
+        "--dir",
+        str(tmp_path),
         "--format",
         "json",
         "--model",
         "anthropic/claude-sonnet-4-5",
     ]
-    assert agent_runtime._opencode_base_cmd(session_id="ses_abc") == [
+    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, session_id="ses_abc") == [
         "opencode",
         "run",
+        "--dir",
+        str(tmp_path),
         "--format",
         "json",
         "--session",
         "ses_abc",
     ]
 
-    assert agent_runtime._opencode_base_cmd(sandbox="read-only") == [
+    assert agent_runtime._opencode_base_cmd(cwd=tmp_path, sandbox="read-only") == [
         "opencode",
         "run",
+        "--dir",
+        str(tmp_path),
         "--format",
         "json",
         "--agent",
         "plan",
-    ]
-    assert agent_runtime._opencode_base_cmd(sandbox="workspace-write") == [
-        "opencode",
-        "run",
-        "--format",
-        "json",
     ]
 
 

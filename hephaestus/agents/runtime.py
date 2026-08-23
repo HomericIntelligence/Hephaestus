@@ -1177,15 +1177,6 @@ def _codex_model_args(model: str, *, use_default: bool = False) -> list[str]:
     return args
 
 
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    """Return whether ``path`` is inside ``parent`` without requiring Python 3.12 APIs."""
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
 def _codex_extra_writable_dirs(cwd: Path, sandbox: str | None) -> list[Path]:
     """Return extra writable roots Codex needs for git worktree metadata."""
     if sandbox != "workspace-write":
@@ -1212,7 +1203,8 @@ def _codex_extra_writable_dirs(cwd: Path, sandbox: str | None) -> list[Path]:
         common_dir = cwd / common_dir
     common_dir = common_dir.resolve(strict=False)
     cwd_resolved = cwd.resolve(strict=False)
-    if _is_relative_to(common_dir, cwd_resolved):
+    # Path.is_relative_to is stdlib since 3.9; the project floor is 3.13.
+    if common_dir.is_relative_to(cwd_resolved):
         return []
     return [common_dir]
 
@@ -1739,12 +1731,21 @@ OPENCODE_PLAN_AGENT = "plan"
 
 def _opencode_base_cmd(
     *,
+    cwd: Path,
     session_id: str | None = None,
     model: str = "",
     sandbox: str = "workspace-write",
 ) -> list[str]:
-    """Build an OpenCode run command that reads the prompt from stdin."""
-    cmd = ["opencode", "run", "--format", "json"]
+    """Build an OpenCode run command that reads the prompt from stdin.
+
+    ``--dir`` pins the session's project to the invocation directory. Without
+    it OpenCode may anchor the project to an unrelated repository root (its
+    registry keys on first-seen git roots), which makes every path inside a
+    pipeline worktree *external* — each edit or out-of-tree ``workdir`` then
+    needs an interactive permission ask that headless runs auto-deny, so the
+    model silently no-ops while claiming success (#2806 validation).
+    """
+    cmd = ["opencode", "run", "--dir", str(cwd), "--format", "json"]
     if model:
         cmd.extend(["--model", model])
     if session_id:
@@ -1790,7 +1791,7 @@ def run_opencode_session(
     is enforced via the built-in ``plan`` agent (verified edit-deny).
     """
     del approval
-    cmd = _opencode_base_cmd(model=model, sandbox=sandbox)
+    cmd = _opencode_base_cmd(cwd=cwd, model=model, sandbox=sandbox)
     return _run_opencode_command(
         cmd,
         prompt=prompt,
@@ -1819,7 +1820,7 @@ def resume_opencode_session(
     is safe for automation flows that switch phase models between calls.
     """
     del approval
-    cmd = _opencode_base_cmd(session_id=session_id, model=model, sandbox=sandbox)
+    cmd = _opencode_base_cmd(cwd=cwd, session_id=session_id, model=model, sandbox=sandbox)
     return _run_opencode_command(
         cmd,
         prompt=prompt,
