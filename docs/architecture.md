@@ -1347,11 +1347,12 @@ another route list.
 `WorkItem` instances initialize those counters through `_default_attempts()`.
 The `merge` default uses `DEFAULT_DRIVE_GREEN_LOOPS`; callers may override
 declared budgets through `PipelineConfig.budget_overrides`. Counters remain
-per-item-lifetime and are never reset when an item re-enters a stage.
-All counters live in [`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py),
-so cross-stage regression cycles (e.g. pr_review → implementation) remain
-Operational readiness waits use a separate 15-minute monotonic deadline keyed to the current reviewed-head proof.
-globally bounded.
+per-item-lifetime and are never reset when an item re-enters a stage, so
+cross-stage regression cycles (e.g. pr_review → implementation) remain
+globally bounded. All counters live in
+[`WorkItem.attempts`](../hephaestus/automation/pipeline/work_item.py).
+Operational readiness waits use a separate 15-minute monotonic deadline keyed
+to the current reviewed-head proof.
 
 ---
 
