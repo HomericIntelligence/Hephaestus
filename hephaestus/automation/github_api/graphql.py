@@ -1098,7 +1098,6 @@ def add_implementation_thread_reply_mutation(
             not isinstance(review, dict)
             or review.get("id") != pending_review_id
             or review.get("state") != "PENDING"
-            or (review.get("commit") or {}).get("oid") != expected_head_sha
         ):
             raise ValueError("implementation reply review receipt was incomplete")
         return {"clientMutationId": intent.client_mutation_id, **comment}
@@ -1154,11 +1153,7 @@ def add_reviewer_feedback_reply_mutation(
             or not isinstance(comment.get("id"), str)
         ):
             raise ValueError("reviewer feedback receipt was incomplete")
-        if (
-            not isinstance(review, dict)
-            or review.get("state") != "COMMENTED"
-            or (review.get("commit") or {}).get("oid") != expected_head_sha
-        ):
+        if not isinstance(review, dict) or review.get("state") != "COMMENTED":
             raise ValueError("reviewer feedback review receipt was incomplete")
         return {"clientMutationId": intent.client_mutation_id, **comment}
 
@@ -1295,6 +1290,7 @@ def pipeline_thread_snapshot_page_query(
         ):
             raise ValueError("pipeline thread identity did not match the requested PR")
         connection = _page_info(node.get("comments"))
+        stale: set[str] = set()
         for comment in connection["nodes"]:
             if (
                 not isinstance(comment.get("id"), str)
@@ -1302,19 +1298,30 @@ def pipeline_thread_snapshot_page_query(
                 or not isinstance(comment.get("viewerDidAuthor"), bool)
             ):
                 raise ValueError("pipeline thread comment fields were malformed")
+            comment_id = comment["id"]
             author = comment.get("author")
             if author is not None and (
                 not isinstance(author, dict) or not isinstance(author.get("login"), str)
             ):
                 raise ValueError("pipeline thread comment author was malformed")
+            # A comment whose owning review was deleted carries a null
+            # pullRequestReview binding. Drop it rather than poisoning the
+            # whole snapshot readback; it cannot carry resolution evidence.
             review = comment.get("pullRequestReview")
-            if not isinstance(review, dict):
-                raise ValueError("pipeline thread review was missing")
-            commit = review.get("commit")
-            if not isinstance(review.get("id"), str) or not isinstance(review.get("state"), str):
-                raise ValueError("pipeline thread review identity was malformed")
-            if not isinstance(commit, dict) or not isinstance(commit.get("oid"), str):
-                raise ValueError("pipeline thread review commit was malformed")
+            commit = review.get("commit") if isinstance(review, dict) else None
+            if not isinstance(review, dict) or not isinstance(commit, dict):
+                stale.add(comment_id)
+                continue
+            if (
+                not isinstance(review.get("id"), str)
+                or not isinstance(review.get("state"), str)
+                or not isinstance(commit.get("oid"), str)
+            ):
+                stale.add(comment_id)
+                continue
+        if stale:
+            kept = [c for c in connection["nodes"] if c.get("id") not in stale]
+            connection["nodes"] = cast(list[dict[str, Any]], kept)
         return {
             "pullRequest": pull_request,
             "thread": node,

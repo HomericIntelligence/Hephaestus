@@ -948,13 +948,13 @@ class PipelineGitHubReviews(_PipelineGitHubHost):
             ):
                 return ImplementationThreadReplyResult(blocked_thread_ids=candidate_ids)
             pending_review_id = observed_pending_review_id or pending_review_id
-            if has_commented_recovery and (prepared or pending_review_id is not None):
-                # A submitted review cannot safely be extended. A mixed
-                # recovery means another actor changed the batch boundary.
-                return ImplementationThreadReplyResult(
-                    retryable_thread_ids=candidate_ids,
-                    retryable=True,
-                )
+            if has_commented_recovery and prepared:
+                # Another actor submitted the previous pending envelope.
+                # Operator policy (#2393): never stall the happy path on
+                # that race — the remaining prepared replies continue
+                # under a freshly created pending review below, so the
+                # submitted id must not be reused as a binding target.
+                pending_review_id = None
             if has_commented_recovery and len(candidate_ids) > 1 and len(commented_review_ids) != 1:
                 # Never let legacy one-review-per-comment recovery masquerade
                 # as a complete implementation pass.
