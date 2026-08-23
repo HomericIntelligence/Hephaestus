@@ -274,7 +274,6 @@ def test_named_host_adapter_entry_point_admits_fresh_cli_process(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An explicitly selected installed adapter bootstraps a fresh process."""
-    """An explicit installed adapter can bootstrap a new console process."""
     from hephaestus.agents.pi_plugins import PiPreflightResult
 
     class Adapter:
@@ -287,7 +286,6 @@ def test_named_host_adapter_entry_point_admits_fresh_cli_process(
                 return Adapter()
 
             return factory
-            return Adapter
 
     observed: list[dict[str, str]] = []
 
