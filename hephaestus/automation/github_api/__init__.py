@@ -70,6 +70,7 @@ from .issues import (  # noqa: E402
     _parse_issue_number as _parse_issue_number,
     fetch_issue_comments_metadata as fetch_issue_comments_metadata,
     fetch_issue_info as fetch_issue_info,
+    gh_issue_body_edited_by_viewer as gh_issue_body_edited_by_viewer,
     gh_issue_comment as gh_issue_comment,
     gh_issue_create as gh_issue_create,
     gh_issue_delete_comment as gh_issue_delete_comment,
@@ -78,6 +79,7 @@ from .issues import (  # noqa: E402
     gh_issue_upsert_owned_comment as gh_issue_upsert_owned_comment,
     gh_list_open_issues as gh_list_open_issues,
     is_issue_closed as is_issue_closed,
+    issue_body_digest as issue_body_digest,
     parse_issue_dependencies as parse_issue_dependencies,
 )
 from .labels import (  # noqa: E402
@@ -162,6 +164,7 @@ __all__ = [
     "gh_create_label",
     "gh_current_login",
     "gh_issue_add_labels",
+    "gh_issue_body_edited_by_viewer",
     "gh_issue_comment",
     "gh_issue_create",
     "gh_issue_delete_comment",
@@ -183,6 +186,7 @@ __all__ = [
     "gh_rate_limit_reset_epoch",
     "is_issue_closed",
     "is_skipped",
+    "issue_body_digest",
     "parse_issue_dependencies",
     "prefetch_issue_states",
     "run",

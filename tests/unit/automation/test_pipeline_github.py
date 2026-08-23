@@ -7,7 +7,9 @@ place the ``StageGitHub`` protocol's dry-run contract is honored.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from multiprocessing import get_context
@@ -169,6 +171,58 @@ def fully_enforced_protection_without_bypass_allowances() -> str:
 def test_adapter_satisfies_stage_github_protocol(adapter: pg.PipelineGitHub) -> None:
     """Runtime protocol conformance (mypy checks it statically too)."""
     assert isinstance(adapter, StageGitHub)
+
+
+@pytest.mark.parametrize(
+    ("editor", "expected"),
+    [("maintainer", True), ("contributor", False), (None, False)],
+)
+def test_issue_body_editor_must_match_authenticated_viewer(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    editor: str | None,
+    expected: bool,
+) -> None:
+    """Finalization trusts only the current actor's latest body edit."""
+    adapter.repo = "repo"
+    payload = {
+        "data": {
+            "viewer": {"login": "maintainer"},
+            "repository": {"issue": {"editor": {"login": editor} if editor is not None else None}},
+        }
+    }
+    monkeypatch.setattr(adapter, "_graphql", lambda *_args, **_kwargs: payload)
+
+    assert adapter.issue_body_edited_by_viewer(2795) is expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(1, "gh"),
+        subprocess.TimeoutExpired("gh", 1),
+        OSError("transport unavailable"),
+        None,
+    ],
+)
+def test_repo_scoped_editor_auth_normalizes_transport_and_json_failures(
+    adapter: pg.PipelineGitHub,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: subprocess.SubprocessError | OSError | None,
+) -> None:
+    """The repo-scoped adapter normalizes transport and decoding failures."""
+    adapter.repo = "repo"
+    if failure is not None:
+        monkeypatch.setattr(transport_mod, "gh_call", MagicMock(side_effect=failure))
+    else:
+        monkeypatch.setattr(
+            transport_mod,
+            "gh_call",
+            MagicMock(return_value=SimpleNamespace(stdout="not-json")),
+        )
+
+    with pytest.raises(RuntimeError, match="repo-scoped pipeline GraphQL request failed"):
+        adapter.issue_body_edited_by_viewer(2795)
 
 
 def _external_reviewer_thread(thread_id: str = "reviewer-thread") -> dict[str, Any]:
@@ -2812,7 +2866,6 @@ _MUTATOR_CASES = [
     ("add_labels", (5, ["x"]), "github_api", "gh_issue_add_labels"),
     ("remove_labels", (5, ["x"]), "github_api", "gh_issue_remove_labels"),
     ("close_issue_as_covered", (5, 7), "module", "close_issue_as_covered"),
-    ("skip_epics", ({5: ["epic"]},), "github_api", "skip_epics"),
     ("ensure_state_labels", (), "github_api", "_ensure_labels_exist"),
 ]
 
@@ -2871,16 +2924,49 @@ class TestMutatorMapping:
     def test_upsert_plan_comment_keys_on_marker(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        fetch = MagicMock(return_value=[])
+        body = render_current_plan("body")
+        fetch = MagicMock(
+            side_effect=[
+                [],
+                [{"body": body, "databaseId": 100, "viewerDidAuthor": True}],
+            ]
+        )
         post = MagicMock()
         monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
-        body = render_current_plan("body")
 
         adapter.upsert_plan_comment(5, body)
 
         assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
+
+    def test_upsert_create_requires_owned_exact_body_readback(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful transport write is not a durable publication receipt."""
+        body = render_current_plan("body")
+        monkeypatch.setattr(adapter, "_repo_issue_comments", MagicMock(side_effect=[[], []]))
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", MagicMock())
+
+        with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
+            adapter.upsert_plan_comment(5, body)
+
+    def test_upsert_patch_requires_owned_exact_body_readback(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PATCH success cannot advance until GitHub returns the requested body."""
+        old = render_current_plan("old")
+        new = render_current_plan("new")
+        stale = {"body": old, "databaseId": 100, "viewerDidAuthor": True}
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(side_effect=[[stale], [stale]]),
+        )
+        monkeypatch.setattr(pg, "gh_call", MagicMock())
+
+        with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
+            adapter.upsert_plan_comment(5, new)
 
     def test_upsert_ignores_foreign_canonical_marker_and_creates_owned_comment(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3567,6 +3653,27 @@ class TestRepoScoping:
             "--repo",
             "org/repo-a",
         ]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.CalledProcessError(1, "gh"),
+            subprocess.TimeoutExpired("gh", 30),
+            OSError("transport unavailable"),
+        ],
+    )
+    def test_edit_labels_normalizes_transport_failures(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ) -> None:
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+        monkeypatch.setattr(adapter, "_label_names", lambda: {"state:plan-go"})
+        monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=failure))
+
+        with pytest.raises(RuntimeError, match="failed to edit labels"):
+            adapter.edit_labels(5, add=["state:plan-go"], remove=["state:plan-no-go"])
 
     def test_plan_presence_does_not_backfill_from_review_comment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4517,9 +4624,14 @@ class TestRepoScoping:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[list[str]] = []
+        current_body = render_current_plan("old")
 
         def fake_gh_call(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            nonlocal current_body
             calls.append(argv)
+            if argv[:3] == ["api", "--method", "PATCH"]:
+                current_body = render_current_plan("new")
+                return SimpleNamespace(stdout="")
             if argv == [
                 "api",
                 "/repos/org/repo-a/issues/5/comments?per_page=100&page=1",
@@ -4527,7 +4639,7 @@ class TestRepoScoping:
                 payload = [
                     {
                         "id": 9,
-                        "body": render_current_plan("old"),
+                        "body": current_body,
                         "viewerDidAuthor": True,
                     }
                 ]
@@ -5225,12 +5337,69 @@ class TestCreatePr:
 class TestReadSurface:
     """Reads delegate verbatim (and stay LIVE even under dry-run)."""
 
+    def test_repo_scoped_issue_read_exposes_exact_body_digest(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw_body = "raw\x00body"
+        adapter.repo = "repo-a"
+        monkeypatch.setattr(
+            adapter,
+            "_gh",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    stdout=json.dumps(
+                        {
+                            "number": 4,
+                            "title": "title",
+                            "state": "OPEN",
+                            "labels": [],
+                            "body": raw_body,
+                        }
+                    )
+                )
+            ),
+        )
+
+        result = adapter.gh_issue_json(4)
+
+        assert result["body"] == "rawbody"
+        assert result["bodyDigest"] == hashlib.sha256(raw_body.encode()).hexdigest()
+        assert result["authoritySanitized"] is True
+
     def test_gh_issue_json(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(github_api_mod, "gh_issue_json", lambda n: {"number": n})
 
         assert adapter.gh_issue_json(4) == {"number": 4}
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.CalledProcessError(1, "gh"),
+            subprocess.TimeoutExpired("gh", 30),
+            OSError("transport unavailable"),
+            None,
+        ],
+    )
+    def test_repo_scoped_issue_read_normalizes_transport_and_json_failures(
+        self,
+        adapter: pg.PipelineGitHub,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException | None,
+    ) -> None:
+        adapter.repo = "repo-a"
+        if failure is not None:
+            monkeypatch.setattr(adapter, "_gh", MagicMock(side_effect=failure))
+        else:
+            monkeypatch.setattr(
+                adapter,
+                "_gh",
+                MagicMock(return_value=SimpleNamespace(stdout="not-json")),
+            )
+
+        with pytest.raises(RuntimeError, match="Failed to fetch issue"):
+            adapter.gh_issue_json(4)
 
     def test_module_bound_reads(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

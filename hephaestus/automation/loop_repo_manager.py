@@ -20,8 +20,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
-from hephaestus.automation.github_api import skip_epics
-from hephaestus.automation.state_labels import is_epic
 from hephaestus.github.client import gh_call
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
@@ -304,7 +302,7 @@ def _list_open_pr_meta(org: str, repo: str) -> list[dict[str, Any]]:
 
 
 def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> list[int]:
-    """Return open NON-epic issue numbers in ``org/repo``, sorted ascending.
+    """Return all open issue numbers in ``org/repo``, sorted ascending.
 
     This is the loop's single canonical issue-discovery call: the result is
     passed down to the plan/implement child phases via ``--issues`` so they do
@@ -313,48 +311,17 @@ def _list_open_issue_numbers(org: str, repo: str, *, dry_run: bool = False) -> l
     ``gh_list_open_issues`` semantics exactly — the loop's convergence and
     failing-PR gates then agree with the work the phases actually do.
 
-    Epic/roadmap **tracking** issues are excluded (#1669): they are checklists
-    of child work, not code tasks, so the loop must never plan/implement them.
-    Each excluded epic is tagged ``state:skip`` (best-effort) via
-    :func:`skip_epics` so dashboards see it as intentionally bypassed; that
-    tagging never raises and never affects the returned list. In dry-run mode,
-    the prospective write is logged but never sent to GitHub. Detection uses
-    label names + title because native GitHub issue types are not exposed by the
-    installed ``gh`` — see :func:`~hephaestus.automation.state_labels.is_epic`.
+    Tracker labels and title patterns remain in the returned scope. The queue
+    sends them through independent semantic planning review; discovery has no
+    authority to tag or exclude them. ``dry_run`` remains a compatibility
+    parameter for callers of the historical counting seam.
 
     Sorted ascending so the implementer phase processes oldest-first. GitHub
     read failures propagate as RuntimeError so automation does not treat an
     unreadable repo as converged.
     """
-    kept: list[int] = []
-    for metadata in _list_open_issue_meta(org, repo):
-        number = int(metadata["number"])
-        labels = list(metadata["labels"])
-        if not is_epic(labels, str(metadata["title"])):
-            kept.append(number)
-            continue
-
-        LOG.info(
-            "[%s] issue #%s is an epic/roadmap tracking issue; excluding from planning loop",
-            repo,
-            number,
-        )
-        # Best-effort skip-tagging: never let a label write break discovery.
-        # The owning repo is passed explicitly — this runs in the multi-repo
-        # parent process, where ambient cwd resolution wrote other repos'
-        # epic numbers onto the launch-directory repo (#2245).  The write is
-        # performed before the exclusion is honored, one bounded metadata row
-        # at a time; do not first collect all epic labels in a spill list.
-        if dry_run:
-            LOG.info("[dry-run] [%s] would tag excluded epic #%s state:skip", repo, number)
-        else:
-            try:
-                skip_epics({number: labels}, repo=(org, repo))
-            except Exception as exc:  # pragma: no cover - defensive
-                LOG.warning(
-                    "[%s] could not tag excluded epic #%s state:skip: %s", repo, number, exc
-                )
-    return sorted(kept)
+    del dry_run
+    return sorted(int(metadata["number"]) for metadata in _list_open_issue_meta(org, repo))
 
 
 def _count_open_issues(org: str, repo: str, *, dry_run: bool = False) -> int:

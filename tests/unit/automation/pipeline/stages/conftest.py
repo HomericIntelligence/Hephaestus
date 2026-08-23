@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from hephaestus.automation.github_api import issue_body_digest
 from hephaestus.automation.implementation_go_audit_receipt import PendingImplementationGoAudit
 from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER, MergeAuthorization
 from hephaestus.automation.pipeline.events import StageEvent
@@ -94,6 +95,7 @@ class FakeStageGitHub(FakeGitHub):
         journal_read_error: str | None = None,
         authorization_reviews: tuple[dict[str, object], ...] | None = None,
         actor_permissions: dict[str, str] | None = None,
+        issue_body_owned_by_viewer: bool = True,
     ) -> None:
         """Initialize the fake with canned read answers.
 
@@ -150,6 +152,7 @@ class FakeStageGitHub(FakeGitHub):
         self._has_plan = has_plan
         self._plan_read_error = plan_read_error
         self._journal_read_error = journal_read_error
+        self._issue_body_owned_by_viewer = issue_body_owned_by_viewer
         self._pr_head_branch = pr_head_branch
         self._pr_head_writable = pr_head_writable
         self._pr_impl_state = pr_impl_state
@@ -227,9 +230,14 @@ class FakeStageGitHub(FakeGitHub):
             "number": issue_number,
             "title": self._issue_title,
             "body": self._issue_body,
+            "bodyDigest": issue_body_digest(self._issue_body),
             "state": self._issue_state,
             "labels": [{"name": name} for name in sorted(self._issue_labels(issue_number))],
         }
+
+    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
+        """Return whether the current actor owns the latest issue-body edit."""
+        return self._issue_body_owned_by_viewer
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Mirror _review_utils.find_merged_closing_pr."""
@@ -733,12 +741,7 @@ class FakeStageGitHub(FakeGitHub):
         self._log("mark_drive_green_learn_result", issue_number, succeeded)
 
     def ensure_state_labels(self) -> None:
-        """Mirror the repo-stage label-vocabulary ensure (records mutation).
-
-        The canonical ``skip_epics`` recorder is inherited from
-        :class:`FakeGitHub`; this is the only repo-stage (#1817) protocol
-        method without a canonical recorder there.
-        """
+        """Mirror the repo-stage label-vocabulary ensure (records mutation)."""
         self._log("ensure_state_labels")
 
 

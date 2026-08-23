@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,11 @@ from ..review_journal import has_exact_leading_marker
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
 MAX_ISSUE_JOURNAL_BODY_BYTES = 16 * 1024 * 1024
 _ISSUE_COMMENT_PAGE_SIZE = 100
+
+
+def issue_body_digest(body: str) -> str:
+    """Return the SHA-256 token for the exact UTF-8 issue body text."""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 @contextlib.contextmanager
@@ -103,23 +109,88 @@ def gh_issue_json(
                 *_repo_args(repo),
             ],
         )
-        data = cast(dict[str, Any], json.loads(result.stdout))
+        parsed = json.loads(result.stdout)
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"Failed to fetch issue #{issue_number}: non-object response")
+        data = cast(dict[str, Any], parsed)
+        raw_body = data.get("body")
+        authority_sanitized = False
         # Strip stray NUL bytes at the source so downstream prompt assembly never
         # feeds an embedded null into a subprocess argv (#1661). Title/body are the
         # free-text fields consumed by the planner/implementer prompts; warn on a
         # strip so the (rare) mutation of a user-visible field is never silent.
+        # Keep the digest bound to the raw GitHub body and mark any sanitized
+        # projection so planning can fail closed instead of treating it as exact
+        # recovery or finalized-plan authority.
         for field in ("title", "body"):
             value = data.get(field)
             if isinstance(value, str):
                 cleaned = strip_null_bytes(value)
                 if cleaned != value:
+                    authority_sanitized = True
                     _api.logger.warning(
                         "Stripped NUL byte(s) from issue #%s %s field", issue_number, field
                     )
                     data[field] = cleaned
-        return data
-    except subprocess.CalledProcessError as e:
+        if authority_sanitized:
+            data["authoritySanitized"] = True
+        if isinstance(raw_body, str):
+            data["bodyDigest"] = issue_body_digest(raw_body)
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, TypeError, ValueError) as e:
         raise RuntimeError(f"Failed to fetch issue #{issue_number}: {e}") from e
+    return data
+
+
+def gh_issue_body_edited_by_viewer(
+    issue_number: int,
+    repo: tuple[str, str] | None = None,
+) -> bool:
+    """Return whether the authenticated actor made the latest issue-body edit."""
+    query = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        " viewer{ login }"
+        " repository(owner:$owner,name:$name){"
+        "  issue(number:$number){ editor{ login } }"
+        " }"
+        "}"
+    )
+    try:
+        owner, name = repo if repo is not None else _api.get_repo_info()
+        result = _api._gh_call(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"number={issue_number}",
+            ]
+        )
+        data = json.loads(result.stdout or "{}")
+    except (subprocess.SubprocessError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Failed to authenticate issue body editor for #{issue_number}: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("issue body editor GraphQL response was not an object")
+    _check_graphql_errors(data, f"issue body editor for #{issue_number}")
+    root = data.get("data")
+    viewer = root.get("viewer") if isinstance(root, dict) else None
+    repository = root.get("repository") if isinstance(root, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    editor = issue.get("editor") if isinstance(issue, dict) else None
+    viewer_login = viewer.get("login") if isinstance(viewer, dict) else None
+    editor_login = editor.get("login") if isinstance(editor, dict) else None
+    return (
+        isinstance(viewer_login, str)
+        and bool(viewer_login)
+        and isinstance(editor_login, str)
+        and editor_login.lower() == viewer_login.lower()
+    )
 
 
 def _repo_args(repo: tuple[str, str] | None) -> list[str]:
@@ -689,4 +760,5 @@ def fetch_issue_info(issue_number: int) -> IssueInfo:
         state=IssueState(issue_data["state"]),
         labels=[label["name"] for label in issue_data.get("labels", [])],
         dependencies=_api.parse_issue_dependencies(issue_data.get("body", "")),
+        authority_sanitized=issue_data.get("authoritySanitized") is True,
     )

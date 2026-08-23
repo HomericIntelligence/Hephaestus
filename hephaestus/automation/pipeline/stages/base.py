@@ -189,6 +189,10 @@ class StageGitHub(Protocol):
         """Fetch issue JSON (mirrors ``github_api.issues.gh_issue_json``)."""
         ...
 
+    def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
+        """Return whether the authenticated actor owns the latest body edit."""
+        raise NotImplementedError
+
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue, if any (``_review_utils``)."""
         ...
@@ -508,16 +512,6 @@ class StageGitHub(Protocol):
         ...
 
     # -- repo-stage surface (#1817) -----------------------------------------
-
-    def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
-        """Durably tag epics ``state:skip`` (the ONE sanctioned seeding write).
-
-        The coordinator (#1817) maps this onto the existing
-        ``github_api.skip_epics`` chokepoint; the repo stage calls it BEFORE
-        excluding epics (doc row "Epic tagging is the one seeding write; done
-        BEFORE excluding" — see :mod:`..seeding`'s write-path boundary note).
-        """
-        ...
 
     def ensure_state_labels(self) -> None:
         """Durably ensure the ``state:*`` label vocabulary exists on the repo.

@@ -64,6 +64,7 @@ def test_repo_discovery_never_materializes_an_unbounded_products_spill(
     before the planning queue has made capacity.
     """
     repo_item = WorkItem(repo="repo-a", kind=ItemKind.REPO, stage=StageName.REPO, state="DISCOVER")
+    repo_item.payload["_synced_default_branch_sha"] = "a" * 40
     ctx = type(
         "Context",
         (),
@@ -86,6 +87,7 @@ def test_repo_discovery_never_materializes_an_unbounded_products_spill(
 
     assert isinstance(result, Continue)
     assert "products" not in repo_item.payload
+    assert repo_item.payload["_repo_issue_source"].base_main_sha == "a" * 40
 
 
 def test_repo_issue_source_is_lossless_and_ordered_at_capacity_one(
@@ -324,6 +326,11 @@ def test_repo_setup_reserves_a_future_source_slot_before_registry_is_full(
         "_iter_open_issue_meta",
         lambda _org, repo: iter(metadata[repo]),
     )
+    monkeypatch.setattr(
+        seeding_mod,
+        "seed_issue_from_github",
+        lambda issue, _github: _facts(issue),
+    )
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -338,6 +345,7 @@ def test_repo_setup_reserves_a_future_source_slot_before_registry_is_full(
         pool=FakeWorkerPool(),
         install_signals=False,
     )
+    coordinator.stages[StageName.PLANNING] = _ImmediatePassStage([])
 
     assert coordinator.run() == 0
     assert coordinator._all_idle()
@@ -442,20 +450,15 @@ def test_empty_repo_source_still_converges_after_one_pass(
     assert coordinator._all_idle()
 
 
-def test_repo_source_tags_epic_before_exclusion_and_next_issue_admission(
+def test_repo_source_semantically_admits_tracker_candidate_and_next_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An epic is durably excluded before the cursor advances to live work."""
+    """Tracker-shaped metadata cannot bypass semantic planning and review."""
     events: list[tuple[str, int]] = []
     metadata = [
         {"number": 5, "labels": ["epic"], "title": "Epic: umbrella"},
         {"number": 6, "labels": ["state:needs-plan"], "title": "implementation"},
     ]
-
-    class _RecordingGitHub(FakeStageGitHub):
-        def skip_epics(self, epics_labels: dict[int, list[str]]) -> None:
-            events.extend(("tag", number) for number in epics_labels)
-            super().skip_epics(epics_labels)
 
     def classify(issue: int, github: Any) -> IssueFacts:
         del github
@@ -466,7 +469,7 @@ def test_repo_source_tags_epic_before_exclusion_and_next_issue_admission(
         loop_repo_manager, "_iter_open_issue_meta", lambda _org, _repo: iter(metadata)
     )
     monkeypatch.setattr(seeding_mod, "seed_issue_from_github", classify)
-    github = _RecordingGitHub(labels=["state:needs-plan"])
+    github = FakeStageGitHub(labels=["state:needs-plan"])
     coordinator = Coordinator(
         PipelineConfig(
             org="org",
@@ -484,5 +487,10 @@ def test_repo_source_tags_epic_before_exclusion_and_next_issue_admission(
     coordinator.stages[StageName.PLANNING] = _ImmediatePassStage(events)
 
     assert coordinator.run() == 0
-    assert events == [("tag", 5), ("classify", 6), ("complete", 6)]
-    assert "state:skip" in github.labels[5]
+    assert events == [
+        ("classify", 5),
+        ("complete", 5),
+        ("classify", 6),
+        ("complete", 6),
+    ]
+    assert "state:skip" not in github.labels.get(5, [])

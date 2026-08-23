@@ -16,9 +16,11 @@ import pytest
 from hephaestus.automation.pipeline.routing import StageName
 from hephaestus.automation.pipeline.summary import (
     RunStats,
+    TerminalSummary,
     format_direct_review_recovery_worktrees,
     format_preserved_worktrees,
     print_summary,
+    record_summary_action,
 )
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 
@@ -162,6 +164,29 @@ class TestPrintSummaryRows:
         assert "loops: 2" in text
         assert "wall: 99.5s" in text
 
+    def test_planning_actions_are_bounded_aggregate_counts(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        item = _item(7, StageName.FINISHED, passed=True, reason="ok")
+        record_summary_action(item, "requirements-recovered")
+        record_summary_action(item, "requirements-recovered")
+        record_summary_action(item, "obsolete-skipped")
+        aggregate = TerminalSummary()
+        aggregate.record(item)
+
+        with caplog.at_level(logging.INFO):
+            print_summary(
+                [item],
+                _stats(),
+                [],
+                json_out=False,
+                terminal_summary=aggregate,
+            )
+
+        assert "planning-actions:" in caplog.text
+        assert "'requirements-recovered': 1" in caplog.text
+        assert "'obsolete-skipped': 1" in caplog.text
+
     def test_summary_uses_latest_logical_item_for_aggregates(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -269,6 +294,17 @@ class TestJsonEnvelope:
         assert envelope["resumable"] == ["repo-a#2@pr_review"]
         assert envelope["preserved_worktrees"] == [[2, "/wt/2"]]
         assert envelope["recovery_worktrees"] == []
+
+    def test_json_envelope_includes_planning_action_counts(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        item = _item(8, StageName.FINISHED, passed=True, reason="ok")
+        record_summary_action(item, "tracker-skipped")
+
+        print_summary([item], _stats(), [], json_out=True)
+
+        envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert envelope["planning_actions"] == {"tracker-skipped": 1}
 
     @pytest.mark.parametrize(
         ("exit_code", "expected_message"),

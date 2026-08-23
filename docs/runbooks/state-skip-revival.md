@@ -9,7 +9,7 @@ resume planning/implementing it.
 
 ## Background
 
-`state:skip` is absolute and operator-only (#1576/#1584): the pipeline's
+`state:skip` is absolute at admission (#1576/#1584): the pipeline's
 seeding classifier (`pipeline/seeding.py` `classify_issue`) excludes any
 `state:skip`-labeled issue from the work queue entirely, before any other
 state label is consulted. This is a *point-in-time* exclusion — if
@@ -60,6 +60,14 @@ stage that still encounters the contradictory label pair
 (`pipeline/stages/planning.py`, `pipeline/stages/implementation.py`) —
 this is informational only and requires no operator response unless the
 warning is unexpected.
+
+The sole automated removal is crash recovery for a semantic tracker/obsolete
+transition whose issue evidence later drifted. The issue-wave checkpoint must
+first contain the exact retired non-code intent and expected supplemental
+labels; the planning stage then removes only that provenance-bound skip and
+confirms fresh readback before deleting the retirement record. This narrow
+cleanup path cannot revive an unrelated operator skip or a finalized issue that
+has no matching retired intent.
 
 ## See also
 

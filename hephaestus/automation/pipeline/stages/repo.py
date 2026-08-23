@@ -19,8 +19,8 @@ Steps:
    materializes a list of classified products.
 4. [M] SOURCE: the coordinator transfers the bounded cursor to its fair
    C-capped registry, then admits one metadata row only when an issue can own
-   a live-work permit. Epics are tagged ``state:skip`` [durable, BEFORE
-   excluding].
+   a live-work permit. Tracker labels and title patterns enter planning as
+   semantic-review candidates; discovery performs no skip mutation.
 
 Discovery seams (``_repo_manager`` / ``_seeding`` module attributes) mirror
 the ``loop_runner._admission`` seam pattern so unit tests patch the reads
@@ -140,6 +140,7 @@ class RepoIssueSource:
     seeded_count: int = 0
     wave_lease: WaveLease | None = None
     one_pass: bool = False
+    base_main_sha: str | None = None
 
 
 class RepoStage(Stage):
@@ -363,6 +364,7 @@ class RepoStage(Stage):
                 metadata=self._wave_metadata(lease.issue_numbers),
                 wave_lease=lease,
                 one_pass=True,
+                base_main_sha=lease.base_main_sha,
             )
             return Continue(next_state="LABELS")
         except IssueWaveError as exc:
@@ -457,7 +459,11 @@ class RepoStage(Stage):
         try:
             open_issues = _repo_manager._iter_open_issue_meta(ctx.org, item.repo)
             recovered = self._iter_closed_learning_meta(item.repo, ctx)
-            source = RepoIssueSource(chain(open_issues, recovered))
+            main_sha = item.payload.get(SYNCED_MAIN_SHA_KEY)
+            source = RepoIssueSource(
+                chain(open_issues, recovered),
+                base_main_sha=main_sha if isinstance(main_sha, str) else None,
+            )
         except Exception as exc:
             logger.warning("repo:%s: discovery failed: %s", item.repo, exc)
             return StageOutcome(Disposition.FINISH_FAIL, note=f"discovery failed: {exc}")

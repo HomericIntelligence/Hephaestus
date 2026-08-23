@@ -1,0 +1,24 @@
+{{ untrusted_notice }}
+
+Independently review the requirements-recovery proposal for issue #{{ issue_number }}.
+Do not defer to the planner. The source body digest is `{{ source_body_digest }}` and the
+evidence binding is `{{ evidence_binding }}`.
+
+Review repository `{{ repository }}` at the bound revision
+`{{ repository_revision }}`. Inspect only the supplied bound checkout when validating
+repository evidence; do not substitute another checkout, branch, or revision.
+
+{{ issue_title_block }}
+
+{{ issue_body_block }}
+
+{{ proposal_block }}
+
+Return exactly one JSON object:
+`{"verdict":"GO|NOGO","disposition":"REQUIREMENTS|TRACKER|OBSOLETE","reason":"..."}`.
+
+The verdict must be GO or NOGO. Use GO only when the proposal is faithful, actionable, and
+supported by the bound evidence. Use NOGO for any incorrect, ambiguous, unsupported, or
+unverifiable reconstruction or semantic disposition. Confirm TRACKER or OBSOLETE only when
+the evidence independently proves it. Do not repeat diffs or substantial code snippets from
+the proposal.
