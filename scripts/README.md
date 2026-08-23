@@ -67,7 +67,7 @@ through installed `hephaestus-*` console scripts.
 
 - **`backup_state.py`** — Backup, restore, and verify tier-3 operational
   state (`build/.issue_implementer/`); stdlib-only so it runs in a broken
-  environment. See `../docs/adr/0012-backup-and-disaster-recovery-policy.md`
+  environment. See `../docs/adr/0013-backup-and-disaster-recovery-policy.md`
   and `../docs/runbooks/backup-restore.md`.
 
 ### Pi smoke validation
