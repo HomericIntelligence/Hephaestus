@@ -400,6 +400,7 @@ def test_all_separates_general_integration_from_artifact_lane(tmp_path: Path) ->
     assert log.count("-m artifact") == 1
 
 
+@pytest.mark.usefixtures("require_git_path_format")
 def test_missing_ci_image_is_built_automatically(tmp_path: Path) -> None:
     """The autonomous queue must not require a manual ``just ci-build`` step."""
     result, log = _run_runner(tmp_path, "unit", image_exists=False)
@@ -415,6 +416,7 @@ def test_missing_ci_image_is_built_automatically(tmp_path: Path) -> None:
     assert "BUILD_CONTEXT_FILE:./build/" not in log
 
 
+@pytest.mark.usefixtures("require_git_path_format")
 def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
     """Queue execution must test with dependencies built from the current checkout."""
     result, log = _run_runner(tmp_path, "unit", rebuild_image=True)
@@ -437,6 +439,7 @@ def test_podman_bare_image_id_is_accepted_as_immutable(tmp_path: Path) -> None:
     assert f"{podman_image_id} bash" in log
 
 
+@pytest.mark.usefixtures("require_git_path_format")
 def test_image_build_context_excludes_ignored_checkout_files(tmp_path: Path) -> None:
     """Only publishable allowlisted files are sent to either container engine."""
     repo = _buildable_candidate_repo(tmp_path)
@@ -449,6 +452,7 @@ def test_image_build_context_excludes_ignored_checkout_files(tmp_path: Path) -> 
     assert "BUILD_CONTEXT_FILE:./.git/" not in log
 
 
+@pytest.mark.usefixtures("require_git_path_format")
 def test_image_build_rejects_allowlisted_symlink_sources(tmp_path: Path) -> None:
     """A staged symlink must not dereference ignored host bytes into the build context."""
     repo = _buildable_candidate_repo(tmp_path)
@@ -463,6 +467,7 @@ def test_image_build_rejects_allowlisted_symlink_sources(tmp_path: Path) -> None
     assert "build --iidfile" not in log
 
 
+@pytest.mark.usefixtures("require_git_path_format")
 def test_image_build_rejects_allowlisted_symlink_ancestors(tmp_path: Path) -> None:
     """An allowlisted directory cannot redirect the build recipe outside the candidate tree."""
     repo = _buildable_candidate_repo(tmp_path)

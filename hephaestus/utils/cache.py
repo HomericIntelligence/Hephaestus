@@ -35,11 +35,24 @@ class ThreadSafeCache[K, V]:
     behavior of only caching successes.
     """
 
-    def __init__(self, ttl_seconds: float = DEFAULT_TTL_SECONDS) -> None:
-        """Create an empty cache whose entries expire after ``ttl_seconds``."""
+    def __init__(
+        self,
+        ttl_seconds: float = DEFAULT_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Create an empty cache whose entries expire after ``ttl_seconds``.
+
+        Args:
+            ttl_seconds: Entry time-to-live in seconds.
+            clock: Zero-argument callable returning monotonic seconds. The
+                default is :func:`time.monotonic`; inject a fake clock to make
+                TTL behavior deterministic without patching global state.
+
+        """
         self._cache: dict[K, tuple[V, float]] = {}
         self._lock = threading.Lock()
         self._ttl = ttl_seconds
+        self._clock = clock
 
     def get_or_compute(self, key: K, compute: Callable[[], V]) -> V:
         """Return the cached value for *key*, or compute, store, and return it.
@@ -53,11 +66,11 @@ class ThreadSafeCache[K, V]:
             entry = self._cache.get(key)
             if entry is not None:
                 value, ts = entry
-                if time.monotonic() - ts < self._ttl:
+                if self._clock() - ts < self._ttl:
                     return value
         value = compute()
         with self._lock:
-            self._cache[key] = (value, time.monotonic())
+            self._cache[key] = (value, self._clock())
         return value
 
     def clear(self) -> None:

@@ -4030,6 +4030,7 @@ class TestGitOps:
             timeout=60,
         )
 
+    @pytest.mark.usefixtures("require_git_path_format")
     def test_continue_rebase_recovers_two_real_conflicts_and_publishes(
         self,
         pool: WorkerPool,
@@ -5758,6 +5759,7 @@ class TestGitOps:
         assert result.ok is False
         assert "unsafe local Git configuration" in (result.error or "")
 
+    @pytest.mark.usefixtures("require_git_path_format")
     def test_sync_checkout_rejects_grafts_in_linked_worktree(
         self,
         pool: WorkerPool,

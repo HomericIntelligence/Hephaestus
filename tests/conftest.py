@@ -4,6 +4,8 @@
 import contextlib
 import json
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 
 # Repository policy requires generated files to live under build/. Hypothesis
@@ -17,6 +19,30 @@ import pytest
 import yaml
 
 CONTRACT_OPT_IN_ENV = "HEPHAESTUS_CONTRACT_TESTS"
+
+
+def _git_supports_path_format() -> bool:
+    """Return True when host git understands ``rev-parse --path-format``."""
+    probe = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--show-toplevel"],
+        capture_output=True,
+        check=False,
+        cwd=tempfile.gettempdir(),  # outside any repo: probes flag support only
+    )
+    return probe.returncode == 0
+
+
+@pytest.fixture(scope="session")
+def require_git_path_format() -> None:
+    """Skip when host git lacks ``--path-format=absolute`` (git >= 2.31).
+
+    Production helpers (worktree metadata resolution, CI build-context
+    assembly) pass ``--path-format=absolute`` to ``git rev-parse``. On hosts
+    running older git those invocations fail outright — a host capability
+    gap, not a product defect — so affected tests skip instead of failing.
+    """
+    if not _git_supports_path_format():
+        pytest.skip("host git lacks --path-format=absolute (needs git >= 2.31)")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

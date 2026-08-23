@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,8 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GITLEAKS_REPO = "https://github.com/gitleaks/gitleaks"
+# The pinned release; the hook rev itself must be the full commit SHA
+# (digest-pinned like every other third-party hook).
 GITLEAKS_VERSION = "v8.30.0"
 _GIT_REPO_ENV_KEYS = (
     "GIT_DIR",
@@ -43,12 +46,12 @@ def _isolated_env(cache: Path) -> dict[str, str]:
 
 
 def test_gitleaks_hook_is_mandatory() -> None:
-    """The local generic scanner must be pre-commit scoped."""
+    """The local generic scanner must be digest-pinned and pre-commit scoped."""
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     repo = next(item for item in config["repos"] if item.get("repo") == GITLEAKS_REPO)
     hook = next(item for item in repo["hooks"] if item.get("id") == "gitleaks")
 
-    assert repo["rev"] == GITLEAKS_VERSION
+    assert re.fullmatch(r"[0-9a-f]{40}", str(repo["rev"])), repo["rev"]
     assert hook["stages"] == ["pre-commit"]
 
 
