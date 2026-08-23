@@ -1,35 +1,32 @@
 # Pi Issue 2519 Report
 
 - Evidence status: `incomplete`
-- End-to-end claim: `unverified / incomplete`
 - Fixture: `fix(utils): reject negative byte sizes`
-- Last recorded Pi version: `0.80.2`
+- Run ID: `host-20260822210919`
+- Created: `2026-08-23T04:09:22Z`
+- Pi version: `0.80.2`
+- Pi binary: recorded privately in the run manifest
+- Skill commands: `skill:advise`, `skill:learn`, `skill:pr-review`
 - Inventory status: `ready`
+- Inventory ready: `True`
 
-## Verification Outcome
+## Captured Commands
 
-This document is not closure evidence for [#2519](https://github.com/HomericIntelligence/Hephaestus/issues/2519).
+_No captured commands recorded yet._
 
-The archived private capture predates the corrected real-pipeline collector and contains only a failed synthetic planning attempt. It does not prove that the normal queue pipeline completed with Pi.
+## Snapshots
 
-Missing evidence:
+_No repository snapshots recorded yet._
 
-- A repository snapshot bound to the validation run.
-- Successful `discovery-plan` capture through `hephaestus-plan-issues --agent pi`.
-- Successful `implementation-review-handoff` capture through `hephaestus-automation-loop --agent pi`.
-- Provider session identifiers and requested tool scopes from those real queue runs.
-- Queue-emitted typed Athena advise and learn host receipts.
-- A same-fixture Pi/Codex comparison if identical starting GitHub state is practical.
-- Fresh exact-head GitHub PR, label, thread, closing-issue, and native auto-merge readback.
-- Publication attestation for the rendered report and runbook.
+## Athena Host Receipts
 
-Policy grants, provider prose, caller-authored booleans, and arbitrary receipt JSON do not substitute for those host-observed facts.
+_No typed Athena host receipts recorded yet._
 
 ## Defects
 
-- Follow-up issue [#2738](https://github.com/HomericIntelligence/Hephaestus/issues/2738): fresh Pi console processes had no external adapter bootstrap.
+- Follow-up issue #2814: Provider credentials absent and no reviewed OS-isolation adapter installed; both block model-backed and pipeline captures
 
 ## Publication
 
-- Runbook: [Pi E2E issue 2519 runbook](runbooks/pi-e2e-2519.md)
-- Report: [Pi issue 2519 report](pi-e2e-2519-report.md)
+- Runbook: `docs/runbooks/pi-e2e-2519.md`
+- Report: `docs/pi-e2e-2519-report.md`
