@@ -44,3 +44,4 @@ numbered, and listed here.
 | [0029](0029-explicit-pi-isolation-adapter-bootstrap.md) | Explicit Pi isolation-adapter bootstrap | Accepted |
 | [0030](0030-autonomous-issue-requirements-recovery.md) | Autonomous issue requirements recovery precedes planning | Accepted |
 | [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Accepted |
+| [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |

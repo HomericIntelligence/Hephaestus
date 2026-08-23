@@ -33,6 +33,9 @@ from hephaestus.automation.mnemosyne_delivery import (
     LearnDeliveryService,
     valid_delivery_receipt,
 )
+from hephaestus.automation.mnemosyne_learning_preparation import (
+    MnemosyneLearningPreparationService,
+)
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest, AthenaSkillResult
 from hephaestus.github.client import gh_call
 from hephaestus.io.utils import write_secure
@@ -62,7 +65,11 @@ class CorpusReader(Protocol):
 class LearnDeliveryBackend(Protocol):
     """Learning delivery surface used by the skill host."""
 
-    def deliver_from_request(self, request: AthenaSkillRequest) -> LearnDeliveryReceipt:
+    def deliver_from_request(
+        self,
+        request: AthenaSkillRequest,
+        binding: MnemosyneBindingReceipt,
+    ) -> LearnDeliveryReceipt:
         """Deliver a learning change and return a PR-backed receipt."""
 
 
@@ -200,15 +207,39 @@ def _string_tuple(data: Mapping[str, object], name: str) -> tuple[str, ...]:
 class DefaultLearnDeliveryBackend:
     """Convert the closed Athena request payload into host-owned PR delivery."""
 
-    def __init__(self, service: LearnDeliveryService | None = None) -> None:
+    def __init__(
+        self,
+        service: LearnDeliveryService | None = None,
+        preparation: MnemosyneLearningPreparationService | None = None,
+    ) -> None:
         """Use the concrete GitHub adapter unless a test seam supplies a service."""
         self._service = service or LearnDeliveryService(github=GitHubLearnDeliveryAdapter())
+        self._preparation = preparation or MnemosyneLearningPreparationService()
 
-    def deliver_from_request(self, request: AthenaSkillRequest) -> LearnDeliveryReceipt:
+    def deliver_from_request(
+        self,
+        request: AthenaSkillRequest,
+        binding: MnemosyneBindingReceipt,
+    ) -> LearnDeliveryReceipt:
         """Deliver the request's validated host-owned learning change."""
+        has_intent = "learning_intent" in request.payload
+        has_delivery = "learn_delivery" in request.payload
+        if has_intent and has_delivery:
+            raise LearnDeliveryError(
+                "learn request must contain exactly one of learning_intent or learn_delivery"
+            )
+        if not has_intent and not has_delivery:
+            raise LearnDeliveryError("learn delivery payload is required")
+        if has_intent:
+            raw_intent = request.payload.get("learning_intent")
+            if not isinstance(raw_intent, dict):
+                raise LearnDeliveryError("learning intent payload must be an object")
+            delivery = self._preparation.prepare(raw_intent, binding)
+            self._validate_binding(delivery, binding)
+            return self._service.deliver(delivery)
         raw = request.payload.get("learn_delivery")
         if not isinstance(raw, dict):
-            raise LearnDeliveryError("learn delivery payload is required")
+            raise LearnDeliveryError("learn delivery payload must be an object")
         existing_pr = raw.get("existing_pr_number")
         if existing_pr is not None and (
             isinstance(existing_pr, bool) or not isinstance(existing_pr, int)
@@ -227,7 +258,19 @@ class DefaultLearnDeliveryBackend:
             validation_evidence=_string_tuple(raw, "validation_evidence"),
             existing_pr_number=existing_pr,
         )
+        self._validate_binding(delivery, binding)
         return self._service.deliver(delivery)
+
+    @staticmethod
+    def _validate_binding(
+        delivery: LearnDeliveryRequest,
+        binding: MnemosyneBindingReceipt,
+    ) -> None:
+        """Require request repository/base to equal the trusted binding."""
+        if delivery.repository != binding.repository:
+            raise LearnDeliveryError("learn delivery repository does not match Mnemosyne binding")
+        if delivery.base_branch != binding.default_branch:
+            raise LearnDeliveryError("learn delivery base branch does not match Mnemosyne binding")
 
 
 def fence_untrusted_context(label: str, content: str, *, nonce: str | None = None) -> str:
@@ -489,7 +532,7 @@ class MnemosyneSkillHost:
                     receipt=receipt,
                 )
             if request.kind == "learn":
-                delivery = self.delivery_service.deliver_from_request(request)
+                delivery = self.delivery_service.deliver_from_request(request, binding)
                 if not valid_delivery_receipt(delivery):
                     return AthenaSkillResult(
                         kind="learn",
