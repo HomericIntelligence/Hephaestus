@@ -14,8 +14,28 @@ set -uo pipefail
 INSTALL_HELPERS_LOADED=1
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+_use_color=0
+if [[ -n "${NO_COLOR:-}" ]]; then
+    _use_color=0
+elif [[ -n "${FORCE_COLOR:-}" ]]; then
+    _use_color=1
+elif [[ -n "${CLICOLOR_FORCE:-}" && "${CLICOLOR_FORCE:-}" != "0" ]]; then
+    _use_color=1
+elif [[ "${CLICOLOR:-}" == "0" ]]; then
+    _use_color=0
+elif [[ -t 1 ]]; then
+    _use_color=1
+fi
+
+if (( _use_color )); then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'; CYAN='\033[0;36m'
+    BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''
+    BOLD=''; DIM=''; NC=''
+fi
+unset _use_color
 
 # ─── Counters ────────────────────────────────────────────────────────────────
 _PASS=0; _FAIL=0; _WARN=0; _SKIP=0

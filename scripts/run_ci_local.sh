@@ -41,14 +41,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SUBSET="${1:-all}"
 
+# shellcheck source=scripts/shell/lib/install_helpers.sh
+source "${SCRIPT_DIR}/shell/lib/install_helpers.sh"
+
 LOCAL_IMAGE="hephaestus-ci:local"
 GITLEAKS_IMAGE="ghcr.io/gitleaks/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 log_info()  { echo -e "${GREEN}[CI]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[CI]${NC} $*"; }
