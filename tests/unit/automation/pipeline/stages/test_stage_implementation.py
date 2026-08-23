@@ -2107,10 +2107,7 @@ class TestTestsAndFix:
             "all",
             "--rebuild",
         )
-        assert (
-            item.payload["test_command"]
-            == "bash scripts/run_ci_local.sh all --rebuild"
-        )
+        assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
     def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
         self, make_ctx: Any, make_work_item: Any
