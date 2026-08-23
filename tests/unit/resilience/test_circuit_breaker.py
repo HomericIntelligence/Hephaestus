@@ -254,21 +254,42 @@ class TestCircuitBreakerIgnoredExceptions:
             breaker.call(lambda: (_ for _ in ()).throw(KeyError("404")))
         assert breaker.state is CircuitBreakerState.CLOSED
 
-    def test_factory_silently_drops_ignore_for_an_existing_name(self) -> None:
-        """Documented footgun: the registry is a singleton keyed by name.
+    def test_factory_rejects_conflicting_ignore_for_an_existing_name(self) -> None:
+        """A later ``get_circuit_breaker`` may not silently swap the predicate.
 
-        A second ``get_circuit_breaker`` for an existing name returns the cached
-        instance and DISCARDS every construction kwarg, ``ignore`` included. Pin
-        the behaviour so the trap is visible rather than surprising (POLA).
+        The registry is a singleton keyed by name; re-fetching an existing
+        name with a different ``ignore`` predicate raises instead of leaving
+        the caller holding a breaker whose predicate it did not install.
         """
         first = get_circuit_breaker("factory-ignore-dup", failure_threshold=1)
         assert first._ignore is None
 
-        second = get_circuit_breaker(
-            "factory-ignore-dup", ignore=lambda exc: isinstance(exc, KeyError)
-        )
+        with pytest.raises(ValueError, match="factory-ignore-dup"):
+            get_circuit_breaker("factory-ignore-dup", ignore=lambda exc: isinstance(exc, KeyError))
+        assert first._ignore is None, "a failed rebinding must not mutate the breaker"
+
+    def test_factory_warns_on_conflicting_thresholds_for_an_existing_name(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Scalar reconfiguration drift is surfaced loudly but stays non-fatal.
+
+        Tests deliberately pre-seed named breakers with tighter thresholds;
+        the cached configuration wins and the drift is logged.
+        """
+        first = get_circuit_breaker("factory-config-dup", failure_threshold=1)
+
+        with caplog.at_level("WARNING"):
+            second = get_circuit_breaker("factory-config-dup", failure_threshold=3)
+
         assert second is first
-        assert second._ignore is None, "a later ignore= must not silently rebind"
+        assert first.failure_threshold == 1
+        assert any("factory-config-dup" in record.message for record in caplog.records)
+
+    def test_factory_allows_identical_refetch(self) -> None:
+        """Re-fetching with exactly the same configuration returns the singleton."""
+        cb1 = get_circuit_breaker("factory-refetch-same", failure_threshold=3, recovery_timeout=5.0)
+        cb2 = get_circuit_breaker("factory-refetch-same", failure_threshold=3, recovery_timeout=5.0)
+        assert cb2 is cb1
 
     def test_default_ignores_nothing(self) -> None:
         """Back-compat: no ``ignore`` predicate → every exception counts."""

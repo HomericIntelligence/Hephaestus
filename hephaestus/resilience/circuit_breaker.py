@@ -339,34 +339,46 @@ def get_circuit_breaker(
 ) -> CircuitBreaker:
     """Get or create a named circuit breaker (singleton per name).
 
-    The registry is a singleton keyed by *name*. Every configuration argument is
-    applied ONLY when the breaker is first created; a later call for an existing
-    name returns the cached instance and SILENTLY DISCARDS the arguments — including
-    ``ignore``. Construct each named breaker exactly once (at its owning module's
-    import), or you will get a breaker whose predicate you did not install.
+    The registry is a singleton keyed by *name*. The first call for a name
+    creates the breaker with the supplied configuration; later calls return
+    the cached instance. Two guards keep the cache honest:
+
+    * A later call that supplies a *different* ``ignore`` predicate raises
+      :class:`ValueError` — silently running with a predicate you did not
+      install is a correctness hazard, so it fails loudly instead.
+    * A later call whose scalar configuration differs from the registered
+      breaker logs a warning; the cached configuration wins. Tests may
+      deliberately pre-seed a named breaker with tighter thresholds, so a
+      mismatch is surfaced, not fatal.
+
+    Construct each named breaker exactly once (at its owning module's
+    import) where possible.
 
     Args:
         name: Unique identifier for the circuit breaker
-        failure_threshold: Failures before opening (only used on creation)
-        recovery_timeout: Recovery timeout in seconds (only used on creation)
-        half_open_max_calls: Maximum concurrent in-flight calls in HALF_OPEN state
-            (only used on creation)
-        success_threshold: Successes in HALF_OPEN to close (only used on creation)
+        failure_threshold: Failures before opening (applied on creation)
+        recovery_timeout: Recovery timeout in seconds (applied on creation)
+        half_open_max_calls: Maximum concurrent in-flight calls in HALF_OPEN
+            state (applied on creation)
+        success_threshold: Successes in HALF_OPEN to close (applied on
+            creation)
         ignore: Predicate for exceptions that are not evidence of service
-            unavailability (only used on creation; silently dropped if *name*
-            already exists). See :meth:`CircuitBreaker.call`.
+            unavailability. Re-registering a name with a different predicate
+            raises rather than silently rebinding. See :meth:`CircuitBreaker.call`.
 
     Returns:
         CircuitBreaker instance for the given name
 
     Raises:
-        ValueError: If the configuration is invalid while creating a new named
-            breaker. Cached breakers retain their existing singleton semantics.
+        ValueError: If the configuration is invalid while creating a new
+            named breaker, or if a later call for an existing name passes a
+            conflicting ``ignore`` predicate.
 
     """
     with _registry_lock:
-        if name not in _registry:
-            _registry[name] = CircuitBreaker(
+        existing = _registry.get(name)
+        if existing is None:
+            breaker = CircuitBreaker(
                 name=name,
                 failure_threshold=failure_threshold,
                 recovery_timeout=recovery_timeout,
@@ -374,7 +386,35 @@ def get_circuit_breaker(
                 success_threshold=success_threshold,
                 ignore=ignore,
             )
-        return _registry[name]
+            _registry[name] = breaker
+            return breaker
+
+        requested = (
+            failure_threshold,
+            recovery_timeout,
+            half_open_max_calls,
+            success_threshold,
+        )
+        installed = (
+            existing.failure_threshold,
+            existing.recovery_timeout,
+            existing.half_open_max_calls,
+            existing.success_threshold,
+        )
+        if requested != installed:
+            logger.warning(
+                "circuit breaker %r already registered with %s; ignoring "
+                "reconfiguration request %s",
+                name,
+                installed,
+                requested,
+            )
+        if ignore is not None and existing._ignore is not ignore:
+            raise ValueError(
+                f"circuit breaker {name!r} is already registered with a "
+                "different ignore predicate; refusing silent rebinding"
+            )
+        return existing
 
 
 def reset_all_circuit_breakers() -> None:
