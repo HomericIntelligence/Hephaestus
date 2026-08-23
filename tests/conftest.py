@@ -5,7 +5,6 @@ import contextlib
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 # Repository policy requires generated files to live under build/. Hypothesis
@@ -22,14 +21,25 @@ CONTRACT_OPT_IN_ENV = "HEPHAESTUS_CONTRACT_TESTS"
 
 
 def _git_supports_path_format() -> bool:
-    """Return True when host git understands ``rev-parse --path-format``."""
+    """Return True when host git understands ``rev-parse --path-format``.
+
+    Probed from this checkout so ``--show-toplevel`` has a repository to
+    operate on. Output must be exactly one line holding the absolute
+    toplevel: capable git resolves the flag, while pre-2.31 git silently
+    echoes the unknown argument as an extra stdout line with exit 0.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
     probe = subprocess.run(
         ["git", "rev-parse", "--path-format=absolute", "--show-toplevel"],
         capture_output=True,
+        text=True,
         check=False,
-        cwd=tempfile.gettempdir(),  # outside any repo: probes flag support only
+        cwd=repo_root,
     )
-    return probe.returncode == 0
+    if probe.returncode != 0:
+        return False
+    lines = probe.stdout.splitlines()
+    return len(lines) == 1 and Path(lines[0]).resolve() == repo_root.resolve()
 
 
 @pytest.fixture(scope="session")
