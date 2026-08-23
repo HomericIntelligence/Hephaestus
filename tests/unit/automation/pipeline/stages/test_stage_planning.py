@@ -1223,8 +1223,7 @@ class TestPlanningStageStep:
     def test_enter_routes_to_advise_when_enabled(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to ADVISE_WAIT when advise is enabled."""
         stage = PlanningStage()
-        ctx = make_ctx()
-        ctx.config.enable_advise = True
+        ctx = make_ctx(config_overrides={"no_advise": False})
         item = make_work_item(issue=1, state="ENTER")
 
         result = stage.step(item, ctx)

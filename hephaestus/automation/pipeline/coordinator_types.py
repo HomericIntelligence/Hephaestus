@@ -364,6 +364,33 @@ def _work_window(config: PipelineConfig) -> int:
 
 
 @dataclass
+class _StageRunConfig:
+    """PlannerOptions-like config injected as ``StageContext.config``."""
+
+    enable_advise: bool = True
+    enable_learn: bool = True
+    enable_follow_up: bool = True
+    run_pre_pr_tests: bool = False
+    force: bool = False
+    agent: str = "claude"
+    model: str = ""
+    planner_model: str = ""
+    reviewer_model: str = ""
+    implementer_model: str = ""
+    planner_reasoning_effort: str = ""
+    reviewer_reasoning_effort: str = ""
+    implementer_reasoning_effort: str = ""
+    dry_run: bool = False
+    nitpick: bool = False
+    drive_green_all: bool = False
+    include_bot_prs: bool = True
+    include_all_authors: bool = False
+    pre_pr_test_argv: tuple[str, ...] = PRE_PR_TEST_ARGV
+    issue_limit: int | None = None
+    reset_plan_review_sessions: set[int] = field(default_factory=set)
+
+
+@dataclass
 class _Paths:
     repo_root: Path
     worktree: Path
@@ -457,12 +484,123 @@ def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
 # Keep this compact so mypy sees the exports without exceeding the file budget.
 # fmt: off
 __all__ = [
-    'DIRECT_SCOPE_BASE_SHA_KEY', 'DIRECT_SCOPE_BOOTSTRAP_KEY', 'DIRECT_SCOPE_WORKTREE_NONCE_KEY', 'PIPELINE_ORDER', 'PRE_PR_TEST_ARGV', 'ROUTES', 'STATE_IMPLEMENTATION_GO', 'STATE_PLAN_BLOCKED', 'WAVE_LEASE_PAYLOAD', 'WAVE_NON_CODE_PAYLOAD', 'WORKTREE_MATERIALIZED_KEY',  # noqa: E501
-    '_DEFAULT_EVENT_LOG_CAPACITY', '_DEFAULT_GRACE_S', '_DEFAULT_TERMINAL_DETAIL_CAPACITY', '_DIRECT_ISSUE_ENTRY_STAGES', '_DRAIN_ORDER', '_FAIL_BACK_CAP', '_FILE_CLAIM_STAGES', '_FILE_OVERLAP_BLOCKED_CLAIMS_KEY', '_FILE_OVERLAP_DEFERRALS_KEY', '_FILE_OVERLAP_WARNING_THRESHOLD',  # noqa: E501
-    '_IDLE_POLL_S', '_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD', '_MAX_STEPS_PER_TICK', '_PROMPT_PREFLIGHT_ERROR', '_PROMPT_PREFLIGHT_TEMPLATE', '_REALIZED_DIFF_CLAIM_STAGES', '_SOURCE_REGISTRY_RETRY_DELAY_S', '_STALL_TICKS_BEFORE_FORCE', '_STEP_WATCHDOG_S', 'AgentJob', 'Any', 'BranchWorktreeOwnerStatus', 'Callable',  # noqa: E501
-    'CompletionQueue', 'Continue', 'Counter', 'Disposition', 'FinishedStage', 'GitJob', 'ImplementationStage', 'IssueInfo', 'IssueWaveError', 'IssueWaveStore', 'ItemKind', 'ItemResult', 'Iterable', 'Iterator', 'JobHandle', 'JobRequest', 'JobResult', 'LearningStage', 'MergeWaitStage',  # noqa: E501
-    'OrderedDict', 'Path', 'PipelineConfig', 'PipelineScope', 'PlanReviewStage', 'PlanningStage', 'PrReviewStage', 'PreservedWorktree', 'PromptCatalog', 'RepoIssueSource', 'RepoStage', 'Route', 'RunStats', 'Stage', 'StageContext', 'StageEvent', 'StageGitHub', 'StageName',  # noqa: E501
-    'StageOutcome', 'StageQueue', 'StageQueueLease', 'StageStepResult', 'TemplateNotFound', 'TerminalSummary', 'WaveLease', 'WorkItem', '_ActiveRepoIssueSource', '_DirectIssueSource', '_DirectPrSource', '_Paths', '_PendingHandoff', '_RepoEntrySource',  # noqa: E501
-    '_admission', '_budget_lookup', '_effective_repo_root', '_json_safe', '_preflight_prompt_catalog', '_seeding', '_work_window', 'annotations', 'dataclass', 'deque', 'encode_stage_event', 'field', 'heapq', 'is_epic', 'is_full_commit_sha', 'is_inspection_only_detached_push_failure', 'json',  # noqa: E501
-    'latest_logical_items', 'list_direct_review_recovery_paths', 'logger', 'logging', 'pipeline_requires_athena_executor', 'print_summary', 'product_to_work_item', 'queue_mod', 'replace', 'signal', 'suppress', 'threading', 'time', 'uuid', 'wave_entry_from_facts']  # noqa: E501
+    'DIRECT_SCOPE_BASE_SHA_KEY',
+    'DIRECT_SCOPE_BOOTSTRAP_KEY',
+    'DIRECT_SCOPE_WORKTREE_NONCE_KEY',
+    'PIPELINE_ORDER',
+    'PRE_PR_TEST_ARGV',
+    'ROUTES',
+    'STATE_IMPLEMENTATION_GO',
+    'STATE_PLAN_BLOCKED',
+    'WAVE_LEASE_PAYLOAD',
+    'WAVE_NON_CODE_PAYLOAD',
+    'WORKTREE_MATERIALIZED_KEY',
+    '_DEFAULT_EVENT_LOG_CAPACITY',
+    '_DEFAULT_GRACE_S',
+    '_DEFAULT_TERMINAL_DETAIL_CAPACITY',
+    '_DIRECT_ISSUE_ENTRY_STAGES',
+    '_DRAIN_ORDER',
+    '_FAIL_BACK_CAP',
+    '_FILE_CLAIM_STAGES',
+    '_FILE_OVERLAP_BLOCKED_CLAIMS_KEY',
+    '_FILE_OVERLAP_DEFERRALS_KEY',
+    '_FILE_OVERLAP_WARNING_THRESHOLD',
+    '_IDLE_POLL_S',
+    '_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD',
+    '_MAX_STEPS_PER_TICK',
+    '_PROMPT_PREFLIGHT_ERROR',
+    '_PROMPT_PREFLIGHT_TEMPLATE',
+    '_REALIZED_DIFF_CLAIM_STAGES',
+    '_SOURCE_REGISTRY_RETRY_DELAY_S',
+    '_STALL_TICKS_BEFORE_FORCE',
+    '_STEP_WATCHDOG_S',
+    'AgentJob',
+    'Any',
+    'BranchWorktreeOwnerStatus',
+    'Callable',
+    'CompletionQueue',
+    'Continue',
+    'Counter',
+    'Disposition',
+    'FinishedStage',
+    'GitJob',
+    'ImplementationStage',
+    'IssueInfo',
+    'IssueWaveError',
+    'IssueWaveStore',
+    'ItemKind',
+    'ItemResult',
+    'Iterable',
+    'Iterator',
+    'JobHandle',
+    'JobRequest',
+    'JobResult',
+    'LearningStage',
+    'MergeWaitStage',
+    'OrderedDict',
+    'Path',
+    'PipelineConfig',
+    'PipelineScope',
+    'PlanReviewStage',
+    'PlanningStage',
+    'PrReviewStage',
+    'PreservedWorktree',
+    'PromptCatalog',
+    'RepoIssueSource',
+    'RepoStage',
+    'Route',
+    'RunStats',
+    'Stage',
+    'StageContext',
+    'StageEvent',
+    'StageGitHub',
+    'StageName',
+    'StageOutcome',
+    'StageQueue',
+    'StageQueueLease',
+    'StageStepResult',
+    'TemplateNotFound',
+    'TerminalSummary',
+    'WaveLease',
+    'WorkItem',
+    '_ActiveRepoIssueSource',
+    '_DirectIssueSource',
+    '_DirectPrSource',
+    '_Paths',
+    '_PendingHandoff',
+    '_RepoEntrySource',
+    '_StageRunConfig',
+    '_admission',
+    '_budget_lookup',
+    '_effective_repo_root',
+    '_json_safe',
+    '_preflight_prompt_catalog',
+    '_seeding',
+    '_work_window',
+    'annotations',
+    'dataclass',
+    'deque',
+    'encode_stage_event',
+    'field',
+    'heapq',
+    'is_epic',
+    'is_full_commit_sha',
+    'is_inspection_only_detached_push_failure',
+    'json',
+    'latest_logical_items',
+    'list_direct_review_recovery_paths',
+    'logger',
+    'logging',
+    'pipeline_requires_athena_executor',
+    'print_summary',
+    'product_to_work_item',
+    'queue_mod',
+    'replace',
+    'signal',
+    'suppress',
+    'threading',
+    'time',
+    'uuid',
+    'wave_entry_from_facts',
+]
 # fmt: on
