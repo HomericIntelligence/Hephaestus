@@ -450,6 +450,14 @@ def is_agent_authenticated(agent: AgentName) -> bool:
         return False
 
     for cmd in AGENT_AUTH_STATUS_COMMANDS[agent]:
+        child_env = {
+            "claude": build_claude_child_env,
+            "codex": build_codex_child_env,
+            "pi": build_pi_child_env,
+            # OpenCode serves models from stored credentials or environment
+            # keys, so the approved platform environment is sufficient here.
+            "opencode": _platform_child_env,
+        }[agent]()
         try:
             result = subprocess.run(
                 list(cmd),
@@ -457,6 +465,7 @@ def is_agent_authenticated(agent: AgentName) -> bool:
                 capture_output=True,
                 timeout=agent_auth_status_timeout(),
                 check=False,
+                env=child_env,
             )
         except (OSError, subprocess.TimeoutExpired):
             continue
@@ -1732,6 +1741,7 @@ def _run_opencode_command(
         cwd=cwd,
         text=True,
         start_new_session=True,
+        env=_platform_child_env(),
     )
     tracker = process_tracker(proc.pid) if process_tracker is not None else contextlib.nullcontext()
     try:
