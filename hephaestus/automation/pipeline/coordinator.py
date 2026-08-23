@@ -206,6 +206,14 @@ class Coordinator(
         # active lease reserves its source capacity while an item executes or
         # waits for a worker completion.  A pending route is represented by a
         # single intent attached to that lease, never by an overflow queue.
+        #
+        # id()-keyed registries invariant: every dict below is keyed by
+        # ``id(item)``, which is only safe because entries are released while
+        # the coordinator's single event-loop thread still holds a live
+        # reference to the item (lease/handoff/permit release happens on the
+        # coordinator thread before the last reference can drop), and WorkItem
+        # objects are never mutated into new identities. Do not add id()-keyed
+        # state that outlives the item's live reference.
         self._leases: dict[int, StageQueueLease] = {}
         self._pending_handoffs: dict[int, _PendingHandoff] = {}
         self._direct_issue_source: _DirectIssueSource | None = None
