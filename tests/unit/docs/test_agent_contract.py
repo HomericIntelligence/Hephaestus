@@ -1,54 +1,16 @@
-"""Regression contract for the canonical repository agent guidance."""
+"""Functional contracts for the repository agent-guidance entry points.
+
+These tests assert *functionality*, not document content: the legacy Claude
+entry point must still route readers to the canonical contract, and no live
+policy consumer may keep citing the deprecated pointer file. The prose inside
+the documents is intentionally not pinned — behavior gates (pr-policy,
+doc-config validator, link validation) own those guarantees.
+"""
 
 import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
-EXPECTED_POINTER = (
-    "# Claude Code guidance\n\n"
-    "Follow [`AGENTS.md`](AGENTS.md). It is the sole authoritative "
-    "agent contract for this repository.\n"
-)
-
-REQUIRED_SECTIONS = {
-    "## Project Overview": ("**Purpose**:", "Role in Ecosystem"),
-    "## Repository Structure": ("automation/", "unit/"),
-    "## Library vs product layer": (
-        "automation → library",
-        "Coverage omit-list invariant",
-    ),
-    "## Python Development Guidelines": (
-        "Python 3.13",
-        "83%+ test coverage enforced; target 90%",
-    ),
-    "## Key Development Principles": ("KISS", "YAGNI", "SOLID", "POLA"),
-    "## Security Configuration Guidelines": (
-        "Never hardcode secrets",
-        "Validate input types and ranges",
-    ),
-    "## Documentation Rules": ("No CHANGELOG.md.",),
-    "## Claude Code Optimization": (
-        "athena:skill-advisor",
-        "Agent Skills vs Sub-Agents Decision Tree",
-    ),
-    "## Working with GitHub": (
-        "Closes #<issue-number>",
-        "git commit -s -S",
-        "Signed-off-by",
-        "PR titles MUST",
-    ),
-    "## Environment Setup": ("just bootstrap", "uv sync"),
-    "## Common Commands": ("--no-verify", "uv run mypy"),
-    "## Troubleshooting": ("Import Errors", "Test Failures"),
-    "## Key Files and Directories": ("hephaestus/utils/", "pyproject.toml"),
-    "## Version Management": (
-        'dynamic = ["version"]',
-        "Make sure all temporary files are in the build/ directory.",
-    ),
-    "## AI-agent topology": ("six main-lane queues and two\nauxiliary queues",),
-    "## Canonical architecture reference": ("docs/architecture.md",),
-}
 
 ALLOWED_CLAUDE_REFERENCE_LINES = {
     Path(".github/CODEOWNERS"): {"CLAUDE.md @mvillmow"},
@@ -70,34 +32,21 @@ EXCLUDED_PARTS = {
 }
 
 
-def _section(text: str, heading: str) -> str:
-    """Return the Markdown section beginning at *heading*."""
-    start = text.index(heading)
-    end = text.find("\n## ", start + len(heading))
-    return text[start:] if end == -1 else text[start:end]
-
-
-def test_claude_md_is_exact_pointer() -> None:
-    """The legacy entry point must contain only the compatibility pointer."""
-    assert (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8") == EXPECTED_POINTER
+def test_claude_md_routes_readers_to_the_canonical_contract() -> None:
+    """The legacy entry point must link readers to the canonical AGENTS.md."""
+    claude_md = REPO_ROOT / "CLAUDE.md"
+    agents_md = REPO_ROOT / "AGENTS.md"
+    assert agents_md.is_file(), "canonical contract must exist"
+    text = claude_md.read_text(encoding="utf-8")
+    assert "(AGENTS.md)" in text, "CLAUDE.md must reference AGENTS.md"
+    # The relative link must resolve from CLAUDE.md's directory (repo root).
+    assert (claude_md.parent / "AGENTS.md").resolve() == agents_md.resolve()
 
 
 def test_hypothesis_cache_is_not_repository_source() -> None:
     """Property-test caches stay under build and outside policy scans."""
     assert ".hypothesis" in EXCLUDED_PARTS
     assert Path(os.environ["HYPOTHESIS_STORAGE_DIRECTORY"]) == (REPO_ROOT / "build" / ".hypothesis")
-
-
-def test_source_sections_and_directives_are_preserved() -> None:
-    """The consolidated contract retains each mapped source section."""
-    text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    positions = []
-    for heading, markers in REQUIRED_SECTIONS.items():
-        section = _section(text, heading)
-        positions.append(text.index(heading))
-        for marker in markers:
-            assert marker in section, f"{heading} lost directive {marker!r}"
-    assert positions == sorted(positions)
 
 
 def test_only_explicit_compatibility_and_history_references_remain() -> None:

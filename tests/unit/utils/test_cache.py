@@ -28,32 +28,43 @@ def test_warm_hit_reuses_without_recompute() -> None:
     assert compute.call_count == 1
 
 
-def test_ttl_expiry_recomputes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ttl_expiry_recomputes() -> None:
     """An entry older than the TTL is recomputed on the next access."""
-    clock = {"now": 1000.0}
-    monkeypatch.setattr("hephaestus.utils.cache.time.monotonic", lambda: clock["now"])
+    now = 1000.0
 
-    cache: ThreadSafeCache[str, int] = ThreadSafeCache(ttl_seconds=10.0)
+    def fake_clock() -> float:
+        return now
+
+    cache: ThreadSafeCache[str, int] = ThreadSafeCache(ttl_seconds=10.0, clock=fake_clock)
     compute = Mock(side_effect=[1, 2])
 
     assert cache.get_or_compute("k", compute) == 1
-    clock["now"] += 11.0  # past the TTL
+    now += 11.0  # past the TTL
     assert cache.get_or_compute("k", compute) == 2
     assert compute.call_count == 2
 
 
-def test_ttl_not_expired_keeps_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ttl_not_expired_keeps_hit() -> None:
     """An entry younger than the TTL is served from the cache without recomputing."""
-    clock = {"now": 1000.0}
-    monkeypatch.setattr("hephaestus.utils.cache.time.monotonic", lambda: clock["now"])
+    now = 1000.0
 
-    cache: ThreadSafeCache[str, int] = ThreadSafeCache(ttl_seconds=10.0)
+    def fake_clock() -> float:
+        return now
+
+    cache: ThreadSafeCache[str, int] = ThreadSafeCache(ttl_seconds=10.0, clock=fake_clock)
     compute = Mock(side_effect=[1, 2])
 
     assert cache.get_or_compute("k", compute) == 1
-    clock["now"] += 5.0  # still within the TTL
+    now += 5.0  # still within the TTL
     assert cache.get_or_compute("k", compute) == 1
     assert compute.call_count == 1
+
+
+def test_default_clock_is_time_monotonic() -> None:
+    """Without an injected clock the cache uses time.monotonic (wall-clock immune)."""
+    import time
+
+    assert ThreadSafeCache()._clock is time.monotonic
 
 
 def test_exceptions_are_not_cached() -> None:
