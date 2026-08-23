@@ -55,3 +55,34 @@ def test_metadata_timeout_reads_valid_override(monkeypatch: pytest.MonkeyPatch) 
     finally:
         monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
         importlib.reload(helpers)
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "86401"])
+def test_metadata_timeout_uses_default_outside_range(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """Out-of-range metadata overrides use the ten-second default."""
+    monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raw)
+    reloaded = importlib.reload(helpers)
+    try:
+        assert reloaded.METADATA_TIMEOUT == 10
+    finally:
+        monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
+        importlib.reload(helpers)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
+def test_metadata_timeout_accepts_inclusive_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: int,
+) -> None:
+    """Metadata overrides accept the inclusive one-second to one-day range."""
+    monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raw)
+    reloaded = importlib.reload(helpers)
+    try:
+        assert expected == reloaded.METADATA_TIMEOUT
+    finally:
+        monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
+        importlib.reload(helpers)
