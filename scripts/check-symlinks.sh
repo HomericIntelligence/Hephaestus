@@ -21,11 +21,13 @@ while IFS= read -r -d '' link; do
     echo "ERROR: broken symlink: $link -> $target"; fail=1
   fi
 done < <(
+  # build/ is pruned wholesale: it is the gitignored automation/packaging
+  # scratch root (issue #1214) and its nested worktree .venv envs contain
+  # legitimate escaped symlinks that are not repository state.
   find "$ROOT" \
     \( -path "$ROOT/.git" \
        -o -path "$ROOT/.venv" \
-       -o -path "$ROOT/build/cli-venv" \
-       -o -path "$ROOT/build/pytest-artifacts" \) -prune \
+       -o -path "$ROOT/build" \) -prune \
     -o -type l -print0
 )
 
