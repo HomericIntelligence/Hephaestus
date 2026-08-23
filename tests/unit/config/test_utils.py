@@ -253,8 +253,8 @@ class TestMergeWithEnv:
     """Tests for merge_with_env."""
 
     @pytest.fixture(autouse=True)
-    def _clear_ambient_hephaestus_environment(self, monkeypatch):
-        """Ensure each merge test controls every variable under its prefix."""
+    def _clear_inherited_hephaestus_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep exact-map assertions independent of the host's configuration."""
         for key in tuple(os.environ):
             if key.startswith("HEPHAESTUS_"):
                 monkeypatch.delenv(key)

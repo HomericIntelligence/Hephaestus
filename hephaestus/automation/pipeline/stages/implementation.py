@@ -114,6 +114,7 @@ from hephaestus.automation.state_labels import (
 from hephaestus.automation.worktree_manager import BRANCH_WORKTREE_OWNED
 from hephaestus.prompts import PromptCatalog
 
+from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
@@ -636,7 +637,7 @@ class ImplementationStage(Stage):
             item.payload.pop(_SYNC_RESTORED_WRITER_BEFORE_REBASE, None)
             return Continue(next_state=ADOPTED)
         if item.payload.pop("rebase_error", None):
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_rebase_failed")
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
             item.payload.pop("post_review_rebase_required", None)
             item.payload.pop("rebase_conflict", None)
@@ -675,7 +676,7 @@ class ImplementationStage(Stage):
     def _rebase_continue_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Let the host validate, complete, sign, and lease-publish a paused rebase."""
         if item.payload.pop("rebase_error", None):
-            return StageOutcome(Disposition.FINISH_FAIL, "implementation_rebase_failed")
+            return StageOutcome(Disposition.FINISH_FAIL, self._rebase_failure_note(item))
         if item.payload.pop("rebase_complete", None):
             item.payload.pop("post_review_rebase_required", None)
             item.payload.pop("rebase_conflict", None)
@@ -710,6 +711,11 @@ class ImplementationStage(Stage):
             descr="complete_host_owned_rebase",
         )
         return JobRequest(job, on_done_state=REBASE_CONTINUE_WAIT)
+
+    @staticmethod
+    def _rebase_failure_note(item: WorkItem) -> str:
+        """Return the bounded host diagnostic for a terminal rebase failure."""
+        return str(item.payload.get("rebase_error_detail") or "implementation_rebase_failed")
 
     def _adopted(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """ADOPTED advances to pr_review after the adopted worktree is ready."""
@@ -1296,7 +1302,7 @@ class ImplementationStage(Stage):
                 logger.warning(
                     "implementation:%s: writer rebase failed: %s", item.issue, result.error
                 )
-                item.payload["rebase_error"] = True
+                self._record_rebase_failure(item, result)
             return
 
         if item.state == REBASE_CONTINUE_WAIT:
@@ -1314,10 +1320,10 @@ class ImplementationStage(Stage):
                     item.issue,
                     result.error,
                 )
+                self._record_rebase_failure(item, result)
                 diagnostic = _rebase_failure_diagnostic(result)
                 if diagnostic is not None:
                     item.payload["rebase_failure_diagnostic"] = diagnostic
-                item.payload["rebase_error"] = True
             return
 
         if item.state == ADVISE_WAIT:
@@ -1613,6 +1619,21 @@ class ImplementationStage(Stage):
             item.payload["rebase_conflict_agent_complete"] = True
         else:
             item.payload["rebase_conflict_agent_error"] = True
+
+    @staticmethod
+    def _record_rebase_failure(item: WorkItem, result: JobResult) -> None:
+        """Persist bounded, structured diagnostics for a terminal rebase failure."""
+        item.payload["rebase_error"] = True
+        if result.error:
+            item.payload["rebase_error_detail"] = redact_diagnostic_text(result.error)[:500]
+        if result.stdout_tail:
+            item.payload["rebase_stdout_tail"] = redact_diagnostic_text(result.stdout_tail)[-4000:]
+        if result.stderr_tail:
+            item.payload["rebase_stderr_tail"] = redact_diagnostic_text(result.stderr_tail)[-4000:]
+        value = result.value if isinstance(result.value, dict) else {}
+        failure_kind = value.get("failure_kind")
+        if isinstance(failure_kind, str) and re.fullmatch(r"[a-z][a-z0-9_]*", failure_kind):
+            item.payload["rebase_error_kind"] = failure_kind
 
     @staticmethod
     def _record_rebase_conflict(item: WorkItem, result: JobResult) -> None:
@@ -2186,7 +2207,7 @@ def _rebase_failure_diagnostic(result: JobResult) -> dict[str, object] | None:
         "failure_kind": value["failure_kind"],
         "phase": value["phase"],
         "returncode": value.get("returncode"),
-        "receipt_error": value.get("receipt_error"),
-        "stdout_tail": result.stdout_tail,
-        "stderr_tail": result.stderr_tail,
+        "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[:500],
+        "stdout_tail": redact_diagnostic_text(result.stdout_tail)[-4000:],
+        "stderr_tail": redact_diagnostic_text(result.stderr_tail)[-4000:],
     }

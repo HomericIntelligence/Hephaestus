@@ -2,12 +2,12 @@ import sys
 from typing import Any, cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
-from hephaestus.diagnostics import bounded_git_diagnostic
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
 from .coordinator_types import *
+from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 
 # ruff: noqa: F403, F405
 
@@ -780,6 +780,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if result.worker_id:
             fields["worker_id"] = result.worker_id
         value = result.value
+        diagnostics = redact_bounded_diagnostic_tails(
+            result.stdout_tail, result.stderr_tail, limit=4000
+        )
+        if diagnostics:
+            fields["diagnostics"] = diagnostics
         if (
             isinstance(value, dict)
             and value.get("failure_kind") in {"signing", "continuation"}
@@ -789,9 +794,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 "failure_kind": value["failure_kind"],
                 "phase": value["phase"],
                 "returncode": value.get("returncode"),
-                "receipt_error": bounded_git_diagnostic(value.get("receipt_error"), limit=500),
-                "stdout_tail": bounded_git_diagnostic(result.stdout_tail, limit=4000),
-                "stderr_tail": bounded_git_diagnostic(result.stderr_tail, limit=4000),
+                "receipt_error": redact_diagnostic_text(str(value.get("receipt_error") or ""))[
+                    -500:
+                ],
+                "stdout_tail": diagnostics.get("stdout_tail", ""),
+                "stderr_tail": diagnostics.get("stderr_tail", ""),
             }
         return fields
 
@@ -804,6 +811,25 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return "interrupted"
         if result.error.startswith("worker_crash:"):
             return "worker_crash"
+        value = result.value if isinstance(result.value, dict) else {}
+        failure_kind = value.get("failure_kind")
+        if isinstance(failure_kind, str) and failure_kind in {
+            "semantic_validation",
+            "publish_remote_head_changed",
+            "publish_remote_head_unchanged",
+            "publish_remote_probe_failed",
+            "publish_lease_drift",
+            "publish_unknown",
+            "publish_timeout",
+            "publish_transport_failed",
+            "validation",
+            "validation_runner",
+            "runner",
+            "timeout",
+        }:
+            return failure_kind
+        if result.error == "timeout":
+            return "timeout"
         return "error"
 
     def _drain_queues(self) -> None:

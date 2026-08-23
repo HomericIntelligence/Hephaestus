@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from logging import Logger
 from typing import Protocol
 
+from ..diagnostics import redact_diagnostic_text
 from .pr_review_verification import (
     HOST_VERIFICATION_DIAGNOSTIC_MAX,
     _HostVerificationSpec,
@@ -23,8 +24,8 @@ class _CommentWriter(Protocol):
 
 
 def _indented_diagnostic(value: object) -> str:
-    """Render bounded diagnostic text as inert Markdown code."""
-    text = str(value or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:]
+    """Render bounded, redacted diagnostic text as inert Markdown code."""
+    text = redact_diagnostic_text(str(value or "")[-HOST_VERIFICATION_DIAGNOSTIC_MAX:])
     return "\n".join(f"    {line}" for line in text.splitlines() or [""])
 
 
