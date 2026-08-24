@@ -16,7 +16,7 @@ _No captured commands recorded yet._
 
 ## Snapshots
 
-_No repository snapshots recorded yet._
+- `fixture` -> `2519-auto-impl-direct-ab1b5e0ad0fd4905a77a1905db1582ee` `31ad853e5cf1ecd32e47b58ccf847d54ca7a316a`
 
 ## Athena Host Receipts
 
