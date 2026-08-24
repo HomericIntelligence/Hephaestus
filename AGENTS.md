@@ -548,6 +548,10 @@ host-only pool runs learning and terminal cleanup. Each agent job runs
 **Claude Code**, **Codex**, **Pi** (admission-gated), or **OpenCode**, chosen via the
 optional `--agent` CLI flag or auto-detected with a Claude preference when
 omitted (see `hephaestus.agents.runtime.add_agent_argument`).
+**Claude Code**, **Codex**, or an explicitly admitted
+**Pi** host integration, chosen via the optional `--agent` CLI flag or
+auto-detected with a Claude preference when omitted (see
+`hephaestus.agents.runtime.add_agent_argument`). Pi is never auto-selected.
 
 **Loop-owned approval policy:** `pr_review` invokes `$athena:pr-review` with
 its normal default behavior when available, otherwise uses its inline-review

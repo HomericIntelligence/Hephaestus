@@ -153,6 +153,13 @@ Examples:
         action="store_true",
         help="Do not create or execute auxiliary learning intents",
     )
+    parser.add_argument(
+        "--evidence-receipt-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Write private typed queue-job receipts beneath PATH (disabled by default).",
+    )
     add_agent_timeout_arg(parser)
     add_advise_timeout_arg(parser)
     add_git_message_timeout_arg(parser)
@@ -277,6 +284,7 @@ def main() -> int:
         reset_plan_review_sessions=(
             frozenset(issues) if args.reset_plan_review_session else frozenset()
         ),
+        evidence_receipt_dir=args.evidence_receipt_dir,
     )
 
     rc = run_pipeline(config)

@@ -122,6 +122,7 @@ class Coordinator(
                 # a different valid docs/adr layout.
                 rebase_adr_validator=validate_rebased_adr_tree,
                 rebase_structural_test_argv=REBASE_STRUCTURAL_TEST_ARGV,
+                evidence_receipt_dir=config.evidence_receipt_dir,
             )
         else:
             # The coordinator owns the cross-thread transport.  An injected

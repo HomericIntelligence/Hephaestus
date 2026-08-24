@@ -263,6 +263,12 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and agent calls (classify + preview only).")
         ),
+        _action_spec(
+            ("--evidence-receipt-dir",),
+            "evidence_receipt_dir",
+            "_StoreAction",
+            None,
+        ),
         _store_true(
             "--force",
             "force",
@@ -731,6 +737,12 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
                 "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
                 "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
             ),
+        ),
+        _action_spec(
+            ("--evidence-receipt-dir",),
+            "evidence_receipt_dir",
+            "_StoreAction",
+            None,
         ),
         _action_spec(
             ("--model",),
