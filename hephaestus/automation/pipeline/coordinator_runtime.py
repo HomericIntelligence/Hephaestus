@@ -70,48 +70,45 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         ctx = self._ctx_cache.get(repo)
         if ctx is not None:
             self._ctx_cache.move_to_end(repo)
-        else:
-            root = _effective_repo_root(self.config, repo)
-            from hephaestus.automation.arming_state import LearningJournalStore
-            from hephaestus.automation.plan_review_session import PlanReviewSessionStore
-            from hephaestus.automation.source_worktree import SourceWorkspaceManager
+            return ctx
+        root = _effective_repo_root(self.config, repo)
+        from hephaestus.automation.arming_state import LearningJournalStore
+        from hephaestus.automation.plan_review_session import PlanReviewSessionStore
+        from hephaestus.automation.source_worktree import SourceWorkspaceManager
 
-            def learning_state_dir() -> Path:
-                return root / "build" / ".automation-state"
+        def learning_state_dir() -> Path:
+            return root / "build" / ".automation-state"
 
-            ctx = StageContext(
-                config=self.config,
-                org=self.config.org,
-                dry_run=self.config.dry_run,
-                github=(
-                    self._github_factory(repo, root)
-                    if self._github_factory is not None
-                    else self.github
+        github_factory = self._github_factory
+        ctx = StageContext(
+            config=self.config,
+            org=self.config.org,
+            dry_run=self.config.dry_run,
+            github=(github_factory(repo, root) if github_factory is not None else self.github),
+            paths=_Paths(
+                repo_root=root,
+                worktree=root,
+                projects_dir=Path(self.config.projects_dir),
+                source_workspaces=lambda: (
+                    SourceWorkspaceManager(root, repository=repo)
+                    if (root / ".git").exists()
+                    else None
                 ),
-                paths=_Paths(
-                    repo_root=root,
-                    worktree=root,
-                    projects_dir=Path(self.config.projects_dir),
-                    source_workspaces=lambda: (
-                        SourceWorkspaceManager(root, repository=repo)
-                        if (root / ".git").exists()
-                        else None
-                    ),
-                ),
-                now_fn=time.monotonic,
-                budget_fn=self._budget_for,
-                event_fn=self._record_stage_event,
-                learning_journal=LearningJournalStore(
-                    learning_state_dir,
-                    claim_registry=self._learning_claim_registry,
-                ),
-                plan_review_sessions=PlanReviewSessionStore(learning_state_dir),
-                plan_review_session_resets=set(self.config.reset_plan_review_sessions),
-                branch_worktree_owner_status=self._branch_worktree_owner_status,
-            )
-            if len(self._ctx_cache) >= self._ctx_cache_capacity:
-                self._ctx_cache.popitem(last=False)
-            self._ctx_cache[repo] = ctx
+            ),
+            now_fn=time.monotonic,
+            budget_fn=self._budget_for,
+            event_fn=self._record_stage_event,
+            learning_journal=LearningJournalStore(
+                learning_state_dir,
+                claim_registry=self._learning_claim_registry,
+            ),
+            plan_review_sessions=PlanReviewSessionStore(learning_state_dir),
+            plan_review_session_resets=set(self.config.reset_plan_review_sessions),
+            branch_worktree_owner_status=self._branch_worktree_owner_status,
+        )
+        if len(self._ctx_cache) >= self._ctx_cache_capacity:
+            self._ctx_cache.popitem(last=False)
+        self._ctx_cache[repo] = ctx
         return ctx
 
     def _ctx_for(self, item: WorkItem) -> StageContext:
