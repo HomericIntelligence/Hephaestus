@@ -509,7 +509,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help=(
             "Execution timeout in seconds, from 1 through 86400 "
-            f"(default: {_EXECUTION_TIMEOUT_SECONDS}); place before <core-dir>",
+            f"(default: {_EXECUTION_TIMEOUT_SECONDS}); place before <core-dir>"
         ),
     )
     parser.add_argument(

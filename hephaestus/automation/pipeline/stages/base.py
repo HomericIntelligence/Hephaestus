@@ -704,7 +704,7 @@ def stage_model(
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
     configured_model = str(phase_value or catch_all or fallback())
-    model = direct_agent_model(selected_provider, codex_default=configured_model)
+    model = direct_agent_model(selected_provider, configured_model)
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
     if reasoning_effort and agent_supports_model_reasoning_effort(selected_provider):
         base_model, separator, current_effort = model.rpartition(":")

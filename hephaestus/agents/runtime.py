@@ -2186,12 +2186,14 @@ def _pi_automation_env(profile_dir: Path) -> dict[str, str]:
 @contextlib.contextmanager
 def _pi_automation_profile(
     preflight: PiPreflightResult,
+    *,
+    pi_dir: Path | None = None,
 ) -> Iterator[tuple[Path, dict[str, Path]]]:
     """Materialize the exact preflight-proven packages plus private model/auth data."""
     inventory = preflight.inventory
     if inventory is None or not inventory.ready:
         raise AgentExecutionError("Pi automation lacks a verified package inventory")
-    source_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent")).expanduser()
+    source_dir = pi_dir.expanduser() if pi_dir is not None else Path.home() / ".pi" / "agent"
     with tempfile.TemporaryDirectory(prefix="pi-automation-") as temporary:
         profile_dir = Path(temporary)
         profile_dir.chmod(0o700)
@@ -2504,10 +2506,18 @@ def _require_pi_request(execution_request: ExecutionRequest | None) -> Execution
 
 
 def _require_admitted_pi_policy(
-    cwd: Path, execution_request: ExecutionRequest | None
+    cwd: Path,
+    execution_request: ExecutionRequest | None,
+    *,
+    disable_pi_automation: bool = False,
+    pi_dir: Path | None = None,
 ) -> tuple[ExecutionPolicy, PiPreflightResult]:
     """Require Pi admission before resolving its caller-supplied execution policy."""
-    preflight = _require_pi_automation_admission(cwd)
+    preflight = _require_pi_automation_admission(
+        cwd,
+        disable_pi_automation=disable_pi_automation,
+        pi_dir=pi_dir,
+    )
     return _require_pi_request(execution_request), preflight
 
 
@@ -2549,6 +2559,7 @@ def _run_pi_with_policy(
     lifecycle: SessionLifecycle,
     session_id: str | None = None,
     process_tracker: ProcessTracker | None = None,
+    pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Run Pi through the verified OS-isolation adapter for ``policy``.
 
@@ -2576,7 +2587,7 @@ def _run_pi_with_policy(
         raise AgentExecutionError("Pi preflight-proven executable identity drifted")
     tokens = pi_private_redaction_tokens(cwd, model)
     try:
-        with _pi_automation_profile(preflight) as (profile_dir, package_roots):
+        with _pi_automation_profile(preflight, pi_dir=pi_dir) as (profile_dir, package_roots):
             command = _pi_automation_cmd(
                 executable,
                 model=model,
@@ -2650,10 +2661,17 @@ def run_agent_text(
     sandbox: str = "workspace-write",
     approval: str = "never",
     execution_request: ExecutionRequest | None = None,
+    disable_pi_automation: bool = False,
+    pi_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a direct-runner agent non-interactively and return text output."""
     if is_pi(agent):
-        policy, preflight = _require_admitted_pi_policy(cwd, execution_request)
+        policy, preflight = _require_admitted_pi_policy(
+            cwd,
+            execution_request,
+            disable_pi_automation=disable_pi_automation,
+            pi_dir=pi_dir,
+        )
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is not SessionLifecycle.ONE_SHOT:
             raise ExecutionPolicyError("Pi text execution requires a ONE_SHOT ExecutionRequest")
@@ -2686,6 +2704,7 @@ def run_agent_text(
             policy=policy,
             preflight=preflight,
             lifecycle=execution_request.lifecycle,
+            pi_dir=pi_dir,
         )
         return subprocess.CompletedProcess(
             args=["pi", "--mode", "json"], returncode=0, stdout=result.stdout, stderr=result.stderr
@@ -2705,10 +2724,17 @@ def run_agent_session(
     process_tracker: ProcessTracker | None = None,
     execution_request: ExecutionRequest | None = None,
     resume_binding: AgentSessionBinding | None = None,
+    disable_pi_automation: bool = False,
+    pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     if is_pi(agent):
-        policy, preflight = _require_admitted_pi_policy(cwd, execution_request)
+        policy, preflight = _require_admitted_pi_policy(
+            cwd,
+            execution_request,
+            disable_pi_automation=disable_pi_automation,
+            pi_dir=pi_dir,
+        )
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is SessionLifecycle.RESUME_REQUIRED:
             if resume_binding is None:
@@ -2753,6 +2779,7 @@ def run_agent_session(
             lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id if resume_binding is not None else None,
             process_tracker=process_tracker,
+            pi_dir=pi_dir,
         )
         if execution_request.lifecycle is SessionLifecycle.ONE_SHOT:
             return AgentRunResult(
@@ -2790,10 +2817,17 @@ def resume_agent_session(
     process_tracker: ProcessTracker | None = None,
     execution_request: ExecutionRequest | None = None,
     resume_binding: AgentSessionBinding | None = None,
+    disable_pi_automation: bool = False,
+    pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Resume a direct-runner agent session."""
     if is_pi(agent):
-        policy, preflight = _require_admitted_pi_policy(cwd, execution_request)
+        policy, preflight = _require_admitted_pi_policy(
+            cwd,
+            execution_request,
+            disable_pi_automation=disable_pi_automation,
+            pi_dir=pi_dir,
+        )
         pi_request = cast(ExecutionRequest, execution_request)
         if pi_request.lifecycle is not SessionLifecycle.RESUME_REQUIRED:
             raise ExecutionPolicyError(
@@ -2839,6 +2873,7 @@ def resume_agent_session(
             lifecycle=execution_request.lifecycle,
             session_id=resume_binding.session_id,
             process_tracker=process_tracker,
+            pi_dir=pi_dir,
         )
         return AgentRunResult(
             stdout=result.stdout,

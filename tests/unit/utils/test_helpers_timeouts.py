@@ -66,17 +66,16 @@ def test_metadata_timeout_uses_default_outside_range(
         importlib.reload(helpers)
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
-def test_metadata_timeout_accepts_inclusive_bounds(
+@pytest.mark.parametrize("raw", ["1", "86400"])
+def test_metadata_timeout_ignores_former_inclusive_overrides(
     monkeypatch: pytest.MonkeyPatch,
     raw: str,
-    expected: int,
 ) -> None:
-    """Metadata overrides accept the inclusive one-second to one-day range."""
+    """Former metadata overrides cannot change the fixed library default."""
     monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raw)
     reloaded = importlib.reload(helpers)
     try:
-        assert expected == reloaded.METADATA_TIMEOUT
+        assert reloaded.METADATA_TIMEOUT == 10
     finally:
         monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
         importlib.reload(helpers)

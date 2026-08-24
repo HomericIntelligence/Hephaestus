@@ -37,6 +37,8 @@ through installed `hephaestus-*` console scripts.
 - **`compact_issue_timelines.py`** — Dry-run-first migration that reduces open
   and closed issue timelines to the latest actor-owned plan and plan review.
   See `../docs/runbooks/compact-issue-timelines.md`.
+- **`compare_benchmarks.py`** — Compare benchmark result JSON files, with an
+  explicit optional command-execution mode for collecting a fresh result.
 
 ### Installation / environment
 
@@ -73,6 +75,8 @@ through installed `hephaestus-*` console scripts.
   `sbatch` using a minimized environment and a fresh ACL-verified private
   scheduler run directory; alias config, Pi directory, and log paths are
   explicit arguments.
+- **`pi_e2e_2519.py`** — Collect and render redacted, reproducible Pi
+  end-to-end evidence for issue #2519 beneath `build/pi-e2e-2519/`.
 - **`slurm/pi_smoke.sbatch`** — Slurm batch template that invokes
   `pi_smoke.py` on a cluster node with a fixed export list and no shared
   scheduler artifact (copy and fill partition/account locally).

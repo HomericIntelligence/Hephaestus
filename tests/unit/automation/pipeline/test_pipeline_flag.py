@@ -349,17 +349,14 @@ def test_stage_model_does_not_append_codex_reasoning_to_claude_model() -> None:
     assert stage_model(context, "reviewer", lambda: "fallback") == ("claude-sonnet-4-6")
 
 
-def test_stage_model_uses_the_operator_selected_pi_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pi jobs must not inherit a Claude fallback model from a pipeline role."""
+def test_stage_model_uses_the_explicit_pi_alias() -> None:
+    """Pi jobs use the explicit role model rather than an ambient alias."""
     config = SimpleNamespace(
         agent="pi",
         model="",
-        reviewer_model="",
+        reviewer_model="operator-local-pi-alias",
         reviewer_reasoning_effort="default",
     )
-    monkeypatch.setenv("HEPH_PI_MODEL", "operator-local-pi-alias")
 
     context = cast(StageContext, SimpleNamespace(config=config))
 
