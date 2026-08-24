@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 import logging
 import os
 import queue as queue_mod
@@ -27,14 +28,14 @@ from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TypeGuard, cast
 
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError
+from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -49,6 +50,7 @@ from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
     AthenaSkillExecutor,
     AthenaSkillJob,
+    AthenaSkillResult,
 )
 from hephaestus.automation.pipeline.github_jobs import (
     GitHubJob,
@@ -1548,6 +1550,39 @@ def _interruptible_file_lock(
             return
 
 
+def _evidence_patch_digest(cwd: Path, *revisions: str) -> str:
+    """Hash the exact Git patch tested or committed by the queue."""
+    result = git_utils.run(
+        ["git", "diff", "--binary", "--no-ext-diff", *revisions, "--"],
+        cwd=cwd,
+        timeout=30,
+    )
+    return hashlib.sha256(result.stdout.encode()).hexdigest()
+
+
+def _git_evidence_fields(job: GitJob, result: JobResult) -> dict[str, object]:
+    """Return immutable Git outcome fields for a private queue receipt."""
+    fields: dict[str, object] = {"job_type": "git", "operation": job.op}
+    if not isinstance(result.value, dict):
+        return fields
+    fields.update(
+        head_sha=result.value.get("head_sha"),
+        pushed=result.value.get("pushed"),
+    )
+    head_sha = result.value.get("head_sha")
+    worktree = job.kwargs.get("worktree_path")
+    if (
+        job.op == "commit_push"
+        and result.value.get("pushed") is True
+        and isinstance(head_sha, str)
+        and isinstance(worktree, str)
+    ):
+        fields["committed_patch_sha256"] = _evidence_patch_digest(
+            Path(worktree), f"{head_sha}^", head_sha
+        )
+    return fields
+
+
 class WorkerPool:
     """Thread pool executor for submitting and tracking frozen jobs.
 
@@ -1577,6 +1612,7 @@ class WorkerPool:
         athena_skill_executor: AthenaSkillExecutor | None = None,
         rebase_adr_validator: Callable[[Path], JobResult | None] | None = None,
         rebase_structural_test_argv: tuple[str, ...] | None = None,
+        evidence_receipt_dir: Path | None = None,
     ) -> None:
         """Initialize the pool.
 
@@ -1600,6 +1636,8 @@ class WorkerPool:
             rebase_structural_test_argv: Host-trusted, repository-owned pytest
                 argv run against the immutable rebased tree.  ``None`` disables
                 the structural gate for repositories without a matching test.
+            evidence_receipt_dir: Optional private directory for bounded typed
+                agent and Athena result receipts.
 
         """
         self._executor = ThreadPoolExecutor(
@@ -1618,6 +1656,7 @@ class WorkerPool:
         self._athena_skill_executor = athena_skill_executor
         self._rebase_adr_validator = rebase_adr_validator
         self._rebase_structural_test_argv = rebase_structural_test_argv
+        self._evidence_receipt_dir = evidence_receipt_dir
 
     @contextmanager
     def _repo_lock(self, repo: str) -> Iterator[None]:
@@ -1845,12 +1884,122 @@ class WorkerPool:
             if self._shutdown.is_set():
                 result = replace(result, interrupted=True, ok=False)
 
+        try:
+            self._persist_evidence_receipt(job, result, claim_key, claim_stage)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.error("failed to persist pipeline evidence receipt: %s", type(exc).__name__)
+            result = replace(result, ok=False, error="evidence_receipt_failed")
+
         return replace(
             result,
             duration_s=time.monotonic() - start,
             stdout_tail=result.stdout_tail[-_TAIL:] if result.stdout_tail else "",
             stderr_tail=result.stderr_tail[-_TAIL:] if result.stderr_tail else "",
             worker_id=worker_id,
+        )
+
+    def _persist_evidence_receipt(
+        self,
+        job: AgentJob | BuildTestJob | GitJob | GitHubJob | CompactJob | AthenaSkillJob,
+        result: JobResult,
+        claim_key: str,
+        claim_stage: str,
+    ) -> None:
+        """Persist one output-free typed receipt when explicitly configured."""
+        receipt_dir = self._evidence_receipt_dir
+        if receipt_dir is None or isinstance(job, CompactJob):
+            return
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        receipt_dir.chmod(0o700)
+        issue = getattr(job, "issue", None)
+        if issue is None and "#" in claim_key:
+            _, _, candidate = claim_key.rpartition("#")
+            if candidate.isdigit():
+                issue = int(candidate)
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "capture_nonce": (
+                match.group(1)
+                if (match := re.fullmatch(r"pipeline-receipts-([0-9a-f]{32})", receipt_dir.name))
+                else ""
+            ),
+            "claim_key": claim_key,
+            "claim_stage": claim_stage,
+            "repo": job.repo,
+            "issue": issue,
+            "descr": job.descr,
+            "ok": result.ok,
+            "interrupted": result.interrupted,
+        }
+
+        if isinstance(job, AthenaSkillJob):
+            payload["job_type"] = "athena"
+            if isinstance(result.value, AthenaSkillResult):
+                payload["result"] = asdict(result.value)
+        elif isinstance(job, AgentJob):
+            payload.update(
+                {
+                    "job_type": "agent",
+                    "provider": job.agent,
+                    "session_id": (
+                        result.session_binding.session_id
+                        if result.session_binding is not None
+                        else result.session_id
+                    ),
+                    "observed_skill_invocations": list(result.observed_skill_invocations),
+                }
+            )
+            if job.execution_request is not None:
+                request = job.execution_request
+                policy = resolve_policy(request)
+                payload["execution_request"] = {
+                    "role": request.role.value,
+                    "operation": request.operation.value,
+                    "lifecycle": request.lifecycle.value,
+                }
+                payload["tool_scopes"] = sorted(policy.builtins)
+            else:
+                payload["execution_request"] = None
+                payload["tool_scopes"] = sorted(
+                    scope.strip() for scope in (job.allowed_tools or "").split(",") if scope.strip()
+                )
+        elif isinstance(job, BuildTestJob):
+            payload.update(
+                {
+                    "job_type": "build_test",
+                    "argv_sha256": hashlib.sha256(
+                        json.dumps(job.argv, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "expected_head_sha": job.expected_head_sha,
+                    "succeeded": result.ok,
+                    "tested_patch_sha256": (
+                        _evidence_patch_digest(job.cwd)
+                        if result.ok and job.descr == "pre_pr_tests"
+                        else None
+                    ),
+                }
+            )
+        elif isinstance(job, GitJob):
+            payload.update(_git_evidence_fields(job, result))
+        elif isinstance(job, GitHubJob):
+            payload.update(
+                {
+                    "job_type": "github",
+                    "operation": type(job.request).__name__,
+                    "pr_number": getattr(job.request, "pr_number", None),
+                    "request_issue": getattr(job.request, "issue_number", None),
+                    "request_head_sha": getattr(job.request, "reviewed_head_sha", None),
+                    "result_type": type(result.value).__name__
+                    if result.value is not None
+                    else None,
+                    "result_action": getattr(result.value, "action", None),
+                    "result_outcome": getattr(result.value, "outcome", None),
+                }
+            )
+        filename = f"{time.time_ns()}-{threading.get_ident()}.json"
+        write_secure(
+            receipt_dir / filename,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
         )
 
     def _run_github(self, job: GitHubJob) -> JobResult:
@@ -1901,7 +2050,7 @@ class WorkerPool:
             session_key = job.session_key or session_agent
             prompt = job.prompt_builder(**job.prompt_kwargs)
 
-            def _invoke() -> tuple[str, str | None, AgentSessionBinding | None]:
+            def _invoke() -> tuple[str, str | None, AgentSessionBinding | None, tuple[str, ...]]:
                 if is_claude:
                     # Scope priority: an explicit per-job grant (a stage that
                     # knows its exact needs, e.g. pr_review) wins; a read-only
@@ -1931,7 +2080,7 @@ class WorkerPool:
                             else None
                         ),
                     )
-                    return stdout, claude_session_id, None
+                    return stdout, claude_session_id, None, ()
                 if job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
@@ -1979,13 +2128,19 @@ class WorkerPool:
                     agent_result.stdout or "",
                     agent_result.session_id or job.resume_session_id,
                     agent_result.session_binding,
+                    agent_result.observed_skill_invocations,
                 )
 
-            def _invoke_leased() -> tuple[str, str | None, AgentSessionBinding | None]:
+            def _invoke_leased() -> tuple[
+                str,
+                str | None,
+                AgentSessionBinding | None,
+                tuple[str, ...],
+            ]:
                 with _agent_workspace_lease(job):
                     return _invoke()
 
-            stdout, session_id, session_binding = resilient_call(
+            stdout, session_id, session_binding, observed_skill_invocations = resilient_call(
                 _invoke_leased,
                 circuit_breaker_name=f"agent:{agent}",
                 retry_predicate=lambda exc: (
@@ -2019,6 +2174,7 @@ class WorkerPool:
                 stdout_tail=stdout[-_TAIL:],
                 session_id=session_id,
                 session_binding=session_binding,
+                observed_skill_invocations=observed_skill_invocations,
             )
 
         except CircuitBreakerOpenError:

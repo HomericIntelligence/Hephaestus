@@ -336,11 +336,10 @@ def test_stage_model_propagates_per_role_reasoning_effort(
     assert stage_model(context, role, lambda: model) == expected
 
 
-@pytest.mark.parametrize("agent", ["claude", "pi"])
-def test_stage_model_does_not_append_codex_reasoning_to_other_provider_model(agent: str) -> None:
+def test_stage_model_does_not_append_codex_reasoning_to_claude_model() -> None:
     """A Codex-only reasoning flag cannot corrupt another provider's model selection."""
     config = SimpleNamespace(
-        agent=agent,
+        agent="claude",
         model="",
         reviewer_model="claude-sonnet-4-6",
         reviewer_reasoning_effort="default",
@@ -348,6 +347,25 @@ def test_stage_model_does_not_append_codex_reasoning_to_other_provider_model(age
 
     context = cast(StageContext, SimpleNamespace(config=config))
     assert stage_model(context, "reviewer", lambda: "fallback") == ("claude-sonnet-4-6")
+
+
+def test_stage_model_uses_the_operator_selected_pi_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi jobs must not inherit a Claude fallback model from a pipeline role."""
+    config = SimpleNamespace(
+        agent="pi",
+        model="",
+        reviewer_model="",
+        reviewer_reasoning_effort="default",
+    )
+    monkeypatch.setenv("HEPH_PI_MODEL", "operator-local-pi-alias")
+
+    context = cast(StageContext, SimpleNamespace(config=config))
+
+    assert stage_model(context, "reviewer", lambda: "claude-sonnet-4-6") == (
+        "operator-local-pi-alias"
+    )
 
 
 @pytest.mark.parametrize("model", ["terra:default", "gpt-5.6-terra:default"])

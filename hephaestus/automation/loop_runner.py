@@ -294,6 +294,7 @@ class LoopConfig:
     # listener rather than selecting an ephemeral port, so the CLI remains
     # opt-in and operators know which port is exposed.
     metrics_port: int = 0
+    evidence_receipt_dir: Path | None = None
     # The optional staged issue-wave selector. Explicit issue/PR lists remain
     # identifier scopes and are rejected together with this value at parsing.
     issue_limit: int | None = None
@@ -567,6 +568,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "Retain at most this many pipeline event logs when inactive logs permit; "
             "0 disables the count limit."
         ),
+    )
+    p.add_argument(
+        "--evidence-receipt-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Write private typed queue-job receipts beneath PATH (disabled by default).",
     )
     p.add_argument(
         "--repos",
@@ -874,6 +882,7 @@ def _build_pipeline_config(
         event_log_path=_pipeline_event_log_path(
             cfg.projects_dir, repos, has_repo_source=repo_source_factory is not None
         ),
+        evidence_receipt_dir=cfg.evidence_receipt_dir,
         projects_dir=cfg.projects_dir,
         repo_roots=cfg.repo_roots,
         json_out=args.json,
@@ -1056,6 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics_port=args.metrics_port,
         event_log_retention_days=args.event_log_retention_days,
         event_log_retention_count=args.event_log_retention_count,
+        evidence_receipt_dir=args.evidence_receipt_dir,
     )
 
     org_repo_source = (lambda: _iter_gh_repos(org)) if streaming_org_scope else None
