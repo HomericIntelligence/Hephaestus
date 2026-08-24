@@ -306,7 +306,6 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
                 raise ValueError("mutation variables are owned by the typed spec")
             return run_graphql(spec, call=gh_call)
         owner, name = self._owner_name()
-        owner, name = self._owner_name()
         if "owner" in fields or "name" in fields:
             raise ValueError("repository identity is owned by PipelineGitHub")
         return run_graphql(

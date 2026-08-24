@@ -43,6 +43,11 @@ io_write_secure = write_secure
 _label_cache: ThreadSafeCache[str, set[str]] = ThreadSafeCache()
 _issue_state_cache: dict[int, IssueState] = {}
 
+from hephaestus.github.client import (  # noqa: E402
+    _GH_BREAKER as _GH_BREAKER,
+    _GH_THROTTLE as _GH_THROTTLE,
+)
+
 from .checks import (  # noqa: E402
     _is_gh_pr_checks_no_checks_error as _is_gh_pr_checks_no_checks_error,
     _map_pr_check as _map_pr_check,
@@ -53,8 +58,6 @@ from .diff import (  # noqa: E402
     _valid_review_positions as _valid_review_positions,
 )
 from .graphql import (  # noqa: E402
-    _GH_BREAKER as _GH_BREAKER,
-    _GH_THROTTLE as _GH_THROTTLE,
     ClaudeUsageCapError as ClaudeUsageCapError,
     GitHubRateLimitError as GitHubRateLimitError,
     GitHubUnavailableError as GitHubUnavailableError,

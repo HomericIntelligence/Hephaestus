@@ -20,8 +20,6 @@ from dataclasses import dataclass
 from typing import Any, TypeVar, cast, overload
 
 from hephaestus.github.client import (
-    _GH_BREAKER as _GH_BREAKER,
-    _GH_THROTTLE as _GH_THROTTLE,
     ClaudeUsageCapError,
     GitHubRateLimitError,
     GitHubUnavailableError,
@@ -277,7 +275,6 @@ def _classify_transport_error[T](  # noqa: C901
     if isinstance(error, GitHubUnavailableError):
         if isinstance(spec, GraphQLQuerySpec):
             return GraphQLRetryableError(str(error), pre_dispatch=True)
-        prepared = _require_prepared(prepared)
         return GraphQLRetryableError(str(error), pre_dispatch=True)
     if isinstance(error, (FileNotFoundError, PermissionError)):
         return GraphQLDeterministicError(str(error))
