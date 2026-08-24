@@ -48,6 +48,7 @@ from hephaestus.config.child_environments import (
     build_claude_child_env,
     build_codex_child_env,
     build_pi_child_env,
+    read_approved_parent_env,
 )
 from hephaestus.constants import (
     agent_auth_status_timeout,
@@ -83,9 +84,6 @@ CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
-PI_PROVIDER_ENV = "HEPH_PI_PROVIDER"
-PI_MODEL_ENV = "HEPH_PI_MODEL"
-PI_ISOLATION_ADAPTER_ENV = "HEPH_PI_ISOLATION_ADAPTER"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
 PI_PRIVATE_DENYLIST_FILENAME = ".heph-private-denylist"
@@ -113,7 +111,6 @@ PI_AUTOMATION_PREFLIGHT_ERROR = (
     "Pi automation preflight is unavailable. Run "
     "`hephaestus-install-pi-plugins --dry-run --json` to inspect the required setup."
 )
-REQUIRED_ALIAS_ENVS: tuple[str, ...] = (PI_PROVIDER_ENV, PI_MODEL_ENV)
 AGENT_AUTH_STATUS_COMMANDS: dict[AgentName, tuple[tuple[str, ...], ...]] = {
     "claude": (("claude", "auth", "status"),),
     "codex": (("codex", "login", "status"),),
@@ -195,15 +192,7 @@ def load_pi_alias_config(path: Path) -> PiAliasConfig:
 
 def _platform_child_env() -> dict[str, str]:
     """Return the approved platform environment used by direct providers."""
-    env = build_pi_child_env()
-    for name in (
-        "GIT_TERMINAL_PROMPT",
-        "NPM_CONFIG_IGNORE_SCRIPTS",
-        "PI_TELEMETRY",
-        "PI_SKIP_VERSION_CHECK",
-    ):
-        env.pop(name, None)
-    return env
+    return read_approved_parent_env()
 
 
 def _claude_child_env() -> dict[str, str]:
@@ -214,13 +203,6 @@ def _claude_child_env() -> dict[str, str]:
 def _codex_child_env() -> dict[str, str]:
     """Return the named allowlisted environment for Codex."""
     return build_codex_child_env()
-
-
-def missing_pi_alias_env(
-    required: tuple[str, ...] = REQUIRED_ALIAS_ENVS,
-) -> list[str]:
-    """Return required Pi alias env vars that are unset or blank."""
-    return [name for name in required if not os.environ.get(name, "").strip()]
 
 
 @dataclass(frozen=True)
@@ -1172,8 +1154,6 @@ def pi_private_redaction_tokens(
         for candidate in (
             model,
             provider,
-            os.environ.get(PI_MODEL_ENV, ""),
-            os.environ.get(PI_PROVIDER_ENV, ""),
         )
         if (value := candidate.strip())
     ]
@@ -1273,8 +1253,7 @@ def run_claude_text(
             ]
         )
 
-    env = os.environ.copy()
-    env["CLAUDECODE"] = ""
+    env = _claude_child_env()
     from hephaestus.logging.utils import get_current_correlation_id
 
     cid = get_current_correlation_id()
@@ -1751,8 +1730,7 @@ def _run_codex_command(
     """Execute Codex with JSON events and return final text plus session id."""
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt") as output_file:
         cmd.extend(["--output-last-message", output_file.name, "-"])
-        env = os.environ.copy()
-        env.setdefault("CODEX_HOME", str(Path.home() / ".codex"))
+        env = _codex_child_env()
         for key in CODEX_PARENT_CONTEXT_ENV_VARS:
             env.pop(key, None)
         try:
@@ -2093,17 +2071,9 @@ def _pi_automation_cmd(
     session_id: str | None = None,
 ) -> list[str]:
     """Build a non-interactive Pi command with explicit private selection."""
-    provider = os.environ.get(PI_PROVIDER_ENV, "").strip()
-    selected_model = model.strip() or os.environ.get(PI_MODEL_ENV, "").strip()
-    missing: list[str] = []
-    if not provider:
-        missing.append(PI_PROVIDER_ENV)
+    selected_model = model.strip()
     if not selected_model:
-        missing.append(PI_MODEL_ENV)
-    if missing:
-        raise AgentExecutionError(
-            "Pi automation requires operator-local provider selection: " + ", ".join(missing)
-        )
+        raise AgentExecutionError("Pi automation requires an explicit model selection")
     cmd = _pi_base_cmd(executable, lifecycle=lifecycle, session_id=session_id)
     cmd.extend(
         [
@@ -2113,8 +2083,6 @@ def _pi_automation_cmd(
             "--no-context-files",
             "--no-prompt-templates",
             "--no-themes",
-            "--provider",
-            provider,
             "--model",
             selected_model,
         ]
@@ -2150,33 +2118,7 @@ def _pi_env(
 
 def _pi_automation_env(profile_dir: Path) -> dict[str, str]:
     """Return the explicit child environment for an admitted Pi process."""
-    safe_names = (
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_DATA_HOME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "SYSTEMROOT",
-        "SystemRoot",
-        "WINDIR",
-        "ComSpec",
-        "COMSPEC",
-        "PATHEXT",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "PI_CODING_AGENT_SESSION_DIR",
-        "PI_PACKAGE_DIR",
-    )
-    env = {name: value for name in safe_names if (value := os.environ.get(name))}
-    env.setdefault("PATH", os.defpath)
-    env["PI_CODING_AGENT_DIR"] = str(profile_dir)
+    env = build_pi_child_env(temp_dir=profile_dir, pi_dir=profile_dir)
     env["PI_OFFLINE"] = "1"
     env["PI_TELEMETRY"] = "0"
     env["PI_SKIP_VERSION_CHECK"] = "1"

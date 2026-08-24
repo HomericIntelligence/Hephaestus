@@ -23,6 +23,7 @@ class EnvVarSpec:
 _PARENT_READER = "hephaestus.config.child_environments.read_approved_parent_env"
 _GH_READER = "hephaestus.config.child_environments.build_gh_child_env"
 _SIGNING_READER = "hephaestus.config.child_environments.build_git_signing_env"
+_COLOR_READER = "hephaestus.cli.colors._automatic_colors_enabled"
 
 
 def _parent(
@@ -69,6 +70,42 @@ def _workflow(name: str, purpose: str, *readers: str, sensitivity: str = "public
 
 
 APPROVED_ENV_VARS: tuple[EnvVarSpec, ...] = (
+    EnvVarSpec(
+        name="CLICOLOR",
+        purpose="Disable ANSI color when set to zero.",
+        owner="cli.colors",
+        sensitivity="public",
+        validation="string",
+        direction="parent-read",
+        qualified_readers=(_COLOR_READER,),
+    ),
+    EnvVarSpec(
+        name="CLICOLOR_FORCE",
+        purpose="Force ANSI color when set to a non-zero value.",
+        owner="cli.colors",
+        sensitivity="public",
+        validation="string",
+        direction="parent-read",
+        qualified_readers=(_COLOR_READER,),
+    ),
+    EnvVarSpec(
+        name="FORCE_COLOR",
+        purpose="Force ANSI color when non-empty.",
+        owner="cli.colors",
+        sensitivity="public",
+        validation="string",
+        direction="parent-read",
+        qualified_readers=(_COLOR_READER,),
+    ),
+    EnvVarSpec(
+        name="NO_COLOR",
+        purpose="Disable ANSI color when non-empty.",
+        owner="cli.colors",
+        sensitivity="public",
+        validation="string",
+        direction="parent-read",
+        qualified_readers=(_COLOR_READER,),
+    ),
     _parent("PATH", "Command discovery", validation="non-empty-no-nul"),
     _parent("HOME", "CLI home and configuration lookup", sensitivity="private", validation="path"),
     _parent("USER", "Host identity hint"),

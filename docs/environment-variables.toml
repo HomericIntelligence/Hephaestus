@@ -4,6 +4,54 @@
 schema_version = 1
 
 [[variables]]
+name = "CLICOLOR"
+category = "operator-config"
+owner = "cli.colors"
+purpose = "Disable ANSI color when set to zero."
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/cli/colors.py", reader = "_automatic_colors_enabled", access = "read" },
+]
+
+[[variables]]
+name = "CLICOLOR_FORCE"
+category = "operator-config"
+owner = "cli.colors"
+purpose = "Force ANSI color when set to a non-zero value."
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/cli/colors.py", reader = "_automatic_colors_enabled", access = "read" },
+]
+
+[[variables]]
+name = "FORCE_COLOR"
+category = "operator-config"
+owner = "cli.colors"
+purpose = "Force ANSI color when non-empty."
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/cli/colors.py", reader = "_automatic_colors_enabled", access = "read" },
+]
+
+[[variables]]
+name = "NO_COLOR"
+category = "operator-config"
+owner = "cli.colors"
+purpose = "Disable ANSI color when non-empty."
+sensitivity = "public"
+validation = "string"
+direction = "input"
+readers = [
+  { path = "hephaestus/cli/colors.py", reader = "_automatic_colors_enabled", access = "read" },
+]
+
+[[variables]]
 name = "APPDATA"
 category = "platform"
 owner = "config.child_environments"

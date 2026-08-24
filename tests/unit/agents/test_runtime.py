@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from hephaestus.agents import runtime as agent_runtime
-from hephaestus.agents.execution_policy import ExecutionPolicyError
+from hephaestus.agents.execution_policy import ExecutionPolicyError, SessionLifecycle
 
 PI_SMOKE_COMMAND_PREFIX = [
     "pi",
@@ -2186,6 +2186,36 @@ def test_pi_private_redaction_tokens_merge_project_and_local_denylists(
     assert "PROJECT_DENYLIST_TOKEN" in tokens
     assert "LOCAL_DENYLIST_TOKEN" in tokens
     assert tokens.count("SHARED_DENYLIST_TOKEN") == 1
+
+
+def test_pi_automation_command_uses_only_its_explicit_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pi automation must not recover provider or model selection from ambient state."""
+    monkeypatch.delenv("HEPH_PI_MODEL", raising=False)
+    monkeypatch.delenv("HEPH_PI_PROVIDER", raising=False)
+
+    command = agent_runtime._pi_automation_cmd(
+        tmp_path / "pi",
+        model="operator-local-alias",
+        lifecycle=SessionLifecycle.ONE_SHOT,
+    )
+
+    assert command == [
+        str(tmp_path / "pi"),
+        "--mode",
+        "json",
+        "--no-session",
+        "--print",
+        "--offline",
+        "--no-approve",
+        "--no-context-files",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--model",
+        "operator-local-alias",
+    ]
 
 
 def test_pi_private_redaction_tokens_fail_closed_on_broken_policy_link(tmp_path: Path) -> None:

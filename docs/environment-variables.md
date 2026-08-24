@@ -45,8 +45,11 @@ This table is generated from the ambient-reader projection. “Reader” is a st
 | Variable | Category | Owner | Purpose | Sensitivity | Validation | Direction | Readers |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `APPDATA` | platform | config.child_environments | Windows application configuration | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `CLICOLOR` | operator-config | cli.colors | Disable ANSI color when set to zero. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
+| `CLICOLOR_FORCE` | operator-config | cli.colors | Force ANSI color when set to a non-zero value. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
 | `COMSPEC` | platform | config.child_environments | Windows command processor alias | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `ComSpec` | platform | config.child_environments | Windows command processor | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `FORCE_COLOR` | operator-config | cli.colors | Force ANSI color when non-empty. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
 | `GH_TOKEN` | child-process | config.child_environments | GitHub CLI authentication bridge | secret | non-empty | input | `hephaestus/config/child_environments.py:build_gh_child_env:read` |
 | `GITHUB_STEP_SUMMARY` | workflow-input | ci/workflow helpers | GitHub step summary file | sensitive | string | input | `hephaestus/ci/precommit.py:write_step_summary:read` |
 | `GITHUB_TOKEN` | child-process | config.child_environments | GitHub authentication bridge | secret | non-empty | input | `hephaestus/config/child_environments.py:build_gh_child_env:read` |
@@ -57,6 +60,7 @@ This table is generated from the ambient-reader projection. “Reader” is a st
 | `LC_CTYPE` | platform | config.child_environments | Character encoding | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `LOCALAPPDATA` | platform | config.child_environments | Windows application cache | sensitive | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `LOGNAME` | platform | config.child_environments | Host identity hint | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
+| `NO_COLOR` | operator-config | cli.colors | Disable ANSI color when non-empty. | public | string | input | `hephaestus/cli/colors.py:_automatic_colors_enabled:read` |
 | `PATH` | platform | config.child_environments | Command discovery | public | non-empty | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `PATHEXT` | platform | config.child_environments | Windows executable suffixes | public | string | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
 | `SHELL` | platform | config.child_environments | Interactive shell hint | public | path | input | `hephaestus/config/child_environments.py:read_approved_parent_env:read` |
