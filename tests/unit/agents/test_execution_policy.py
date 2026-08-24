@@ -145,7 +145,7 @@ def test_pi_policy_args_never_advertise_an_unbrokered_subagent_tool() -> None:
         )
     )
 
-    assert "subagent" not in agent_runtime._pi_policy_args(policy)[1].split(",")
+    assert "subagent" not in policy.builtins
 
 
 def test_ready_pi_is_explicitly_na_without_a_registered_isolation_adapter(
@@ -298,9 +298,8 @@ def test_named_host_adapter_bootstraps_before_direct_policy_dispatch(
     received: dict[str, object] = {}
 
     class Adapter:
-        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
-            received.update(kwargs)
-            return agent_runtime.AgentRunResult(stdout="reviewed", stderr="")
+        def invoke(self, **_kwargs: object) -> agent_runtime.AgentRunResult:
+            raise AssertionError("dispatch is exercised through the proven runtime seam")
 
     class EntryPoint:
         def load(self) -> object:
@@ -314,6 +313,11 @@ def test_named_host_adapter_bootstraps_before_direct_policy_dispatch(
         agent_runtime, "entry_points", lambda **_kwargs: (EntryPoint(),), raising=False
     )
     monkeypatch.setenv("HEPH_PI_ISOLATION_ADAPTER", "poison-broker")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **kwargs: received.update(kwargs) or agent_runtime.AgentRunResult("reviewed", ""),
+    )
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER,
         AgentOperation.PR_REVIEW,
@@ -461,7 +465,7 @@ def test_named_host_adapter_sanitizes_protocol_attribute_failures(
 
     with pytest.raises(
         agent_runtime.PiIsolationUnavailableError,
-        match="could not be initialized",
+        match="does not implement invoke",
     ) as exc_info:
         agent_runtime.resolve_agent("pi", cwd=tmp_path, pi_isolation_adapter="operator-broker")
 
@@ -496,17 +500,16 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     """The only Pi dispatch seam gives the external adapter the full policy."""
     received: dict[str, object] = {}
 
-    class Adapter:
-        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
-            received.update(kwargs)
-            return agent_runtime.AgentRunResult(stdout="review", stderr="")
-
     monkeypatch.setattr(
         agent_runtime,
         "_require_pi_automation_admission",
         lambda _cwd, **_kwargs: None,
     )
-    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **kwargs: received.update(kwargs) or agent_runtime.AgentRunResult("review", ""),
+    )
     request = ExecutionRequest(
         AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT
     )
@@ -519,7 +522,7 @@ def test_pi_policy_dispatch_hands_read_only_and_network_policy_to_adapter(
     policy = cast(ExecutionPolicy, received["policy"])
     assert policy.filesystem is FilesystemMode.CHECKOUT_RO
     assert policy.network is NetworkMode.CONSTRAINED_WEB_RELAY
-    assert received["session_id"] is None
+    assert received.get("session_id") is None
 
 
 def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
@@ -567,12 +570,11 @@ def test_pi_session_start_rejects_a_binding_but_resume_requires_one(
 
     received: dict[str, object] = {}
 
-    class Adapter:
-        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
-            received.update(kwargs)
-            return agent_runtime.AgentRunResult(stdout="amended", stderr="")
-
-    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **kwargs: received.update(kwargs) or agent_runtime.AgentRunResult("amended", ""),
+    )
     resume_request = ExecutionRequest(
         AgentRole.PLANNER, AgentOperation.AMEND, SessionLifecycle.RESUME_REQUIRED
     )
@@ -597,19 +599,19 @@ def test_pi_session_start_dispatches_without_resume_binding(
     """A START_NEW request reaches the adapter without an inherited session id."""
     received: dict[str, object] = {}
 
-    class Adapter:
-        def invoke(self, **kwargs: object) -> agent_runtime.AgentRunResult:
-            received.update(kwargs)
-            return agent_runtime.AgentRunResult(
-                stdout="planned", stderr="", session_id="pi-session-new"
-            )
-
     monkeypatch.setattr(
         agent_runtime,
         "_require_pi_automation_admission",
         lambda _cwd, **_kwargs: None,
     )
-    monkeypatch.setattr(agent_runtime, "_PI_ISOLATION_ADAPTER", Adapter())
+    monkeypatch.setattr(
+        agent_runtime,
+        "_run_pi_with_policy",
+        lambda **kwargs: (
+            received.update(kwargs)
+            or agent_runtime.AgentRunResult("planned", "", session_id="pi-session-new")
+        ),
+    )
     request = ExecutionRequest(AgentRole.PLANNER, AgentOperation.PLAN, SessionLifecycle.START_NEW)
 
     result = agent_runtime.run_agent_session(

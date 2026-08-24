@@ -124,22 +124,18 @@ class TestGdbCmdPrefixParsing:
     def _capture_argv(monkeypatch) -> list[list[str]]:
         captured: list[list[str]] = []
 
-        def fake_run(argv, check=False, env=None):
-            assert env is not None
+        def fake_run(argv, timeout, *, additional_process_group_file=None):
+            del timeout, additional_process_group_file
             captured.append(list(argv))
+            return 0
 
-            class _R:
-                returncode = 0
-
-            return _R()
-
-        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.run", fake_run)
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner._run_bounded", fake_run)
         return captured
 
     def test_prefix_none_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
         captured = self._capture_argv(monkeypatch)
         run_under_gdb(str(tmp_path / "cores"), "sh", ["-c", "true"], gdb_cmd_prefix=None)
-        assert captured, "subprocess.run was not invoked"
+        assert captured, "_run_bounded was not invoked"
         assert captured[0][0] == "gdb"
 
     def test_prefix_empty_string_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:

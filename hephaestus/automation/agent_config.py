@@ -81,7 +81,6 @@ from hephaestus.constants import (
     AGENT_LEARN_TIMEOUT,
     AGENT_PLAN_TIMEOUT,
     AGENT_REVIEW_TIMEOUT,
-    CLAUDE_SONNET_MODEL,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,7 +88,7 @@ logger = logging.getLogger(__name__)
 # ── Model selection ──────────────────────────────────────────────────────────
 
 OPUS_47 = "claude-opus-4-7"
-SONNET_46 = CLAUDE_SONNET_MODEL
+SONNET_46 = "claude-sonnet-4-6"
 HAIKU_45 = "claude-haiku-4-5"
 CODEX_ADVISE = "gpt-5.4-mini"
 

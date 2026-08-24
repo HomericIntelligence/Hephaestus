@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -43,6 +44,11 @@ from hephaestus.agents.pi_session import (
     create_pi_binding,
     validate_pi_binding,
 )
+from hephaestus.config.child_environments import (
+    build_claude_child_env,
+    build_codex_child_env,
+    build_pi_child_env,
+)
 from hephaestus.constants import (
     agent_auth_status_timeout,
 )
@@ -58,7 +64,6 @@ DEFAULT_AGENT: AgentName = "claude"
 CODEX_HELP_PROBE_SECONDS = 10
 GIT_COMMON_DIR_PROBE_SECONDS = 5
 CODEX_TERMINATION_GRACE_SECONDS = 5
-CODEX_FINAL_MESSAGE_GRACE_ENV = "HEPH_CODEX_FINAL_MESSAGE_GRACE"
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 5.0
 CODEX_GPT_56_MODEL = "gpt-5.6"
 CODEX_GPT_55_MODEL = "gpt-5.5"
@@ -127,6 +132,88 @@ _PI_AGENT_STAGE_REQUESTS: dict[str, tuple[AgentRole, AgentOperation, SessionLife
     "pr-review": (AgentRole.PR_REVIEWER, AgentOperation.PR_REVIEW, SessionLifecycle.ONE_SHOT),
     "learn": (AgentRole.LEARNER, AgentOperation.LEARN, SessionLifecycle.START_NEW),
 }
+
+
+@dataclass(frozen=True)
+class PiAliasConfig:
+    """Private operator aliases used only by the tool-free Pi smoke sentinel."""
+
+    provider: str
+    model: str
+
+
+def _validate_pi_alias_metadata(metadata: os.stat_result) -> None:
+    """Validate one snapshot of the private alias file's security metadata."""
+    if stat.S_ISLNK(metadata.st_mode):
+        raise OSError("Pi alias config must be a regular file, not a symlink")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError("Pi alias config must be a regular file")
+    if not hasattr(os, "getuid"):
+        raise OSError("Pi alias config ownership checks are unavailable on this platform")
+    if metadata.st_uid != os.getuid():
+        raise OSError("Pi alias config must be owned by the current user")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise OSError("Pi alias config must have mode 0600")
+
+
+def load_pi_alias_config(path: Path) -> PiAliasConfig:
+    """Load an exact two-key Pi alias TOML file through a race-safe descriptor."""
+    try:
+        initial = path.lstat()
+    except OSError as exc:
+        raise OSError("Unable to inspect Pi alias config") from exc
+    _validate_pi_alias_metadata(initial)
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise OSError("Unable to open Pi alias config without following symlinks") from exc
+    try:
+        opened = os.fstat(descriptor)
+        _validate_pi_alias_metadata(opened)
+        if (initial.st_dev, initial.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("Pi alias config changed while being opened")
+        with os.fdopen(descriptor, "rb", closefd=False) as config_file:
+            try:
+                payload: Any = tomllib.load(config_file)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError("Pi alias config is not valid TOML") from exc
+    finally:
+        os.close(descriptor)
+
+    if not isinstance(payload, dict) or set(payload) != {"provider", "model"}:
+        raise ValueError("Pi alias config must contain exactly provider and model")
+    provider = payload["provider"]
+    model = payload["model"]
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError("Pi alias config provider must be a nonblank string")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Pi alias config model must be a nonblank string")
+    return PiAliasConfig(provider=provider.strip(), model=model.strip())
+
+
+def _platform_child_env() -> dict[str, str]:
+    """Return the approved platform environment used by direct providers."""
+    env = build_pi_child_env()
+    for name in (
+        "GIT_TERMINAL_PROMPT",
+        "NPM_CONFIG_IGNORE_SCRIPTS",
+        "PI_TELEMETRY",
+        "PI_SKIP_VERSION_CHECK",
+    ):
+        env.pop(name, None)
+    return env
+
+
+def _claude_child_env() -> dict[str, str]:
+    """Return the named allowlisted environment for Claude."""
+    return build_claude_child_env()
+
+
+def _codex_child_env() -> dict[str, str]:
+    """Return the named allowlisted environment for Codex."""
+    return build_codex_child_env()
 
 
 def missing_pi_alias_env(
@@ -285,9 +372,9 @@ def _supports_pi_isolation_adapter_invoke_contract(adapter: object) -> bool:
     return True
 
 
-def _load_configured_pi_isolation_adapter() -> None:
-    """Load the explicitly selected host adapter for a fresh CLI process."""
-    adapter_name = os.environ.get(PI_ISOLATION_ADAPTER_ENV, "").strip()
+def load_pi_isolation_adapter(adapter_name: str | None) -> None:
+    """Load one explicitly selected host adapter for a fresh CLI process."""
+    adapter_name = (adapter_name or "").strip()
     if not adapter_name:
         return
     try:
@@ -321,10 +408,10 @@ def _load_configured_pi_isolation_adapter() -> None:
     register_pi_isolation_adapter(adapter)
 
 
-def _require_pi_isolation_adapter() -> None:
+def _require_pi_isolation_adapter(adapter_name: str | None = None) -> None:
     """Fail at provider selection when this installation has no Pi broker."""
     if _PI_ISOLATION_ADAPTER is None:
-        _load_configured_pi_isolation_adapter()
+        load_pi_isolation_adapter(adapter_name)
     if _PI_ISOLATION_ADAPTER is None:
         raise PiIsolationUnavailableError(
             "Pi automation is N/A: this installation has no registered host "
@@ -442,9 +529,50 @@ def add_agent_argument(parser: argparse.ArgumentParser) -> None:
             "(default: auto-detect authenticated backend, preferring claude when authenticated)"
         ),
     )
+    parser.add_argument(
+        "--disable-pi-automation",
+        action="store_true",
+        help="Reject Pi automation before preflight or provider execution",
+    )
+    parser.add_argument(
+        "--auth-status-timeout",
+        type=_positive_timeout,
+        default=agent_auth_status_timeout(),
+        metavar="SECONDS",
+        help="Positive timeout for provider authentication probes (default: 10)",
+    )
+    parser.add_argument(
+        "--pi-isolation-adapter",
+        default=None,
+        metavar="ENTRY_POINT",
+        help="Explicit registered Pi OS-isolation adapter entry point",
+    )
+    parser.add_argument(
+        "--pi-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Explicit Pi coding-agent configuration directory",
+    )
 
 
-def is_agent_authenticated(agent: AgentName) -> bool:
+def _positive_timeout(value: str) -> int:
+    """Parse a strictly positive integer timeout at the CLI boundary."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer")
+    return parsed
+
+
+def is_agent_authenticated(
+    agent: AgentName,
+    *,
+    auth_status_timeout: int | None = None,
+    pi_dir: Path | None = None,
+) -> bool:
     """Return True when the provider CLI is installed and reports logged-in auth."""
     if shutil.which(agent) is None:
         return False
@@ -453,7 +581,7 @@ def is_agent_authenticated(agent: AgentName) -> bool:
         child_env = {
             "claude": build_claude_child_env,
             "codex": build_codex_child_env,
-            "pi": build_pi_child_env,
+            "pi": lambda: build_pi_child_env(pi_dir=pi_dir),
             # OpenCode serves models from stored credentials or environment
             # keys, so the approved platform environment is sufficient here.
             "opencode": _platform_child_env,
@@ -463,7 +591,11 @@ def is_agent_authenticated(agent: AgentName) -> bool:
                 list(cmd),
                 text=True,
                 capture_output=True,
-                timeout=agent_auth_status_timeout(),
+                timeout=(
+                    agent_auth_status_timeout()
+                    if auth_status_timeout is None
+                    else auth_status_timeout
+                ),
                 check=False,
                 env=child_env,
             )
@@ -471,17 +603,16 @@ def is_agent_authenticated(agent: AgentName) -> bool:
             continue
         if result.returncode == 0:
             if agent == "pi":
-                return _pi_models_configured()
+                return _pi_models_configured(pi_dir)
             return True
     return False
 
 
-def _pi_models_configured() -> bool:
+def _pi_models_configured(pi_dir: Path | None = None) -> bool:
     """Return True when Pi has at least one local model alias configured."""
-    configured_root = os.environ.get("PI_CODING_AGENT_DIR", "").strip()
     config_path = (
-        Path(configured_root).expanduser() / "models.json"
-        if configured_root
+        pi_dir.expanduser() / "models.json"
+        if pi_dir is not None
         else Path.home() / PI_MODEL_CONFIG_RELATIVE_PATH
     )
     try:
@@ -499,29 +630,50 @@ def _pi_models_configured() -> bool:
     return False
 
 
-def _require_pi_automation_admission(cwd: Path) -> PiPreflightResult:
+def _require_pi_automation_admission(
+    cwd: Path,
+    *,
+    disable_pi_automation: bool = False,
+    pi_dir: Path | None = None,
+) -> PiPreflightResult:
     """Return verified Pi admission, honoring the emergency stop before probing."""
-    if os.environ.get("HEPH_DISABLE_PI_AUTOMATION") == "1":
+    if disable_pi_automation:
         raise PiAutomationDisabledError(
-            "Pi automation disabled by HEPH_DISABLE_PI_AUTOMATION=1; "
-            "no Pi or broker process was started"
+            "Pi automation disabled by CLI policy; no Pi or broker process was started"
         )
-    result = preflight_pi_environment(cwd, trust_override="--no-approve")
+    result = preflight_pi_environment(cwd, pi_dir=pi_dir)
     if not result.ready:
         raise AgentExecutionError(f"{PI_AUTOMATION_PREFLIGHT_ERROR} {result.remediation_message()}")
     return result
 
 
-def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
+def resolve_agent(
+    agent: str | None,
+    *,
+    cwd: Path | None = None,
+    disable_pi_automation: bool = False,
+    auth_status_timeout: int | None = None,
+    pi_isolation_adapter: str | None = None,
+    pi_dir: Path | None = None,
+) -> AgentName:
     """Resolve an optional provider selection into a concrete backend."""
     effective_cwd = Path.cwd() if cwd is None else cwd
     if agent is not None:
         if agent not in AGENT_CHOICES:
             raise ValueError(f"Unsupported agent: {agent}")
         if agent == "pi":
-            _require_pi_automation_admission(effective_cwd)
-            _require_pi_isolation_adapter()
-        if not is_agent_authenticated(agent):
+            _require_pi_automation_admission(
+                effective_cwd,
+                disable_pi_automation=disable_pi_automation,
+                pi_dir=pi_dir,
+            )
+            _require_pi_isolation_adapter(pi_isolation_adapter)
+        authenticated = is_agent_authenticated(
+            agent,
+            auth_status_timeout=auth_status_timeout,
+            pi_dir=pi_dir if agent == "pi" else None,
+        )
+        if not authenticated:
             if shutil.which(agent) is None:
                 raise RuntimeError(
                     f"Agent '{agent}' is not installed on PATH. "
@@ -548,14 +700,18 @@ def resolve_agent(agent: str | None, *, cwd: Path | None = None) -> AgentName:
     )
     if not installed_agents:
         if shutil.which("pi") is not None:
-            _require_pi_automation_admission(effective_cwd)
+            _require_pi_automation_admission(
+                effective_cwd,
+                disable_pi_automation=disable_pi_automation,
+                pi_dir=pi_dir,
+            )
         raise RuntimeError(
             "No supported agent backend found on PATH. Install `claude`, `codex`, `pi`, "
             "or `opencode`, or pass --agent after installing the selected backend."
         )
 
     for agent_name in installed_agents:
-        if is_agent_authenticated(agent_name):
+        if is_agent_authenticated(agent_name, auth_status_timeout=auth_status_timeout):
             return agent_name
 
     raise RuntimeError(
@@ -620,21 +776,17 @@ def uses_direct_agent_runner(agent: str) -> bool:
 
 def direct_agent_model(
     agent: str,
-    phase_env_var: str | None = None,
+    model_value: str | None = None,
     *,
     codex_default: str = "",
 ) -> str:
     """Return a provider-neutral direct-runner model default.
 
-    Pi obtains its operator-local alias from :data:`PI_MODEL_ENV`; other
-    providers use an optional phase-specific environment override or the
-    explicit caller default.
+    The caller resolves any provider-specific defaults at the explicit CLI
+    boundary. Runtime execution never consults ambient model configuration.
     """
-    if is_pi(agent):
-        return os.environ.get(PI_MODEL_ENV, "")
-    if phase_env_var is None:
-        return codex_default
-    return os.environ.get(phase_env_var, codex_default)
+    del agent
+    return codex_default if model_value is None else model_value
 
 
 def agent_cli_name(agent: str) -> str:
@@ -709,6 +861,7 @@ def _run_pi_private_acl_command(command: list[str]) -> str:
             text=True,
             capture_output=True,
             check=True,
+            env=_platform_child_env(),
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise OSError("Unable to verify Pi smoke artifact ACLs") from exc
@@ -1003,6 +1156,7 @@ def pi_private_redaction_tokens(
     cwd: Path,
     model: str = "",
     *,
+    provider: str = "",
     additional_roots: Iterable[Path] = (),
     require_readable: bool = False,
 ) -> tuple[str, ...]:
@@ -1017,6 +1171,7 @@ def pi_private_redaction_tokens(
         value
         for candidate in (
             model,
+            provider,
             os.environ.get(PI_MODEL_ENV, ""),
             os.environ.get(PI_PROVIDER_ENV, ""),
         )
@@ -1151,6 +1306,7 @@ def codex_approval_args(approval: str) -> list[str]:
             stderr=subprocess.STDOUT,
             timeout=CODEX_HELP_PROBE_SECONDS,
             check=False,
+            env=build_codex_child_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -1240,6 +1396,7 @@ def _codex_extra_writable_dirs(cwd: Path, sandbox: str | None) -> list[Path]:
             stderr=subprocess.DEVNULL,
             timeout=GIT_COMMON_DIR_PROBE_SECONDS,
             check=True,
+            env=build_codex_child_env(),
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return []
@@ -1539,6 +1696,7 @@ def run_codex_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Run a new persisted Codex exec session and capture its UUID."""
     cmd = _codex_base_cmd(cwd=cwd, model=model, sandbox=sandbox, approval=approval)
@@ -1548,6 +1706,7 @@ def run_codex_session(
         cwd=cwd,
         timeout=timeout,
         process_tracker=process_tracker,
+        final_message_grace_seconds=_final_message_grace_seconds,
     )
 
 
@@ -1561,6 +1720,7 @@ def resume_codex_session(
     sandbox: str = "workspace-write",
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
+    _final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Resume a persisted Codex exec session and capture its latest output."""
     cmd = _codex_base_cmd(
@@ -1575,6 +1735,7 @@ def resume_codex_session(
         cwd=cwd,
         timeout=timeout,
         process_tracker=process_tracker,
+        final_message_grace_seconds=_final_message_grace_seconds,
     )
 
 
@@ -1585,6 +1746,7 @@ def _run_codex_command(
     cwd: Path,
     timeout: int,
     process_tracker: ProcessTracker | None = None,
+    final_message_grace_seconds: float | None = None,
 ) -> AgentRunResult:
     """Execute Codex with JSON events and return final text plus session id."""
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt") as output_file:
@@ -1602,6 +1764,7 @@ def _run_codex_command(
                 env=env,
                 output_path=Path(output_file.name),
                 process_tracker=process_tracker,
+                final_message_grace_seconds=final_message_grace_seconds,
             )
         except subprocess.CalledProcessError as exc:
             diagnostic = _codex_failure_diagnostic(
@@ -1975,38 +2138,14 @@ def _pi_sandbox_args(sandbox: str) -> list[str]:
     raise ValueError(f"Unsupported Pi sandbox mode: {sandbox}")
 
 
-def _pi_env(*, model: str = "", temp_dir: Path | None = None) -> dict[str, str]:
+def _pi_env(
+    *, model: str = "", temp_dir: Path | None = None, pi_dir: Path | None = None
+) -> dict[str, str]:
     """Return the minimized, privacy-enforcing environment for Pi subprocesses."""
     # The public smoke sentinel is only input to Hephaestus validation and
     # redaction; it is not a native Pi configuration channel.
     del model
-    safe_names = (
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_DATA_HOME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "SYSTEMROOT",
-        "SystemRoot",
-        "WINDIR",
-        "ComSpec",
-        "COMSPEC",
-        "PATHEXT",
-    )
-    env = {name: value for name in safe_names if (value := os.environ.get(name))}
-    env.setdefault("PATH", os.defpath)
-    if temp_dir is not None:
-        for name in ("TMPDIR", "TMP", "TEMP"):
-            env[name] = str(temp_dir)
-    env["PI_TELEMETRY"] = "0"
-    env["PI_SKIP_VERSION_CHECK"] = "1"
-    return env
+    return build_pi_child_env(temp_dir=temp_dir, pi_dir=pi_dir)
 
 
 def _pi_automation_env(profile_dir: Path) -> dict[str, str]:
@@ -2104,9 +2243,12 @@ def _pi_failure_redaction_tokens(
     cwd: Path,
     model: str,
     *diagnostics: str,
+    provider: str = "",
 ) -> tuple[str, ...]:
     """Combine configured values with session IDs observed before Pi failed."""
     tokens = list(pi_private_redaction_tokens(cwd, model))
+    if provider.strip():
+        tokens.append(provider.strip())
     for diagnostic in diagnostics:
         tokens.extend(_pi_json_session_ids(diagnostic))
     return tuple(dict.fromkeys(tokens))
@@ -2120,11 +2262,13 @@ def _run_pi_command(
     timeout: int,
     sandbox: str,
     model: str = "",
+    provider: str = "",
+    pi_dir: Path | None = None,
     _internal_admission_token: object | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Pi with prompt content attached via an ephemeral file, not argv."""
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
-        _require_pi_automation_admission(cwd)
+        _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     prompt_path: Path | None = None
     private_temp_dir: Path | None = None
     try:
@@ -2150,13 +2294,15 @@ def _run_pi_command(
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
                 timeout=timeout,
-                env=_pi_env(model=model, temp_dir=private_temp_dir),
+                env=_pi_env(model=model, temp_dir=private_temp_dir, pi_dir=pi_dir),
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
             raw_stdout = exc.stdout or ""
             raw_stderr = exc.stderr or ""
-            tokens = _pi_failure_redaction_tokens(cwd, model, raw_stdout, raw_stderr)
+            tokens = _pi_failure_redaction_tokens(
+                cwd, model, raw_stdout, raw_stderr, provider=provider
+            )
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
             redacted_output = redact_pi_private_values(raw_stdout, tokens)
             redacted_stderr = redact_pi_private_values(raw_stderr, tokens)
@@ -2176,7 +2322,9 @@ def _run_pi_command(
         except subprocess.TimeoutExpired as exc:
             raw_output = _coerce_timeout_output(exc.output)
             raw_stderr = _coerce_timeout_output(exc.stderr)
-            tokens = _pi_failure_redaction_tokens(cwd, model, raw_output, raw_stderr)
+            tokens = _pi_failure_redaction_tokens(
+                cwd, model, raw_output, raw_stderr, provider=provider
+            )
             redacted_cmd = _redact_pi_command_args(exc.cmd, tokens)
             redacted_output = redact_pi_private_values(raw_output, tokens)
             redacted_stderr = redact_pi_private_values(raw_stderr, tokens)
@@ -2229,6 +2377,8 @@ def _invoke_pi_session(
     timeout: int,
     model: str,
     sandbox: str,
+    provider: str = "",
+    pi_dir: Path | None = None,
     session_id: str | None = None,
     base_cmd: list[str] | None = None,
     require_json_event: bool = False,
@@ -2237,7 +2387,7 @@ def _invoke_pi_session(
 ) -> AgentRunResult:
     """Execute Pi and preserve a new or resumed opaque session identity."""
     if _internal_admission_token is not _PI_INTERNAL_ADMISSION_TOKEN:
-        _require_pi_automation_admission(cwd)
+        _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     cmd = list(base_cmd) if base_cmd is not None else _pi_smoke_base_cmd()
     result = _run_pi_command(
         cmd,
@@ -2246,6 +2396,8 @@ def _invoke_pi_session(
         timeout=timeout,
         sandbox=sandbox,
         model=model,
+        provider=provider,
+        pi_dir=pi_dir,
         _internal_admission_token=_PI_INTERNAL_ADMISSION_TOKEN,
     )
     raw_stdout = result.stdout or ""
@@ -2294,6 +2446,8 @@ def run_pi_smoke_session(
     cwd: Path,
     timeout: int,
     model: str = "",
+    provider: str = "",
+    pi_dir: Path | None = None,
 ) -> AgentRunResult:
     """Run the fixed tool-free smoke seam without retaining a Pi session id."""
     result = _invoke_pi_session(
@@ -2301,6 +2455,8 @@ def run_pi_smoke_session(
         cwd=cwd,
         timeout=timeout,
         model=model,
+        provider=provider,
+        pi_dir=pi_dir,
         sandbox="no-tools",
         base_cmd=_pi_smoke_base_cmd(),
         require_json_event=True,
@@ -2709,6 +2865,7 @@ def _communicate_codex_process(
     env: dict[str, str],
     output_path: Path,
     process_tracker: ProcessTracker | None = None,
+    final_message_grace_seconds: float | None = None,
 ) -> tuple[str, str]:
     """Run Codex and recover when a completed final message leaves the wrapper alive."""
     proc = subprocess.Popen(
@@ -2729,7 +2886,11 @@ def _communicate_codex_process(
         # raise ``ValueError: embedded null byte`` on a stray NUL, before Codex runs
         # (#1661) — the same crash the Claude path guards against.
         input_text: str | None = strip_null_bytes(prompt)
-        grace_seconds = _codex_final_message_grace_seconds()
+        grace_seconds = (
+            _codex_final_message_grace_seconds()
+            if final_message_grace_seconds is None
+            else final_message_grace_seconds
+        )
 
         while True:
             elapsed = time.monotonic() - started_at
@@ -2803,14 +2964,8 @@ def _read_text_file(path: Path) -> str:
 
 
 def _codex_final_message_grace_seconds() -> float:
-    raw = os.environ.get(CODEX_FINAL_MESSAGE_GRACE_ENV)
-    if raw is None:
-        return CODEX_FINAL_MESSAGE_GRACE_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
-        return CODEX_FINAL_MESSAGE_GRACE_SECONDS
-    return max(0.0, value)
+    """Return the fixed internal grace used by production Codex calls."""
+    return CODEX_FINAL_MESSAGE_GRACE_SECONDS
 
 
 def _coerce_timeout_output(output: str | bytes | None) -> str:

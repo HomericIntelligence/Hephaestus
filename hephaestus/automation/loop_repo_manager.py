@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from hephaestus.automation.git_utils import COMMIT_POLICY_REWRITE_EXEC
 from hephaestus.automation.github_api import gh_call
+from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.resilience.subprocess_resilience import resilient_call
 from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 

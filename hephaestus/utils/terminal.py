@@ -18,9 +18,10 @@ import sys
 import threading
 from collections.abc import Callable, Generator
 
+from hephaestus.config.child_environments import read_approved_parent_env
+
 _TERMINAL_RESTORE_TIMEOUT_SECONDS = 2
 _TERMINAL_TIMEOUT_WARNING = "[hephaestus] WARNING: terminal restoration timed out"
-from hephaestus.config.child_environments import read_approved_parent_env
 
 
 def restore_terminal() -> None:

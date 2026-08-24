@@ -41,7 +41,6 @@ from hephaestus.cli.utils import (
 )
 from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.github.client import DEFAULT_GH_TIMEOUT, gh_call, positive_timeout
-from hephaestus.constants import CLAUDE_SONNET_MODEL
 from hephaestus.github.git_ops import (
     in_git_repo as _shared_in_git_repo,
     repo_root as _shared_repo_root,
@@ -57,7 +56,7 @@ logger = logging.getLogger(__name__)
 # hephaestus.constants (not hephaestus.automation) so the library layer stays
 # inside the one-way boundary while sharing a single model ID with the
 # automation taxonomy.
-_TIDY_SWARM_MODEL = CLAUDE_SONNET_MODEL
+_TIDY_SWARM_MODEL = "claude-sonnet-4-6"
 
 # ANSI escape sequence stripper
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")

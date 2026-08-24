@@ -259,20 +259,6 @@ def fork_upstream(owner: str, *, timeout: int = METADATA_TIMEOUT) -> bool:
     return False
 
 
-def _warn_legacy_owner_once(legacy_owner: str) -> None:
-    """Warn once per process when the ignored legacy owner variable is set."""
-    with _legacy_owner_warning_lock:
-        if _legacy_owner_warning_emitted.is_set():
-            return
-        _legacy_owner_warning_emitted.set()
-    logger.warning(
-        "%s is ignored; use %s=%s to make an explicit Mnemosyne trust decision",
-        LEGACY_OWNER_ENV_VAR,
-        OWNER_ENV_VAR,
-        legacy_owner,
-    )
-
-
 def resolve_mnemosyne_target(
     *,
     override_owner: str | None = None,

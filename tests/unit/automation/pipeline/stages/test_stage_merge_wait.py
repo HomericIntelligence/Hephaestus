@@ -1370,7 +1370,7 @@ def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadli
         now_fn=lambda: now[0],
     )
 
-    for _ in range(33):
+    for _ in range(23):
         result = _complete_merge_cycle(stage, item, ctx)
         assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
         assert github.merge_attempts == []
@@ -1380,8 +1380,8 @@ def test_blocked_readiness_wait_allows_one_full_ci_restart_with_a_bounded_deadli
 
     assert result == StageOutcome(Disposition.FINISH_FAIL, "merge_readiness_timeout")
     assert github.merge_attempts == []
-    assert item.payload["merge_readiness_deadline_s"] == 2800.0
-    assert item.payload["merge_readiness_polls"] == 33
+    assert item.payload["merge_readiness_deadline_s"] == 2200.0
+    assert item.payload["merge_readiness_polls"] == 23
 
 
 @pytest.mark.parametrize("now", [1900.0, 1901.0])
@@ -1444,7 +1444,7 @@ def test_readiness_wait_resets_its_deadline_for_a_fresh_reviewed_head(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["merge_readiness_head_sha"] == fresh_head
-    assert item.payload["merge_readiness_deadline_s"] == 1900.0
+    assert item.payload["merge_readiness_deadline_s"] == 1300.0
     assert item.payload["merge_readiness_polls"] == 1
     assert github.merge_attempts == []
 
@@ -1477,7 +1477,7 @@ def test_readiness_wait_resets_for_a_fresh_proof_of_the_same_head(
 
     assert result == StageOutcome(Disposition.RETRY, "merge_readiness_wait")
     assert item.payload["merge_readiness_proof_generation"] == 2
-    assert item.payload["merge_readiness_deadline_s"] == 1900.0
+    assert item.payload["merge_readiness_deadline_s"] == 1300.0
     assert item.payload["merge_readiness_polls"] == 1
     assert github.merge_attempts == []
 

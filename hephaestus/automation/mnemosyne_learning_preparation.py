@@ -32,6 +32,7 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
 )
 from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess, slugify
 
@@ -496,6 +497,7 @@ def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.Com
         timeout=timeout_s,
         check=False,
         track_process_group=True,
+        env=build_git_child_env(),
     )
 
 
