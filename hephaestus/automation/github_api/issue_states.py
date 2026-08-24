@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import re
-import subprocess
 
 import hephaestus.automation.github_api as _api
 
@@ -23,34 +21,20 @@ def _fetch_batch_states(batch: list[int], owner: str, repo: str) -> dict[int, Is
         Mapping of issue number to IssueState for the batch.
 
     """
-    # GraphQL cannot index a list variable to build per-element aliases, so we
-    # declare one $nN:Int! per issue and bind each via -F nN=<int>. The f-string
-    # interpolates only range(len(batch))-derived fragment indices (query structure),
-    # never user data. This was smoke-tested against the live GitHub endpoint.
-    var_decls = ",".join(f"$n{idx}:Int!" for idx in range(len(batch)))
-    fragments = " ".join(
-        f"issue{idx}: issue(number:$n{idx}){{ number state }}" for idx in range(len(batch))
-    )
-    query = (
-        f"query($owner:String!,$name:String!,{var_decls})"
-        f"{{repository(owner:$owner,name:$name){{{fragments}}}}}"
-    )
-    args = ["api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={repo}"]
+    variables: dict[str, int | str] = {"owner": owner, "name": repo}
     for idx, num in enumerate(batch):
-        args.extend(["-F", f"n{idx}={int(num)}"])
+        variables[f"n{idx}"] = int(num)
 
     states: dict[int, IssueState] = {}
     try:
-        result = _api._gh_call(args)
-        data = json.loads(result.stdout)
-        _api._check_graphql_errors(data, "prefetch_issue_states")
-        repo_data = data.get("data", {}).get("repository", {})
-        for key, issue_data in repo_data.items():
-            if key.startswith("issue") and issue_data:
-                states[issue_data["number"]] = IssueState(issue_data["state"])
+        raw_states = _api.run_graphql(
+            _api.batch_issue_states_query(batch, owner, repo),
+            variables,
+        )
+        states = {number: IssueState(state) for number, state in raw_states.items()}
         _api.logger.debug("Fetched states for %s issues", len(batch))
-    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as e:
-        _api.logger.warning("Failed to batch fetch issue states: %s", e)
+    except _api.GraphQLDeterministicError as e:
+        _api.logger.warning("Deterministic batch state failure: %s", e)
         for num in batch:
             try:
                 issue_data = _api.gh_issue_json(num)

@@ -34,6 +34,14 @@ class PrReviewGate(_PrReviewHost):
         handoff_status = self._consume_reply_handoff_receipt(item)
         if handoff_status == "visibility_wait":
             return StageOutcome(Disposition.RETRY, "implementation_reply_handoff_visibility_wait")
+        if handoff_status == "blocked":
+            # The handoff may have crossed the mutation boundary without a
+            # receipt. Drop all round evidence and refresh from GitHub; the
+            # fresh review must reconcile any already-applied replies rather
+            # than replaying the armed intent.
+            _clear_round_review_state(item)
+            payload["review_refresh_required"] = True
+            return Continue(next_state=REVIEW_WAIT)
         if handoff_status == "invalid":
             logger.error(
                 "pr_review:%d: refusing to replay malformed implementation reply handoff",

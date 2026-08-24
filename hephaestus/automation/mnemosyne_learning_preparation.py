@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 import hephaestus.automation.github_api as github_api
+from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryRequest
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
@@ -31,7 +32,6 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
 )
 from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
-from hephaestus.github.client import gh_call
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess, slugify
 
