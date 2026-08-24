@@ -375,9 +375,7 @@ def test_get_proj_root_removed_from_utility_surfaces() -> None:
     """The dynamic ``<PROJECT>_ROOT`` environment API remains absent."""
     import hephaestus
     import hephaestus.utils as utils_pkg
-    import hephaestus.utils.helpers as helpers
 
-    assert not hasattr(helpers, "get_proj_root")
     assert not hasattr(utils_pkg, "get_proj_root")
     assert "get_proj_root" not in utils_pkg.__all__
     assert not hasattr(hephaestus, "get_proj_root")

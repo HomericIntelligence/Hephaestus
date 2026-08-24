@@ -526,7 +526,7 @@ def render_markdown_inventory(registry: tuple[RegistryVariable, ...]) -> str:
     lines = [
         MARKDOWN_START,
         "| Variable | Category | Owner | Purpose | Sensitivity | Validation | "
-        "Direction | Readers |",
+        + "Direction | Readers |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for variable in sorted(registry, key=lambda item: item.name):

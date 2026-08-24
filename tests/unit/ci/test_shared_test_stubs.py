@@ -17,7 +17,8 @@ class _Resolver(Protocol):
         cwd: Path | None = None,
         disable_pi_automation: bool = False,
         auth_status_timeout: int = 10,
-    ) -> str: ...
+    ) -> str:
+        pass
 
 
 class _Authenticator(Protocol):
@@ -28,7 +29,8 @@ class _Authenticator(Protocol):
         agent: str,
         *,
         auth_status_timeout: int = 10,
-    ) -> bool: ...
+    ) -> bool:
+        pass
 
 
 def test_authenticated_agent_stub_accepts_timeout_keyword() -> None:
