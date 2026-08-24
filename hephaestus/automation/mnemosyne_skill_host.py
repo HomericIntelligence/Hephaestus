@@ -38,6 +38,7 @@ from hephaestus.automation.mnemosyne_learning_preparation import (
     MnemosyneLearningPreparationService,
 )
 from hephaestus.automation.pipeline.athena_skill_jobs import AthenaSkillRequest, AthenaSkillResult
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils import subprocess_registry
 from hephaestus.utils.helpers import run_subprocess
@@ -350,6 +351,7 @@ class DefaultCorpusReader:
                 ["git", *argv],
                 cwd=root,
                 check=False,
+                env=build_git_child_env(),
                 track_process_group=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:

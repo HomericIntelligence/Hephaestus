@@ -5943,10 +5943,13 @@ class TestRateBudget:
         assert pg.rate_budget_ok(timeout=17) == (True, 0.0)
         assert observed == [17]
 
-    def test_guard_disabled_by_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_guard_disabled_by_explicit_option(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The removed ambient toggle cannot disable the explicit guard."""
         monkeypatch.setenv("HEPHAESTUS_RATE_GUARD", "0")
+        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (10, 1_000_000))
 
-        assert pg.rate_budget_ok() == (True, 0.0)
+        assert pg.rate_budget_ok(now_epoch=999_995.0) == (False, 10.0)
+        assert pg.rate_budget_ok(enabled=False) == (True, 0.0)
 
     def test_unknown_budget_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
