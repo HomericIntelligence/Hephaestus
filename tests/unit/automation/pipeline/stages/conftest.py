@@ -33,7 +33,6 @@ from hephaestus.automation.pipeline.stages.base import (
     BranchWorktreeOwnerStatus,
     ImplementationReplyProgress,
 )
-from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
 from hephaestus.automation.pipeline.work_item import ItemKind, WorkItem
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
