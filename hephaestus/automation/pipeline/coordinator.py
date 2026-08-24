@@ -183,7 +183,7 @@ class Coordinator(
             name: StageQueue(
                 config.learning_queue_capacity if name is StageName.LEARNING else work_window
             )
-            for name in StageName
+            for name in PIPELINE_ORDER
         }
         self.timers: list[tuple[float, int, WorkItem]] = []
         self.in_flight: dict[JobHandle, WorkItem] = {}

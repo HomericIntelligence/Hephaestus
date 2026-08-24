@@ -224,19 +224,9 @@ _DEFAULT_EVENT_LOG_CAPACITY = 1_024
 _DEFAULT_TERMINAL_DETAIL_CAPACITY = 128
 _SOURCE_REGISTRY_RETRY_DELAY_S = 0.05
 
-#: Downstream-first drain order: finish work before admitting new (epic
-#: #1809 "drain queues downstream-first"; finished and auxiliary learning
-#: drain before the main pipeline so terminal work is recorded promptly).
-_DRAIN_ORDER: tuple[StageName, ...] = (
-    StageName.FINISHED,
-    StageName.LEARNING,
-    StageName.MERGE_WAIT,
-    StageName.PR_REVIEW,
-    StageName.IMPLEMENTATION,
-    StageName.PLAN_REVIEW,
-    StageName.PLANNING,
-    StageName.REPO,
-)
+#: Downstream-first drain order generated from the authoritative pipeline
+#: order; the finished sink drains first so results are recorded promptly.
+_DRAIN_ORDER: tuple[StageName, ...] = tuple(reversed(PIPELINE_ORDER))
 
 # An explicit issue can classify into any of these queues.  The source cursor
 # classifies only when every possible destination can accept one item, so the
@@ -291,7 +281,7 @@ def _json_safe(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Configuration for the pipeline coordinator (built by ``loop_runner``)."""
+    """Configuration shared by the coordinator and every pipeline stage."""
 
     org: str
     repos: list[str]
@@ -361,6 +351,11 @@ class PipelineConfig:
     issue_limit: int | None = None
     enable_learn: bool = True
     reset_plan_review_sessions: frozenset[int] = frozenset()
+
+    @property
+    def enable_advise(self) -> bool:
+        """Return the positive stage-facing form of ``no_advise``."""
+        return not self.no_advise
 
 
 def _work_window(config: PipelineConfig) -> int:

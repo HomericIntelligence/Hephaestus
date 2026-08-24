@@ -613,7 +613,7 @@ class MergeWaitStage(Stage):
 
     def _route_merged(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Record post-merge learning without changing confirmed merge success."""
-        if item.issue is None or not getattr(ctx.config, "enable_learn", True):
+        if item.issue is None or not ctx.config.enable_learn:
             return StageOutcome(Disposition.FINISH_PASS, "merged")
         if ctx.github.drive_green_learn_terminal(item.issue):
             return StageOutcome(Disposition.FINISH_PASS, "merged")
