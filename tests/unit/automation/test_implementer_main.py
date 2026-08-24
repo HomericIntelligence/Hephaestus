@@ -102,6 +102,16 @@ def test_main_no_advise_propagates(tmp_path: Path) -> None:
     assert captured["config"].no_advise is True
 
 
+def test_main_no_learn_propagates(tmp_path: Path) -> None:
+    """--no-learn maps to PipelineConfig.enable_learn."""
+    captured = _run_main_capturing_config(
+        ["--issues", "5", "--no-learn", "--dry-run"],
+        tmp_path,
+    )
+
+    assert captured["config"].enable_learn is False
+
+
 def test_main_nitpick_propagates(tmp_path: Path) -> None:
     """--nitpick maps to PipelineConfig.nitpick."""
     captured = _run_main_capturing_config(["--issues", "5", "--nitpick", "--dry-run"], tmp_path)

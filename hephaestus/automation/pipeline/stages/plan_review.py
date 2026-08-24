@@ -241,10 +241,9 @@ def _restore_review_conversation(
     store = ctx.plan_review_sessions
     if store is None or item.issue is None or not plan_text:
         return None
-    reset_issues: set[int] = getattr(ctx.config, "reset_plan_review_sessions", set())
-    reset = item.issue in reset_issues
+    reset = item.issue in ctx.plan_review_session_resets
     if reset:
-        reset_issues.discard(item.issue)
+        ctx.plan_review_session_resets.discard(item.issue)
     try:
         active = None if reset else store.recover_active(repo=item.repo, issue=item.issue)
         cycle_number = item.attempts.get("plan_cycles", 0)

@@ -1,10 +1,8 @@
 """Declarative stage-routing table. Pure data, zero I/O (epic #1809).
 
-The ROUTES table below is the code form of the normative table in
-[`docs/architecture.md` §6](../docs/architecture.md#6-the-routes-table--single-source-of-truth)
-("The ROUTES table — single source of truth"). Any change here MUST be reflected
-there and vice versa;
-``tests/unit/automation/pipeline/test_routing.py`` pins every row.
+``ROUTES`` is the executable authority for stage order, success and failure
+targets, and per-item budgets. Documentation describes its schema, while
+tests generate structural and scoped-routing cases from the table.
 
 All budgets are per-item-lifetime counters (tracked in ``WorkItem.attempts``);
 they are never reset when an item re-enters a stage, so cross-stage
@@ -13,6 +11,7 @@ regression cycles remain globally bounded.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -26,7 +25,8 @@ DEFAULT_DRIVE_GREEN_LOOPS = 5
 class StageName(StrEnum):
     """Pipeline stage identifiers.
 
-    Members are declared in pipeline order and MUST NOT be reordered.
+    ``ROUTES`` insertion order, not enum declaration order, defines pipeline
+    order for non-terminal stages. ``FINISHED`` is always the terminal sink.
     """
 
     REPO = "repo"
@@ -37,25 +37,6 @@ class StageName(StrEnum):
     MERGE_WAIT = "merge_wait"
     LEARNING = "learning"
     FINISHED = "finished"
-
-
-#: Active loop order used for scope-contiguity validation. CI/CD intentionally
-#: has no pipeline stage: normal review may collect its evidence for a binary
-#: verdict, but the loop does not change CI/CD and it never independently
-#: authorizes an approval.
-MAIN_PIPELINE_ORDER: tuple[StageName, ...] = (
-    StageName.REPO,
-    StageName.PLANNING,
-    StageName.PLAN_REVIEW,
-    StageName.IMPLEMENTATION,
-    StageName.PR_REVIEW,
-    StageName.MERGE_WAIT,
-)
-AUXILIARY_PIPELINE_ORDER: tuple[StageName, ...] = (
-    StageName.LEARNING,
-    StageName.FINISHED,
-)
-PIPELINE_ORDER: tuple[StageName, ...] = MAIN_PIPELINE_ORDER + AUXILIARY_PIPELINE_ORDER
 
 
 class Disposition(StrEnum):
@@ -91,9 +72,8 @@ class Route:
     budgets: dict[str, int] = field(default_factory=dict)
 
 
-# The rows below transcribe docs/architecture.md §6 "ROUTES
-# table" exactly: named fail-route keys are the doc's reason vocabulary, "*"
-# is the doc's default target. Budget provenance:
+# Named fail-route keys are the stage reason vocabulary, "*" is the default
+# target. Budget provenance:
 #   plan_review_iter=3, pr_review_iter=3, pr_review_hard=6
 #                                             <- architecture doc stage sections
 #   clone=2, plan=2, plan_cycles=2,
@@ -172,6 +152,36 @@ ROUTES: dict[StageName, Route] = {
     ),
     StageName.FINISHED: Route(next=StageName.FINISHED),
 }
+
+
+# Lane membership remains an execution-capacity concern, while ordering within
+# and across lanes comes only from ROUTES.
+_AUXILIARY_STAGES = frozenset({StageName.LEARNING, StageName.FINISHED})
+
+
+def _pipeline_order(routes: Mapping[StageName, Route]) -> tuple[StageName, ...]:
+    """Return route order with the universal terminal sink last.
+
+    The route table remains authoritative for every executable stage's
+    relative order.  ``FINISHED`` is excluded from that ordering because its
+    terminal-sink contract must not depend on an incidental dictionary
+    position.
+    """
+    return (
+        *(stage for stage in routes if stage is not StageName.FINISHED),
+        StageName.FINISHED,
+    )
+
+
+#: Full stage order derived from the authoritative routing table. CI/CD
+#: intentionally has no pipeline stage. ``FINISHED`` is always last.
+PIPELINE_ORDER: tuple[StageName, ...] = _pipeline_order(ROUTES)
+MAIN_PIPELINE_ORDER: tuple[StageName, ...] = tuple(
+    stage for stage in PIPELINE_ORDER if stage not in _AUXILIARY_STAGES
+)
+AUXILIARY_PIPELINE_ORDER: tuple[StageName, ...] = tuple(
+    stage for stage in PIPELINE_ORDER if stage in _AUXILIARY_STAGES
+)
 
 
 def budget_keys() -> frozenset[str]:

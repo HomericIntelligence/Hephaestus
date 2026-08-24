@@ -695,8 +695,7 @@ class TestPlanReviewStageStep:
         """GO durably applies state:plan-go then advances (learn disabled)."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=2, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
@@ -725,8 +724,7 @@ class TestPlanReviewStageStep:
 
         stage = PlanReviewStage()
         github = DroppedLabelGitHub(labels=[STATE_NEEDS_PLAN])
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=202, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
@@ -748,8 +746,7 @@ class TestPlanReviewStageStep:
 
         stage = PlanReviewStage()
         github = PartialLabelGitHub(labels=[STATE_PLAN_NO_GO])
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=203, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
@@ -765,8 +762,7 @@ class TestPlanReviewStageStep:
         """A BLOCKED label added during review stops before audit or label writes."""
         stage = PlanReviewStage()
         github = FakeStageGitHub(labels=[STATE_PLAN_BLOCKED])
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=204, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
@@ -822,7 +818,6 @@ class TestPlanReviewStageStep:
         github = FakeStageGitHub()
         journal = LearningJournalStore(lambda: tmp_path)
         ctx = make_ctx(github=github, learning_journal=journal)
-        ctx.config.enable_learn = True
         item = make_work_item(issue=3, state="EVAL")
         item.payload["plan_text"] = "# Approved plan\n\nImplement the queue."
         item.payload["plan_revision"] = 8
@@ -1453,8 +1448,7 @@ class TestDurableWriteOrdering:
         """The state:plan-go write is recorded before ADVANCE is returned."""
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=11, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
@@ -1826,8 +1820,7 @@ class TestAtomicLabelWrites:
 
         stage = PlanReviewStage()
         github = EditFailsGitHub()
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=34, state="EVAL")
         item.payload["review_verdict"] = _verdict("GO")
 
@@ -1868,8 +1861,7 @@ class TestReviewFlowWithFakePool:
 
         stage = PlanReviewStage()
         github = FakeStageGitHub()
-        ctx = make_ctx(github=github)
-        ctx.config.enable_learn = False
+        ctx = make_ctx(github=github, config_overrides={"enable_learn": False})
         item = make_work_item(issue=20, state="REVIEW_WAIT")
         item.payload["plan_text"] = "# Plan"
 
@@ -1903,7 +1895,6 @@ class TestReviewFlowWithFakePool:
         github = FakeStageGitHub()
         github.comments[21] = [render_current_plan("# Plan v1", revision=1)]
         ctx = make_ctx(github=github)
-        ctx.config.enable_learn = True
         item = make_work_item(issue=21, state="ENTER")
         item.payload["plan_text"] = "# Plan v1"
 

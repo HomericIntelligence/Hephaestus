@@ -292,7 +292,7 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                         "view",
                         str(issue_number),
                         "--json",
-                        "number,title,state,labels,body",
+                        "id,number,title,state,labels,body,url",
                     ]
                 )
             except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
