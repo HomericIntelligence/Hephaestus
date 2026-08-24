@@ -25,6 +25,8 @@ from hephaestus.automation.pipeline.github_jobs import (
 )
 from hephaestus.automation.review_journal import IssueComment
 
+from .stages.base import ImplementationReplyProgress
+
 IMPLEMENTATION_REPLY_HANDOFF_RETRY_CAP = 2
 IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRY_CAP = 2
 IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRY_CAP = 2
@@ -75,6 +77,9 @@ def implementation_reply_handoff(
     threads: object,
     replies: object,
     batch_nonce: object,
+    *,
+    progress: ImplementationReplyProgress | None = None,
+    reconciliation_only: bool = False,
 ) -> dict[str, Any] | None:
     """Return a replay-safe outstanding implementation-reply handoff.
 
@@ -107,6 +112,8 @@ def implementation_reply_handoff(
         "threads": deepcopy(snapshots),
         "replies": dict(normalized_replies),
         "batch_nonce": batch_nonce,
+        "reconciliation_only": reconciliation_only,
+        **({"progress": progress.as_dict()} if progress is not None else {}),
     }
 
 
@@ -177,11 +184,22 @@ def implementation_reply_handoff_journal_entry(
     """
     if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
         return None
+    progress = (
+        ImplementationReplyProgress.from_dict(handoff.get("progress"))
+        if isinstance(handoff, dict) and "progress" in handoff
+        else None
+    )
+    if isinstance(handoff, dict) and "progress" in handoff and progress is None:
+        return None
     normalized = implementation_reply_handoff(
         handoff.get("head_sha") if isinstance(handoff, dict) else None,
         handoff.get("threads") if isinstance(handoff, dict) else None,
         handoff.get("replies") if isinstance(handoff, dict) else None,
         handoff.get("batch_nonce") if isinstance(handoff, dict) else None,
+        progress=progress,
+        reconciliation_only=(
+            isinstance(handoff, dict) and handoff.get("reconciliation_only") is True
+        ),
     )
     if normalized is None:
         return None
@@ -194,12 +212,18 @@ def implementation_reply_handoff_journal_entry(
         return None
     payload = json.dumps(
         {
-            "format": 1,
+            "format": 2,
+            "armed": True,
             "pr_number": pr_number,
             "head_sha": normalized["head_sha"],
             "batch_nonce": normalized["batch_nonce"],
             "thread_snapshot_sha256": thread_snapshot_sha256,
             "replies": normalized["replies"],
+            **(
+                {"progress": normalized["progress"]}
+                if isinstance(normalized.get("progress"), dict)
+                else {}
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -227,15 +251,27 @@ def _journal_handoff_from_comment(
         raw = json.loads(payload.removeprefix("<!-- ").removesuffix(" -->"))
     except json.JSONDecodeError as error:
         raise ValueError("implementation reply handoff journal is malformed") from error
-    if not isinstance(raw, dict) or raw.get("format") != 1 or raw.get("pr_number") != pr_number:
+    if (
+        not isinstance(raw, dict)
+        or raw.get("format") not in {1, 2}
+        or raw.get("pr_number") != pr_number
+        or (raw.get("format") == 2 and raw.get("armed") is not True)
+    ):
         raise ValueError("implementation reply handoff journal identity is invalid")
     if raw.get("thread_snapshot_sha256") != _thread_snapshot_fingerprint(threads):
         return None
+    progress = (
+        ImplementationReplyProgress.from_dict(raw.get("progress")) if "progress" in raw else None
+    )
+    if "progress" in raw and progress is None:
+        raise ValueError("implementation reply handoff progress is invalid")
     handoff = implementation_reply_handoff(
         raw.get("head_sha"),
         threads,
         raw.get("replies"),
         raw.get("batch_nonce"),
+        progress=progress,
+        reconciliation_only=True,
     )
     if (
         handoff is None
@@ -245,6 +281,7 @@ def _journal_handoff_from_comment(
         or handoff["batch_nonce"] != match.group("batch")
     ):
         raise ValueError("implementation reply handoff journal payload is invalid")
+    handoff["reconciliation_only"] = True
     return handoff
 
 
@@ -343,9 +380,16 @@ def _consume_reply_post_result(
     batch_nonce: str,
     issue_number: int | None,
     logger: logging.Logger,
-) -> Literal["completed", "visibility_wait", "stale", "invalid", "retry"]:
+) -> Literal["completed", "visibility_wait", "stale", "invalid", "blocked", "retry"]:
     """Classify one reply mutation result and retain only proven retry work."""
     expected_ids = set(replies)
+    if bool(getattr(result, "outcome_unknown", False)):
+        # An issued mutation can have succeeded even when its receipt was
+        # lost.  Never retain the target in a pending handoff for replay.
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
+        return "blocked"
     replied = set(getattr(result, "replied_thread_ids", ()))
     receipts = list(getattr(result, "receipts", ()))
     if replied == expected_ids and len(receipts) == len(replied):
@@ -362,6 +406,24 @@ def _consume_reply_post_result(
         ):
             return "visibility_wait"
         return "stale"
+    progress = getattr(result, "progress", None)
+    if bool(getattr(result, "retryable", False)) and isinstance(
+        progress, ImplementationReplyProgress
+    ):
+        replacement = implementation_reply_handoff(
+            head_sha,
+            threads,
+            replies,
+            batch_nonce,
+            progress=progress,
+            reconciliation_only=False,
+        )
+        if replacement is None:
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            return "invalid"
+        payload[PENDING_IMPLEMENTATION_REPLY_HANDOFF] = replacement
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        return "retry"
     remaining_ids = expected_ids - replied
     retryable = bool(getattr(result, "retryable", False))
     result_retryable_ids = set(getattr(result, "retryable_thread_ids", ()))
@@ -390,14 +452,14 @@ def _consume_reply_post_result(
     return "retry"
 
 
-def retry_pending_implementation_reply_handoff(
+def retry_pending_implementation_reply_handoff(  # noqa: C901
     payload: dict[str, Any],
     *,
     pr_number: int | None,
     issue_number: int | None,
     github: Any,
     logger: logging.Logger,
-) -> Literal["none", "completed", "visibility_wait", "stale", "invalid", "retry"]:
+) -> Literal["none", "completed", "visibility_wait", "stale", "invalid", "blocked", "retry"]:
     """Retry one exact post-push reply batch without invoking an agent.
 
     Returns ``none`` when no handoff exists, ``completed`` when every reply
@@ -422,6 +484,16 @@ def retry_pending_implementation_reply_handoff(
     threads = handoff["threads"]
     replies = handoff["replies"]
     batch_nonce = handoff["batch_nonce"]
+    reconciliation_only = (
+        isinstance(raw_handoff, dict) and raw_handoff.get("reconciliation_only") is True
+    )
+    progress = (
+        ImplementationReplyProgress.from_dict(raw_handoff.get("progress"))
+        if isinstance(raw_handoff, dict) and "progress" in raw_handoff
+        else None
+    )
+    if isinstance(raw_handoff, dict) and "progress" in raw_handoff and progress is None:
+        return "invalid"
     try:
         state = github.gh_pr_state(pr_number)
         pr_state_outcome = _classify_handoff_pr_state(
@@ -439,20 +511,67 @@ def retry_pending_implementation_reply_handoff(
             payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
             return "stale"
         payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_VISIBILITY_RETRIES, None)
-        result = github.post_implementation_thread_replies(
-            pr_number,
-            expected_head_sha=head_sha,
-            threads=threads,
-            replies=replies,
-            batch_nonce=batch_nonce,
-        )
+        if reconciliation_only:
+            # A journal-recovered armed intent is read-only.  The accessor
+            # owns the complete marker-bound reconciliation and has no
+            # mutation-capable fallback.
+            result = github.reconcile_implementation_thread_replies(
+                pr_number,
+                expected_head_sha=head_sha,
+                threads=threads,
+                replies=replies,
+                batch_nonce=batch_nonce,
+            )
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            if bool(getattr(result, "outcome_unknown", False)) or bool(
+                getattr(result, "blocked_thread_ids", ())
+            ):
+                return "blocked"
+            return "completed" if getattr(result, "replied_thread_ids", ()) else "blocked"
+        delivery_kwargs: dict[str, Any] = {
+            "expected_head_sha": head_sha,
+            "threads": threads,
+            "replies": replies,
+            "batch_nonce": batch_nonce,
+        }
+        if progress is not None:
+            delivery_kwargs["progress"] = progress
+        result = github.post_implementation_thread_replies(pr_number, **delivery_kwargs)
     except Exception as error:
+        pre_dispatch_retry = (
+            type(error).__name__ == "GraphQLRetryableError"
+            and type(error).__module__ == "hephaestus.automation.github_api.graphql"
+            and getattr(error, "pre_dispatch", False) is True
+        )
+        if pre_dispatch_retry:
+            if reconciliation_only:
+                return "retry"
+            logger.warning(
+                "reply_handoff:%s: mutation handoff transport was retryable before proof",
+                issue_number,
+            )
+            return "retry"
+        if reconciliation_only:
+            # A recovered armed intent is reconciliation-only.  Any missing
+            # read seam or incomplete proof blocks the intent; it must never
+            # fall through to the ordinary mutation retry path.
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+            payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+            logger.warning(
+                "reply_handoff:%s: reconciliation could not prove the armed reply (%s)",
+                issue_number,
+                type(error).__name__,
+            )
+            return "blocked"
         logger.warning(
             "reply_handoff:%s: implementation reply handoff retry failed (%s)",
             issue_number,
             type(error).__name__,
         )
-        return "retry"
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF, None)
+        payload.pop(PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES, None)
+        return "blocked"
 
     return _consume_reply_post_result(
         payload,

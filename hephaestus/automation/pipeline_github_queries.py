@@ -141,18 +141,8 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
         self, pr_number: int
     ) -> list[dict[str, Any]]:
         """List unresolved PR review threads for this accessor's explicit repo."""
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-            "  repository(owner:$owner,name:$name){"
-            "    pullRequest(number:$number){"
-            "      reviewThreads(first:100,after:$after){"
-            "        pageInfo{ hasNextPage endCursor }"
-            "        nodes{ id isResolved }"
-            "      }"
-            "    }"
-            "  }"
-            "}"
-        )
+        owner, name = self._owner_name()
+        spec = github_api.pipeline_unresolved_threads_page_query(owner, name, pr_number)
 
         def read_thread_ids() -> tuple[str, ...]:
             """Read one complete unresolved-thread traversal without hydrating it."""
@@ -164,18 +154,8 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
                 fields: dict[str, int | str] = {"number": int(pr_number)}
                 if after is not None:
                     fields["after"] = after
-                data = self._graphql(query, **fields)
-                data_node = data.get("data") if isinstance(data, dict) else None
-                repository = data_node.get("repository") if isinstance(data_node, dict) else None
-                pull_request = (
-                    repository.get("pullRequest") if isinstance(repository, dict) else None
-                )
-                review_threads = (
-                    pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
-                )
-                if not isinstance(review_threads, dict):
-                    raise RuntimeError("could not fetch all PR review threads")
-                nodes = review_threads.get("nodes")
+                review_threads = self._graphql(spec, **fields)
+                nodes = review_threads.get("nodes") if isinstance(review_threads, dict) else None
                 if not isinstance(nodes, list):
                     raise RuntimeError("could not fetch all PR review threads")
                 for node in nodes:
@@ -340,30 +320,17 @@ class PipelineGitHubQueries(_PipelineGitHubHost):
 
     def issue_body_edited_by_viewer(self, issue_number: int) -> bool:
         """Authenticate the body editor before trusting a finalized-plan seal."""
-        if self._repo_slug is None:
-            return github_api.gh_issue_body_edited_by_viewer(issue_number)
-        query = (
-            "query($owner:String!,$name:String!,$number:Int!){"
-            " viewer{ login }"
-            " repository(owner:$owner,name:$name){"
-            "  issue(number:$number){ editor{ login } }"
-            " }"
-            "}"
-        )
-        data = self._graphql(query, number=issue_number)
-        root = data.get("data") if isinstance(data, dict) else None
-        viewer = root.get("viewer") if isinstance(root, dict) else None
-        repository = root.get("repository") if isinstance(root, dict) else None
-        issue = repository.get("issue") if isinstance(repository, dict) else None
-        editor = issue.get("editor") if isinstance(issue, dict) else None
-        viewer_login = viewer.get("login") if isinstance(viewer, dict) else None
-        editor_login = editor.get("login") if isinstance(editor, dict) else None
-        return (
-            isinstance(viewer_login, str)
-            and bool(viewer_login)
-            and isinstance(editor_login, str)
-            and editor_login.lower() == viewer_login.lower()
-        )
+        try:
+            if self._repo_slug is None:
+                return github_api.gh_issue_body_edited_by_viewer(issue_number)
+            owner, name = self._owner_name()
+            return self._graphql(
+                github_api.issue_body_editor_query(owner, name, issue_number),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Failed to authenticate issue body editor for #{issue_number}: {exc}"
+            ) from exc
 
     def find_merged_closing_pr(self, issue_number: int) -> int | None:
         """Return the merged PR closing this issue (``_review_utils``)."""

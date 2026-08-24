@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import re
-from typing import Any
+from typing import Any, cast
 
 import hephaestus.automation.github_api as _api
 
@@ -85,15 +84,7 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
     connection.  This helper deliberately completes that second pagination
     rather than dropping a long-lived conversation from an address prompt.
     """
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!,$threadId:ID!,$after:String){"
-        "repository(owner:$owner,name:$name){pullRequest(number:$number){id}}"
-        "node(id:$threadId){... on PullRequestReviewThread{"
-        "id isResolved path line side:diffSide pullRequest{"
-        "id number repository{name owner{login}}}"
-        "comments(first:100,after:$after){pageInfo{hasNextPage endCursor}"
-        "nodes{id body author{login}}}}}}"
-    )
+    spec = _api.review_thread_snapshot_page_query(owner, repo, pr_number, thread_id)
 
     def read_once() -> tuple[dict[str, Any], bool] | None:  # noqa: C901
         page_count = 0
@@ -103,71 +94,21 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
         def fetch_comment_page(after: str | None) -> dict[str, Any]:
             nonlocal expected_thread_fields, page_count, requested_pr_id
             page_count += 1
-            argv = [
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={repo}",
-                "-F",
-                f"number={int(pr_number)}",
-                "-F",
-                f"threadId={thread_id}",
-            ]
+            variables: dict[str, int | str] = {
+                "owner": owner,
+                "name": repo,
+                "number": int(pr_number),
+                "threadId": thread_id,
+            }
             if after is not None:
-                argv.extend(["-F", f"after={after}"])
-            result = _api._gh_call(argv)
-            data = json.loads(result.stdout)
-            _api._check_graphql_errors(
-                data,
-                f"review-thread snapshot(pr={pr_number}, thread={thread_id})",
-            )
-            data_node = data.get("data") if isinstance(data, dict) else None
-            repository = data_node.get("repository") if isinstance(data_node, dict) else None
-            requested_pr = repository.get("pullRequest") if isinstance(repository, dict) else None
-            node = data_node.get("node") if isinstance(data_node, dict) else None
-            if not isinstance(requested_pr, dict) or not isinstance(node, dict):
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            pr_id = requested_pr.get("id")
-            if not isinstance(pr_id, str) or not pr_id or node.get("id") != thread_id:
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+                variables["after"] = after
+            response = _api.run_graphql(spec, variables)
+            requested_pr = response["pullRequest"]
+            node = response["thread"]
+            pr_id = requested_pr["id"]
             if requested_pr_id is None:
                 requested_pr_id = pr_id
             elif requested_pr_id != pr_id:
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            pull_request = node.get("pullRequest")
-            thread_pr_number = (
-                pull_request.get("number") if isinstance(pull_request, dict) else None
-            )
-            thread_repository = (
-                pull_request.get("repository") if isinstance(pull_request, dict) else None
-            )
-            thread_owner = (
-                thread_repository.get("owner") if isinstance(thread_repository, dict) else None
-            )
-            if (
-                not isinstance(pull_request, dict)
-                or pull_request.get("id") != requested_pr_id
-                or isinstance(thread_pr_number, bool)
-                or not isinstance(thread_pr_number, int)
-                or thread_pr_number != pr_number
-                or not isinstance(thread_repository, dict)
-                or thread_repository.get("name") != repo
-                or not isinstance(thread_owner, dict)
-                or thread_owner.get("login") != owner
-                or not isinstance(node.get("isResolved"), bool)
-                or not isinstance(node.get("path"), str)
-                or (
-                    node.get("line") is not None
-                    and (
-                        isinstance(node.get("line"), bool) or not isinstance(node.get("line"), int)
-                    )
-                )
-                or (node.get("side") is not None and not isinstance(node.get("side"), str))
-            ):
                 raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
             thread_fields = (
                 node["isResolved"],
@@ -179,10 +120,7 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
                 expected_thread_fields = thread_fields
             elif expected_thread_fields != thread_fields:
                 raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            connection = node.get("comments")
-            if not isinstance(connection, dict):
-                raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
-            return connection
+            return cast(dict[str, Any], response["comments"])
 
         try:
             comment_nodes = collect_graphql_connection_nodes(
@@ -190,10 +128,10 @@ def _complete_thread_snapshot(  # noqa: C901 - GraphQL response validation is fa
                 connection_name=f"comments for PR review thread {thread_id}",
                 max_nodes=MAX_PR_REVIEW_THREAD_COMMENTS,
             )
-        except (_api.GitHubRateLimitError, _api.GitHubUnavailableError):
+        except _api.GraphQLResponseError:
             raise
         except RuntimeError as exc:
-            raise RuntimeError(
+            raise _api.GraphQLDeterministicError(
                 f"could not fetch all comments for PR review thread {thread_id}: {exc}"
             ) from exc
 
@@ -276,62 +214,31 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
 
     # Sanitize owner/repo to prevent injection (same pattern as prefetch_issue_states)
     if not re.match(r"^[a-zA-Z0-9_-]+$", owner) or not re.match(r"^[a-zA-Z0-9_-]+$", repo):
-        _api.logger.error("Invalid owner/repo format: %s/%s", owner, repo)
-        return []
-
-    query = (
-        "query($owner:String!,$name:String!,$number:Int!,$after:String){"
-        "  repository(owner:$owner,name:$name){"
-        "    pullRequest(number:$number){"
-        "      reviewThreads(first:100,after:$after){"
-        "        pageInfo{ hasNextPage endCursor }"
-        "        nodes{ id isResolved }"
-        "      }"
-        "    }"
-        "  }"
-        "}"
-    )
+        raise _api.GraphQLDeterministicError("invalid repository identity")
+    spec = _api.unresolved_review_threads_page_query(owner, repo, pr_number)
 
     def read_thread_ids() -> tuple[str, ...]:
         """Read one complete unresolved-thread traversal without hydrating it."""
 
         def fetch_thread_page(after: str | None) -> dict[str, Any]:
-            argv = [
-                "api",
-                "graphql",
-                "-f",
-                f"query={query}",
-                "-F",
-                f"owner={owner}",
-                "-F",
-                f"name={repo}",
-                "-F",
-                f"number={int(pr_number)}",
-            ]
+            variables: dict[str, int | str] = {
+                "owner": owner,
+                "name": repo,
+                "number": int(pr_number),
+            }
             if after is not None:
-                argv.extend(["-F", f"after={after}"])
-            result = _api._gh_call(argv)
-            data = json.loads(result.stdout)
-            _api._check_graphql_errors(data, f"gh_pr_list_unresolved_threads(pr={pr_number})")
-            data_node = data.get("data") if isinstance(data, dict) else None
-            repository = data_node.get("repository") if isinstance(data_node, dict) else None
-            pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
-            review_threads = (
-                pull_request.get("reviewThreads") if isinstance(pull_request, dict) else None
-            )
-            if not isinstance(review_threads, dict):
-                raise RuntimeError("could not fetch all PR review threads")
-            return review_threads
+                variables["after"] = after
+            return _api.run_graphql(spec, variables)
 
         try:
             nodes = collect_graphql_connection_nodes(
                 fetch_thread_page,
                 connection_name=f"review threads for PR #{pr_number}",
             )
-        except (_api.GitHubRateLimitError, _api.GitHubUnavailableError):
+        except _api.GraphQLResponseError:
             raise
         except RuntimeError as exc:
-            raise RuntimeError("could not fetch all PR review threads") from exc
+            raise _api.GraphQLDeterministicError("could not fetch all PR review threads") from exc
 
         thread_ids: list[str] = []
         seen: set[str] = set()
@@ -344,7 +251,7 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
                 or not thread_id
                 or thread_id in seen
             ):
-                raise RuntimeError("could not fetch all PR review threads")
+                raise _api.GraphQLDeterministicError("could not fetch all PR review threads")
             seen.add(thread_id)
             if not is_resolved:
                 thread_ids.append(thread_id)
@@ -352,12 +259,14 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
 
     first_ids = read_thread_ids()
     if first_ids != read_thread_ids():
-        raise RuntimeError("could not stabilize all PR review threads")
+        raise _api.GraphQLDeterministicError("could not stabilize all PR review threads")
     threads: list[dict[str, Any]] = []
     for thread_id in first_ids:
         snapshot = _complete_thread_snapshot(owner, repo, pr_number, thread_id)
         if snapshot is None:
-            raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            raise _api.GraphQLDeterministicError(
+                f"could not fetch all comments for PR review thread {thread_id}"
+            )
         fact = _unresolved_thread_fact(snapshot)
         if fact is not None:
             threads.append(fact)
@@ -365,7 +274,9 @@ def gh_pr_list_unresolved_threads(  # noqa: C901 - complete thread pagination is
             # The outer traversal established this as unresolved.  Do not
             # silently lose it if its hydrated snapshot lacks the comment
             # history needed for an agent to investigate it.
-            raise RuntimeError(f"could not fetch all comments for PR review thread {thread_id}")
+            raise _api.GraphQLDeterministicError(
+                f"could not fetch all comments for PR review thread {thread_id}"
+            )
 
     _api.logger.debug("Found %s unresolved thread(s) on PR #%s", len(threads), pr_number)
     return threads

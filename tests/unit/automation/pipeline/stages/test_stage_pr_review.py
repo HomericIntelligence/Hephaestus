@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+import hephaestus.automation.github_api as github_api
 from hephaestus.agents.execution_policy import AgentRole
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.automation.pipeline.github_jobs import (
@@ -2949,6 +2950,7 @@ class TestReviewThreadLifecycle:
             "threads": [thread],
             "replies": {"thread-1": "Fixed the first concern."},
             "batch_nonce": "b" * 32,
+            "reconciliation_only": False,
         }
         assert (
             _implementation_reply_handoff(
@@ -5963,17 +5965,23 @@ class TestRealCommitGate:
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
                 batch_nonce: str,
+                progress: object = None,
             ) -> Any:
                 self.reply_attempts += 1
                 if self.reply_attempts == 1:
-                    raise OSError("temporary GitHub transport failure")
-                return super().post_implementation_thread_replies(
-                    pr_number,
-                    expected_head_sha=expected_head_sha,
-                    threads=threads,
-                    replies=replies,
-                    batch_nonce=batch_nonce,
-                )
+                    raise github_api.GraphQLRetryableError(
+                        "circuit open",
+                        pre_dispatch=True,
+                    )
+                kwargs: dict[str, Any] = {
+                    "expected_head_sha": expected_head_sha,
+                    "threads": threads,
+                    "replies": replies,
+                    "batch_nonce": batch_nonce,
+                }
+                if progress is not None:
+                    kwargs["progress"] = progress
+                return super().post_implementation_thread_replies(pr_number, **kwargs)
 
         stage = PrReviewStage()
         github = ReplyFailsOnceGitHub()
@@ -6072,7 +6080,9 @@ class TestRealCommitGate:
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
                 batch_nonce: str,
+                progress: object = None,
             ) -> ImplementationThreadReplyResult:
+                del progress
                 self.reply_attempts += 1
                 return super().post_implementation_thread_replies(
                     pr_number,
@@ -6144,7 +6154,9 @@ class TestRealCommitGate:
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
                 batch_nonce: str,
+                progress: object = None,
             ) -> ImplementationThreadReplyResult:
+                del progress
                 self.reply_attempts += 1
                 return super().post_implementation_thread_replies(
                     pr_number,
@@ -6207,8 +6219,9 @@ class TestRealCommitGate:
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
                 batch_nonce: str,
+                progress: object = None,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, replies, batch_nonce
+                del pr_number, expected_head_sha, threads, replies, batch_nonce, progress
                 # The reply may already be visible, but a reviewer comment
                 # raced the post-read.  This is a factual stale handoff, not
                 # a transport ambiguity that can be replayed.
@@ -6264,8 +6277,9 @@ class TestRealCommitGate:
                 threads: list[dict[str, Any]],
                 replies: dict[str, str],
                 batch_nonce: str,
+                progress: object = None,
             ) -> ImplementationThreadReplyResult:
-                del pr_number, expected_head_sha, threads, batch_nonce
+                del pr_number, expected_head_sha, threads, batch_nonce, progress
                 self.reply_batches.append(tuple(sorted(replies)))
                 return ImplementationThreadReplyResult(
                     blocked_thread_ids=("stale-thread",),

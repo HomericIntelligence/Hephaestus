@@ -7,6 +7,7 @@ import json
 from unittest import mock
 
 from hephaestus.automation import github_api as gha
+from hephaestus.automation.github_api import graphql
 
 
 def test_public_reexports_match_canonical_submodules() -> None:
@@ -32,6 +33,13 @@ def test_public_reexports_match_canonical_submodules() -> None:
         module = importlib.import_module(f"hephaestus.automation.github_api.{module_name}")
         for name in names:
             assert getattr(gha, name) is getattr(module, name)
+
+
+def test_graphql_contract_is_reexported_from_package_facade() -> None:
+    """The package façade exposes the one automation GraphQL executor."""
+    assert gha.run_graphql is graphql.run_graphql
+    assert gha.GraphQLQuerySpec is graphql.GraphQLQuerySpec
+    assert gha.GraphQLMutationSpec is graphql.GraphQLMutationSpec
 
 
 def test_patch_on_package_reaches_internal_sibling_caller() -> None:
