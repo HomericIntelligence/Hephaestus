@@ -2,6 +2,12 @@
 
 This file outlines security considerations for developing utilities in Hephaestus.
 
+## Writing Standard
+
+Follow the [ASD-STE100 writing standard](../../docs/asd-ste100.md) for all
+English technical prose that you create or revise. Do not change the wording
+of the security principles below only to satisfy this writing standard.
+
 ## Key Principles
 
 1. **Defense in Depth**: Apply multiple layers of security controls

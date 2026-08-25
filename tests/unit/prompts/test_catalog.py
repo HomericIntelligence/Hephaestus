@@ -12,6 +12,8 @@ from hephaestus.automation.prompts.planning import (
     get_plan_prompt,
 )
 
+WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
+
 
 def test_default_catalog_render_exposes_planning_contract() -> None:
     """The packaged default renders the planning prompt's stable contracts."""
@@ -64,7 +66,10 @@ def test_harness_template_replaces_only_the_matching_default(tmp_path: Path) -> 
 
     catalog = PromptCatalog(override_root=tmp_path)
 
-    assert get_plan_prompt(42, catalog=catalog) == "Harness plan for issue 42\n"
+    rendered = get_plan_prompt(42, catalog=catalog)
+
+    assert WRITING_STANDARD_SENTINEL in rendered
+    assert "Harness plan for issue 42\n" in rendered
 
 
 def test_prompt_dir_cli_flag_selects_the_optional_override(tmp_path: Path) -> None:
@@ -76,7 +81,9 @@ def test_prompt_dir_cli_flag_selects_the_optional_override(tmp_path: Path) -> No
     parser = build_automation_parser("test parser")
     try:
         parser.parse_args(["--prompt-dir", str(tmp_path)])
-        assert get_plan_prompt(42) == "CLI 42\n"
+        rendered = get_plan_prompt(42)
+        assert WRITING_STANDARD_SENTINEL in rendered
+        assert rendered.endswith("CLI 42\n")
     finally:
         PromptCatalog.clear_current()
 
@@ -85,7 +92,9 @@ def test_default_catalog_has_no_implicit_override() -> None:
     """Only an optional CLI-selected catalog may enable an override."""
     PromptCatalog.clear_current()
 
-    assert get_plan_prompt(12).startswith("\nCreate an implementation plan")
+    rendered = get_plan_prompt(12)
+    assert rendered.startswith("## Writing standard\n\n")
+    assert "\nCreate an implementation plan" in rendered
 
 
 def test_environment_does_not_select_a_prompt_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,7 +102,9 @@ def test_environment_does_not_select_a_prompt_override(monkeypatch: pytest.Monke
     monkeypatch.setenv("HEPHAESTUS_PROMPT_DIR", "/does/not/exist")
     PromptCatalog.clear_current()
 
-    assert get_plan_prompt(12).startswith("\nCreate an implementation plan")
+    rendered = get_plan_prompt(12)
+    assert rendered.startswith("## Writing standard\n\n")
+    assert "\nCreate an implementation plan" in rendered
 
 
 def test_later_cli_parse_without_prompt_dir_resets_prior_override(tmp_path: Path) -> None:
@@ -104,11 +115,15 @@ def test_later_cli_parse_without_prompt_dir_resets_prior_override(tmp_path: Path
 
     parser = build_automation_parser("test parser")
     parser.parse_args(["--prompt-dir", str(tmp_path)])
-    assert get_plan_prompt(42) == "CLI 42\n"
+    rendered = get_plan_prompt(42)
+    assert WRITING_STANDARD_SENTINEL in rendered
+    assert rendered.endswith("CLI 42\n")
 
     parser.parse_args([])
 
-    assert get_plan_prompt(42).startswith("\nCreate an implementation plan")
+    rendered = get_plan_prompt(42)
+    assert rendered.startswith("## Writing standard\n\n")
+    assert "\nCreate an implementation plan" in rendered
 
 
 def test_harness_can_override_a_shared_prompt_fragment(tmp_path: Path) -> None:
@@ -121,3 +136,4 @@ def test_harness_can_override_a_shared_prompt_fragment(tmp_path: Path) -> None:
 
     assert "HARNESS DIRECTIVE" in rendered
     assert "Output discipline (token budget)" not in rendered
+    assert WRITING_STANDARD_SENTINEL in rendered

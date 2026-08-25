@@ -14,6 +14,8 @@ from hephaestus.agents.runtime import AgentRunResult
 from hephaestus.automation import agent_stage
 from hephaestus.prompts import PromptCatalog
 
+WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
+
 
 def _args(tmp_path: Path, *, agent: str = "claude") -> argparse.Namespace:
     prompt_file = tmp_path / "prompt.md"
@@ -45,8 +47,49 @@ def test_read_prompt_prepends_skill_instructions(tmp_path: Path) -> None:
     prompt = agent_stage.read_prompt(prompt_file, skill_file, "review")
 
     assert "Hephaestus agent stage `review`" in prompt
+    assert WRITING_STANDARD_SENTINEL in prompt
     assert "strict instructions" in prompt
     assert prompt.endswith("do the work")
+
+
+def test_read_prompt_adds_writing_standard_without_skill_file(tmp_path: Path) -> None:
+    """The stage writing policy also applies when the operator supplies no skill."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("do the work", encoding="utf-8")
+
+    prompt = agent_stage.read_prompt(prompt_file, None, "review")
+
+    assert "Hephaestus agent stage" not in prompt
+    assert WRITING_STANDARD_SENTINEL in prompt
+    assert prompt.endswith("do the work")
+
+
+def test_read_prompt_preserves_a_provider_command_as_the_first_token(tmp_path: Path) -> None:
+    """A slash command stays first while the writing policy remains in force."""
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("/learn Capture the result.", encoding="utf-8")
+
+    prompt = agent_stage.read_prompt(prompt_file, None, "learning")
+
+    assert prompt.startswith("/learn Capture the result.")
+    assert "Hephaestus agent stage" not in prompt
+    assert WRITING_STANDARD_SENTINEL in prompt
+    assert prompt.index("/learn") < prompt.index(WRITING_STANDARD_SENTINEL)
+
+
+def test_read_prompt_preserves_a_provider_command_with_skill_context(tmp_path: Path) -> None:
+    """A slash command stays first when the stage also supplies skill context."""
+    prompt_file = tmp_path / "prompt.md"
+    skill_file = tmp_path / "skill.md"
+    prompt_file.write_text("/learn Capture the result.", encoding="utf-8")
+    skill_file.write_text("Use the learning workflow.", encoding="utf-8")
+
+    prompt = agent_stage.read_prompt(prompt_file, skill_file, "learning")
+
+    assert prompt.startswith("/learn Capture the result.")
+    assert "Hephaestus agent stage `learning`" in prompt
+    assert "Use the learning workflow." in prompt
+    assert prompt.count(WRITING_STANDARD_SENTINEL) == 1
 
 
 def test_build_parser_supports_prompt_dir_override(tmp_path: Path) -> None:
@@ -79,7 +122,9 @@ def test_build_parser_supports_prompt_dir_override(tmp_path: Path) -> None:
 
         prompt = agent_stage.read_prompt(prompt_file, skill_file, "review")
 
-        assert prompt.startswith("HARNESS review")
+        assert WRITING_STANDARD_SENTINEL in prompt
+        assert "HARNESS review" in prompt
+        assert prompt.index(WRITING_STANDARD_SENTINEL) < prompt.index("HARNESS review")
         assert "stage prompt" in prompt
         assert "strict instructions" in prompt
     finally:
@@ -182,6 +227,7 @@ def test_run_agent_dispatches_athena_skill_request(
     request = captured["request"]
     assert request.kind == "advise"
     assert request.agent == "pi"
+    assert request.payload["context"] == "stage prompt"
 
 
 def test_run_agent_forwards_closed_learn_delivery_file(

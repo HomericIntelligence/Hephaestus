@@ -17,7 +17,7 @@ from typing import Any, get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
-from jinja2 import TemplateNotFound, TemplateSyntaxError
+from jinja2 import TemplateSyntaxError
 
 import hephaestus.automation.pipeline as pipeline_pkg
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
@@ -213,7 +213,29 @@ class TestWiring:
         assert exc_info.value.code != 0
         assert "Prompt templates missing" in str(exc_info.value)
         assert "`uv sync`" in str(exc_info.value)
-        assert isinstance(exc_info.value.__cause__, TemplateNotFound)
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+        github_factory.assert_not_called()
+        coordinator_factory.assert_not_called()
+
+    def test_run_pipeline_prompt_preflight_requires_writing_standard(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pipeline fails before work when the immutable directive is absent."""
+        notice = tmp_path / "shared" / "untrusted_notice.j2"
+        notice.parent.mkdir()
+        notice.write_text("Untrusted content follows.\n", encoding="utf-8")
+        coordinator_factory, github_factory = self._stub_pipeline_runtime(monkeypatch)
+        monkeypatch.setattr(prompt_catalog_mod, "_DEFAULT_TEMPLATES_DIR", tmp_path)
+        PromptCatalog.clear_current()
+
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                run_pipeline(PipelineConfig(org="org", repos=["repo"], projects_dir=tmp_path))
+        finally:
+            PromptCatalog.clear_current()
+
+        assert "Prompt templates missing" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
         github_factory.assert_not_called()
         coordinator_factory.assert_not_called()
 

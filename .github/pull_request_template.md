@@ -47,6 +47,7 @@ Closes #
 - [ ] Self-review of code completed
 - [ ] Comments added in hard-to-understand areas
 - [ ] Documentation updated (if needed)
+- [ ] New or revised English technical prose follows the [ASD-STE100 writing standard](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/asd-ste100.md)
 - [ ] No new warnings introduced
 - [ ] PR title and authored commit subjects use Conventional Commit format
 - [ ] Branch named following convention: `<issue-number>-<description>`

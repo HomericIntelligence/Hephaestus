@@ -73,13 +73,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def read_prompt(prompt_file: Path, skill_file: Path | None, stage: str) -> str:
-    """Read the stage prompt and optionally prepend skill instructions."""
+    """Read a stage prompt and apply project and optional skill instructions."""
     prompt = prompt_file.read_text(encoding="utf-8")
+    catalog = PromptCatalog.current()
     if skill_file is None:
-        return prompt
-    skill_text = skill_file.read_text(encoding="utf-8")
-    return PromptCatalog.current().render(
-        "agent_stage/skill_prefix.j2", stage=stage, skill_text=skill_text, prompt=prompt
+        return catalog.apply_writing_standard(
+            prompt,
+            preserve_leading_command=prompt.startswith("/"),
+        )
+    return catalog.render(
+        "agent_stage/skill_prefix.j2",
+        stage=stage,
+        skill_text=skill_file.read_text(encoding="utf-8"),
+        prompt=prompt,
+        command_prompt=prompt.startswith("/"),
     )
 
 
@@ -239,7 +246,11 @@ def run_agent(args: argparse.Namespace) -> int:
     log_file = Path(args.log_file).expanduser().resolve() if args.log_file else None
     skill_file = Path(args.skill_file).expanduser().resolve() if args.skill_file else None
 
-    prompt = read_prompt(prompt_file, skill_file, args.stage)
+    if args.athena_skill:
+        # Host-owned Athena uses the prompt as retrieval data, not as an agent direction.
+        prompt = prompt_file.read_text(encoding="utf-8")
+    else:
+        prompt = read_prompt(prompt_file, skill_file, args.stage)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)

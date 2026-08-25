@@ -66,6 +66,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_NO_GO,
     STATE_SKIP,
 )
+from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 _RECOVERY_REVISION = "d" * 40
@@ -108,6 +109,15 @@ def _bind_recovery_revision(item: Any) -> None:
     item.payload["_synced_default_branch_sha"] = _RECOVERY_REVISION
 
 
+WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
+
+
+def _unwrapped_plan_prompt(issue_number: int) -> str:
+    """Return the complete plan payload without its outer policy wrapper."""
+    directive = PromptCatalog().render("shared/writing_standard.j2").rstrip()
+    return get_plan_prompt(issue_number).removeprefix(f"{directive}\n\n")
+
+
 def _fence_present(prompt: str, label: str) -> bool:
     """Return True when a prompt has nonce-delimited markers for label."""
     return bool(
@@ -139,7 +149,8 @@ class TestBuildPlanPrompt:
         assert _fence_present(prompt, "ISSUE_BODY")
         assert "Retry failure" in prompt
         assert "The loop retries forever." in prompt
-        assert prompt.endswith(get_plan_prompt(7))
+        assert prompt.endswith(_unwrapped_plan_prompt(7))
+        assert prompt.count(WRITING_STANDARD_SENTINEL) == 1
 
     def test_with_findings_appends_learnings_block(self) -> None:
         """Advise findings ride in a fenced learnings block."""
@@ -153,7 +164,8 @@ class TestBuildPlanPrompt:
         assert "## Prior Learnings from Team Knowledge Base (untrusted)" in prompt
         assert _fence_present(prompt, "ADVISE_FINDINGS")
         assert "Use the retry helper from utils." in prompt
-        assert prompt.endswith(get_plan_prompt(7))
+        assert prompt.endswith(_unwrapped_plan_prompt(7))
+        assert prompt.count(WRITING_STANDARD_SENTINEL) == 1
 
     def test_resume_history_is_fenced_as_untrusted(self) -> None:
         prompt = build_plan_prompt(
