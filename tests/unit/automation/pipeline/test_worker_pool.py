@@ -5053,19 +5053,15 @@ class TestGitOps:
             timeout_s=120,
             kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
         )
-        with (
-            patch(f"{_WP}.gh_call", create=True) as mock_gh,
-            patch("hephaestus.automation.git_utils.run") as mock_run,
-        ):
+        with patch("hephaestus.automation.git_utils.run") as mock_run:
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 
-        mock_gh.assert_called_once_with(
-            ["repo", "clone", "owner/name", "/tmp/dest"],
+        mock_run.assert_called_once_with(
+            ["gh", "repo", "clone", "owner/name", "/tmp/dest"],
+            cwd=None,
             timeout=120,
-            max_retries=1,
         )
-        mock_run.assert_not_called()
         assert result.ok is True
 
     def test_sync_checkout_fast_forwards_clean_expected_default_branch(
@@ -6286,7 +6282,7 @@ class TestGitOps:
             kwargs={"repo": "owner/name", "dest": "/tmp/dest"},
         )
         with patch(
-            f"{_WP}.gh_call",
+            "hephaestus.automation.git_utils.run",
             side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=1),
         ):
             pool.submit(job, StageName.REPO)
@@ -6314,7 +6310,7 @@ class TestGitOps:
             stderr="fatal: repository access denied",
         )
 
-        with patch(f"{_WP}.gh_call", side_effect=exc):
+        with patch("hephaestus.automation.git_utils.run", side_effect=exc):
             pool.submit(job, StageName.REPO)
             _, result = completion_q.get(timeout=10)
 

@@ -45,7 +45,6 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
-from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -2518,11 +2517,7 @@ class WorkerPool:
                     ok=False,
                     error="clone requires non-empty 'repo' and 'dest' kwargs",
                 )
-            gh_call(
-                ["repo", "clone", repo, dest],
-                timeout=job.timeout_s,
-                max_retries=1,
-            )
+            git_utils.run(["gh", "repo", "clone", repo, dest], cwd=None, timeout=job.timeout_s)
             return JobResult(ok=True)
 
         elif job.op == "sync_checkout":
