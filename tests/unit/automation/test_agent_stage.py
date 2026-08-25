@@ -77,6 +77,21 @@ def test_read_prompt_preserves_a_provider_command_as_the_first_token(tmp_path: P
     assert prompt.index("/learn") < prompt.index(WRITING_STANDARD_SENTINEL)
 
 
+def test_read_prompt_preserves_a_provider_command_with_skill_context(tmp_path: Path) -> None:
+    """A slash command stays first when the stage also supplies skill context."""
+    prompt_file = tmp_path / "prompt.md"
+    skill_file = tmp_path / "skill.md"
+    prompt_file.write_text("/learn Capture the result.", encoding="utf-8")
+    skill_file.write_text("Use the learning workflow.", encoding="utf-8")
+
+    prompt = agent_stage.read_prompt(prompt_file, skill_file, "learning")
+
+    assert prompt.startswith("/learn Capture the result.")
+    assert "Hephaestus agent stage `learning`" in prompt
+    assert "Use the learning workflow." in prompt
+    assert prompt.count(WRITING_STANDARD_SENTINEL) == 1
+
+
 def test_build_parser_supports_prompt_dir_override(tmp_path: Path) -> None:
     """The stage CLI should honor the shared CLI-only prompt overlay selector."""
     template = tmp_path / "agent_stage" / "skill_prefix.j2"
@@ -212,6 +227,7 @@ def test_run_agent_dispatches_athena_skill_request(
     request = captured["request"]
     assert request.kind == "advise"
     assert request.agent == "pi"
+    assert request.payload["context"] == "stage prompt"
 
 
 def test_run_agent_forwards_closed_learn_delivery_file(

@@ -246,7 +246,11 @@ def run_agent(args: argparse.Namespace) -> int:
     log_file = Path(args.log_file).expanduser().resolve() if args.log_file else None
     skill_file = Path(args.skill_file).expanduser().resolve() if args.skill_file else None
 
-    prompt = read_prompt(prompt_file, skill_file, args.stage)
+    if args.athena_skill:
+        # Host-owned Athena uses the prompt as retrieval data, not as an agent direction.
+        prompt = prompt_file.read_text(encoding="utf-8")
+    else:
+        prompt = read_prompt(prompt_file, skill_file, args.stage)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
