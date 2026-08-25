@@ -241,6 +241,44 @@ def add_max_workers_arg(
     )
 
 
+def _parse_gh_extra_path_root(value: str) -> Path:
+    """Validate an explicit root whose only admitted executable is ``bin/gh``."""
+    root = Path(value).expanduser()
+    if not root.is_absolute():
+        raise argparse.ArgumentTypeError("--gh-extra-path-root must be an absolute path")
+    try:
+        resolved_root = root.resolve(strict=True)
+        executable = (resolved_root / "bin" / "gh").resolve(strict=True)
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(
+            "--gh-extra-path-root must contain an executable bin/gh"
+        ) from exc
+    if (
+        not resolved_root.is_dir()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+        or not executable.is_relative_to(resolved_root)
+    ):
+        raise argparse.ArgumentTypeError(
+            "--gh-extra-path-root must contain an executable bin/gh without symlink escapes"
+        )
+    return resolved_root
+
+
+def add_gh_extra_path_root_arg(parser: argparse.ArgumentParser) -> None:
+    """Add the explicit, narrowly validated ``gh`` root argument to ``parser``."""
+    parser.add_argument(
+        "--gh-extra-path-root",
+        type=_parse_gh_extra_path_root,
+        default=None,
+        metavar="ROOT",
+        help=(
+            "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
+            "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
+        ),
+    )
+
+
 def print_worker_summary(
     title: str,
     results: dict[int, WorkerResult],
@@ -351,6 +389,7 @@ def build_automation_parser(
     add_parallel: bool = False,
     parallel_help: str = "Number of parallel workers, 1-32 (default: 3)",
     add_github_throttle: bool = False,
+    add_gh_extra_path_root: bool = False,
     add_dry_run: bool = True,
     dry_run_prefix: str | None = None,
     dry_run_help: str | None = None,
@@ -374,6 +413,7 @@ def build_automation_parser(
         add_parallel: Add the planner-style ``--parallel`` worker flag.
         parallel_help: Help text for ``--parallel``.
         add_github_throttle: Add GitHub global-throttle flags.
+        add_gh_extra_path_root: Add the explicit trusted ``ROOT/bin/gh`` selector.
         add_dry_run: Add ``--dry-run``.
         dry_run_prefix: Prefix passed to the canonical dry-run helper.
         dry_run_help: Raw ``--dry-run`` help text; bypasses the canonical caveat.
@@ -407,6 +447,8 @@ def build_automation_parser(
         )
     if add_github_throttle:
         add_github_throttle_args(parser)
+    if add_gh_extra_path_root:
+        add_gh_extra_path_root_arg(parser)
     if add_dry_run:
         if dry_run_help is not None:
             parser.add_argument("--dry-run", action="store_true", help=dry_run_help)
@@ -434,6 +476,7 @@ def build_review_parser(
     *,
     issues_help: str,
     dry_run_prefix: str,
+    add_gh_extra_path_root: bool = False,
 ) -> argparse.ArgumentParser:
     """Build the argparse parser used by the PR-review CLI wrapper.
 
@@ -443,6 +486,7 @@ def build_review_parser(
         issues_help: Help text for the ``--issues`` argument.
         dry_run_prefix: Prefix string for the ``--dry-run`` help text, appended
             with ``DRY_RUN_HELP_CAVEAT``.
+        add_gh_extra_path_root: Add the explicit trusted ``ROOT/bin/gh`` selector.
 
     Returns:
         Configured ``argparse.ArgumentParser`` — caller invokes ``parse_args``.
@@ -453,6 +497,7 @@ def build_review_parser(
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_github_throttle=True,
+        add_gh_extra_path_root=add_gh_extra_path_root,
         dry_run_prefix=dry_run_prefix,
         add_no_ui=True,
         add_version=False,

@@ -177,6 +177,16 @@ def _github_throttle_specs() -> tuple[ActionSpec, ActionSpec]:
     )
 
 
+def _gh_extra_path_root_spec() -> ActionSpec:
+    """Return the explicit trusted GitHub CLI root action spec."""
+    return _action_spec(
+        ("--gh-extra-path-root",),
+        "gh_extra_path_root",
+        "_StoreAction",
+        None,
+    )
+
+
 def _json_spec() -> ActionSpec:
     """Return the common --json action spec."""
     return _action_spec(
@@ -260,6 +270,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Issue numbers to plan (default: all open issues)",
         ),
         _agent_spec(),
+        _gh_extra_path_root_spec(),
         _dry_run_spec(
             _dry_help("Suppress GitHub mutations and agent calls (classify + preview only).")
         ),
@@ -365,6 +376,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Issue numbers whose linked PRs should be reviewed",
         ),
         _agent_spec(),
+        _gh_extra_path_root_spec(),
         _max_workers_spec(COMMON_REVIEW_MAX_WORKERS),
         *_github_throttle_specs(),
         _dry_run_spec(
@@ -477,6 +489,7 @@ EXPECTED_SPECS: dict[str, tuple[ActionSpec, ...]] = {
             help_text="Specific issue numbers to implement (alternative to --epic)",
         ),
         _agent_spec(),
+        _gh_extra_path_root_spec(),
         _store_true(
             "--analyze",
             "analyze",

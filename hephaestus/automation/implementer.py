@@ -157,6 +157,7 @@ Examples:
   %(prog)s --issues 595 --dry-run
         """,
         add_github_throttle=True,
+        add_gh_extra_path_root=True,
         dry_run_prefix="Suppress GitHub mutations and git pushes (no PR creation, no commits).",
         add_no_ui=True,
     )
@@ -554,6 +555,7 @@ def main() -> int:
         scope=PipelineScope(
             frozenset({StageName.IMPLEMENTATION, StageName.PR_REVIEW, StageName.MERGE_WAIT})
         ),
+        gh_extra_path_root=args.gh_extra_path_root,
     )
 
     rc = run_pipeline(config)

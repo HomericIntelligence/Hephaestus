@@ -103,6 +103,7 @@ Examples:
         dry_run_prefix=(
             "Show the review/remediation lifecycle without GitHub mutations or git pushes."
         ),
+        add_gh_extra_path_root=True,
     )
     add_version_arg(parser)
     add_agent_timeout_arg(parser)
@@ -176,6 +177,7 @@ def main() -> int:
             projects_dir=resolve_projects_dir(None, prefer_cwd_parent=True),
             json_out=args.json,
             scope=PipelineScope(_PR_REVIEWER_SCOPE_STAGES),
+            gh_extra_path_root=args.gh_extra_path_root,
         )
 
         rc = run_pipeline(config)

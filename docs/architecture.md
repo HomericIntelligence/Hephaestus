@@ -1654,11 +1654,12 @@ GitHub-only checks that need a created PR, especially `pr-policy`, still run
 after publication and remain part of the merge contract.
 
 For hosts that cannot install GitHub CLI in the system-owned locations, the
-automation loop accepts the explicit, CLI-only
-`--gh-extra-path-root ROOT` exception. It admits only `ROOT/bin/gh`; `ROOT`
-must be absolute, the executable must be executable, and its resolved path
-must remain below `ROOT`. The loop does not read an environment equivalent and
-does not discover this exception through `PATH`.
+automation loop and its direct plan, implement, and PR-review wrappers accept
+the explicit, CLI-only `--gh-extra-path-root ROOT` exception. It admits only
+`ROOT/bin/gh`; `ROOT` must be absolute, the executable must be executable, and
+its resolved path must remain below `ROOT`. Other automation CLIs do not expose
+the exception. No wrapper reads an environment equivalent or discovers this
+exception through `PATH`.
 
 Three Codex-only flags control per-role reasoning effort:
 `--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
