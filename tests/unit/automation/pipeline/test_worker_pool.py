@@ -7003,3 +7003,61 @@ class TestAgentToolScopes:
         assert result.ok is True
         assert invoke.call_args.kwargs["allowed_tools"] == "Read,Glob,Grep"
         assert invoke.call_args.kwargs["permission_mode"] == "dontAsk"
+
+
+def test_sync_checkout_uses_explicit_gh_root_for_api_when_fixed_candidates_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct scope must use ``ROOT/bin/gh`` for its default-branch lookup."""
+    from hephaestus.automation.pipeline import worker_pool as worker_pool_module
+
+    root = tmp_path / "direct-gh-root"
+    executable = root / "bin" / "gh"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    executable.chmod(0o755)
+    monkeypatch.setattr(worker_pool_module, "_TRUSTED_GH_CANDIDATES", ())
+
+    pool = WorkerPool(
+        size=1,
+        shutdown=threading.Event(),
+        completion_q=queue.Queue(),
+        gh_extra_path_root=root,
+    )
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    expected_executable = str(executable.resolve())
+    try:
+        with (
+            patch("hephaestus.automation.git_utils.run") as mock_run,
+            patch.object(
+                pool, "_fast_forward_checkout", return_value=JobResult(ok=True)
+            ) as fast_forward,
+        ):
+            mock_run.side_effect = [
+                subprocess.CompletedProcess([], 0, stdout="https://github.com/owner/name.git\n"),
+                subprocess.CompletedProcess([], 0, stdout=""),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+                subprocess.CompletedProcess([], 0, stdout="main\n"),
+            ]
+            result = pool._sync_checkout_locked(
+                checkout=checkout,
+                expected_repo="owner/name",
+                timeout_s=120,
+            )
+    finally:
+        pool.shutdown()
+
+    assert result.ok is True
+    assert mock_run.call_args_list[3] == call(
+        [expected_executable, "api", "repos/owner/name", "--jq", ".default_branch"],
+        cwd=checkout,
+        timeout=120,
+        env=ANY,
+    )
+    fast_forward.assert_called_once_with(
+        checkout=checkout,
+        default_branch="main",
+        gh_command=expected_executable,
+        timeout_s=120,
+    )
