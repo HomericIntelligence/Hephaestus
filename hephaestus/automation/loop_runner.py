@@ -130,30 +130,6 @@ def _parse_non_negative_int(value: str) -> int:
     return number
 
 
-def _parse_gh_extra_path_root(value: str) -> Path:
-    """Validate an explicit root whose only admitted executable is ``bin/gh``."""
-    root = Path(value).expanduser()
-    if not root.is_absolute():
-        raise argparse.ArgumentTypeError("--gh-extra-path-root must be an absolute path")
-    try:
-        resolved_root = root.resolve(strict=True)
-        executable = (resolved_root / "bin" / "gh").resolve(strict=True)
-    except OSError as exc:
-        raise argparse.ArgumentTypeError(
-            "--gh-extra-path-root must contain an executable bin/gh"
-        ) from exc
-    if (
-        not resolved_root.is_dir()
-        or not executable.is_file()
-        or not os.access(executable, os.X_OK)
-        or not executable.is_relative_to(resolved_root)
-    ):
-        raise argparse.ArgumentTypeError(
-            "--gh-extra-path-root must contain an executable bin/gh without symlink escapes"
-        )
-    return resolved_root
-
-
 def _parse_positive_int_list(value: str, label: str) -> list[int]:
     """Split a comma-separated list into positive integers."""
     numbers: list[int] = []
@@ -317,6 +293,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         max_workers_default=LOOP_DEFAULT_MAX_WORKERS,
         add_github_throttle=True,
+        add_gh_extra_path_root=True,
         dry_run_prefix=(
             "Forward --dry-run to every phase (suppresses GitHub mutations and git pushes)."
         ),
@@ -450,16 +427,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Run the configurable pre-PR test gate for repositories without an automatic "
             "required-check profile; Hephaestus runs its required checks before initial "
             "PR creation."
-        ),
-    )
-    p.add_argument(
-        "--gh-extra-path-root",
-        type=_parse_gh_extra_path_root,
-        default=None,
-        metavar="ROOT",
-        help=(
-            "Explicitly allow only ROOT/bin/gh in addition to system gh locations. "
-            "ROOT must be absolute and contain an executable bin/gh that does not escape ROOT."
         ),
     )
     p.add_argument(

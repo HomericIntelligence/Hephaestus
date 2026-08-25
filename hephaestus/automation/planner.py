@@ -102,6 +102,7 @@ Examples:
         add_parallel=True,
         parallel_help="Number of parallel workers, 1-32 (maps to the pipeline worker pool)",
         add_github_throttle=True,
+        add_gh_extra_path_root=True,
         dry_run_prefix="Suppress GitHub mutations and agent calls (classify + preview only).",
     )
 
@@ -285,6 +286,7 @@ def main() -> int:
             frozenset(issues) if args.reset_plan_review_session else frozenset()
         ),
         evidence_receipt_dir=args.evidence_receipt_dir,
+        gh_extra_path_root=args.gh_extra_path_root,
     )
 
     rc = run_pipeline(config)
