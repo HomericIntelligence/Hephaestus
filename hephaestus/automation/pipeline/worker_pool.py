@@ -45,6 +45,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.agents.session_errors import AgentSessionLostError
 from hephaestus.agents.workspace import WorkspaceKind, validate_workspace_binding
+from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.learn import compact_agent_session
 from hephaestus.automation.models import DEFAULT_STATE_DIR
 from hephaestus.automation.pipeline.athena_skill_jobs import (
@@ -89,7 +90,6 @@ from hephaestus.config.child_environments import (
     read_approved_parent_env,
 )
 from hephaestus.diagnostics import bounded_git_diagnostic
-from hephaestus.github.client import gh_call
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,

@@ -67,7 +67,8 @@ def gh_list_labels(
 
     def _fetch() -> set[str]:
         cmd = _with_repo(["label", "list", "--json", "name", "--limit", "200"], repo)
-        result = _api._gh_call(cmd, timeout=timeout)
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        result = _api._gh_call(cmd, **kwargs)
         data = json.loads(result.stdout)
         return {item["name"] for item in data}
 

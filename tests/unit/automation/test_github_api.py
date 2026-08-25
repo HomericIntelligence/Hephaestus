@@ -2417,25 +2417,20 @@ class TestWriteSecureCompatibility:
 
 
 class TestGhCallThrottle:
-    """Tests for the per-thread `gh` call throttle inside _gh_call."""
+    """Tests for the globally configured ``gh`` throttle."""
 
     @pytest.fixture(autouse=True)
     def _reset_throttle(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
-        # Reset the per-thread throttle state and force a known rate so tests
-        # don't inherit clock state from earlier suite calls.
+        # Preserve the compatibility seam while keeping tests independent of
+        # process-global throttle state.
         client_module._GH_THROTTLE = threading.local()
-        monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "5")
         configure_gh_global_throttle(rate=0, burst=10)
         yield
         configure_gh_global_throttle(rate=10.0, burst=30.0)
 
     @patch("hephaestus.github.client.run_subprocess")
-    def test_consecutive_calls_are_paced_to_min_interval(self, mock_run: Any) -> None:
-        """Pace consecutive calls to the configured min interval.
-
-        At 5 calls/sec, two back-to-back calls in the same thread must be
-        separated by at least ~0.2s.
-        """
+    def test_calls_do_not_consult_ambient_throttle_configuration(self, mock_run: Any) -> None:
+        """Explicit global configuration, not an environment variable, owns pacing."""
         mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
 
         import time as _time
@@ -2445,15 +2440,11 @@ class TestGhCallThrottle:
         _gh_call(["api", "/rate_limit"])
         elapsed = _time.monotonic() - t0
 
-        # Allow a small slack below the theoretical 0.2s for clock granularity.
-        assert elapsed >= 0.18, f"throttle did not pace; elapsed={elapsed:.3f}s"
+        assert elapsed < 0.05, f"disabled global throttle unexpectedly paced: {elapsed:.3f}s"
 
     @patch("hephaestus.github.client.run_subprocess")
-    def test_throttle_disabled_when_rate_zero(
-        self, mock_run: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """GH_RATE_LIMIT_PER_SEC=0 disables pacing entirely."""
-        monkeypatch.setenv("GH_RATE_LIMIT_PER_SEC", "0")
+    def test_global_throttle_disabled_when_rate_zero(self, mock_run: Any) -> None:
+        """An explicit zero global rate disables pacing entirely."""
         mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
 
         with patch("hephaestus.github.client.time.sleep") as mock_sleep:
@@ -2464,17 +2455,14 @@ class TestGhCallThrottle:
         mock_sleep.assert_not_called()
 
     @patch("hephaestus.github.client.run_subprocess")
-    def test_buckets_are_per_thread(self, mock_run: Any) -> None:
-        """Each thread has its own bucket.
-
-        Two threads each making one call should not block each other.
-        """
+    def test_disabled_global_throttle_does_not_block_threads(self, mock_run: Any) -> None:
+        """Threads do not block one another when the configured budget is disabled."""
         import threading as _t
         import time as _time
 
         mock_run.return_value = Mock(stdout="", stderr="", returncode=0)
 
-        # Pre-warm thread A's bucket so a second call from A would block.
+        # Establish an ordinary call before measuring the independent thread.
         _gh_call(["api", "/rate_limit"])
 
         elapsed_b: list[float] = []
@@ -2488,10 +2476,7 @@ class TestGhCallThrottle:
         worker.start()
         worker.join()
 
-        # Thread B has its own bucket and should not have been throttled.
-        assert elapsed_b[0] < 0.05, (
-            f"per-thread isolation broken; thread B waited {elapsed_b[0]:.3f}s"
-        )
+        assert elapsed_b[0] < 0.05, f"disabled throttle blocked thread B: {elapsed_b[0]:.3f}s"
 
 
 class TestGhCallRateLimitFromStdout:
