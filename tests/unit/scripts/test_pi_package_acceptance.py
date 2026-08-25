@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "pi_package_acceptance.py"
-ATHENA_REF = "496815b00f6fb4c8e97466489371b364d52588b5"
+ATHENA_REF = "44a22b8dfab986f505a99ce52e8521f645da3e2b"
 
 
 def _load_module() -> ModuleType:
@@ -42,7 +42,7 @@ def _write_catalog(path: Path, *, ref: str = ATHENA_REF) -> None:
                 "schema_version": 1,
                 "package": {
                     "source": "git:github.com/HomericIntelligence/Athena",
-                    "version": "v0.4.0",
+                    "version": "v0.5.0",
                     "ref": ref,
                 },
                 "compatibility": {
@@ -52,8 +52,8 @@ def _write_catalog(path: Path, *, ref: str = ATHENA_REF) -> None:
                 },
                 "upstream": {
                     "issue": "https://github.com/HomericIntelligence/Athena/issues/61",
-                    "pull_request": "https://github.com/HomericIntelligence/Athena/pull/62",
-                    "release_tag": "v0.4.0",
+                    "pull_request": "https://github.com/HomericIntelligence/Athena/pull/149",
+                    "release_tag": "v0.5.0",
                     "required_check": "package",
                 },
             }
@@ -67,7 +67,7 @@ def test_catalog_requires_an_exact_commit_ref(
 ) -> None:
     """Mutable tags and abbreviated SHAs are never installation authority."""
     catalog_path = tmp_path / "catalog.json"
-    _write_catalog(catalog_path, ref="v0.4.0")
+    _write_catalog(catalog_path, ref="v0.5.0")
 
     with pytest.raises(ValueError, match="40-character lowercase commit"):
         acceptance_module.load_catalog(catalog_path)
@@ -237,11 +237,11 @@ def test_archive_inspection_enforces_native_package_boundary(
 ) -> None:
     """The downstream audit accepts resources only and rejects bundled dependencies."""
     checkout = tmp_path / "Athena"
-    archive_path = checkout / "dist" / "athena-plugin-0.4.0.tar.gz"
+    archive_path = checkout / "dist" / "athena-plugin-0.5.0.tar.gz"
     archive_path.parent.mkdir(parents=True)
     manifest = {
         "name": "@homericintelligence/athena",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "pi": {"skills": ["./skills"]},
     }
     _write_athena_archive(archive_path, manifest)
@@ -315,11 +315,11 @@ def test_remote_receipts_bind_issue_pr_tag_check_and_implementation(
     transport = FakeTransport(
         {
             ("GET", "/repos/HomericIntelligence/Athena/issues/61"): {"state": "closed"},
-            ("GET", "/repos/HomericIntelligence/Athena/pulls/62"): {
+                ("GET", "/repos/HomericIntelligence/Athena/pulls/149"): {
                 "merged": True,
                 "merge_commit_sha": ATHENA_REF,
             },
-            ("GET", "/repos/HomericIntelligence/Athena/commits/v0.4.0"): {"sha": ATHENA_REF},
+            ("GET", "/repos/HomericIntelligence/Athena/commits/v0.5.0"): {"sha": ATHENA_REF},
             (
                 "GET",
                 f"/repos/HomericIntelligence/Athena/commits/{ATHENA_REF}/check-runs?per_page=100",
@@ -361,11 +361,11 @@ def test_remote_receipts_reject_malformed_check_payload(
     transport = FakeTransport(
         {
             ("GET", "/repos/HomericIntelligence/Athena/issues/61"): {"state": "closed"},
-            ("GET", "/repos/HomericIntelligence/Athena/pulls/62"): {
+                ("GET", "/repos/HomericIntelligence/Athena/pulls/149"): {
                 "merged": True,
                 "merge_commit_sha": ATHENA_REF,
             },
-            ("GET", "/repos/HomericIntelligence/Athena/commits/v0.4.0"): {"sha": ATHENA_REF},
+            ("GET", "/repos/HomericIntelligence/Athena/commits/v0.5.0"): {"sha": ATHENA_REF},
             (
                 "GET",
                 f"/repos/HomericIntelligence/Athena/commits/{ATHENA_REF}/check-runs?per_page=100",

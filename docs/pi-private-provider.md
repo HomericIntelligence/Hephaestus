@@ -226,7 +226,7 @@ uv run python scripts/publish_pi_package_acceptance.py \
 The publisher is the only forge-write step. It revalidates the catalog and
 implementation PR, refuses foreign or duplicate marker comments, and succeeds
 only after exact actor-owned readback. If acceptance must be rolled back,
-publish evidence for the reviewed prior catalog ref; never retag `v0.4.0` or
+publish evidence for the reviewed prior catalog ref; never retag `v0.5.0` or
 silently advance the existing catalog.
 
 ## Project-level denylist (committed)

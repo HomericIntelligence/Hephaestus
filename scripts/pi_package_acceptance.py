@@ -199,8 +199,8 @@ def load_catalog(path: Path) -> PackageCatalog:
         )
         if tuple(athena.get("commands", ())) != REQUIRED_COMMANDS:
             raise ValueError("catalog Athena commands must preserve the accepted raw identifiers")
-        if _require_string(athena, "manifest_version", "catalog.packages.athena") != "0.4.0":
-            raise ValueError("catalog Athena manifest version must be 0.4.0")
+        if _require_string(athena, "manifest_version", "catalog.packages.athena") != "0.5.0":
+            raise ValueError("catalog Athena manifest version must be 0.5.0")
     else:
         # Temporary compatibility for pre-#2516 acceptance evidence fixtures.
         package_data = _require_object(root.get("package"), "catalog.package")
@@ -211,8 +211,8 @@ def load_catalog(path: Path) -> PackageCatalog:
         )
     if package.source != "git:github.com/HomericIntelligence/Athena":
         raise ValueError("catalog package source must be the canonical Athena Git source")
-    if package.version != "v0.4.0":
-        raise ValueError("catalog package version must be v0.4.0")
+    if package.version != "v0.5.0":
+        raise ValueError("catalog package version must be v0.5.0")
     if _COMMIT_RE.fullmatch(package.ref) is None:
         raise ValueError("catalog package ref must be a 40-character lowercase commit")
 
@@ -544,9 +544,9 @@ def inspect_athena_archive(athena_checkout: Path) -> ArchiveEvidence:
         [sys.executable, str(package_script), "--root", str(athena_checkout)],
         cwd=athena_checkout,
     )
-    archives = sorted((athena_checkout / "dist").glob("athena-plugin-0.4.0.tar.gz"))
+    archives = sorted((athena_checkout / "dist").glob("athena-plugin-0.5.0.tar.gz"))
     if len(archives) != 1:
-        raise ValueError("Athena package build did not produce one v0.4.0 archive")
+        raise ValueError("Athena package build did not produce one v0.5.0 archive")
     archive_path = archives[0]
     try:
         with tarfile.open(archive_path, mode="r:gz") as archive:
@@ -570,7 +570,7 @@ def inspect_athena_archive(athena_checkout: Path) -> ArchiveEvidence:
         raise ValueError("Athena archive lacks required native Pi skill resources")
     if manifest.get("name") != "@homericintelligence/athena":
         raise ValueError("Athena archive package name is invalid")
-    if manifest.get("version") != "0.4.0":
+    if manifest.get("version") != "0.5.0":
         raise ValueError("Athena archive package version is invalid")
     if manifest.get(PI_RESOURCE_FIELD) != {"skills": ["./skills"]}:
         raise ValueError("Athena archive does not expose only canonical skills")
@@ -647,7 +647,7 @@ def render_issue_comment(evidence: dict[str, Any]) -> str:
         raise ValueError("evidence.discovery.commands must be a string list")
     return "\n".join(
         [
-            "<!-- hephaestus-pi-package-acceptance:athena-v0.4.0 -->",
+            "<!-- hephaestus-pi-package-acceptance:athena-v0.5.0 -->",
             "## Athena native Pi package acceptance",
             "",
             f"- Package: `{package.get('source')}@{package.get('ref')}`",

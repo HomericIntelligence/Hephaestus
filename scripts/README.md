@@ -88,7 +88,7 @@ through installed `hephaestus-*` console scripts.
   clean-install skill discovery; generate untracked evidence beneath
   `build/pi-acceptance/`.
 - **`publish_pi_package_acceptance.py`** — Publish and exactly read back the
-  actor-owned Athena `v0.4.0` acceptance comment on issue #2515.
+  actor-owned Athena `v0.5.0` acceptance comment on issue #2515.
 
 Collection is read-only with respect to GitHub:
 
