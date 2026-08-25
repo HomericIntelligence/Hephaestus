@@ -4251,6 +4251,46 @@ class TestRepoScoping:
         assert argv[argv.index("name=repo-a") - 1] == "-f"
         assert argv[argv.index("number=7") - 1] == "-F"
 
+    def test_pipeline_graphql_marks_guarded_transport_internal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The typed pipeline adapter is the only caller allowed past the GraphQL guard."""
+        call_kwargs: list[dict[str, object]] = []
+
+        def fake_gh_call(_argv: list[str], **kwargs: object) -> SimpleNamespace:
+            call_kwargs.append(dict(kwargs))
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "name": "repo-a",
+                                "owner": {"login": "org"},
+                                "pullRequest": {
+                                    "id": "PR_7",
+                                    "number": 7,
+                                    "reviewThreads": {
+                                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                        "nodes": [],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                ),
+                returncode=0,
+            )
+
+        monkeypatch.setattr(pg, "gh_call", fake_gh_call)
+        adapter = pg.PipelineGitHub("org", repo="repo-a", repo_root=tmp_path)
+
+        adapter._graphql(
+            github_api_mod.unresolved_review_threads_page_query("org", "repo-a", 7),
+            number=7,
+        )
+
+        assert call_kwargs[0]["_graphql_internal"] is True
+
     @pytest.mark.parametrize(
         "review_threads",
         [
