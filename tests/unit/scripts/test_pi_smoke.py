@@ -13,6 +13,7 @@ import pytest
 from hephaestus.agents.runtime import AgentRunResult
 
 _SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "pi_smoke.py"
+_WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 _spec = importlib.util.spec_from_file_location("pi_smoke", _SCRIPT)
 assert _spec and _spec.loader
 _mod = importlib.util.module_from_spec(_spec)
@@ -59,7 +60,9 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     assert kwargs["cwd"] == tmp_path
     assert kwargs["model"] == "private-model-alias"
     assert "provider" not in kwargs
-    assert run_pi.call_args.args == ("Say OK",)
+    submitted_prompt = run_pi.call_args.args[0]
+    assert _WRITING_STANDARD_SENTINEL in submitted_prompt
+    assert submitted_prompt.endswith("Say OK")
     captured = capsys.readouterr()
     assert captured.out.strip() == "OK"
     assert "SESSION_ID=" not in captured.err
@@ -73,6 +76,19 @@ def test_runs_pi_with_env_aliases_model_for_redaction_not_argv(
     assert "pi-smoke" not in log_text
     assert "private-provider-alias" not in log_text
     assert "private-model-alias" not in log_text
+
+
+def test_default_literal_probe_stays_exact() -> None:
+    """The fixed probe is a required literal, not English technical prose."""
+    assert _mod._prepare_smoke_prompt(_mod.DEFAULT_PROMPT) == _mod.DEFAULT_PROMPT
+
+
+def test_custom_slash_command_keeps_its_first_token() -> None:
+    """A custom provider command stays first and still receives the writing policy."""
+    prompt = _mod._prepare_smoke_prompt("/custom Check the provider.")
+
+    assert prompt.startswith("/custom Check the provider.")
+    assert _WRITING_STANDARD_SENTINEL in prompt
 
 
 def test_failure_output_redacts_private_values(

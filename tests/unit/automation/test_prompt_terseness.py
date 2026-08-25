@@ -1,4 +1,4 @@
-"""Verify the shared terse-output directive is composed into every agent prompt (#1082)."""
+"""Verify shared output directions are composed into every core agent prompt."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from hephaestus.automation.prompts import (
     get_advise_prompt,
     get_codex_advise_prompt,
     get_comment_difficulty_prompt,
+    get_dirty_reused_worktree_decision_prompt,
     get_follow_up_prompt,
     get_impl_loop_review_prompt,
     get_impl_resume_feedback_prompt,
@@ -27,6 +28,7 @@ from hephaestus.automation.prompts._shared import get_terse_output_directive
 # from every existing prompt file (grep -rnE "Output discipline|token budget"
 # hephaestus/automation/prompts/ returned no hits, exit 1).
 SENTINEL = "Output discipline (token budget)"
+WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 
 def test_terse_directive_leads_with_github_carveout() -> None:
@@ -96,12 +98,30 @@ PROMPT_BUILDERS = [
     lambda: get_comment_difficulty_prompt(issue_number=1, comments_json="[]"),
 ]
 
+WRITING_STANDARD_PROMPT_BUILDERS = [
+    *PROMPT_BUILDERS,
+    lambda: get_dirty_reused_worktree_decision_prompt(
+        branch_name="1-change",
+        status_text=" M file.py",
+        diff_text="diff",
+    ),
+]
+
 
 @pytest.mark.parametrize("build", PROMPT_BUILDERS)
 def test_each_prompt_includes_terse_directive(build) -> None:
     """Verify terse directive is composed into each agent prompt."""
     text = build()
     assert SENTINEL in text, "shared terse directive missing from composed prompt"
+
+
+@pytest.mark.parametrize("build", WRITING_STANDARD_PROMPT_BUILDERS)
+def test_each_prompt_includes_writing_standard(build) -> None:
+    """Each core prompt tells the agent which technical-English standard to use."""
+    text = build()
+    assert WRITING_STANDARD_SENTINEL in text, (
+        "ASD-STE100 writing standard missing from composed prompt"
+    )
 
 
 def test_terse_directive_is_external_to_python_prompt_modules() -> None:

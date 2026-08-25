@@ -30,6 +30,32 @@ common abstractions used throughout the HomericIntelligence suite.
 - AchaeanFleet → Multi-agent fleet orchestration
 - **Hephaestus → Shared utilities, tooling, and foundational components**
 
+## ASD-STE100 writing standard
+
+Hephaestus MUST use ASD-STE100 Simplified Technical English for all English
+technical prose that it owns and creates or revises. Hephaestus adopts Issue 9,
+dated January 15, 2025. Use this issue until the project explicitly adopts a
+later issue.
+
+This rule applies to Hephaestus-owned skill text, agent directions, packaged
+prompts, documentation, code comments, docstrings, user-interface text, and
+issue or pull-request text. It also applies to new or revised text that an agent
+creates when Hephaestus supplies an external skill. Do not change third-party
+skill source text or versioned external contract fixtures.
+
+The wording of the project principles is the only prose exception. This
+exception applies only to sections or prompt blocks that explicitly declare
+project principles, including specialized principle lists. Do not rewrite this
+text to meet the writing standard. References to, explanations of, and
+applications of a principle MUST follow the standard.
+
+Follow the complete [Hephaestus ASD-STE100 policy](docs/asd-ste100.md). Use the
+[official ASD-STE100 website](https://www.asd-ste100.org/) and
+[request a free official copy](https://www.asd-ste100.org/STE_downloads.html)
+when you need the standard. Do not copy its rules, dictionary, PDF, or logo
+into this repository. This project policy does not state or imply that ASD or
+STEMG approves, certifies, or endorses Hephaestus.
+
 ## Repository Structure
 
 ```text
@@ -225,6 +251,7 @@ All utility functions accepting external input must:
 - Maintain README.md with setup and usage instructions
 - Document API endpoints in OpenAPI format when applicable
 - Reference external documentation rather than duplicating
+- Follow the [ASD-STE100 writing standard](docs/asd-ste100.md)
 
 **No CHANGELOG.md.** Do not create, edit, or file issues against `CHANGELOG.md`. Release notes are generated from commits at release time via `gh release create --generate-notes`. Audit reports MUST NOT flag missing/stale changelog entries.
 

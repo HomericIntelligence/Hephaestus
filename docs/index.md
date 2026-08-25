@@ -66,6 +66,8 @@ See the [README](../README.md) for installation and development setup instructio
 - [Third-Party Services](third-party-services.md) — Vendor inventory, responsibility split, and availability expectations for GitHub, PyPI, and agent providers (issue #2177)
 - [Documentation Maintenance](documentation-maintenance.md) — Living-doc scope,
   source ownership, review triggers, and automated currency checks
+- [ASD-STE100 Writing Standard](asd-ste100.md) — Required writing policy,
+  scope, principles exception, and official sources
 
 ## Contributing
 

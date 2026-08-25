@@ -2,6 +2,12 @@
 
 This file describes the typical development workflow for Hephaestus.
 
+## Writing Standard
+
+Follow the [ASD-STE100 writing standard](../../docs/asd-ste100.md) for all
+English technical prose that you create or revise. Do not change the wording
+of project principles only to satisfy this writing standard.
+
 ## Development Cycle
 
 1. **Issue Creation**: Create GitHub issue describing the utility or enhancement

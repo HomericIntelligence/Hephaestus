@@ -29,6 +29,7 @@ from hephaestus.agents.runtime import (
     redact_pi_private_values,
     run_pi_smoke_session,
 )
+from hephaestus.prompts import PromptCatalog
 
 DEFAULT_PROMPT = "Reply with exactly: OK"
 DEFAULT_LOG_DIR = Path("pi-smoke-logs")
@@ -65,6 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local directory for untracked smoke validation logs",
     )
     return parser
+
+
+def _prepare_smoke_prompt(prompt: str) -> str:
+    """Keep the fixed literal probe exact and govern each custom prompt."""
+    if prompt == DEFAULT_PROMPT:
+        return prompt
+    return PromptCatalog().apply_writing_standard(
+        prompt,
+        preserve_leading_command=prompt.startswith("/"),
+    )
 
 
 def _write_smoke_log(
@@ -119,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         result = run_pi_smoke_session(
-            args.prompt,
+            _prepare_smoke_prompt(args.prompt),
             cwd=args.cwd,
             timeout=args.timeout,
             model=model,

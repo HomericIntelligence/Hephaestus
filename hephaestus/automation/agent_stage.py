@@ -73,13 +73,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def read_prompt(prompt_file: Path, skill_file: Path | None, stage: str) -> str:
-    """Read the stage prompt and optionally prepend skill instructions."""
+    """Read a stage prompt and apply project and optional skill instructions."""
     prompt = prompt_file.read_text(encoding="utf-8")
+    catalog = PromptCatalog.current()
     if skill_file is None:
-        return prompt
-    skill_text = skill_file.read_text(encoding="utf-8")
-    return PromptCatalog.current().render(
-        "agent_stage/skill_prefix.j2", stage=stage, skill_text=skill_text, prompt=prompt
+        return catalog.apply_writing_standard(
+            prompt,
+            preserve_leading_command=prompt.startswith("/"),
+        )
+    return catalog.render(
+        "agent_stage/skill_prefix.j2",
+        stage=stage,
+        skill_text=skill_file.read_text(encoding="utf-8"),
+        prompt=prompt,
+        command_prompt=prompt.startswith("/"),
     )
 
 

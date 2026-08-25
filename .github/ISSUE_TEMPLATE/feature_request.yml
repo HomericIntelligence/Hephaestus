@@ -3,6 +3,11 @@ description: Suggest a new utility or improvement
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: >
+        Use the [ASD-STE100 writing standard](https://github.com/HomericIntelligence/Hephaestus/blob/main/docs/asd-ste100.md)
+        for English technical prose.
   - type: textarea
     id: motivation
     attributes:

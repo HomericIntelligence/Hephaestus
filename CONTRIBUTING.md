@@ -177,6 +177,8 @@ We follow these style guidelines:
 - Type hints: Required for all public functions (enforced by mypy strict mode)
 - Line length: 100 characters
 - Target Python: 3.13
+- English technical prose: Follow the
+  [ASD-STE100 writing standard](docs/asd-ste100.md)
 
 Run the development tools:
 

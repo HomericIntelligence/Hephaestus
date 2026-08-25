@@ -20,6 +20,47 @@ from jinja2 import (
 #: module so loading never depends on importlib package metadata (which races
 #: an editable-install rebuild, #2308).
 _DEFAULT_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates" / "default"
+_WRITING_STANDARD_TEMPLATE = "shared/writing_standard.j2"
+
+# Complete agent-direction payloads. ``PromptCatalog.render`` applies the
+# built-in writing policy after it resolves an optional harness overlay. This
+# keeps the project policy in force even when the overlay replaces a complete
+# prompt or the shared output fragment.
+_AGENT_DIRECTION_TEMPLATES = frozenset(
+    {
+        "address_review/address_review.j2",
+        "advise/advise.j2",
+        "advise/direct.j2",
+        "advise/json_retry.j2",
+        "agent_stage/skill_prefix.j2",
+        "audit/coordinator.j2",
+        "ci/fix.j2",
+        "ci/force_engagement.j2",
+        "fleet_sync/conflict_resolution.j2",
+        "follow_up/follow_up.j2",
+        "implementation/dirty_worktree.j2",
+        "implementation/implementation.j2",
+        "implementation/loop_review.j2",
+        "implementation/resume_feedback.j2",
+        "learn/learn.j2",
+        "planning/context.j2",
+        "planning/plan.j2",
+        "planning/plan_loop_review.j2",
+        "planning/plan_review.j2",
+        "planning/requirements_recovery.j2",
+        "planning/requirements_recovery_review.j2",
+        "pr_management/commit_message.j2",
+        "pr_management/pr_message.j2",
+        "pr_review/analysis.j2",
+        "pr_review/comment_difficulty.j2",
+        "pr_review/validation.j2",
+        "tidy/rebase_fix.j2",
+    }
+)
+_COMPOSED_AGENT_DIRECTION_KEYS = {
+    "advise/json_retry.j2": "advise_prompt",
+    "planning/context.j2": "plan_prompt",
+}
 
 _ACTIVE_CATALOG: ContextVar[PromptCatalog | None] = ContextVar(
     "hephaestus_active_prompt_catalog", default=None
@@ -62,6 +103,7 @@ class PromptCatalog:
             keep_trailing_newline=True,
             newline_sequence="\n",
         )
+        self._writing_standard = self._writing_standard_directive()
 
     @classmethod
     def from_cli(cls, *, override_root: Path | None = None) -> PromptCatalog:
@@ -78,10 +120,51 @@ class PromptCatalog:
         """Clear CLI-selected state after an in-process invocation or test."""
         _ACTIVE_CATALOG.set(None)
 
+    @staticmethod
+    def _writing_standard_directive() -> str:
+        """Read the immutable writing directive from the packaged default tree."""
+        return (_DEFAULT_TEMPLATES_DIR / _WRITING_STANDARD_TEMPLATE).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _compose_writing_standard(
+        prompt: str, directive: str, *, preserve_leading_command: bool
+    ) -> str:
+        """Compose a previously loaded directive with one prompt."""
+        if preserve_leading_command:
+            return f"{prompt}\n\n{directive}"
+        return f"{directive.rstrip()}\n\n{prompt}"
+
+    def apply_writing_standard(self, prompt: str, *, preserve_leading_command: bool = False) -> str:
+        """Apply the immutable writing directive to an arbitrary agent prompt."""
+        directive = self._writing_standard
+        return self._compose_writing_standard(
+            prompt,
+            directive,
+            preserve_leading_command=preserve_leading_command,
+        )
+
     def render(self, template_name: str, /, **context: Any) -> str:
         """Render one safe, relative prompt template name."""
         self._validate_template_name(template_name)
-        return self._environment.get_template(template_name).render(**context)
+        if template_name not in _AGENT_DIRECTION_TEMPLATES:
+            return self._environment.get_template(template_name).render(**context)
+
+        directive = self._writing_standard
+        context = dict(context)
+        nested_key = _COMPOSED_AGENT_DIRECTION_KEYS.get(template_name)
+        if nested_key is not None and isinstance(context.get(nested_key), str):
+            prefix = f"{directive.rstrip()}\n\n"
+            context[nested_key] = context[nested_key].removeprefix(prefix)
+        if template_name == "address_review/address_review.j2":
+            context["_writing_standard_directive"] = directive.rstrip()
+        rendered = self._environment.get_template(template_name).render(**context)
+
+        if template_name == "learn/learn.j2" or rendered.startswith("/"):
+            # Provider command parsing requires the slash command to remain first.
+            return self._compose_writing_standard(
+                rendered, directive, preserve_leading_command=True
+            )
+        return self._compose_writing_standard(rendered, directive, preserve_leading_command=False)
 
     def source(self, template_name: str) -> str:
         """Return a template's source for legacy string-template compatibility."""

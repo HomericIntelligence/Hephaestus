@@ -46,6 +46,7 @@ from hephaestus.automation.state_labels import (
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
 )
+from hephaestus.prompts import PromptCatalog
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 
@@ -88,6 +89,12 @@ def _fence_present(prompt: str, label: str) -> bool:
     )
 
 
+def _unwrapped_plan_prompt(issue_number: int) -> str:
+    """Return the complete plan payload without its outer policy wrapper."""
+    directive = PromptCatalog().render("shared/writing_standard.j2").rstrip()
+    return get_plan_prompt(issue_number).removeprefix(f"{directive}\n\n")
+
+
 class TestBuildAmendPrompt:
     """build_amend_prompt composes the plan prompt with the feedback block."""
 
@@ -101,7 +108,10 @@ class TestBuildAmendPrompt:
             advise_findings="Use the retry helper.",
         )
 
-        assert get_plan_prompt(42) in prompt  # template reused inside the composed prompt
+        plan_prompt = _unwrapped_plan_prompt(42)
+        assert plan_prompt in prompt
+        assert prompt.index(plan_prompt) < prompt.index("## Prior reviewer critique")
+        assert prompt.count("ASD-STE100 Simplified Technical English, Issue 9") == 1
         assert get_untrusted_notice() in prompt
         assert _fence_present(prompt, "ISSUE_TITLE")
         assert _fence_present(prompt, "ISSUE_BODY")

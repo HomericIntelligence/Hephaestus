@@ -80,6 +80,9 @@ CI/CD remains outside this remediation loop.
      returning; an incomplete thread set is rejected by the coordinator.
 
    **Each sub-agent prompt MUST include these guardrails (critical):**
+   - Include this complete writing standard directive without changes:
+
+{{ _writing_standard_directive | indent(5, first=True) }}
    - "Do NOT background your work, do NOT exit early, and do NOT defer. Complete the fix
      synchronously and return only when the edit is done."
    - "Do not commit, push, or run git — the coordinator handles that."

@@ -84,6 +84,8 @@ from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
+WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
+
 _WP = "hephaestus.automation.pipeline.worker_pool"
 _TEST_AGENT_CWD = Path(__file__).resolve().parents[4] / "build" / "worker-pool-tests"
 
@@ -621,7 +623,8 @@ class TestWorkerPoolSubmitComplete:
                 _, result = completion_q.get(timeout=10)
 
             assert result.ok is True
-            assert seen["prompt"] == "WORKER 7\n"
+            assert WRITING_STANDARD_SENTINEL in seen["prompt"]
+            assert seen["prompt"].endswith("WORKER 7\n")
         finally:
             PromptCatalog.clear_current()
 

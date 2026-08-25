@@ -15,9 +15,11 @@ and the [packaged default templates](../../hephaestus/prompts/templates/default/
 
 Move every built-in, agent-facing Hephaestus prompt and reusable prompt
 fragment out of Python source into packaged Jinja2 templates.  A harness must
-be able to replace any default template or fragment without copying unrelated
-defaults.  Rendering the packaged defaults for the same inputs must preserve
-the current prompt text byte-for-byte.
+be able to replace the content of any default template or fragment without
+copying unrelated defaults. The harness cannot replace the required
+ASD-STE100 writing standard wrapper. Except for this wrapper, rendering the
+packaged defaults for the same inputs must preserve the current prompt text
+byte-for-byte.
 
 ## Scope
 
@@ -69,6 +71,18 @@ The catalog accepts only safe, relative `.j2` paths.  Prompt builders own the
 set of template names they render; an override cannot escape its selected
 directory or cause arbitrary Python-source loading.
 
+For each complete agent-direction payload, the catalog adds the packaged
+ASD-STE100 writing standard directive after it resolves the template. It reads
+this directive only from the packaged default tree. A harness cannot remove
+or replace it. For `learn/learn.j2`, the catalog puts the writing directive
+after the replaceable content so the packaged `/learn` command stays first.
+Other complete payloads put the directive first. A harness remains responsible
+for the command syntax in the content that it replaces.
+
+A non-template agent direction uses `PromptCatalog.apply_writing_standard` at
+its production boundary. The fixed Pi smoke probe stays exact because it tests
+a required literal. A custom Pi smoke prompt uses this method.
+
 ## Override resolution
 
 The prompt root has the established Hephaestus precedence:
@@ -78,10 +92,12 @@ The prompt root has the established Hephaestus precedence:
 
 An override root must be an existing directory.  It is layered ahead of the
 packaged default loader: an override file wins; a missing file falls through
-to the packaged default.  A malformed override, missing required variable, or
-invalid registered path is an error, never a silent fallback.  CLI entrypoints
-thread the selected catalog through their orchestration context; library
-callers may construct and pass a catalog directly.
+to the packaged default. This precedence applies to replaceable prompt
+content, but not to the packaged writing standard wrapper. A malformed
+override, missing required variable, or invalid registered path is an error,
+never a silent fallback. CLI entrypoints thread the selected catalog through
+their orchestration context; library callers may construct and pass a catalog
+directly.
 
 ## Compatibility and tests
 
@@ -93,11 +109,12 @@ coverage for every text-changing variant (provider, review iteration,
 prior-review, nitpick, and fenced-content paths) before it is complete.
 
 The parity fixture is a deliberate compatibility oracle, not a prose-quality
-snapshot: the product requirement is exact instantiated prompt preservation.
+snapshot. The product requirement is exact instantiated prompt preservation,
+except for required governance wrappers such as the ASD-STE100 directive.
 
 ## Non-goals
 
-This change does not alter prompt content, relax untrusted-input fencing,
-change parsing contracts, or introduce an external template registry.  A
-harness supplies local files and remains responsible for versioning its own
-overrides.
+Except for the required governance wrapper, this change does not alter
+replaceable prompt content. It does not relax untrusted-input fencing, change
+parsing contracts, or introduce an external template registry. A harness
+supplies local files and remains responsible for versioning its own overrides.

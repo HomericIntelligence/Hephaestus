@@ -513,6 +513,9 @@ hephaestus-check-complexity --help
 
 ## Development Guidelines
 
+Follow the [ASD-STE100 writing standard](docs/asd-ste100.md) for all English
+technical prose that you create or revise.
+
 1. Follow the principles in [AGENTS.md](AGENTS.md)
 2. Write comprehensive unit tests for all new functionality
 3. Document all public functions with Google-style docstrings
