@@ -576,10 +576,10 @@ def _gh_call(
 gh_call = _gh_call
 
 __all__ = [
+    "DEFAULT_GH_TIMEOUT",
     "ClaudeUsageCapError",
     "GitHubRateLimitError",
     "GitHubUnavailableError",
-    "DEFAULT_GH_TIMEOUT",
     "gh_call",
     "gh_cli_timeout",
     "positive_timeout",

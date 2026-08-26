@@ -87,7 +87,7 @@ def _detect_cwd_repo(*, metadata_timeout: int = METADATA_TIMEOUT) -> tuple[str |
     return (org, repo)
 
 
-def _iter_gh_repos(org: str) -> Iterator[str]:
+def _iter_gh_repos(org: str, *, network_timeout: float | None = None) -> Iterator[str]:
     """Yield non-archived, non-fork organization repos one REST page at a time.
 
     The generator does not prefetch the next page: the coordinator owns when
@@ -95,7 +95,17 @@ def _iter_gh_repos(org: str) -> Iterator[str]:
     REST page and its bounded pipeline cursors rather than every repository.
     The API uses ``archived`` and ``fork`` (not GraphQL's ``isArchived`` /
     ``isFork``); malformed flags fail closed before automation touches a repo.
+
+    Args:
+        org: Organization slug to enumerate.
+        network_timeout: Explicit per-call timeout in seconds; falls back to
+            the module default when omitted.
+
+    Yields:
+        Repository names, one per page entry.
+
     """
+    timeout = NETWORK_TIMEOUT if network_timeout is None else network_timeout
     page = 1
     while True:
         try:
@@ -107,7 +117,7 @@ def _iter_gh_repos(org: str) -> Iterator[str]:
                         f"&direction=asc&page={page}"
                     ),
                 ],
-                timeout=NETWORK_TIMEOUT,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"gh repo list {org} timed out after {exc.timeout}s") from exc

@@ -12,18 +12,14 @@ if __package__ in {None, ""}:
 
 from skills._cli import argument_parser
 
-COMPANION_FILE = re.compile(
-    r"(?:.*\.notes(?:-[A-Za-z0-9_-]+)?\.md|.*\.history(?:[-.].*)?)\Z"
-)
+COMPANION_FILE = re.compile(r"(?:.*\.notes(?:-[A-Za-z0-9_-]+)?\.md|.*\.history(?:[-.].*)?)\Z")
 
 
 def retrievable_skill_files(knowledge_root: Path) -> list[Path]:
     """Return sorted flat main-skill files from a Mnemosyne checkout."""
     skills_directory = knowledge_root / "skills"
     if not skills_directory.is_dir():
-        raise RuntimeError(
-            f"knowledge skills directory is unavailable: {skills_directory}"
-        )
+        raise RuntimeError(f"knowledge skills directory is unavailable: {skills_directory}")
     return sorted(
         path
         for path in skills_directory.glob("*.md")

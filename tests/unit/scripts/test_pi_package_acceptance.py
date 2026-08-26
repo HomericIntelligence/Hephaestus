@@ -315,7 +315,7 @@ def test_remote_receipts_bind_issue_pr_tag_check_and_implementation(
     transport = FakeTransport(
         {
             ("GET", "/repos/HomericIntelligence/Athena/issues/61"): {"state": "closed"},
-                ("GET", "/repos/HomericIntelligence/Athena/pulls/149"): {
+            ("GET", "/repos/HomericIntelligence/Athena/pulls/149"): {
                 "merged": True,
                 "merge_commit_sha": ATHENA_REF,
             },
@@ -361,7 +361,7 @@ def test_remote_receipts_reject_malformed_check_payload(
     transport = FakeTransport(
         {
             ("GET", "/repos/HomericIntelligence/Athena/issues/61"): {"state": "closed"},
-                ("GET", "/repos/HomericIntelligence/Athena/pulls/149"): {
+            ("GET", "/repos/HomericIntelligence/Athena/pulls/149"): {
                 "merged": True,
                 "merge_commit_sha": ATHENA_REF,
             },

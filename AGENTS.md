@@ -173,6 +173,7 @@ from typing import List, Dict, Optional
 # Local imports last
 # from hephaestus.utils.helpers import helper_function
 
+
 def function_name(param: str, optional_param: Optional[int] = None) -> bool:
     """Clear docstring with purpose, parameters, and return value.
 

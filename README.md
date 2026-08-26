@@ -33,6 +33,7 @@ pip install HomericIntelligence-Hephaestus
 
 ```python
 import hephaestus
+
 print(hephaestus.__version__)
 ```
 

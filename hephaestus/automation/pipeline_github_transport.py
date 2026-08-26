@@ -11,7 +11,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import quote
 
 import hephaestus.automation.github_api as github_api
@@ -239,8 +239,13 @@ get_pr_head_branch = _CompatCallable("get_pr_head_branch")
 issue_auto_impl_branch_name = _CompatCallable("issue_auto_impl_branch_name")
 file_lock = _CompatCallable("file_lock")
 # Keep the coordinator's historical patch seam on the façade while allowing
-# the runtime collaborator to depend only on this transport module.
-rate_budget_ok = cast(Callable[[], tuple[bool, float]], _CompatCallable("rate_budget_ok"))
+# the runtime collaborator to depend only on this transport module. Under
+# type checking the name keeps its declared function type; at runtime it
+# resolves through the façade compatibility shim.
+if TYPE_CHECKING:
+    rate_budget_ok = _rate_budget_ok_impl
+else:  # pragma: no cover - runtime seam exercised by coordinator tests
+    rate_budget_ok = cast(Callable[[], tuple[bool, float]], _CompatCallable("rate_budget_ok"))
 
 
 class PipelineGitHubTransport(_PipelineGitHubHost):
