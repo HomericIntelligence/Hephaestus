@@ -379,14 +379,17 @@ repos:
         entry: 'add_to_bashrc\s+"(?!(?:eval \\"\\\$\(/[A-Za-z0-9._/\-]+ shellenv\)\\"|export PATH=\\\$PATH:[A-Za-z0-9._/\-$]+)")[^"]*"'
         files: ^scripts/shell/install\.sh$
         pass_filenames: true
-  # Shellcheck for shell scripts
-  - repo: https://github.com/shellcheck-py/shellcheck-py
-    # v0.10.0.1
-    rev: a23f6b85d0fdd5bb9d564e2579e678033debbdff
+  # ShellCheck is installed in the snapshot-pinned CI image and supplied by
+  # the developer's local toolchain.  Using the binary directly avoids
+  # shellcheck-py's build-time download, which otherwise makes image builds
+  # network-flaky.
+  - repo: local
     hooks:
       - id: shellcheck
         name: ShellCheck
         description: Shell script linter
+        language: system
+        entry: shellcheck
         files: \.sh$
         # -x lets shellcheck follow `# shellcheck source=...` directives
         # (e.g. install.sh sourcing lib/install_helpers.sh).
