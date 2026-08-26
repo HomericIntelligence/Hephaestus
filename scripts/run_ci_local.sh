@@ -56,6 +56,7 @@ CANDIDATE_ROOT=""
 CANDIDATE_TREE=""
 CANDIDATE_INDEX_CONTAINER=""
 CANDIDATE_OBJECTS_CONTAINER=""
+REPOSITORY_OBJECTS_CONTAINER=""
 CI_BUILD_ROOT=""
 CI_RUN_IMAGE=""
 
@@ -75,6 +76,7 @@ cleanup_candidate_snapshot() {
     CANDIDATE_TREE=""
     CANDIDATE_INDEX_CONTAINER=""
     CANDIDATE_OBJECTS_CONTAINER=""
+    REPOSITORY_OBJECTS_CONTAINER=""
 }
 
 cleanup_ci_build() {
@@ -172,6 +174,15 @@ prepare_candidate_snapshot() {
     candidate_relative="${CANDIDATE_ROOT#"${PROJECT_ROOT}/"}"
     CANDIDATE_INDEX_CONTAINER="/workspace/${candidate_relative}/index"
     CANDIDATE_OBJECTS_CONTAINER="/workspace/${candidate_relative}/objects"
+    case "${repository_objects}" in
+        "${PROJECT_ROOT}"/*)
+            REPOSITORY_OBJECTS_CONTAINER="/workspace/${repository_objects#"${PROJECT_ROOT}/"}"
+            ;;
+        *)
+            # Linked-worktree common metadata is mounted at its host path.
+            REPOSITORY_OBJECTS_CONTAINER="${repository_objects}"
+            ;;
+    esac
 }
 
 trap cleanup EXIT
@@ -359,7 +370,8 @@ run_lint() {
     prepare_candidate_snapshot
     run_in_container env \
         "GIT_INDEX_FILE=${CANDIDATE_INDEX_CONTAINER}" \
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES=${CANDIDATE_OBJECTS_CONTAINER}" \
+        "GIT_OBJECT_DIRECTORY=${CANDIDATE_OBJECTS_CONTAINER}" \
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES=${REPOSITORY_OBJECTS_CONTAINER}" \
         uv run pre-commit run --all-files --show-diff-on-failure || return 1
     run_in_container uv run hephaestus-validate-links docs --repo-root . || return 1
 }

@@ -69,6 +69,7 @@ def _fake_engine(
             '  candidate_root=""\n'
             '  candidate_index=""\n'
             '  candidate_objects=""\n'
+            '  candidate_object_directory=""\n'
             '  for arg in "$@"; do\n'
             '    case "$arg" in\n'
             "      *:/workspace:Z)\n"
@@ -83,14 +84,19 @@ def _fake_engine(
             "      GIT_ALTERNATE_OBJECT_DIRECTORIES=/workspace/*)\n"
             '        candidate_objects="${arg#GIT_ALTERNATE_OBJECT_DIRECTORIES=/workspace/}"\n'
             "        ;;\n"
+            "      GIT_OBJECT_DIRECTORY=/workspace/*)\n"
+            '        candidate_object_directory="${arg#GIT_OBJECT_DIRECTORY=/workspace/}"\n'
+            "        ;;\n"
             "    esac\n"
             "  done\n"
-            '  if [[ -n "$candidate_index" ]] && '
+            '  if [[ -n "$candidate_index" && -n "$candidate_object_directory" ]] && '
             'GIT_INDEX_FILE="$workspace_root/$candidate_index" '
+            'GIT_OBJECT_DIRECTORY="$workspace_root/$candidate_object_directory" '
             'GIT_ALTERNATE_OBJECT_DIRECTORIES="$workspace_root/$candidate_objects" '
             '/usr/bin/git -C "$workspace_root" cat-file -e :new_source.py; then\n'
             '    printf "CANDIDATE_INDEX_BYTES:" >> "$FAKE_ENGINE_LOG"\n'
             '    GIT_INDEX_FILE="$workspace_root/$candidate_index" '
+            'GIT_OBJECT_DIRECTORY="$workspace_root/$candidate_object_directory" '
             'GIT_ALTERNATE_OBJECT_DIRECTORIES="$workspace_root/$candidate_objects" '
             '/usr/bin/git -C "$workspace_root" show :new_source.py '
             '>> "$FAKE_ENGINE_LOG"\n'
@@ -270,7 +276,8 @@ def test_all_runs_every_local_required_gate(tmp_path: Path) -> None:
     assert "All locally executable CI checks passed." in result.stdout
     for command in (
         "GIT_INDEX_FILE=/workspace/build/ci-candidate.",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES=/workspace/build/ci-candidate.",
+        "GIT_OBJECT_DIRECTORY=/workspace/build/ci-candidate.",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
         "uv run pre-commit run --all-files --show-diff-on-failure",
         "uv run hephaestus-validate-links docs --repo-root .",
         "uv run pytest tests/unit",
@@ -325,6 +332,7 @@ def test_lint_candidate_index_includes_untracked_source(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "CANDIDATE_INDEX_BYTES:NEW = True" in log
     assert "GIT_INDEX_FILE=/workspace/build/ci-candidate." in log
+    assert "GIT_OBJECT_DIRECTORY=/workspace/build/ci-candidate." in log
     after_index = subprocess.run(
         ["git", "write-tree"], cwd=repo, text=True, capture_output=True, check=True
     ).stdout
