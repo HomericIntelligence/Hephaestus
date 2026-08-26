@@ -39,6 +39,7 @@ __all__ = [
     "add_json_arg",
     "add_learn_timeout_arg",
     "add_logging_args",
+    "add_pipeline_runtime_args",
     "add_poll_max_wait_arg",
     "add_version_arg",
     "configure_cli_logging",
@@ -163,6 +164,12 @@ def add_logging_args(parser: argparse.ArgumentParser) -> None:
         "-q", "--quiet", action="store_true", help="Suppress informational messages"
     )
     logging_group.add_argument("--log-file", help="Log to file instead of stdout")
+    logging_group.add_argument(
+        "--log-format",
+        choices=("text", "json"),
+        default="text",
+        help="Log record format (default: text; independent of --json output).",
+    )
 
 
 def add_version_arg(parser: argparse.ArgumentParser) -> None:
@@ -240,7 +247,7 @@ def resolve_repo_root(args: argparse.Namespace) -> Path:
     return args.repo_root if args.repo_root is not None else get_repo_root()
 
 
-def configure_cli_logging(*, verbose: bool = False) -> None:
+def configure_cli_logging(*, verbose: bool = False, log_format: str = "text") -> None:
     """Configure standard stderr-safe logging for a ``hephaestus-*`` CLI.
 
     Centralizes the logging setup boilerplate repeated across
@@ -249,6 +256,7 @@ def configure_cli_logging(*, verbose: bool = False) -> None:
 
     Args:
         verbose: When True, set the root level to ``DEBUG``; otherwise ``INFO``.
+        log_format: ``"text"`` for standard logs or ``"json"`` for structured logs.
 
     """
     setup_logging(
@@ -256,6 +264,7 @@ def configure_cli_logging(*, verbose: bool = False) -> None:
         format_string=AUTOMATION_LOG_FORMAT,
         datefmt=LOG_DATEFMT,
         primary_stream="stderr",
+        json_format=log_format == "json",
     )
 
 
@@ -552,7 +561,7 @@ def add_agent_timeout_arg(
     *,
     flag: str = "--agent-timeout",
     dest: str = "agent_timeout",
-    default_doc: int = 7200,
+    default: int = 7200,
     help_extra: str = "",
 ) -> None:
     """Add an optional agent subprocess timeout flag to a CLI parser.
@@ -561,7 +570,7 @@ def add_agent_timeout_arg(
         parser: ArgumentParser instance to add the flag to
         flag: The CLI flag name (default: ``--agent-timeout``)
         dest: The argparse destination attribute (default: ``agent_timeout``)
-        default_doc: Default value shown in help text (default: 7200)
+        default: Default timeout value (default: 7200)
         help_extra: Optional extra help text appended after the default note
 
     """
@@ -570,10 +579,10 @@ def add_agent_timeout_arg(
         flag,
         dest=dest,
         type=_positive_int,
-        default=None,
+        default=default,
         metavar="SECONDS",
         help=(
-            f"Agent subprocess timeout in seconds (default: {default_doc})."
+            f"Agent subprocess timeout in seconds (default: {default})."
             f"{extra}{_POSITIVE_TIMEOUT_HELP}"
         ),
     )
@@ -590,7 +599,7 @@ def add_advise_timeout_arg(parser: argparse.ArgumentParser) -> None:
         "--advise-timeout",
         dest="advise_timeout",
         type=_positive_int,
-        default=None,
+        default=7200,
         metavar="SECONDS",
         help="Timeout for the advise sub-agent in seconds (default: 7200)."
         + _POSITIVE_TIMEOUT_HELP,
@@ -608,7 +617,7 @@ def add_poll_max_wait_arg(parser: argparse.ArgumentParser) -> None:
         "--poll-max-wait",
         dest="poll_max_wait",
         type=_positive_int,
-        default=None,
+        default=1200,
         metavar="SECONDS",
         help="Max wall-clock seconds to poll CI before backing off (default: 1200)."
         + _POSITIVE_TIMEOUT_HELP,
@@ -626,7 +635,7 @@ def add_git_message_timeout_arg(parser: argparse.ArgumentParser) -> None:
         "--git-message-timeout",
         dest="git_message_timeout",
         type=_positive_int,
-        default=None,
+        default=1200,
         metavar="SECONDS",
         help="Timeout for the lightweight commit/PR message agent (default: 1200)."
         + _POSITIVE_TIMEOUT_HELP,
@@ -644,9 +653,9 @@ def add_learn_timeout_arg(parser: argparse.ArgumentParser) -> None:
         "--learn-timeout",
         dest="learn_timeout",
         type=_positive_int,
-        default=None,
+        default=1200,
         metavar="SECONDS",
-        help="Timeout for the /learn agent session (default: 7200)." + _POSITIVE_TIMEOUT_HELP,
+        help="Timeout for the /learn agent session (default: 1200)." + _POSITIVE_TIMEOUT_HELP,
     )
 
 
@@ -661,8 +670,46 @@ def add_follow_up_timeout_arg(parser: argparse.ArgumentParser) -> None:
         "--follow-up-timeout",
         dest="follow_up_timeout",
         type=_positive_int,
-        default=None,
+        default=7200,
         metavar="SECONDS",
         help="Timeout for the follow-up-issue agent session (default: 7200)."
         + _POSITIVE_TIMEOUT_HELP,
     )
+
+
+def add_pipeline_runtime_args(
+    parser: argparse.ArgumentParser,
+    *,
+    role: str,
+    timeouts: Sequence[str] = (),
+    plugin_skills: bool = False,
+) -> None:
+    """Add shared explicit configuration for a standalone pipeline wrapper."""
+    for flag in ("model", f"{role}-model", "fallback-model"):
+        parser.add_argument(f"--{flag}", default="", metavar="MODEL")
+    parser.add_argument("--projects-dir", type=Path, default=None, metavar="PATH")
+    parser.add_argument(
+        "--rate-guard", action="store_true", dest="rate_guard_enabled", default=True
+    )
+    parser.add_argument("--no-rate-guard", action="store_false", dest="rate_guard_enabled")
+    parser.add_argument("--rate-guard-threshold", type=_positive_int, default=200, metavar="N")
+    if plugin_skills:
+        parser.add_argument("--plugin-skills-dir", type=Path, default=None, metavar="PATH")
+    timeout_defaults = {
+        "clone": 120,
+        "network": 120,
+        "gh": 120,
+        "metadata": 10,
+        "rebase": 2400,
+        "diff-collect": 60,
+        "pre-pr-test": 600,
+    }
+    for name in timeouts:
+        default = timeout_defaults[name]
+        parser.add_argument(
+            f"--{name}-timeout",
+            dest=f"{name.replace('-', '_')}_timeout",
+            type=_positive_int,
+            default=default,
+            metavar="SECONDS",
+        )

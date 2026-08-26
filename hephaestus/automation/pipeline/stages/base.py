@@ -108,6 +108,7 @@ __all__ = [
     "agent_provider",
     "source_workspace_binding",
     "stage_model",
+    "stage_timeout",
     "write_skip_label",
 ]
 
@@ -703,7 +704,7 @@ def stage_model(
     phase_value = getattr(ctx.config, f"{phase}_model", "")
     catch_all = getattr(ctx.config, "model", "")
     configured_model = str(phase_value or catch_all or fallback())
-    model = direct_agent_model(selected_provider, codex_default=configured_model)
+    model = direct_agent_model(selected_provider, configured_model)
     reasoning_effort = str(getattr(ctx.config, f"{phase}_reasoning_effort", "") or "")
     if reasoning_effort and agent_supports_model_reasoning_effort(selected_provider):
         base_model, separator, current_effort = model.rpartition(":")
@@ -711,6 +712,21 @@ def stage_model(
             model = base_model
         return f"{model}:{reasoning_effort}"
     return model
+
+
+def stage_timeout(
+    ctx: StageContext,
+    phase: str,
+    fallback: Callable[[], int] | int,
+) -> int:
+    """Return a positive typed phase timeout or the legacy fixed default."""
+    value = getattr(ctx.config, f"{phase}_timeout", None)
+    if value is None:
+        value = fallback() if callable(fallback) else fallback
+    timeout = int(value)
+    if timeout <= 0:
+        raise ValueError(f"{phase}_timeout must be positive")
+    return timeout
 
 
 def source_workspace_binding(
@@ -832,7 +848,7 @@ def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJo
     return GitJob(
         repo=item.repo,
         op="rebase",
-        timeout_s=GIT_JOB_TIMEOUT_S,
+        timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
         kwargs={
             "cwd": _worktree_path(item, ctx),
             "base_branch": str(item.payload.get("base_branch") or "main"),

@@ -30,6 +30,7 @@ hephaestus-audit-prs [--pr-numbers N ...] [--codex] [--dry-run] [--json] [-v]
 
 ```python
 from hephaestus.automation import AuditReviewer
+
 rc, audits = AuditReviewer(pr_numbers=[101, 102]).run()
 ```
 

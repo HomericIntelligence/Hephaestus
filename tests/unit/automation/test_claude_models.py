@@ -38,34 +38,30 @@ class TestDefaults:
         assert claude_models.fallback_model() == claude_models.OPUS_48
 
 
-class TestEnvOverride:
-    """An operator can flip a phase's model without code changes.
+class TestExplicitOverride:
+    """An operator can flip a phase's model through typed CLI configuration.
 
     Useful when one tier's quota is exhausted (the original bug —
     Opus quota ran out, blocking every implementer call until the user
     could pin Haiku).
     """
 
-    def test_planner_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HEPH_PLANNER_MODEL", "claude-haiku-4-5")
-        assert claude_models.planner_model() == "claude-haiku-4-5"
+    def test_planner_override(self) -> None:
+        assert claude_models.planner_model("claude-haiku-4-5") == "claude-haiku-4-5"
 
-    def test_implementer_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-opus-4-7")
-        assert claude_models.implementer_model() == "claude-opus-4-7"
+    def test_implementer_override(self) -> None:
+        assert claude_models.implementer_model("claude-opus-4-7") == "claude-opus-4-7"
 
-    def test_fallback_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-sonnet-4-6")
-        assert claude_models.fallback_model() == "claude-sonnet-4-6"
+    def test_fallback_override(self) -> None:
+        assert claude_models.fallback_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
 
     def test_fallback_unknown_override_warns_but_returns_value(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture
     ) -> None:
         import logging
 
-        monkeypatch.setenv("HEPH_FALLBACK_MODEL", "claude-preview-99-99")
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.fallback_model()
+            result = claude_models.fallback_model("claude-preview-99-99")
         assert result == "claude-preview-99-99"
         assert any("Unknown model" in r.message for r in caplog.records)
 
@@ -90,8 +86,8 @@ class TestModuleStable:
         assert expected_codex_advise == claude_models.CODEX_ADVISE
 
 
-class TestEnvVarValidation:
-    """A5-04: unknown env-var overrides warn but do not crash."""
+class TestExplicitValueValidation:
+    """Unknown explicit overrides warn but do not crash."""
 
     def test_known_override_no_warning(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -99,9 +95,8 @@ class TestEnvVarValidation:
         """Known model IDs produce no warning."""
         import logging
 
-        monkeypatch.setenv("HEPH_PLANNER_MODEL", claude_models.HAIKU)
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.planner_model()
+            result = claude_models.planner_model(claude_models.HAIKU)
         assert result == claude_models.HAIKU
         assert not caplog.records
 
@@ -111,31 +106,21 @@ class TestEnvVarValidation:
         """Unknown model IDs trigger a warning but are still returned (A5-04)."""
         import logging
 
-        monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-preview-99-99")
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.implementer_model()
+            result = claude_models.implementer_model("claude-preview-99-99")
         assert result == "claude-preview-99-99"
         assert any("Unknown model" in r.message for r in caplog.records)
 
     def test_all_phase_functions_accept_unknown_model(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
     ) -> None:
         """All phase functions accept overrides without raising (A5-04)."""
         model_id = "claude-experimental-0-0"
-        for env_var in (
-            "HEPH_PLANNER_MODEL",
-            "HEPH_IMPLEMENTER_MODEL",
-            "HEPH_REVIEWER_MODEL",
-            "HEPH_ADVISE_MODEL",
-            "HEPH_LEARN_MODEL",
-        ):
-            monkeypatch.setenv(env_var, model_id)
-
-        assert claude_models.planner_model() == model_id
-        assert claude_models.implementer_model() == model_id
-        assert claude_models.reviewer_model() == model_id
-        assert claude_models.advise_model() == model_id
-        assert claude_models.learn_model() == model_id
+        assert claude_models.planner_model(model_id) == model_id
+        assert claude_models.implementer_model(model_id) == model_id
+        assert claude_models.reviewer_model(model_id) == model_id
+        assert claude_models.advise_model(model_id) == model_id
+        assert claude_models.learn_model(model_id) == model_id
 
 
 class TestNewerModelsRecognized:
@@ -167,9 +152,8 @@ class TestNewerModelsRecognized:
     ) -> None:
         import logging
 
-        monkeypatch.setenv("HEPH_REVIEWER_MODEL", raw_model)
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.reviewer_model()
+            result = claude_models.reviewer_model(raw_model)
         assert result == expected_model
         assert not caplog.records
 
@@ -198,8 +182,7 @@ class TestNewerModelsRecognized:
         """Adding newer models must not suppress warnings for true typos."""
         import logging
 
-        monkeypatch.setenv("HEPH_REVIEWER_MODEL", "claude-fbale-5")  # typo
         with caplog.at_level(logging.WARNING, logger="hephaestus.automation.agent_config"):
-            result = claude_models.reviewer_model()
+            result = claude_models.reviewer_model("claude-fbale-5")  # typo
         assert result == "claude-fbale-5"
         assert any("Unknown model" in r.message for r in caplog.records)

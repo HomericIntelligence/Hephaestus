@@ -23,7 +23,9 @@ from hephaestus.github.fleet_sync.git_ops import (
 from hephaestus.github.fleet_sync.gpg import get_resign_email, get_resign_exec
 from hephaestus.github.fleet_sync.models import (
     ASCII_SYMBOLS,
+    DEFAULT_FLEET_TIMEOUTS,
     UNICODE_SYMBOLS,
+    FleetTimeouts,
     PRInfo,
     PRStatus,
     Symbols,
@@ -36,14 +38,13 @@ from hephaestus.github.fleet_sync.pr_api import (
     merge_pr,
 )
 from hephaestus.github.fleet_sync.sync_coordinator import logger, process_repo
-from hephaestus.utils.helpers import METADATA_TIMEOUT, NETWORK_TIMEOUT
 
 __all__ = [
     "ASCII_SYMBOLS",
     "DEFAULT_FLEET_CONFIG_FILENAME",
-    "METADATA_TIMEOUT",
-    "NETWORK_TIMEOUT",
+    "DEFAULT_FLEET_TIMEOUTS",
     "UNICODE_SYMBOLS",
+    "FleetTimeouts",
     "PRInfo",
     "PRStatus",
     "Symbols",

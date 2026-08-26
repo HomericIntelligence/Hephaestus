@@ -979,7 +979,7 @@ class TestMessageAgentInvocation:
     def test_pi_message_agent_uses_read_only_pi_exec(self) -> None:
         completed = subprocess.CompletedProcess(args=["pi"], returncode=0, stdout="{}", stderr="")
         with (
-            patch.dict("os.environ", {"HEPH_PI_MODEL": "operator-local-alias"}, clear=True),
+            patch.dict("os.environ", {"HEPH_PI_MODEL": "poisoned-env-value"}, clear=True),
             patch.object(pr_manager, "uses_direct_agent_runner", return_value=True),
             patch.object(pr_manager, "run_agent_text", return_value=completed) as run_agent,
         ):
@@ -991,6 +991,7 @@ class TestMessageAgentInvocation:
                     worktree_path=Path("/tmp/wt"),
                     agent="pi",
                     timeout=120,
+                    model_override="operator-local-alias",
                 )
                 == "{}"
             )
@@ -1073,8 +1074,8 @@ class TestCoAuthorLine:
         commit_msg = run_mock.call_args_list[-1].args[0][-1]
         assert "Implemented-By: claude-test-model-9" in commit_msg
 
-    def test_implemented_by_reflects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "claude-env-override-5")
+    def test_implemented_by_reflects_explicit_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HEPH_IMPLEMENTER_MODEL", "poisoned-env-value")
         porcelain = _porcelain(" M foo.py")
         run_mock = MagicMock(
             side_effect=[
@@ -1095,11 +1096,10 @@ class TestCoAuthorLine:
             patch.object(pr_manager, "_agentic_commit_email", return_value=_TEST_AGENT_EMAIL),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
-            pr_manager.commit_changes(20, Path("/tmp/wt"))
+            pr_manager.commit_changes(20, Path("/tmp/wt"), agent_model="claude-explicit-5")
 
         commit_msg = run_mock.call_args_list[-1].args[0][-1]
-        # Env override flows into Implemented-By, not Co-Authored-By.
-        assert "Implemented-By: claude-env-override-5" in commit_msg
+        assert "Implemented-By: claude-explicit-5" in commit_msg
         coauthor_line = next(
             line for line in commit_msg.splitlines() if line.startswith("Co-Authored-By:")
         )

@@ -5,9 +5,14 @@ similarly named fork, stale checkout, or unverified remote.
 
 ## At a glance
 
-Athena resolves a trusted owner, synchronizes an exact checkout, and binds use
-to its reported revision. Any trust, authentication, checkout, or update failure
-stops the dependent skill.
+Athena normally resolves a trusted owner, synchronizes an exact checkout, and binds use
+to its reported revision. During normal resolution, any trust, authentication, checkout, or
+update failure stops the dependent skill. A planning-mode, read-only path may explicitly use an
+existing checkout as best effort without upstream synchronization; it must bind and report its
+current `HEAD`, state freshness and trust limits, never substitute another repository, and never
+perform durable writes.
+Skills may impose stricter requirements; `learn` requires a usable checkout before discovery or
+writing, and its discovery path does not create one in planning mode.
 
 ```mermaid
 flowchart LR
@@ -19,8 +24,10 @@ flowchart LR
     C --> G["Verify origin and clean checkout"]
     E --> G
     F --> G
-    G --> H["Fetch, fast-forward, bind SHA"]
-    H --> I["Revalidate automatic-fork trust before use"]
+    G --> H{"Planning-mode read-only path?"}
+    H -->|yes| I["Inspect existing checkout; bind current HEAD; report limits"]
+    H -->|no| J["Fetch, fast-forward, bind SHA"]
+    J --> K["Revalidate automatic-fork trust before use"]
 ```
 
 ## Component details
@@ -93,8 +100,20 @@ candidate `parent.full_name`, resolved repository identity, default branch, and 
 reported trust decision and checked-out commit. Stop on any mismatch. This closes the race between
 resolution and use.
 
+### Read-only local best effort
+
+Only a read-only planning or `learn` discovery path may use this exception. It may inspect an
+existing checkout and bind to its current `HEAD` without cloning, fetching, fast-forwarding, or
+revalidating an automatic fork. It must report the checkout, revision, trust basis or uncertainty,
+and freshness limitation. A missing checkout or failed inspection stops that dependent knowledge
+retrieval; the caller may continue its primary plan only when its skill contract permits planning
+without guidance. `learn` does not permit that fallback and blocks without an existing usable
+checkout.
+
 An authentication failure, missing repository, invalid fork relationship, unexpected origin,
 conflicting local state, clone failure, fetch failure, or fast-forward failure is fatal.
+The fatal rule applies to normal execution and to the `learn` delivery boundary; the read-only
+local-best-effort exception never permits PR creation from an unsynchronized base.
 
 Mnemosyne writes use isolated worktrees and always end in a pull request. Hephaestus is read or
 executed from its canonical checkout; Athena skills never edit it unless the user explicitly asks

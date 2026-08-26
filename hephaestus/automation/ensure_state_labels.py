@@ -187,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
     configure_github_throttle_from_args(args)
-    configure_cli_logging(verbose=args.verbose)
+    configure_cli_logging(verbose=args.verbose, log_format=getattr(args, "log_format", "text"))
 
     shutdown = threading.Event()
     with terminal_guard(shutdown.set):

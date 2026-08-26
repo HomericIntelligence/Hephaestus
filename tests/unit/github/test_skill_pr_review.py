@@ -73,6 +73,19 @@ def test_git_read_environment_rejects_inherited_git_overrides(monkeypatch) -> No
     assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
 
 
+def test_git_read_environment_is_a_named_minimal_allowlist(monkeypatch) -> None:
+    """Unrelated parent variables and secrets cannot leak to Git read children."""
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+    monkeypatch.setenv("HEPH_GH_TIMEOUT", "poison")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    environment = _git_read_environment()
+
+    assert environment["PATH"] == "/usr/bin"
+    assert "UNRELATED_SECRET" not in environment
+    assert "HEPH_GH_TIMEOUT" not in environment
+
+
 @patch("hephaestus.github.skill_pr_review.configure_github_throttle_from_args")
 @patch("hephaestus.github.skill_pr_review.gh_call")
 def test_resolve_pr_emits_open_pr_metadata_after_repository_identity_check(

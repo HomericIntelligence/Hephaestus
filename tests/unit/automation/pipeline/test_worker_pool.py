@@ -712,6 +712,8 @@ class TestWorkerPoolSubmitComplete:
             sandbox="read-only",
             execution_request=None,
             session_binding=None,
+            disable_pi_automation=False,
+            auth_status_timeout=10,
         )
 
     def test_submit_and_complete_non_claude_agent_job(
@@ -730,7 +732,14 @@ class TestWorkerPoolSubmitComplete:
             pool.submit(job, StageName.IMPLEMENTATION)
             _handle, result = completion_q.get(timeout=10)
 
-        mock_resolve.assert_called_once_with("codex", cwd=job.cwd)
+        mock_resolve.assert_called_once_with(
+            "codex",
+            cwd=job.cwd,
+            disable_pi_automation=False,
+            auth_status_timeout=10,
+            pi_isolation_adapter=None,
+            pi_dir=None,
+        )
         mock_session.assert_called_once_with(
             agent="codex",
             prompt="test prompt",
@@ -742,6 +751,8 @@ class TestWorkerPoolSubmitComplete:
             process_tracker=subprocess_registry.track_process_group,
             execution_request=None,
             resume_binding=None,
+            disable_pi_automation=False,
+            pi_dir=None,
         )
         assert result.ok is True
         assert result.value == "codex output"
@@ -776,6 +787,8 @@ class TestWorkerPoolSubmitComplete:
             process_tracker=subprocess_registry.track_process_group,
             execution_request=None,
             resume_binding=None,
+            disable_pi_automation=False,
+            pi_dir=None,
         )
         run.assert_not_called()
         assert result.ok is True
@@ -4726,6 +4739,7 @@ class TestGitOps:
             allowed_paths=None,
             timeout=60,
             agent_model="sol:medium",
+            git_message_timeout=1200,
         )
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
@@ -6819,7 +6833,7 @@ class TestShutdownReapsSubprocess:
         monkeypatch.setattr(
             agent_runtime,
             "_require_pi_automation_admission",
-            lambda _cwd: PiPreflightResult.ready_result(
+            lambda _cwd, **_kwargs: PiPreflightResult.ready_result(
                 InventoryResult(True, "ready", {}, {}),
                 executable=Path(sys.executable).resolve(),
             ),

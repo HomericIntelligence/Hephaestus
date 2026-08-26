@@ -8,7 +8,6 @@ generic ``AgentJob`` dispatch.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -32,6 +31,7 @@ from hephaestus.automation.review_journal import (
     plan_fingerprint,
 )
 from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
+from hephaestus.config.child_environments import build_git_child_env, read_approved_parent_env
 from hephaestus.io.utils import write_secure
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess, slugify
 
@@ -496,6 +496,7 @@ def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.Com
         timeout=timeout_s,
         check=False,
         track_process_group=True,
+        env=build_git_child_env(),
     )
 
 
@@ -685,12 +686,8 @@ class MnemosynePluginValidator:
         diff allows only generated ``skills/*.md`` artifacts.
         """
         with tempfile.TemporaryDirectory(prefix="hephaestus-uv-cache-") as cache_dir:
-            env = {
-                "PATH": os.environ.get("PATH", ""),
-                "LANG": "C.UTF-8",
-                "LC_ALL": "C.UTF-8",
-                "UV_CACHE_DIR": str(Path(cache_dir)),
-            }
+            env = read_approved_parent_env()
+            env.update({"UV_CACHE_DIR": str(Path(cache_dir))})
             result = self._runner(
                 list(VALIDATOR_ARGV),
                 cwd=path,

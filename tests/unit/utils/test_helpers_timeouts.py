@@ -1,10 +1,4 @@
-"""Tests for the import-time subprocess-timeout env reads in ``helpers``.
-
-``METADATA_TIMEOUT`` and ``NETWORK_TIMEOUT`` are bound at import time, so a
-malformed override must fall back to the default rather than raising
-``ValueError`` and crashing the module import. These tests set the env var,
-reload the module, and assert the fallback / override behavior.
-"""
+"""Poison-environment tests for fixed subprocess timeout defaults."""
 
 import importlib
 
@@ -35,23 +29,23 @@ def test_network_timeout_uses_default_on_garbage(monkeypatch: pytest.MonkeyPatch
         importlib.reload(helpers)
 
 
-def test_network_timeout_reads_valid_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A valid integer NETWORK override is honored."""
+def test_network_timeout_ignores_valid_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retired NETWORK override has no effect."""
     monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", "45")
     reloaded = importlib.reload(helpers)
     try:
-        assert reloaded.NETWORK_TIMEOUT == 45
+        assert reloaded.NETWORK_TIMEOUT == 120
     finally:
         monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", raising=False)
         importlib.reload(helpers)
 
 
-def test_metadata_timeout_reads_valid_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A valid integer METADATA override is honoured on reimport."""
+def test_metadata_timeout_ignores_valid_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retired METADATA override has no effect."""
     monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", "33")
     reloaded = importlib.reload(helpers)
     try:
-        assert reloaded.METADATA_TIMEOUT == 33
+        assert reloaded.METADATA_TIMEOUT == 10
     finally:
         monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
         importlib.reload(helpers)
@@ -72,17 +66,16 @@ def test_metadata_timeout_uses_default_outside_range(
         importlib.reload(helpers)
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
-def test_metadata_timeout_accepts_inclusive_bounds(
+@pytest.mark.parametrize("raw", ["1", "86400"])
+def test_metadata_timeout_ignores_former_inclusive_overrides(
     monkeypatch: pytest.MonkeyPatch,
     raw: str,
-    expected: int,
 ) -> None:
-    """Metadata overrides accept the inclusive one-second to one-day range."""
+    """Former metadata overrides cannot change the fixed library default."""
     monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raw)
     reloaded = importlib.reload(helpers)
     try:
-        assert expected == reloaded.METADATA_TIMEOUT
+        assert reloaded.METADATA_TIMEOUT == 10
     finally:
         monkeypatch.delenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", raising=False)
         importlib.reload(helpers)

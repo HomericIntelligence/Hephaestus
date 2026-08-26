@@ -642,10 +642,10 @@ else
         echo -e "    ${BLUE}→${NC} Installing nats-server 2.10.24..."
         GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
         NATS_PKG="nats-server-v2.10.24-linux-${GOARCH}.tar.gz"
-        NATS_URL="https://github.com/nats-io/nats-server/releases/download/v2.10.24/$NATS_PKG"
+        NATS_DOWNLOAD_URL="https://github.com/nats-io/nats-server/releases/download/v2.10.24/$NATS_PKG"
         mkdir -p ~/.local/bin
         NATS_TMP_DIR="$(make_install_tmpdir nats-server)"
-        if curl -fsSL "$NATS_URL" -o "$NATS_TMP_DIR/$NATS_PKG" \
+        if curl -fsSL "$NATS_DOWNLOAD_URL" -o "$NATS_TMP_DIR/$NATS_PKG" \
             && tar -xzf "$NATS_TMP_DIR/$NATS_PKG" -C "$NATS_TMP_DIR" \
             && mv "$NATS_TMP_DIR/nats-server-v2.10.24-linux-${GOARCH}/nats-server" ~/.local/bin/nats-server \
             && chmod +x ~/.local/bin/nats-server; then

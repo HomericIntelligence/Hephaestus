@@ -46,7 +46,7 @@ def dispatch(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     monkeypatch.setattr(
         loop_runner, "_resolve_org_and_repos", lambda args: ("org", ["repo-a"], None)
     )
-    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent: "claude")
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent, **_kwargs: "claude")
     return mocks
 
 
@@ -63,7 +63,7 @@ def test_pipeline_path_preflights_but_skips_clone(dispatch: dict[str, MagicMock]
     loop_runner.main([])
 
     dispatch["run_pipeline"].assert_called_once()
-    dispatch["preflight"].assert_called_once_with("org", "repo-a")
+    dispatch["preflight"].assert_called_once_with("org", "repo-a", timeout=120)
     dispatch["clone"].assert_not_called()
 
 
@@ -259,7 +259,7 @@ def test_build_pipeline_config_maps_agent_and_models(
     dispatch: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The pipeline path preserves provider and model selections."""
-    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent: "codex")
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent, **_kwargs: "codex")
 
     loop_runner.main(
         [
@@ -288,7 +288,7 @@ def test_build_pipeline_config_maps_per_role_reasoning_effort(
     dispatch: dict[str, MagicMock], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The loop forwards each role's explicit reasoning setting to stages."""
-    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent: "codex")
+    monkeypatch.setattr(loop_runner, "resolve_agent", lambda agent, **_kwargs: "codex")
 
     loop_runner.main(
         [
@@ -349,17 +349,14 @@ def test_stage_model_does_not_append_codex_reasoning_to_claude_model() -> None:
     assert stage_model(context, "reviewer", lambda: "fallback") == ("claude-sonnet-4-6")
 
 
-def test_stage_model_uses_the_operator_selected_pi_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pi jobs must not inherit a Claude fallback model from a pipeline role."""
+def test_stage_model_uses_the_explicit_pi_alias() -> None:
+    """Pi jobs use the explicit role model rather than an ambient alias."""
     config = SimpleNamespace(
         agent="pi",
         model="",
-        reviewer_model="",
+        reviewer_model="operator-local-pi-alias",
         reviewer_reasoning_effort="default",
     )
-    monkeypatch.setenv("HEPH_PI_MODEL", "operator-local-pi-alias")
 
     context = cast(StageContext, SimpleNamespace(config=config))
 

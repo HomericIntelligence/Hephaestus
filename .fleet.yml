@@ -1,5 +1,5 @@
 # Fleet configuration consumed by hephaestus-fleet-sync.
-# Override per-invocation with --org / --repos or FLEET_ORG / FLEET_REPOS.
+# Override per invocation with the explicit --org and --repos options.
 org: HomericIntelligence
 repos:
   - Odysseus

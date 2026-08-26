@@ -7,7 +7,6 @@ from hephaestus.system.info import (
     extract_version_word,
     format_system_info,
     get_command_path,
-    get_environment_info,
     get_git_info,
     get_os_info,
     get_python_info,
@@ -94,28 +93,17 @@ class TestGetGitInfo:
         assert info["repository"] in ("Yes", "No")
 
 
-class TestGetEnvironmentInfo:
-    """Tests for get_environment_info."""
-
-    def test_returns_dict(self) -> None:
-        """Returns a dict with string values."""
-        info = get_environment_info()
-        assert isinstance(info, dict)
-        for v in info.values():
-            assert isinstance(v, str)
-
-
 class TestGetSystemInfo:
     """Tests for get_system_info."""
 
     def test_returns_all_sections(self) -> None:
-        """System info contains os, python, directory, git, environment keys."""
+        """System info excludes ambient environment contents."""
         info = get_system_info(include_tools=False)
         assert "os" in info
         assert "python" in info
         assert "directory" in info
         assert "git" in info
-        assert "environment" in info
+        assert "environment" not in info
 
     def test_tools_section_when_requested(self) -> None:
         """Tools section present when include_tools=True."""

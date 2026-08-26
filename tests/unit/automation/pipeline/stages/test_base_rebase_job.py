@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from hephaestus.automation.pipeline.stages.base import (
-    GIT_JOB_TIMEOUT_S,
-    _build_rebase_job,
-)
+from hephaestus.automation.pipeline.stages.base import _build_rebase_job
 
 
 class TestBuildRebaseJob:
@@ -18,7 +15,7 @@ class TestBuildRebaseJob:
         job = _build_rebase_job(item, ctx, descr="x")
         assert job.op == "rebase"
         assert job.kwargs["base_branch"] == "main"
-        assert job.timeout_s == GIT_JOB_TIMEOUT_S
+        assert job.timeout_s == 2400
 
     def test_uses_captured_base_branch(self, make_ctx, make_work_item):
         ctx = make_ctx()

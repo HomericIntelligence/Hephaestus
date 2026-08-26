@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -34,6 +34,7 @@ def test_run_git_uses_shared_subprocess_helper() -> None:
 
     mock_run.assert_called_once_with(
         ["git", "status"],
+        env=ANY,
         cwd=None,
         check=True,
         timeout=NETWORK_TIMEOUT,
@@ -50,6 +51,7 @@ def test_run_git_accepts_git_prefixed_commands_and_dry_run() -> None:
 
     mock_run.assert_called_once_with(
         ["git", "push"],
+        env=ANY,
         cwd="/repo",
         check=True,
         timeout=NETWORK_TIMEOUT,

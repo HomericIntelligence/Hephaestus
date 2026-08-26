@@ -139,7 +139,7 @@ def test_default_contract_loader_runs_advise_without_an_agent_harness(tmp_path: 
 
     assert result.ok is True
     assert result.context == "selected guidance"
-    assert result.receipt["contract"]["trust_source"] == ("hephaestus-athena-contract:v0.4.0")
+    assert result.receipt["contract"]["trust_source"] == ("hephaestus-athena-contract:v0.5.0")
     preflight.assert_not_called()
     start.assert_not_called()
 

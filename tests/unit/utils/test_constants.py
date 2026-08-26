@@ -3,7 +3,6 @@
 
 import importlib
 import logging
-import os
 
 import pytest
 
@@ -145,32 +144,30 @@ class TestSubprocessTimeouts:
 
     def test_default_metadata_timeout_is_10(self) -> None:
         """Default METADATA_TIMEOUT is 10 seconds."""
-        if "HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT" not in os.environ:
-            assert helpers.METADATA_TIMEOUT == 10
+        assert helpers.METADATA_TIMEOUT == 10
 
     def test_default_network_timeout_is_120(self) -> None:
         """Default NETWORK_TIMEOUT is 120 seconds."""
-        if "HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT" not in os.environ:
-            assert helpers.NETWORK_TIMEOUT == 120
+        assert helpers.NETWORK_TIMEOUT == 120
 
-    def test_metadata_timeout_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """METADATA_TIMEOUT respects HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT env var."""
+    def test_metadata_timeout_ignores_poison_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """METADATA_TIMEOUT is fixed despite the retired variable."""
         monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_METADATA_TIMEOUT", "5")
         # Reimport to pick up the new env var
         importlib.reload(helpers)
         try:
-            assert helpers.METADATA_TIMEOUT == 5
+            assert helpers.METADATA_TIMEOUT == 10
         finally:
             # Restore original values
             importlib.reload(helpers)
 
-    def test_network_timeout_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """NETWORK_TIMEOUT respects HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT env var."""
+    def test_network_timeout_ignores_poison_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """NETWORK_TIMEOUT is fixed despite the retired variable."""
         monkeypatch.setenv("HEPHAESTUS_SUBPROCESS_NETWORK_TIMEOUT", "300")
         # Reimport to pick up the new env var
         importlib.reload(helpers)
         try:
-            assert helpers.NETWORK_TIMEOUT == 300
+            assert helpers.NETWORK_TIMEOUT == 120
         finally:
             # Restore original values
             importlib.reload(helpers)

@@ -2102,16 +2102,12 @@ class TestTestsAndFix:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert result.job.argv == (
-            "env",
-            "HEPHAESTUS_CI_REBUILD=1",
             "bash",
             "scripts/run_ci_local.sh",
             "all",
+            "--rebuild",
         )
-        assert (
-            item.payload["test_command"]
-            == "env HEPHAESTUS_CI_REBUILD=1 bash scripts/run_ci_local.sh all"
-        )
+        assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
     def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
         self, make_ctx: Any, make_work_item: Any
@@ -2136,11 +2132,10 @@ class TestTestsAndFix:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, BuildTestJob)
         assert result.job.argv == (
-            "env",
-            "HEPHAESTUS_CI_REBUILD=1",
             "bash",
             "scripts/run_ci_local.sh",
             "all",
+            "--rebuild",
         )
 
     def test_same_named_repo_in_another_org_preserves_configurable_gate(
@@ -3009,6 +3004,7 @@ class TestCommitPushAndPrCreate:
             "branch": "1-auto-impl",
             "agent": "claude",
             "agent_model": "claude-haiku-4-5",
+            "git_message_timeout": 1200,
         }
         assert result.on_done_state == "PR_CREATE"
 

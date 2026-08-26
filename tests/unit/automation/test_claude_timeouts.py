@@ -41,11 +41,11 @@ def test_agent_default_timeout_is_generic(monkeypatch: pytest.MonkeyPatch) -> No
     assert result != DEFAULT_THROUGHPUT_TIMEOUT_S
 
 
-def test_agent_default_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HEPH_AGENT_DEFAULT_TIMEOUT tunes the shared invoke fallback."""
+def test_agent_default_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removed process configuration cannot tune the shared invoke fallback."""
     monkeypatch.setenv("HEPH_AGENT_DEFAULT_TIMEOUT", "4321")
 
-    assert claude_timeouts.agent_default_timeout() == 4321
+    assert claude_timeouts.agent_default_timeout() == TWO_HOURS_S
 
 
 def test_plan_stage_timeout_default_stays_long(
@@ -57,7 +57,7 @@ def test_plan_stage_timeout_default_stays_long(
     assert claude_timeouts.plan_stage_timeout() == TWO_HOURS_S
 
 
-def test_plan_stage_timeout_ignores_inner_agent_plan_env(
+def test_plan_stage_timeout_ignores_removed_process_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """HEPH_AGENT_PLAN_TIMEOUT only controls planner agent calls, not the stage."""
@@ -65,17 +65,17 @@ def test_plan_stage_timeout_ignores_inner_agent_plan_env(
     monkeypatch.setenv("HEPH_AGENT_PLAN_TIMEOUT", "333")
 
     assert claude_timeouts.plan_stage_timeout() == TWO_HOURS_S
-    assert claude_timeouts.planner_claude_timeout() == 333
+    assert claude_timeouts.planner_claude_timeout() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
 
-def test_plan_stage_timeout_env(
+def test_plan_stage_timeout_ignores_removed_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """HEPH_PLAN_STAGE_TIMEOUT tunes the outer plan-stage wrapper."""
     _clear_plan_stage_timeout_env(monkeypatch)
     monkeypatch.setenv("HEPH_PLAN_STAGE_TIMEOUT", "9000")
 
-    assert claude_timeouts.plan_stage_timeout() == 9000
+    assert claude_timeouts.plan_stage_timeout() == TWO_HOURS_S
 
 
 @pytest.mark.parametrize(
@@ -167,17 +167,18 @@ def test_legacy_claude_timeout_envs_are_ignored(
         ("HEPH_AGENT_LEARN_TIMEOUT", claude_timeouts.learn_claude_timeout),
     ],
 )
-def test_agent_timeout_envs_are_read_per_call(
+def test_agent_timeout_envs_are_ignored(
     monkeypatch: pytest.MonkeyPatch,
     primary_env: str,
     timeout_fn: Callable[[], int],
 ) -> None:
     """New generic agent timeout env vars are read on every function call."""
     monkeypatch.setenv(primary_env, "333")
-    assert timeout_fn() == 333
+    expected = 1800 if primary_env == "HEPH_AGENT_IMPL_TIMEOUT" else 1200
+    assert timeout_fn() == expected
 
     monkeypatch.setenv(primary_env, "444")
-    assert timeout_fn() == 444
+    assert timeout_fn() == expected
 
 
 @pytest.mark.parametrize(
@@ -235,7 +236,7 @@ def test_deprecated_agent_timeout_aliases_are_ignored(
     assert timeout_fn() == default
 
 
-def test_planner_timeout_invalid_agent_env_logs_and_defaults(
+def test_planner_timeout_invalid_agent_env_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -246,7 +247,7 @@ def test_planner_timeout_invalid_agent_env_logs_and_defaults(
     with caplog.at_level(logging.WARNING, logger="hephaestus.constants"):
         assert claude_timeouts.planner_claude_timeout() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
-    assert any("HEPH_AGENT_PLAN_TIMEOUT" in record.message for record in caplog.records)
+    assert not caplog.records
 
 
 def test_advise_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,18 +257,18 @@ def test_advise_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert claude_timeouts.advise_claude_timeout() == TWO_HOURS_S
 
 
-def test_advise_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Codex-friendly advise runs can be tuned with a generic env var."""
+def test_advise_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Removed timeout environment variables cannot affect defaults."""
     monkeypatch.setenv("HEPH_ADVISE_AGENT_TIMEOUT", "600")
 
-    assert claude_timeouts.advise_claude_timeout() == 600
+    assert claude_timeouts.advise_claude_timeout() == TWO_HOURS_S
 
 
-def test_git_message_timeout_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_git_message_timeout_ignores_removed_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The lightweight git-message agent uses its own short tunable timeout."""
     monkeypatch.setenv("HEPH_GIT_MESSAGE_AGENT_TIMEOUT", "90")
 
-    assert claude_timeouts.git_message_agent_timeout() == 90
+    assert claude_timeouts.git_message_agent_timeout() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
 
 def test_ci_poll_max_wait_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,14 +278,14 @@ def test_ci_poll_max_wait_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert claude_timeouts.ci_poll_max_wait() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
 
-def test_ci_poll_max_wait_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ci_poll_max_wait_ignores_removed_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """HEPH_CI_POLL_MAX_WAIT overrides the default per call (re-read each time)."""
     monkeypatch.setenv("HEPH_CI_POLL_MAX_WAIT", "1800")
 
-    assert claude_timeouts.ci_poll_max_wait() == 1800
+    assert claude_timeouts.ci_poll_max_wait() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
 
-def test_ci_poll_max_wait_invalid_env_logs_and_defaults(
+def test_ci_poll_max_wait_invalid_env_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -294,4 +295,4 @@ def test_ci_poll_max_wait_invalid_env_logs_and_defaults(
     with caplog.at_level(logging.WARNING, logger="hephaestus.automation.claude_timeouts"):
         assert claude_timeouts.ci_poll_max_wait() == DEFAULT_THROUGHPUT_TIMEOUT_S
 
-    assert any("HEPH_CI_POLL_MAX_WAIT" in record.message for record in caplog.records)
+    assert not caplog.records

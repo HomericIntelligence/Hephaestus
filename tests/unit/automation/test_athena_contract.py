@@ -18,7 +18,7 @@ from hephaestus.automation.athena_contract import (
     load_athena_contract_receipt,
 )
 
-FIXTURE_ROOT = Path("tests/fixtures/athena_contract/v0.4.0")
+FIXTURE_ROOT = Path("tests/fixtures/athena_contract/v0.5.0")
 CONTRACT_MODULE = Path("hephaestus/automation/athena_contract.py")
 
 
@@ -29,7 +29,7 @@ def _expected_contract() -> dict[str, str]:
 def test_receipt_binds_fixture_to_provider_neutral_athena_contract() -> None:
     receipt = load_athena_contract_receipt(
         contract_root=FIXTURE_ROOT,
-        trust_source="fixture:v0.4.0",
+        trust_source="fixture:v0.5.0",
     )
 
     assert receipt == AthenaContractReceipt(**_expected_contract())
@@ -50,7 +50,7 @@ def test_default_receipt_needs_no_harness_or_contract_checkout() -> None:
     assert receipt.advise_sha256 == expected["advise_sha256"]
     assert receipt.learn_sha256 == expected["learn_sha256"]
     assert receipt.dependency_resolution_sha256 == expected["dependency_resolution_sha256"]
-    assert receipt.trust_source == "hephaestus-athena-contract:v0.4.0"
+    assert receipt.trust_source == "hephaestus-athena-contract:v0.5.0"
     preflight.assert_not_called()
 
 
@@ -93,7 +93,7 @@ def test_receipt_refuses_content_that_differs_from_packaged_contract(
     with pytest.raises(AthenaContractError, match=r"pinned Athena content mismatch.*advise"):
         load_athena_contract_receipt(
             contract_root=copied,
-            trust_source="fixture:v0.4.0",
+            trust_source="fixture:v0.5.0",
         )
 
 

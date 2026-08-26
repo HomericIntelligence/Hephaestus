@@ -40,7 +40,7 @@ from hephaestus.cli.utils import add_agent_timeout_arg, configure_cli_logging, e
 from hephaestus.github.rate_limit import wait_until
 from hephaestus.utils.terminal import terminal_guard
 
-from .agent_config import DEFAULT_AGENT_TIMEOUT
+from .agent_config import DEFAULT_AGENT_TIMEOUT, fallback_model
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
 from .git_utils import (
@@ -476,9 +476,10 @@ class PlanReviewer:
                 issue=issue_number,
                 agent=AGENT_PLAN_REVIEWER,
                 prompt=prompt,
-                model=reviewer_model(),
+                model=self.options.reviewer_model or reviewer_model(),
                 cwd=repo_root,
                 timeout=self.options.agent_timeout,
+                fallback_model_value=self.options.fallback_model or None,
                 allowed_tools="Read,Glob,Grep",
                 input_via_stdin=True,
             )
@@ -540,7 +541,9 @@ class PlanReviewer:
                 execution_request=ExecutionRequest(
                     AgentRole.PLAN_REVIEWER, AgentOperation.PLAN_REVIEW, SessionLifecycle.ONE_SHOT
                 ),
-                model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
+                model=direct_agent_model(
+                    agent, model_value=self.options.reviewer_model or reviewer_model()
+                ),
                 sandbox="read-only",
             )
             output = (result.stdout or "").strip()
@@ -676,14 +679,14 @@ class PlanReviewer:
 # ---------------------------------------------------------------------------
 
 
-def _setup_logging(verbose: bool = False) -> None:
+def _setup_logging(verbose: bool = False, log_format: str = "text") -> None:
     """Configure logging for the CLI.
 
     Args:
         verbose: Enable verbose (DEBUG) logging.
 
     """
-    configure_cli_logging(verbose=verbose)
+    configure_cli_logging(verbose=verbose, log_format=log_format)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -718,7 +721,16 @@ Examples:
         required=True,
         help="Issue numbers whose plans should be reviewed",
     )
-    add_agent_timeout_arg(parser)
+    add_agent_timeout_arg(parser, default=1200)
+    parser.add_argument("--model", default="", metavar="MODEL")
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
+    parser.add_argument("--fallback-model", default="", metavar="MODEL")
+    parser.add_argument(
+        "--work-report",
+        type=Path,
+        default=None,
+        help="Write the completed work-unit count to PATH.",
+    )
     return parser
 
 
@@ -735,8 +747,14 @@ def main() -> int:
 
     """
     args = _parse_args()
-    _setup_logging(args.verbose)
-    agent = resolve_agent(args.agent)
+    _setup_logging(args.verbose, args.log_format)
+    agent = resolve_agent(
+        args.agent,
+        disable_pi_automation=args.disable_pi_automation,
+        auth_status_timeout=args.auth_status_timeout,
+        pi_isolation_adapter=args.pi_isolation_adapter,
+        pi_dir=args.pi_dir,
+    )
 
     log = logging.getLogger(__name__)
 
@@ -748,7 +766,7 @@ def main() -> int:
 
     work_units = 0
     shutdown = threading.Event()
-    with work_report_context(lambda: work_units), terminal_guard(shutdown.set):
+    with work_report_context(lambda: work_units, args.work_report), terminal_guard(shutdown.set):
         try:
             options = PlanReviewerOptions(
                 issues=args.issues,
@@ -760,6 +778,8 @@ def main() -> int:
                 agent_timeout=(
                     args.agent_timeout if args.agent_timeout is not None else DEFAULT_AGENT_TIMEOUT
                 ),
+                reviewer_model=reviewer_model(args.reviewer_model or args.model or None),
+                fallback_model=fallback_model(args.fallback_model or args.model or None),
             )
 
             reviewer = PlanReviewer(options)

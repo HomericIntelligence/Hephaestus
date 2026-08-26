@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -73,32 +72,19 @@ def test_repo_root_resolves_to_repo_containing_pyproject() -> None:
     assert (root / "hephaestus").is_dir()
 
 
-def test_repo_root_honors_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """repo_root() uses HEPHAESTUS_REPO_ROOT env var when it contains pyproject.toml."""
-    (tmp_path / "pyproject.toml").write_text("")
-    monkeypatch.setenv("HEPHAESTUS_REPO_ROOT", str(tmp_path))
-    assert constants.repo_root() == tmp_path
-
-
-def test_repo_root_ignores_env_without_marker(
+def test_repo_root_ignores_environment_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """repo_root() falls back to walk-up if env var path lacks pyproject.toml."""
-    monkeypatch.setenv("HEPHAESTUS_REPO_ROOT", str(tmp_path))  # no pyproject.toml
+    """Repository discovery is filesystem-only even when the legacy variable is set."""
+    (tmp_path / "pyproject.toml").write_text("")
+    monkeypatch.setenv("HEPHAESTUS_REPO_ROOT", str(tmp_path))
     root = constants.repo_root()
     assert (root / "pyproject.toml").is_file()
+    assert root != tmp_path
 
 
-def test_repo_root_ignores_nonexistent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """repo_root() falls back to walk-up if env var path does not exist."""
-    monkeypatch.setenv("HEPHAESTUS_REPO_ROOT", "/nonexistent/path/xyz")
-    root = constants.repo_root()
-    assert (root / "pyproject.toml").is_file()
-
-
-def test_scripts_dir_matches_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scripts_dir_matches_repo_root() -> None:
     """scripts_dir() returns repo_root() / 'scripts'."""
-    monkeypatch.delenv("HEPHAESTUS_REPO_ROOT", raising=False)
     assert constants.scripts_dir() == constants.repo_root() / "scripts"
     assert constants.scripts_dir().is_dir()
 
@@ -123,87 +109,12 @@ def test_agent_timeout_defaults_are_importable(constant_name: str, value: int) -
     assert getattr(constants, constant_name) == value
 
 
-def test_read_timeout_env_reads_primary_env_per_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Timeout env helpers re-read env vars every call instead of caching at import."""
-    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "41")
-    assert constants.agent_git_timeout() == 41
-
-    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "42")
-    assert constants.agent_git_timeout() == 42
+def test_timeout_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy timeout variables cannot alter the fixed library defaults."""
+    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", "999")
+    assert constants.agent_git_timeout() == constants.AGENT_GIT_TIMEOUT == 30
 
 
-def test_read_timeout_env_has_no_legacy_names_parameter() -> None:
-    """The timeout helper keeps one canonical name plus optional bounds."""
-    assert tuple(inspect.signature(constants.read_timeout_env).parameters) == (
-        "env_name",
-        "default",
-        "minimum",
-        "maximum",
-    )
-
-
-@pytest.mark.parametrize("bad_value", ["foo", "12.5", "", "  ", "0x10"])
-def test_read_timeout_env_falls_back_on_malformed_value(
-    monkeypatch: pytest.MonkeyPatch,
-    bad_value: str,
-) -> None:
-    """A non-integer override is ignored: the default is returned, never raised."""
-    monkeypatch.setenv("HEPH_AGENT_GIT_TIMEOUT", bad_value)
-
-    assert constants.read_timeout_env("HEPH_AGENT_GIT_TIMEOUT", 77) == 77
-
-
-@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
-def test_read_timeout_env_accepts_inclusive_bounds(
-    monkeypatch: pytest.MonkeyPatch,
-    raw: str,
-    expected: int,
-) -> None:
-    """Validated timeout overrides accept both inclusive endpoints."""
-    monkeypatch.setenv("HEPH_TEST_TIMEOUT", raw)
-
-    assert (
-        constants.read_timeout_env(
-            "HEPH_TEST_TIMEOUT",
-            10,
-            minimum=1,
-            maximum=86_400,
-        )
-        == expected
-    )
-
-
-@pytest.mark.parametrize("raw", ["0", "-1", "86401"])
-def test_read_timeout_env_rejects_out_of_range_values(
-    monkeypatch: pytest.MonkeyPatch,
-    raw: str,
-) -> None:
-    """Out-of-range timeout overrides use the supplied default."""
-    monkeypatch.setenv("HEPH_TEST_TIMEOUT", raw)
-
-    assert (
-        constants.read_timeout_env(
-            "HEPH_TEST_TIMEOUT",
-            10,
-            minimum=1,
-            maximum=86_400,
-        )
-        == 10
-    )
-
-
-def test_read_timeout_env_warning_does_not_echo_value(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Timeout warnings identify the variable without logging its raw value."""
-    hostile = "9" * 100_000
-    monkeypatch.setenv("HEPH_TEST_TIMEOUT", hostile)
-
-    with caplog.at_level("WARNING", logger="hephaestus.constants"):
-        assert constants.read_timeout_env("HEPH_TEST_TIMEOUT", 10) == 10
-
-    assert hostile not in caplog.text
-    assert "HEPH_TEST_TIMEOUT" in caplog.text
+def test_read_timeout_env_api_is_removed() -> None:
+    """The arbitrary environment-variable reader is no longer public code."""
+    assert not hasattr(constants, "read_timeout_env")

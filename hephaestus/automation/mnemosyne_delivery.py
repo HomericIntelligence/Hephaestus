@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
+from hephaestus.config.child_environments import build_git_signing_env
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
 
@@ -89,6 +90,7 @@ class LearnDeliveryReceipt:
 def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.CompletedProcess[str]:
     return run_subprocess(
         ["git", *argv],
+        env=build_git_signing_env(),
         cwd=cwd,
         check=False,
         timeout=timeout_s,

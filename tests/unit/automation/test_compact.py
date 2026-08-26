@@ -97,15 +97,15 @@ class TestCompactSession:
 
             assert mock_run.call_args[1]["timeout"] == 1200
 
-    def test_compact_session_uses_env_configured_learn_timeout(
+    def test_compact_session_uses_explicit_learn_timeout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The default compact timeout is read from HEPH_AGENT_LEARN_TIMEOUT per call."""
+        """An explicit compact timeout wins while the removed environment is inert."""
         monkeypatch.setenv("HEPH_AGENT_LEARN_TIMEOUT", "333")
         with patch("hephaestus.automation.learn.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0, stderr="")
 
-            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path)
+            compact_session("test-repo", 42, AGENT_CI_DRIVER, tmp_path, timeout=333)
 
             assert mock_run.call_args[1]["timeout"] == 333
 
@@ -173,6 +173,7 @@ class TestCompactAgentSession:
             model="gpt-5.6",
             sandbox="read-only",
             approval="never",
+            disable_pi_automation=False,
         )
 
     def test_direct_compact_without_a_session_is_a_safe_noop(self, tmp_path: Path) -> None:

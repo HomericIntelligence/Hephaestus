@@ -233,7 +233,7 @@ class TestMain:
         with patch("hephaestus.automation.ensure_state_labels.configure_cli_logging") as configure:
             rc = main(["--repo", "owner/name"])
         assert rc == 0
-        configure.assert_called_once_with(verbose=False)
+        configure.assert_called_once_with(verbose=False, log_format="text")
 
 
 class TestCircuitBreakerBoundary:

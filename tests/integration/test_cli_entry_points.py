@@ -57,16 +57,12 @@ def _cli_subprocess_env() -> dict[str, str]:
     return env
 
 
-REQUIRE_CLI_ENV = "HEPHAESTUS_REQUIRE_CLI"
-
-
-def _resolve_binary(command: str) -> str:
+def _resolve_binary(command: str, *, required: bool) -> str:
     """Return the console-script path, skipping — or failing — when absent.
 
-    By default a missing binary skips (developer checkouts without an
-    install). When ``HEPHAESTUS_REQUIRE_CLI=1`` (set by CI lanes that
-    install the package first), a missing binary is a hard failure so the
-    installed-artifact checks can never silently skip (#2173).
+    By default a missing binary skips (developer checkouts without an install).
+    When the explicit pytest CLI requirement is enabled, a missing binary is a
+    hard failure so installed-artifact checks can never silently skip (#2173).
 
     Args:
         command: The console-script command name to resolve on ``PATH``.
@@ -76,14 +72,14 @@ def _resolve_binary(command: str) -> str:
 
     Raises:
         Skipped: When the binary is absent and the gate is not set.
-        Failed: When the binary is absent and ``HEPHAESTUS_REQUIRE_CLI=1``.
+        Failed: When the binary is absent and ``--require-cli`` was passed.
 
     """
     binary = shutil.which(command)
     if binary is None:
         message = f"{command} not on PATH — install with `pip install -e .` or run with uv"
-        if os.environ.get(REQUIRE_CLI_ENV) == "1":
-            pytest.fail(f"{message} (skip forbidden: {REQUIRE_CLI_ENV}=1)")
+        if required:
+            pytest.fail(f"{message} (skip forbidden: --require-cli)")
         pytest.skip(message)
     return binary
 
@@ -108,14 +104,14 @@ class TestCLIHelpFlag:
     """Every console script must respond to ``--help`` with exit code 0."""
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
-    def test_help_flag(self, command: str, module_path: str, attr: str) -> None:
+    def test_help_flag(self, command: str, module_path: str, attr: str, require_cli: bool) -> None:
         # Automation CLIs transitively import POSIX-only stdlib modules
         # (`curses` for the UI, `fcntl` for cross-process locking in planner).
         # CPython on Windows ships neither; the CLIs aren't intended for
         # Windows operators. Skip the help-flag check on that platform.
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary = _resolve_binary(command)
+        binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
             [binary, "--help"],
@@ -137,7 +133,9 @@ class TestCLIJsonFlag:
     """Every console script must accept ``--json`` for machine-readable output."""
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
-    def test_json_flag_documented_in_help(self, command: str, module_path: str, attr: str) -> None:
+    def test_json_flag_documented_in_help(
+        self, command: str, module_path: str, attr: str, require_cli: bool
+    ) -> None:
         """``<cmd> --help`` must mention ``--json`` so it is discoverable.
 
         We do not invoke ``<cmd> --json`` directly because most CLIs need
@@ -148,7 +146,7 @@ class TestCLIJsonFlag:
         """
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary = _resolve_binary(command)
+        binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
             [binary, "--help"],
@@ -175,11 +173,13 @@ class TestCLIVersionFlag:
     """Every console script must respond to ``--version`` with exit code 0."""
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
-    def test_version_flag(self, command: str, module_path: str, attr: str) -> None:
+    def test_version_flag(
+        self, command: str, module_path: str, attr: str, require_cli: bool
+    ) -> None:
         """``<cmd> --version`` must exit 0 and print a version line."""
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary = _resolve_binary(command)
+        binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
             [binary, "--version"],
@@ -200,11 +200,13 @@ class TestCLIVersionFlag:
         )
 
     @pytest.mark.parametrize("command,module_path,attr", ENTRY_POINTS, ids=ENTRY_POINT_IDS)
-    def test_version_flag_short_form(self, command: str, module_path: str, attr: str) -> None:
+    def test_version_flag_short_form(
+        self, command: str, module_path: str, attr: str, require_cli: bool
+    ) -> None:
         """``<cmd> -V`` must also work (short form of --version)."""
         if sys.platform == "win32" and "automation" in module_path:
             pytest.skip("automation CLIs require POSIX stdlib (curses/fcntl)")
-        binary = _resolve_binary(command)
+        binary = _resolve_binary(command, required=require_cli)
 
         result = subprocess.run(
             [binary, "-V"],
@@ -234,9 +236,9 @@ class TestCLIEntryPointDiscovery:
 class TestMaxWorkersValidation:
     """Regression for #723: --max-workers validation must be consistent."""
 
-    def test_automation_loop_rejects_zero_max_workers(self) -> None:
+    def test_automation_loop_rejects_zero_max_workers(self, require_cli: bool) -> None:
         """hephaestus-automation-loop --max-workers=0 exits non-zero with clear error."""
-        binary = _resolve_binary("hephaestus-automation-loop")
+        binary = _resolve_binary("hephaestus-automation-loop", required=require_cli)
 
         result = subprocess.run(
             [binary, "--max-workers", "0"],
@@ -252,18 +254,17 @@ class TestMaxWorkersValidation:
 
 
 class TestRequireCliGate:
-    """The HEPHAESTUS_REQUIRE_CLI gate must fail — not skip — on missing binaries."""
+    """The explicit CLI gate must fail — not skip — on missing binaries."""
 
-    def test_missing_binary_skips_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(REQUIRE_CLI_ENV, raising=False)
+    def test_missing_binary_skips_by_default(self) -> None:
         with pytest.raises(pytest.skip.Exception):
-            _resolve_binary("hephaestus-definitely-not-a-real-binary")
+            _resolve_binary("hephaestus-definitely-not-a-real-binary", required=False)
 
-    def test_missing_binary_fails_when_required(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(REQUIRE_CLI_ENV, "1")
+    def test_missing_binary_fails_when_required(self) -> None:
         with pytest.raises(pytest.fail.Exception):
-            _resolve_binary("hephaestus-definitely-not-a-real-binary")
+            _resolve_binary("hephaestus-definitely-not-a-real-binary", required=True)
 
     def test_present_binary_resolves(self) -> None:
         # `python3` (POSIX) / `python` is always on PATH in the test env.
-        assert _resolve_binary("python3" if sys.platform != "win32" else "python")
+        command = "python3" if sys.platform != "win32" else "python"
+        assert _resolve_binary(command, required=True)

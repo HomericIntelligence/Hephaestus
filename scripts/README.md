@@ -30,12 +30,6 @@ through installed `hephaestus-*` console scripts.
 - **`check_security_policy_no_hardcoded_date.py`** — Reject hard-coded
   `As of YYYY-MM-DD` stamps in `SECURITY.md` (issue #730).
 
-### Benchmark analysis
-
-- **`compare_benchmarks.py`** — Compare current benchmark JSON against a
-  baseline and generate a Markdown regression report. Critical regressions are
-  report-only by default; pass `--fail-on-regression` to exit nonzero.
-
 ### Scaffolding / automation introspection
 
 - **`show_prompt.py`** — Display the automation-pipeline agent prompt for a
@@ -43,6 +37,8 @@ through installed `hephaestus-*` console scripts.
 - **`compact_issue_timelines.py`** — Dry-run-first migration that reduces open
   and closed issue timelines to the latest actor-owned plan and plan review.
   See `../docs/runbooks/compact-issue-timelines.md`.
+- **`compare_benchmarks.py`** — Compare benchmark result JSON files, with an
+  explicit optional command-execution mode for collecting a fresh result.
 
 ### Installation / environment
 
@@ -58,8 +54,8 @@ through installed `hephaestus-*` console scripts.
   a named subset. Its `build` subset runs the required artifact lifecycle lane
   rather than a separate package-build approximation. Project-toolchain
   commands use a Podman/Docker image that the runner builds automatically when
-  absent. Set `HEPHAESTUS_CI_REBUILD=1` to rebuild the image from the current
-  checkout; the autonomous queue always sets it. Linked-worktree Git metadata
+  absent. Pass `--rebuild` to rebuild the image from the current checkout; the
+  autonomous queue always passes it. Linked-worktree Git metadata
   is mounted read-only so versioning and Git-aware scans inspect the candidate
   commit. `just`, ShellCheck, and Bats all run in the pinned CI image.
 
@@ -67,16 +63,20 @@ through installed `hephaestus-*` console scripts.
 
 - **`backup_state.py`** — Backup, restore, and verify tier-3 operational
   state (`build/.issue_implementer/`); stdlib-only so it runs in a broken
-  environment. See `../docs/adr/0013-backup-and-disaster-recovery-policy.md`
+  environment. See `../docs/adr/0012-backup-and-disaster-recovery-policy.md`
   and `../docs/runbooks/backup-restore.md`.
 
 ### Pi smoke validation
 
-- **`pi_smoke.py`** — Run a tool-free Pi smoke prompt using
-  `HEPH_PI_PROVIDER` and `HEPH_PI_MODEL` from the environment.
+- **`pi_smoke.py`** — Run a tool-free Pi smoke prompt using a private mode-0600
+  TOML file supplied with `--pi-alias-config`; use `--pi-dir` for a non-default
+  coding-agent configuration directory.
 - **`pi_smoke_slurm.py`** — Submit `scripts/slurm/pi_smoke.sbatch` with
   `sbatch` using a minimized environment and a fresh ACL-verified private
-  scheduler run directory.
+  scheduler run directory; alias config, Pi directory, and log paths are
+  explicit arguments.
+- **`pi_e2e_2519.py`** — Collect and render redacted, reproducible Pi
+  end-to-end evidence for issue #2519 beneath `build/pi-e2e-2519/`.
 - **`slurm/pi_smoke.sbatch`** — Slurm batch template that invokes
   `pi_smoke.py` on a cluster node with a fixed export list and no shared
   scheduler artifact (copy and fill partition/account locally).
@@ -88,21 +88,30 @@ through installed `hephaestus-*` console scripts.
   clean-install skill discovery; generate untracked evidence beneath
   `build/pi-acceptance/`.
 - **`publish_pi_package_acceptance.py`** — Publish and exactly read back the
-  actor-owned Athena `v0.4.0` acceptance comment on issue #2515.
+  actor-owned Athena `v0.5.0` acceptance comment on issue #2515.
 
-### Pi end-to-end evidence
+Collection is read-only with respect to GitHub:
 
-- **`pi_e2e_2519.py`** — Collect the live issue #2519 Pi/Codex evidence run,
-  keep the private raw records under `build/pi-e2e-2519/<run-id>/`, and render
-  the reproducible `docs/pi-e2e-2519-report.md` plus
-  `docs/runbooks/pi-e2e-2519.md` artifacts.
+```bash
+uv run python scripts/pi_package_acceptance.py collect \
+  --athena-checkout "$ATHENA_CHECKOUT" \
+  --implementation-pr "$IMPLEMENTATION_PR_NUMBER" \
+  --pi-bin "$ATHENA_PI_BIN" \
+  --output-dir build/pi-acceptance
+```
 
-The collector only performs GitHub readback. Commands passed to `capture` are
-the normal planner and automation loop and retain their ordinary GitHub
-mutation behavior. It enables their opt-in private receipt sink so provider
-sessions, resolved policy scopes, and host-owned Athena results come from the
-actual queue workers. Direct provider commands are rejected. See
-`docs/runbooks/pi-e2e-2519.md` for the exact commands and evidence contract.
+Publication is the sole forge-write step and requires the generated evidence
+and comment artifacts:
+
+```bash
+uv run python scripts/publish_pi_package_acceptance.py \
+  --acceptance build/pi-acceptance/acceptance.json \
+  --comment build/pi-acceptance/issue-comment.md
+```
+
+Do not commit or hand-edit the generated files. See
+`docs/pi-private-provider.md` for the exact-ref update, rollback, removal, and
+acceptance/readback contract.
 
 ## Usage
 

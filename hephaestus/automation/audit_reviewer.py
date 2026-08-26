@@ -34,6 +34,7 @@ from hephaestus.agents.runtime import (
 )
 from hephaestus.automation.prompts.catalog import PromptCatalog
 from hephaestus.cli.utils import (
+    add_agent_timeout_arg,
     configure_cli_logging,
     configure_github_throttle_from_args,
     emit_json_status,
@@ -42,9 +43,8 @@ from hephaestus.io.utils import write_secure
 from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser, ensure_state_dir
-from .agent_config import DEFAULT_AGENT_TIMEOUT
+from .agent_config import DEFAULT_AGENT_TIMEOUT, fallback_model, reviewer_model
 from .claude_invoke import invoke_claude_with_session
-from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug
 from .github_api import _gh_call, fetch_open_prs
 from .session_naming import AGENT_PR_REVIEWER
@@ -126,6 +126,8 @@ def run_audit_coordinator(
     state_dir: Path,
     dry_run: bool = False,
     timeout: int = DEFAULT_AGENT_TIMEOUT,
+    model: str | None = None,
+    fallback_model_value: str | None = None,
 ) -> list[dict[str, Any]]:
     """Dispatch the coordinator agent; return parsed audit results.
 
@@ -156,7 +158,7 @@ def run_audit_coordinator(
                 execution_request=ExecutionRequest(
                     AgentRole.PR_REVIEWER, AgentOperation.AUDIT_REVIEW, SessionLifecycle.ONE_SHOT
                 ),
-                model=direct_agent_model(agent, "HEPH_REVIEWER_MODEL"),
+                model=direct_agent_model(agent, model_value=model or reviewer_model()),
                 sandbox="read-only",
             )
             response = result.stdout or ""
@@ -169,13 +171,14 @@ def run_audit_coordinator(
                 issue=0,
                 agent=AGENT_PR_REVIEWER,
                 prompt=prompt,
-                model=reviewer_model(),
+                model=model or reviewer_model(),
                 cwd=get_repo_root(),
                 timeout=timeout,
                 output_format="json",
                 permission_mode="dontAsk",
                 allowed_tools="Read,Glob,Grep",
                 input_via_stdin=True,
+                fallback_model_value=fallback_model_value,
             )
             try:
                 response = json.loads(stdout or "{}").get("result", stdout or "")
@@ -204,6 +207,8 @@ class AuditReviewer:
     state_dir: Path | None = None
     dry_run: bool = False
     timeout: int = DEFAULT_AGENT_TIMEOUT
+    model: str = ""
+    fallback_model: str = ""
     shutdown_event: threading.Event | None = None
 
     def __post_init__(self) -> None:
@@ -227,6 +232,8 @@ class AuditReviewer:
                 state_dir=self.state_dir,
                 dry_run=self.dry_run,
                 timeout=self.timeout,
+                model=self.model,
+                fallback_model_value=self.fallback_model or None,
             )
         except RuntimeError as exc:
             logger.error("Coordinator failed: %s", exc)
@@ -255,6 +262,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Audit only these PR numbers (default: all open).",
     )
     parser.add_argument("--codex", action="store_true", help="Deprecated alias for --agent codex.")
+    parser.add_argument("--model", default="", metavar="MODEL")
+    parser.add_argument("--reviewer-model", default="", metavar="MODEL")
+    parser.add_argument("--fallback-model", default="", metavar="MODEL")
+    add_agent_timeout_arg(parser, default=1200)
     return parser
 
 
@@ -262,9 +273,19 @@ def main(argv: list[str] | None = None) -> int:
     """Parse CLI arguments and run the audit reviewer."""
     args = _build_parser().parse_args(argv)
     configure_github_throttle_from_args(args)
-    configure_cli_logging(verbose=args.verbose)
+    configure_cli_logging(verbose=args.verbose, log_format=getattr(args, "log_format", "text"))
     selected_agent = "codex" if args.codex else args.agent
-    agent = (selected_agent or "claude") if args.dry_run else resolve_agent(selected_agent)
+    agent = (
+        selected_agent or "claude"
+        if args.dry_run
+        else resolve_agent(
+            selected_agent,
+            disable_pi_automation=args.disable_pi_automation,
+            auth_status_timeout=args.auth_status_timeout,
+            pi_isolation_adapter=args.pi_isolation_adapter,
+            pi_dir=args.pi_dir,
+        )
+    )
 
     shutdown = threading.Event()
     with terminal_guard(shutdown.set):
@@ -274,6 +295,9 @@ def main(argv: list[str] | None = None) -> int:
                 pr_numbers=args.pr_numbers,
                 dry_run=args.dry_run,
                 shutdown_event=shutdown,
+                model=reviewer_model(args.reviewer_model or args.model or None),
+                fallback_model=fallback_model(args.fallback_model or args.model or None),
+                timeout=args.agent_timeout,
             )
             rc, audits = reviewer.run()
             if getattr(args, "json", False):

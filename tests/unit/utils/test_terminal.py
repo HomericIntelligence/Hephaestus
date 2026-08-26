@@ -48,12 +48,13 @@ class TestRestoreTerminal:
             mock_stdin.isatty.return_value = True
             with patch("subprocess.run") as mock_run:
                 restore_terminal()
-                mock_run.assert_called_once_with(
-                    ["stty", "sane"],
-                    stdin=mock_stdin,
-                    check=False,
-                    timeout=2,
-                )
+                mock_run.assert_called_once()
+                args, kwargs = mock_run.call_args
+                assert args == (["stty", "sane"],)
+                assert kwargs["stdin"] is mock_stdin
+                assert kwargs["check"] is False
+                assert kwargs["timeout"] == 2
+                assert isinstance(kwargs["env"], dict)
 
     def test_timeout_emits_bounded_warning(self, capsys) -> None:
         """A stty timeout emits a fixed warning without exposing exception data."""

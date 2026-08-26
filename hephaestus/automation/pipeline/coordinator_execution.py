@@ -8,6 +8,7 @@ from typing import Any
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import store_agent_session_result
 from .coordinator_types import *
+from .jobs import CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 
 # This collaborator consumes the facade's shared type namespace by design.
@@ -98,6 +99,21 @@ class ExecutionCoordinator(_CoordinatorHost):
                 return
             if self.config.phase_timeout_s and self.config.phase_timeout_s > 0:
                 job = replace(job, timeout_s=int(self.config.phase_timeout_s))
+            job = replace(
+                job,
+                disable_pi_automation=self.config.disable_pi_automation,
+                auth_status_timeout=self.config.auth_status_timeout,
+                pi_isolation_adapter=self.config.pi_isolation_adapter,
+                pi_dir=self.config.pi_dir,
+                fallback_model=self.config.fallback_model,
+                plugin_skills_dir=self.config.plugin_skills_dir,
+            )
+        elif isinstance(job, CompactJob):
+            job = replace(
+                job,
+                disable_pi_automation=self.config.disable_pi_automation,
+                auth_status_timeout=self.config.auth_status_timeout,
+            )
         claims = self._capture_implementation_file_claims(item)
         auxiliary = self._auxiliary_pool_separate and self._is_auxiliary_stage(item.stage)
         if auxiliary:
@@ -126,7 +142,11 @@ class ExecutionCoordinator(_CoordinatorHost):
         """Return the non-blocking GitHub rate-budget decision."""
         from hephaestus.automation.pipeline_github_transport import rate_budget_ok
 
-        return rate_budget_ok()
+        return rate_budget_ok(
+            enabled=self.config.rate_guard_enabled,
+            threshold=self.config.rate_guard_threshold,
+            timeout=self.config.gh_timeout,
+        )
 
     def _drain_completions(self) -> None:
         """Drain all ready completions from both worker lanes."""

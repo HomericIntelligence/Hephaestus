@@ -160,6 +160,7 @@ from .base import (
     _worktree_path,
     agent_provider,
     stage_model,
+    stage_timeout,
     write_skip_label,
 )
 from .pr_review_receipts import (
@@ -836,5 +837,6 @@ __all__ = [
     'is_full_commit_sha', 'json', 'logger', 'logging', 'parse_addressed_replies',
     'parse_review_audit', 'pr_is_current_open_head', 'pr_reviewer_claude_timeout', 're',
     'reviewer_model',
-    'scope_retraction_paths_for_threads', 'secrets', 'stage_model', 'write_skip_label']
+    'scope_retraction_paths_for_threads', 'secrets', 'stage_model', 'stage_timeout',
+    'write_skip_label']
 # fmt: on

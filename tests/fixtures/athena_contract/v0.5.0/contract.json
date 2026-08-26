@@ -1,0 +1,8 @@
+{
+  "athena_repository": "github.com/HomericIntelligence/Athena",
+  "athena_commit": "44a22b8dfab986f505a99ce52e8521f645da3e2b",
+  "advise_sha256": "353090814ee2fac601ad3f68c6aaf10d27800fd4f93f9418dfa422119193e3b0",
+  "learn_sha256": "a2786f71a60a933220abf68bdce1272faeeafec1b6640c9d2d0cb8d04819ba21",
+  "dependency_resolution_sha256": "2c6d741b798450665935e7bab6118972a366e31d1fad5c7381cfd3efeacc0ca6",
+  "trust_source": "fixture:v0.5.0"
+}

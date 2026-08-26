@@ -123,7 +123,7 @@ class TestFileLogging:
 
 
 class TestJsonFormat:
-    """Integration: JSON formatting via HEPHAESTUS_LOG_FORMAT env var."""
+    """Integration: JSON formatting through an explicit logging parameter."""
 
     def test_json_format_produces_valid_json(self, capsys, monkeypatch) -> None:
         """With json_format=True, each log line is valid JSON."""

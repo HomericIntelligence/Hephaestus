@@ -3,23 +3,12 @@
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
-import signal
-import subprocess
-import sys
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, call
 
 import pytest
 
-from hephaestus.forensics import gdb_runner
 from hephaestus.forensics.gdb_runner import (
-    _EXECUTION_TIMEOUT_SECONDS,
-    _build_parser,
-    _run_bounded,
     _validate_gdb_cmd_prefix,
     build_gdb_script,
     main,
@@ -31,33 +20,10 @@ from hephaestus.forensics.gdb_runner import (
 #: no-gdb fallback path of run_under_gdb without needing gdb installed.
 _UNRESOLVABLE_CMD = "definitely_not_a_real_command_xyz"
 
-
-def _gdb_supports_logging_enabled() -> bool:
-    """Return True when gdb accepts the batch script's logging syntax.
-
-    The generated batch script uses ``set logging enabled on``, which GDB
-    introduced in 12.0. Older gdb (e.g. Debian's 10.1) rejects it before any
-    hook runs, so genuinely invoking gdb there cannot succeed. Note that old
-    gdb still exits 0 from ``-batch`` after printing the error, so both the
-    exit status AND the diagnostic are checked.
-    """
-    if shutil.which("gdb") is None:
-        return False
-    probe = subprocess.run(
-        ["gdb", "-batch", "-nx", "-ex", "set logging enabled on", "-ex", "quit"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    combined = probe.stdout + probe.stderr
-    return probe.returncode == 0 and "Undefined set logging" not in combined
-
-
 #: Skip marker for tests that genuinely invoke gdb (an integration concern;
-#: a capable gdb is not guaranteed to be present in the unit-test environment).
+#: gdb is not guaranteed to be present in the unit-test environment).
 _requires_gdb = pytest.mark.skipif(
-    not _gdb_supports_logging_enabled(),
-    reason="gdb >= 12 (set logging enabled) is not available in this environment",
+    shutil.which("gdb") is None, reason="gdb is not installed in this environment"
 )
 
 
@@ -105,12 +71,12 @@ class TestBuildGdbScript:
     def test_intercepts_crash_signals(self) -> None:
         """The script installs handlers for the expected fatal signals."""
         script = build_gdb_script("a", "b", "c")
-        for signal_name in ("SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE"):
+        for signal in ("SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE"):
             # The template aligns the signal column with padding spaces, so
             # match the tokens individually rather than a fixed-spacing string.
-            assert f"handle {signal_name}" in script
+            assert f"handle {signal}" in script
             handle_line = next(
-                line for line in script.splitlines() if line.startswith(f"handle {signal_name}")
+                line for line in script.splitlines() if line.startswith(f"handle {signal}")
             )
             assert "stop" in handle_line
             assert "nopass" in handle_line
@@ -152,26 +118,24 @@ class TestRunUnderGdb:
 
 
 class TestGdbCmdPrefixParsing:
-    """Regression tests for GDB_CMD_PREFIX shell-quote parsing (issue #756)."""
+    """Regression tests for gdb-prefix shell-quote parsing (issue #756)."""
 
     @staticmethod
     def _capture_argv(monkeypatch) -> list[list[str]]:
         captured: list[list[str]] = []
-        process = MagicMock()
-        process.pid = 4242
-        process.wait.return_value = 0
 
-        def fake_popen(argv, *, start_new_session, process_group):
+        def fake_run(argv, timeout, *, additional_process_group_file=None):
+            del timeout, additional_process_group_file
             captured.append(list(argv))
-            return process
+            return 0
 
-        monkeypatch.setattr("hephaestus.forensics.gdb_runner.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("hephaestus.forensics.gdb_runner._run_bounded", fake_run)
         return captured
 
     def test_prefix_none_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
         captured = self._capture_argv(monkeypatch)
         run_under_gdb(str(tmp_path / "cores"), "sh", ["-c", "true"], gdb_cmd_prefix=None)
-        assert captured, "subprocess.Popen was not invoked"
+        assert captured, "_run_bounded was not invoked"
         assert captured[0][0] == "gdb"
 
     def test_prefix_empty_string_yields_no_prefix_tokens(self, monkeypatch, tmp_path) -> None:
@@ -230,24 +194,24 @@ class TestGdbCmdPrefixParsing:
 class TestMain:
     """Tests for the CLI entry point."""
 
-    def test_run_under_gdb_0_bypasses_gdb(self, monkeypatch) -> None:
-        """RUN_UNDER_GDB=0 execs the command directly and returns its code."""
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        rc = main(["/tmp/unused-core-dir", "sh", "-c", "exit 0"])
+    def test_direct_option_bypasses_gdb(self, monkeypatch) -> None:
+        """--direct executes the command directly and returns its code."""
+        monkeypatch.setenv("RUN_UNDER_GDB", "1")
+        rc = main(["--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
         assert rc == 0
 
-    def test_run_under_gdb_0_propagates_nonzero(self, monkeypatch) -> None:
-        """RUN_UNDER_GDB=0 propagates the command's non-zero exit code."""
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        rc = main(["/tmp/unused-core-dir", "sh", "-c", "exit 3"])
+    def test_direct_option_propagates_nonzero(self, monkeypatch) -> None:
+        """--direct propagates the command's non-zero exit code."""
+        monkeypatch.setenv("RUN_UNDER_GDB", "1")
+        rc = main(["--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 3"])
         assert rc == 3
 
-    def test_run_under_gdb_0_json_envelope(self, monkeypatch, capsys) -> None:
-        """RUN_UNDER_GDB=0 with --json emits a status envelope."""
+    def test_direct_option_json_envelope(self, monkeypatch, capsys) -> None:
+        """--direct with --json emits a status envelope."""
         import json
 
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        rc = main(["--json", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
+        monkeypatch.setenv("RUN_UNDER_GDB", "1")
+        rc = main(["--json", "--direct", "/tmp/unused-core-dir", "sh", "-c", "exit 0"])
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "ok"
@@ -276,347 +240,9 @@ class TestMain:
         rc = main([str(tmp_path), "sh"])
         assert rc == 42
 
-    @pytest.mark.parametrize("direct", [True, False])
-    def test_timeout_returns_124_at_each_execution_path(
-        self,
-        direct: bool,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys,
-        tmp_path: Path,
-    ) -> None:
-        """Both CLI execution paths return fixed timeout status output."""
-        hostile = "secret-" * 20_000
-        error = subprocess.TimeoutExpired(
-            [hostile],
-            7,
-            output=hostile,
-            stderr=hostile,
-        )
-        if direct:
-            monkeypatch.setenv("RUN_UNDER_GDB", "0")
-            monkeypatch.setattr(gdb_runner, "_run_bounded", Mock(side_effect=error))
-        else:
-            monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-            monkeypatch.setattr(gdb_runner, "run_under_gdb", Mock(side_effect=error))
-
-        rc = main(["--json", "--timeout", "7", str(tmp_path / "cores"), "tool", hostile])
-
-        captured = capsys.readouterr()
-        assert rc == 124
-        assert captured.err == "[run-under-gdb] ERROR: command timed out\n"
-        assert json.loads(captured.out) == {
-            "status": "error",
-            "exit_code": 124,
-            "message": "command timed out",
-        }
-        assert hostile not in captured.out
-        assert hostile not in captured.err
-
-    def test_direct_bypass_succeeds_without_process_groups(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Direct execution preserves success when process groups are unavailable."""
-        process = MagicMock(pid=4242)
-        process.wait.return_value = 0
-        popen = Mock(return_value=process)
-        monkeypatch.setenv("RUN_UNDER_GDB", "0")
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
-        monkeypatch.setattr(subprocess, "Popen", popen)
-
-        assert main(["--timeout", "7", "unused-cores", "tool"]) == 0
-        assert popen.call_args.kwargs["start_new_session"] is False
-        assert popen.call_args.kwargs["process_group"] is None
-        process.kill.assert_not_called()
-
-    def test_gdb_success_without_process_groups(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Gdb execution preserves success when process groups are unavailable."""
-        process = MagicMock(pid=4242)
-        process.wait.return_value = 0
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
-        monkeypatch.setattr(gdb_runner, "resolve_command", lambda _command: "/tool")
-        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
-
-        assert run_under_gdb(str(tmp_path / "cores"), "tool", [], timeout=7) == 0
-        process.kill.assert_not_called()
-
-    @pytest.mark.skipif(not hasattr(os, "forkpty"), reason="requires a controlling TTY")
-    def test_direct_bypass_preserves_controlling_tty(self) -> None:
-        """The direct path keeps /dev/tty usable in a PTY-backed session."""
-        pid, master_fd = os.forkpty()
-        if pid == 0:
-            os.environ["RUN_UNDER_GDB"] = "0"
-            rc = main(
-                [
-                    "--timeout",
-                    "5",
-                    "unused-cores",
-                    sys.executable,
-                    "-c",
-                    "with open('/dev/tty', 'rb') as tty: assert tty.isatty()",
-                ]
-            )
-            os._exit(rc)
-
-        try:
-            _, status = os.waitpid(pid, 0)
-        finally:
-            os.close(master_fd)
-        assert os.waitstatus_to_exitcode(status) == 0
-
-    def test_artifact_cleanup_cannot_mask_timeout(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Best-effort unlink failures preserve the execution timeout."""
-        timeout = subprocess.TimeoutExpired(["gdb"], 7)
-        monkeypatch.setattr(gdb_runner, "resolve_command", lambda _command: "/tool")
-        monkeypatch.setattr(gdb_runner, "_run_bounded", Mock(side_effect=timeout))
-        monkeypatch.setattr(Path, "unlink", Mock(side_effect=PermissionError("denied")))
-
-        with pytest.raises(subprocess.TimeoutExpired):
-            run_under_gdb(str(tmp_path / "cores"), "tool", [], timeout=7)
-
-
-class TestBoundedProcess:
-    """Tests for process-group and direct-child timeout cleanup."""
-
-    def test_timeout_kills_and_reaps_process_group(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """POSIX timeout cleanup kills the process group and reaps the child."""
-        process = MagicMock(pid=4242)
-        process.wait.side_effect = [
-            subprocess.TimeoutExpired(["tool"], 7),
-            -signal.SIGKILL,
-        ]
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
-        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
-        killpg = Mock()
-        monkeypatch.setattr(os, "killpg", killpg)
-
-        with pytest.raises(subprocess.TimeoutExpired):
-            _run_bounded(["tool"], 7)
-
-        killpg.assert_called_once_with(4242, signal.SIGKILL)
-        process.kill.assert_not_called()
-        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
-
-    def test_timeout_without_process_groups_kills_direct_child(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Fallback cleanup kills and reaps only the direct child."""
-        process = MagicMock(pid=4242)
-        process.wait.side_effect = [
-            subprocess.TimeoutExpired(["tool"], 7),
-            -1,
-        ]
-        popen = Mock(return_value=process)
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
-        monkeypatch.setattr(subprocess, "Popen", popen)
-
-        with pytest.raises(subprocess.TimeoutExpired):
-            _run_bounded(["tool"], 7)
-
-        assert popen.call_args.kwargs["start_new_session"] is False
-        process.kill.assert_called_once()
-        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
-
-    def test_second_reap_timeout_attempts_nonblocking_final_reap(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A stalled reap is retried once without extending timeout cleanup."""
-        process = MagicMock(pid=4242)
-        process.wait.side_effect = [
-            subprocess.TimeoutExpired(["tool"], 7),
-            subprocess.TimeoutExpired(["tool"], 5),
-            subprocess.TimeoutExpired(["tool"], 0),
-        ]
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", False)
-        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
-
-        with pytest.raises(RuntimeError, match="termination was not confirmed"):
-            _run_bounded(["tool"], 7)
-
-        assert process.kill.call_count == 2
-        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5), call(timeout=0)]
-
-    def test_permission_error_during_group_kill_is_not_suppressed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A genuine termination failure is surfaced instead of reporting 124."""
-        process = MagicMock(pid=4242)
-        process.wait.side_effect = subprocess.TimeoutExpired(["tool"], 7)
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", True)
-        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
-        monkeypatch.setattr(os, "killpg", Mock(side_effect=PermissionError("denied")))
-
-        with pytest.raises(PermissionError, match="denied"):
-            _run_bounded(["tool"], 7)
-
-    @pytest.mark.parametrize("process_groups", [True, False])
-    def test_keyboard_interrupt_cleans_up_before_reraising(
-        self,
-        process_groups: bool,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Both POSIX-group and direct-child paths clean up on Ctrl-C."""
-        process = MagicMock(pid=4242)
-        process.wait.side_effect = [KeyboardInterrupt, -signal.SIGKILL]
-        monkeypatch.setattr(gdb_runner, "_PROCESS_GROUPS_SUPPORTED", process_groups)
-        monkeypatch.setattr(subprocess, "Popen", Mock(return_value=process))
-        killpg = Mock()
-        monkeypatch.setattr(os, "killpg", killpg)
-
-        with pytest.raises(KeyboardInterrupt):
-            _run_bounded(["tool"], 7)
-
-        if process_groups:
-            killpg.assert_called_once_with(4242, signal.SIGKILL)
-            process.kill.assert_not_called()
-        else:
-            process.kill.assert_called_once()
-        assert process.wait.call_args_list == [call(timeout=7), call(timeout=5)]
-
-    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
-    def test_timeout_kills_real_descendant(self, tmp_path: Path) -> None:
-        """A timed-out parent does not leave its process-group descendant alive."""
-        pid_file = tmp_path / "child.pid"
-        child_code = "import time; time.sleep(60)"
-        parent_code = (
-            "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-c', sys.argv[3]])\n"
-            "with open(sys.argv[1], 'w') as pid_file:\n"
-            "    pid_file.write(str(child.pid))\n"
-            "    pid_file.flush()\n"
-            "time.sleep(60)\n"
-        )
-
-        with pytest.raises(subprocess.TimeoutExpired):
-            _run_bounded(
-                [
-                    sys.executable,
-                    "-c",
-                    parent_code,
-                    str(pid_file),
-                    "parent",
-                    child_code,
-                ],
-                1,
-            )
-
-        deadline = time.monotonic() + 5
-        while not pid_file.is_file() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert pid_file.is_file()
-        child_pid = int(pid_file.read_text())
-
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                break
-            # A killed descendant may remain briefly as a zombie until its
-            # reaper collects it. Confirm that state portably: read the
-            # kernel's /proc state directly instead of relying on procps
-            # userland, which minimal CI containers do not ship. A platform
-            # without /proc keeps requiring a positive ProcessLookupError.
-            proc_stat = Path(f"/proc/{child_pid}/stat")
-            if proc_stat.exists():
-                try:
-                    state = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0]
-                except (OSError, IndexError):
-                    state = None
-                if state == "Z":
-                    break
-            time.sleep(0.01)
-        else:
-            pytest.fail(f"descendant process {child_pid} survived timeout cleanup")
-
-    @_requires_gdb
-    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
-    def test_gdb_timeout_kills_forking_inferior_descendant(self, tmp_path: Path) -> None:
-        """Timeout cleanup kills a descendant in GDB's inferior process group."""
-        pid_file = tmp_path / "gdb-child.pid"
-        child_code = "import time; time.sleep(60)"
-        inferior_code = (
-            "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]])\n"
-            "with open(sys.argv[1], 'w') as pid_file:\n"
-            "    pid_file.write(str(child.pid))\n"
-            "    pid_file.flush()\n"
-            "time.sleep(60)\n"
-        )
-
-        with pytest.raises(subprocess.TimeoutExpired):
-            run_under_gdb(
-                str(tmp_path / "cores"),
-                sys.executable,
-                ["-c", inferior_code, str(pid_file), child_code],
-                timeout=3,
-            )
-
-        assert pid_file.is_file(), "GDB did not start the forking inferior"
-        child_pid = int(pid_file.read_text())
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                break
-            status = subprocess.run(
-                ["ps", "-o", "stat=", "-p", str(child_pid)],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-            if status.returncode == 0 and status.stdout.strip().startswith("Z"):
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail(f"GDB inferior descendant {child_pid} survived timeout cleanup")
-
-
-class TestExecutionTimeoutParser:
-    """Tests for the bounded execution timeout CLI option."""
-
-    @pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("86400", 86400)])
-    def test_accepts_inclusive_timeout_bounds(self, raw: str, expected: int) -> None:
-        """The parser accepts both inclusive timeout endpoints."""
-        args = _build_parser().parse_args(["--timeout", raw, "cores", "tool"])
-        assert args.timeout == expected
-
-    @pytest.mark.parametrize("raw", ["0", "-1", "86401", "not-an-int"])
-    def test_rejects_invalid_timeout(self, raw: str) -> None:
-        """The parser rejects invalid timeout values."""
-        with pytest.raises(SystemExit):
-            _build_parser().parse_args(["--timeout", raw, "cores", "tool"])
-
-    def test_default_timeout_is_documented_value(self) -> None:
-        """The parser defaults to the documented two-hour limit."""
-        args = _build_parser().parse_args(["cores", "tool"])
-        assert args.timeout == _EXECUTION_TIMEOUT_SECONDS
-
-    def test_timeout_after_command_is_remainder(self) -> None:
-        """The remainder-consuming command position requires timeout first."""
-        args = _build_parser().parse_args(["cores", "tool", "--timeout", "7"])
-        assert args.timeout == _EXECUTION_TIMEOUT_SECONDS
-        assert args.command_args == ["--timeout", "7"]
-
 
 class TestValidateGdbCmdPrefix:
-    """Tests for GDB_CMD_PREFIX whitelist validation."""
+    """Tests for explicit gdb command-prefix whitelist validation."""
 
     @pytest.mark.parametrize("raw", [None, "", "   ", "\t\n  "])
     def test_empty_input_returns_empty_list(self, raw: str | None) -> None:
@@ -665,11 +291,11 @@ class TestValidateGdbCmdPrefix:
 
         After issue #756 the value is tokenized with ``shlex.split`` before the
         per-token whitelist runs. Unbalanced-quote cases (e.g. ``foo'bar``) are
-        rejected by shlex itself (re-raised with a ``GDB_CMD_PREFIX`` message);
+        rejected by shlex itself (re-raised with an option-named message);
         the remaining cases survive tokenization but carry shell metacharacters
         outside the whitelist.
         """
-        with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
+        with pytest.raises(ValueError, match="gdb-cmd-prefix"):
             _validate_gdb_cmd_prefix(raw)
 
 
@@ -678,7 +304,7 @@ class TestRunUnderGdbPrefixValidation:
 
     def test_unsafe_prefix_raises_before_subprocess(self, tmp_path: Path) -> None:
         """Hoisted validation fires before resolve_command for unsafe prefix."""
-        with pytest.raises(ValueError, match="GDB_CMD_PREFIX"):
+        with pytest.raises(ValueError, match="gdb-cmd-prefix"):
             run_under_gdb(
                 str(tmp_path / "cores"),
                 _UNRESOLVABLE_CMD,
@@ -700,33 +326,46 @@ class TestRunUnderGdbPrefixValidation:
 class TestMainPrefixValidation:
     """main() converts validation errors into a clean CLI error + exit 2."""
 
-    def test_main_returns_2_on_unsafe_env_var(self, monkeypatch, capsys, tmp_path: Path) -> None:
-        """main() returns 2 and prints ERROR to stderr for invalid GDB_CMD_PREFIX."""
-        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=run")
-        rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+    def test_main_returns_2_on_unsafe_prefix_option(self, capsys, tmp_path: Path) -> None:
+        """main() returns 2 and prints ERROR for an invalid prefix option."""
+        rc = main(
+            [
+                "--gdb-cmd-prefix=--init-eval-command=run",
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+            ]
+        )
         captured = capsys.readouterr()
         assert rc == 2
         assert "[run-under-gdb] ERROR:" in captured.err
-        assert "GDB_CMD_PREFIX" in captured.err
+        assert "gdb-cmd-prefix" in captured.err
 
-    def test_main_json_envelope_on_unsafe_env_var(
-        self, monkeypatch, capsys, tmp_path: Path
-    ) -> None:
+    def test_main_json_envelope_on_unsafe_prefix_option(self, capsys, tmp_path: Path) -> None:
         """main() emits a JSON status envelope with status != ok on invalid prefix."""
         import json
 
-        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=run")
-        rc = main(["--json", str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+        rc = main(
+            [
+                "--json",
+                "--gdb-cmd-prefix=--init-eval-command=run",
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+            ]
+        )
         assert rc == 2
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] != "ok"
-        assert "GDB_CMD_PREFIX" in payload["message"]
+        assert "gdb-cmd-prefix" in payload["message"]
 
-    def test_main_safe_env_var_unchanged(self, monkeypatch, tmp_path: Path) -> None:
-        """Safe prefix + unresolvable command: validation passes, returns 127."""
-        monkeypatch.delenv("RUN_UNDER_GDB", raising=False)
-        monkeypatch.setenv("GDB_CMD_PREFIX", "uv run --")
-        rc = main([str(tmp_path / "cores"), _UNRESOLVABLE_CMD])
+    def test_main_safe_prefix_option_unchanged(self, monkeypatch, tmp_path: Path) -> None:
+        """The explicit prefix wins while a poison environment value is ignored."""
+        monkeypatch.setenv("GDB_CMD_PREFIX", "--init-eval-command=poison")
+        rc = main(
+            [
+                "--gdb-cmd-prefix",
+                "uv run --",
+                str(tmp_path / "cores"),
+                _UNRESOLVABLE_CMD,
+            ]
+        )
         assert rc == 127

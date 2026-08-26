@@ -64,6 +64,23 @@ class TestModuleSurface:
     def test_main_callable(self) -> None:
         assert callable(ci_driver_mod.main)
 
+
+def test_timeout_flags_thread_into_pipeline_config() -> None:
+    """Standalone CI-driver timeout options configure scoped operations."""
+    captured = _run_main_capturing_config(
+        [
+            "--issues",
+            "123",
+            "--agent-timeout",
+            "11",
+            "--poll-max-wait",
+            "13",
+        ]
+    )
+    config = captured["config"]
+    assert (config.reviewer_timeout, config.implementer_timeout) == (11, 11)
+    assert config.poll_max_wait == 13
+
     def test_cidriver_class_exposed(self) -> None:
         assert hasattr(ci_driver_mod, "CIDriver")
 

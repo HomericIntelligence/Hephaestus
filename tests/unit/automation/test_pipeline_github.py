@@ -2345,6 +2345,7 @@ class TestConditionalMerge:
             check=False,
             retry_on_rate_limit=False,
             max_retries=1,
+            timeout=120,
         )
 
     def test_preserves_a_409_response_for_stage_level_head_drift_handling(
@@ -2366,7 +2367,7 @@ class TestConditionalMerge:
             "_repo_issue_comments",
             lambda issue: [{"body": render_current_plan("Plan"), "user": {"login": "bot"}}],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         result = adapter.merge_pr_if_head(7, "a" * 40, _authorization())
 
@@ -2795,6 +2796,7 @@ class TestConversationResolutionAdmission:
         call_mock.assert_called_once_with(
             ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
             check=False,
+            timeout=120,
         )
 
     def test_accepts_valid_protection_without_a_bypass_allowance_field(
@@ -2817,6 +2819,7 @@ class TestConversationResolutionAdmission:
         call_mock.assert_called_once_with(
             ["api", "--method", "GET", "/repos/org/repo/branches/main/protection"],
             check=False,
+            timeout=120,
         )
 
     @pytest.mark.parametrize(
@@ -3443,9 +3446,9 @@ def test_unscoped_mark_go_uses_transport_without_repo_selector(
     adapter.mark_pr_implementation_go(7)
 
     assert calls == [
-        (["issue", "edit", "7", "--add-label", STATE_IMPLEMENTATION_GO], {}),
-        (["issue", "edit", "7", "--remove-label", STATE_IMPLEMENTATION_NO_GO], {}),
-        (["pr", "view", "7", "--json", "labels"], {"check": False}),
+        (["issue", "edit", "7", "--add-label", STATE_IMPLEMENTATION_GO], {"timeout": 120}),
+        (["issue", "edit", "7", "--remove-label", STATE_IMPLEMENTATION_NO_GO], {"timeout": 120}),
+        (["pr", "view", "7", "--json", "labels"], {"check": False, "timeout": 120}),
     ]
 
 
@@ -3517,7 +3520,9 @@ def test_unscoped_label_read_malformed_response_fails_closed(
     monkeypatch.setattr(transport_mod, "gh_call", call_mock)
 
     assert adapter.pr_has_implementation_state_label(7) == (False, False)
-    call_mock.assert_called_once_with(["pr", "view", "7", "--json", "labels"], check=False)
+    call_mock.assert_called_once_with(
+        ["pr", "view", "7", "--json", "labels"], check=False, timeout=120
+    )
 
 
 @pytest.mark.parametrize("state", [(False, False), (True, True)])
@@ -3579,7 +3584,7 @@ class TestRepoScoping:
                 {"body": "review", "databaseId": 2, "user": {"login": "bot"}},
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.issue_comments(7) == [
             IssueComment(body="plan", author_login="bot", viewer_did_author=True, database_id=1),
@@ -3730,7 +3735,7 @@ class TestRepoScoping:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
@@ -3748,7 +3753,7 @@ class TestRepoScoping:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.FOUND
 
@@ -3772,7 +3777,7 @@ class TestRepoScoping:
             "_repo_issue_comments",
             lambda issue: [{"body": body, "user": {"login": "bot"}}],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
@@ -3791,7 +3796,7 @@ class TestRepoScoping:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.ABSENT
 
@@ -3814,7 +3819,7 @@ class TestRepoScoping:
                 },
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.FOUND
 
@@ -3833,7 +3838,7 @@ class TestRepoScoping:
         monkeypatch.setattr(
             adapter, "_repo_issue_comments", lambda issue: (_ for _ in ()).throw(failure)
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.discover_plan(5).status is PlanDiscoveryStatus.READ_ERROR
 
@@ -5651,7 +5656,7 @@ class TestReadSurface:
                 }
             ],
         )
-        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda: "bot")
+        monkeypatch.setattr(github_api_mod, "gh_current_login", lambda **_kwargs: "bot")
 
         assert adapter.find_merged_closing_pr(9) == 1
         assert adapter.find_pr_for_issue(9) == 2
@@ -5799,6 +5804,7 @@ class TestReadSurface:
         call_mock.assert_called_once_with(
             ["pr", "view", "7", "--json", "labels"],
             check=False,
+            timeout=120,
         )
 
 
@@ -5811,7 +5817,7 @@ class TestGhPrState:
         payload = {"state": "OPEN", "headRefOid": "abc", "mergedAt": None}
         calls: list[list[str]] = []
 
-        def fake_gh_call(argv: list[str]) -> Any:
+        def fake_gh_call(argv: list[str], **_kwargs: Any) -> Any:
             calls.append(argv)
             return SimpleNamespace(stdout=json.dumps(payload))
 
@@ -5831,7 +5837,7 @@ class TestGhPrState:
     def test_failure_returns_none(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def boom(argv: list[str]) -> Any:
+        def boom(argv: list[str], **_kwargs: Any) -> Any:
             raise RuntimeError("gh down")
 
         monkeypatch.setattr(pg, "gh_call", boom)
@@ -5922,27 +5928,45 @@ class TestDriveGreenLearning:
 class TestRateBudget:
     """The non-blocking port of the legacy rate guard."""
 
-    def test_guard_disabled_by_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HEPHAESTUS_RATE_GUARD", "0")
+    def test_explicit_timeout_reaches_rate_limit_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CLI-owned GitHub timeout must bound the guard's live probe."""
+        observed: list[int | None] = []
 
-        assert pg.rate_budget_ok() == (True, 0.0)
+        def _remaining(*, timeout: int | None = None) -> tuple[int, int]:
+            observed.append(timeout)
+            return 5000, 0
+
+        monkeypatch.setattr(pg, "rate_limit_remaining", _remaining)
+
+        assert pg.rate_budget_ok(timeout=17) == (True, 0.0)
+        assert observed == [17]
+
+    def test_guard_disabled_by_explicit_option(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The removed ambient toggle cannot disable the explicit guard."""
+        monkeypatch.setenv("HEPHAESTUS_RATE_GUARD", "0")
+        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (10, 1_000_000))
+
+        assert pg.rate_budget_ok(now_epoch=999_995.0) == (False, 10.0)
+        assert pg.rate_budget_ok(enabled=False) == (True, 0.0)
 
     def test_unknown_budget_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda: None)
+        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: None)
 
         assert pg.rate_budget_ok() == (True, 0.0)
 
     def test_high_budget_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda: (5000, 0))
+        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (5000, 0))
 
         assert pg.rate_budget_ok() == (True, 0.0)
 
     def test_low_budget_returns_park_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Low budget: (False, seconds-until-reset + 5s slack) — never a sleep."""
         monkeypatch.delenv("HEPHAESTUS_RATE_GUARD", raising=False)
-        monkeypatch.setattr(pg, "rate_limit_remaining", lambda: (10, 1_000_000))
+        monkeypatch.setattr(pg, "rate_limit_remaining", lambda **_: (10, 1_000_000))
 
         ok, delay = pg.rate_budget_ok(now_epoch=999_995.0)
 
@@ -5953,12 +5977,16 @@ class TestRateBudget:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         payload = {"resources": {"graphql": {"remaining": 42, "reset": 123}}}
-        monkeypatch.setattr(pg, "gh_call", lambda argv: SimpleNamespace(stdout=json.dumps(payload)))
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda argv, **_: SimpleNamespace(stdout=json.dumps(payload)),
+        )
 
         assert pg.rate_limit_remaining() == (42, 123)
 
     def test_rate_limit_remaining_none_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def boom(argv: list[str]) -> Any:
+        def boom(argv: list[str], **_: Any) -> Any:
             raise RuntimeError("gh down")
 
         monkeypatch.setattr(pg, "gh_call", boom)
@@ -5968,10 +5996,18 @@ class TestRateBudget:
     def test_rate_limit_remaining_none_on_malformed_payload(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(pg, "gh_call", lambda argv: SimpleNamespace(stdout="not json"))
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda argv, **_: SimpleNamespace(stdout="not json"),
+        )
         assert pg.rate_limit_remaining() is None
 
-        monkeypatch.setattr(pg, "gh_call", lambda argv: SimpleNamespace(stdout="{}"))
+        monkeypatch.setattr(
+            pg,
+            "gh_call",
+            lambda argv, **_: SimpleNamespace(stdout="{}"),
+        )
         assert pg.rate_limit_remaining() is None
 
 

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from hephaestus.cli.utils import create_validation_parser, format_output, resolve_repo_root
+from hephaestus.config.child_environments import build_python_phase_env
 from hephaestus.io.toml import import_tomllib
 from hephaestus.utils.helpers import NETWORK_TIMEOUT
 
@@ -301,6 +302,7 @@ def collect_actual_test_count(repo_root: Path) -> int | None:
             capture_output=True,
             text=True,
             timeout=NETWORK_TIMEOUT,
+            env=build_python_phase_env(repo_root),
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None

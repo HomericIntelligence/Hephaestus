@@ -1966,7 +1966,11 @@ class TestImplementationAdmission:
         be silently terminalized as a duplicate of the other.
         """
         coordinator, _pool, _ = make_coordinator(
-            tmp_path, monkeypatch, repos=["repo-a", "repo-b"], max_workers=2
+            tmp_path,
+            monkeypatch,
+            repos=["repo-a", "repo-b"],
+            max_workers=2,
+            serialize_file_overlap=False,
         )
         # No real plan comments exist for the fake issues; fail open (None) so
         # the overlap selector dispatches without a GitHub fetch (#2057).

@@ -13,8 +13,8 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "publish_pi_package_acceptance.py"
 COLLECTOR = Path(__file__).resolve().parents[3] / "scripts" / "pi_package_acceptance.py"
-ATHENA_REF = "496815b00f6fb4c8e97466489371b364d52588b5"
-MARKER = "<!-- hephaestus-pi-package-acceptance:athena-v0.4.0 -->"
+ATHENA_REF = "44a22b8dfab986f505a99ce52e8521f645da3e2b"
+MARKER = "<!-- hephaestus-pi-package-acceptance:athena-v0.5.0 -->"
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -58,7 +58,7 @@ def _write_inputs(
         "schema_version": 1,
         "package": {
             "source": "git:github.com/HomericIntelligence/Athena",
-            "version": "v0.4.0",
+            "version": "v0.5.0",
             "ref": ATHENA_REF,
         },
         "compatibility": {
@@ -68,8 +68,8 @@ def _write_inputs(
         },
         "upstream": {
             "issue": "https://github.com/HomericIntelligence/Athena/issues/61",
-            "pull_request": "https://github.com/HomericIntelligence/Athena/pull/62",
-            "release_tag": "v0.4.0",
+            "pull_request": "https://github.com/HomericIntelligence/Athena/pull/149",
+            "release_tag": "v0.5.0",
             "required_check": "package",
         },
     }

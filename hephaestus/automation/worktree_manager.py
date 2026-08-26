@@ -26,7 +26,6 @@ that runs the automation. Recovery procedure for a force-killed loop:
 
 import contextlib
 import logging
-import os
 import shutil
 import subprocess
 import threading
@@ -56,9 +55,9 @@ def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     return {} if timeout is None else {"timeout": timeout}
 
 
-def _loop_trunk_githash() -> str | None:
-    """Return the loop-provided trunk commit-ish when available."""
-    trunk = os.environ.get("HEPH_TRUNK_GITHASH", "").strip()
+def _normalize_trunk_githash(trunk_githash: str | None) -> str | None:
+    """Return a usable explicitly supplied trunk commit-ish."""
+    trunk = (trunk_githash or "").strip()
     if not trunk or trunk == "unknown":
         return None
     return trunk
@@ -113,6 +112,7 @@ class WorktreeManager:
         base_dir: Path | None = None,
         base_branch: str | None = None,
         repo_root: Path | None = None,
+        trunk_githash: str | None = None,
     ) -> None:
         """Initialize worktree manager.
 
@@ -136,11 +136,11 @@ class WorktreeManager:
 
         # Base-branch detection is deferred to first use so that constructing
         # a WorktreeManager in test fixtures or environments without origin/*
-        # refs does not raise. The automation loop passes HEPH_TRUNK_GITHASH as
-        # a session-stable fallback, but issue-major workers may still request a
+        # refs does not raise. The automation loop may pass a session-stable
+        # trunk fallback, but issue-major workers may still request a
         # fresh remote base via refresh_base=True before cutting a new branch.
         # An explicit constructor base remains pinned and is never moved.
-        loop_trunk = _loop_trunk_githash()
+        loop_trunk = _normalize_trunk_githash(trunk_githash)
         self._base_branch_override = base_branch or loop_trunk
         self._base_branch_override_source = (
             "explicit" if base_branch is not None else "loop_trunk" if loop_trunk else None
@@ -211,7 +211,7 @@ class WorktreeManager:
         re-detects ``origin/HEAD``.
 
         A no-op only when the base is explicitly pinned with ``base_branch=``.
-        ``HEPH_TRUNK_GITHASH`` is a loop-start fallback, not an issue-major
+        The explicitly supplied trunk hash is a loop-start fallback, not an issue-major
         freshness pin, so refresh_base=True deliberately drops it and re-detects
         the current remote base. Returns the effective base branch.
         """

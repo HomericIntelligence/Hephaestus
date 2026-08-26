@@ -1,16 +1,16 @@
 """Preflight fixtures for the opt-in contract lane (issue #2146).
 
-Lane gating (``HEPHAESTUS_CONTRACT_TESTS``) lives in ``tests/conftest.py``;
-these fixtures skip individual tests whose external prerequisite is absent.
+Lane gating lives in ``tests/conftest.py``; these fixtures skip individual
+tests whose external prerequisite is absent.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
+from hephaestus.config.child_environments import build_gh_child_env
 from hephaestus.utils.helpers import run_subprocess
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -22,6 +22,7 @@ def gh_authenticated() -> None:
     try:
         result = run_subprocess(
             ["gh", "auth", "status"],
+            env=build_gh_child_env(),
             check=False,
             timeout=30,
             log_on_error=False,
@@ -33,19 +34,19 @@ def gh_authenticated() -> None:
 
 
 @pytest.fixture(scope="session")
-def contract_repo(gh_authenticated: None) -> str:
+def contract_repo(gh_authenticated: None, contract_repo_option: str | None) -> str:
     """Return the explicitly selected repository slug for contract calls.
 
-    ``HEPHAESTUS_CONTRACT_REPO`` takes precedence. Otherwise the repository is
-    resolved once from the checked-out root with an explicit ``cwd`` so the
-    lane cannot target an ambient working directory's repository.
+    The explicit CLI selection takes precedence. Otherwise the repository is
+    resolved once from the checked-out root with an explicit ``cwd`` so the lane
+    cannot target an ambient working directory's repository.
     """
-    slug = os.environ.get("HEPHAESTUS_CONTRACT_REPO", "").strip()
-    if slug:
-        return slug
+    if contract_repo_option:
+        return contract_repo_option
 
     result = run_subprocess(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        env=build_gh_child_env(),
         cwd=str(REPO_ROOT),
         timeout=60,
     )
@@ -53,7 +54,7 @@ def contract_repo(gh_authenticated: None) -> str:
 
 
 @pytest.fixture()
-def agent_lane_enabled() -> None:
+def agent_lane_enabled(contract_agent_enabled: bool) -> None:
     """Skip the token-costly agent lane unless explicitly enabled."""
-    if os.environ.get("HEPHAESTUS_CONTRACT_AGENT") != "1":
-        pytest.skip("agent contract lane spends model tokens; set HEPHAESTUS_CONTRACT_AGENT=1")
+    if not contract_agent_enabled:
+        pytest.skip("agent contract lane spends model tokens; pass --run-contract-agent")

@@ -10,6 +10,7 @@ from typing import Any
 
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
+from hephaestus.config.child_environments import build_git_child_env
 from hephaestus.utils.helpers import METADATA_TIMEOUT, run_subprocess
 
 
@@ -55,6 +56,7 @@ class MnemosyneCorpusResult:
 def _run_git(cwd: Path, argv: tuple[str, ...], timeout_s: int) -> subprocess.CompletedProcess[str]:
     return run_subprocess(
         ["git", *argv],
+        env=build_git_child_env(),
         cwd=cwd,
         check=False,
         timeout=timeout_s,

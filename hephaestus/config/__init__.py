@@ -5,7 +5,6 @@ from hephaestus.config.utils import (
     load_config,
     load_yaml_config,
     merge_configs,
-    merge_with_env,
     validate_config,
 )
 
@@ -14,6 +13,5 @@ __all__ = [
     "load_config",
     "load_yaml_config",
     "merge_configs",
-    "merge_with_env",
     "validate_config",
 ]

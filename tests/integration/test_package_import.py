@@ -22,7 +22,6 @@ TOP_LEVEL_SYMBOLS = [
     "format_system_info",
     "format_table",
     "get_logger",
-    "get_proj_root",
     "get_repo_root",
     "get_setting",
     "get_system_info",
@@ -44,7 +43,8 @@ TOP_LEVEL_SYMBOLS = [
 
 # Deprecated symbols removed in issue #1420. Guards against re-introduction at
 # the top-level package surface.
-REMOVED_DEPRECATED_SYMBOLS = ("get_config_value", "retry_with_jitter")
+REMOVED_DEPRECATED_SYMBOLS = ("get_config_value", "get_proj_root", "retry_with_jitter")
+REMOVED_CONFIG_SYMBOLS = ("merge_with_env",)
 
 SUBPACKAGE_SYMBOLS = [
     (
@@ -176,6 +176,14 @@ class TestSubpackageImports:
         mod = importlib.import_module(package)
         for symbol in symbols:
             assert hasattr(mod, symbol), f"{package}.{symbol} not found"
+
+    @pytest.mark.parametrize("symbol", REMOVED_CONFIG_SYMBOLS)
+    def test_removed_config_symbols_unavailable(self, symbol):
+        """Environment-backed configuration APIs cannot re-enter the public surface."""
+        import hephaestus.config as config
+
+        assert symbol not in config.__all__
+        assert not hasattr(config, symbol)
 
     def test_io_functions_callable(self):
         """Core io functions must be callable."""

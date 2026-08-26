@@ -34,9 +34,9 @@ def test_packaged_catalog_is_the_exact_pin_authority() -> None:
         "npm_name": "@earendil-works/pi-coding-agent",
         "version": "0.80.2",
     }
-    assert catalog["packages"]["athena"]["commit"] == ("496815b00f6fb4c8e97466489371b364d52588b5")
+    assert catalog["packages"]["athena"]["commit"] == ("44a22b8dfab986f505a99ce52e8521f645da3e2b")
     assert catalog["packages"]["athena"]["name"] == "@homericintelligence/athena"
-    assert catalog["packages"]["athena"]["manifest_version"] == "0.4.0"
+    assert catalog["packages"]["athena"]["manifest_version"] == "0.5.0"
     assert catalog["packages"]["pi-subagents"]["version"] == "0.37.2"
     assert catalog["packages"]["pi-web-access"]["version"] == "0.15.0"
 
@@ -47,9 +47,9 @@ def test_catalog_builds_only_immutable_native_install_specs() -> None:
 
     catalog = load_pi_package_catalog()
 
-    assert catalog.packages[0].manifest_version == "0.4.0"
+    assert catalog.packages[0].manifest_version == "0.5.0"
     assert catalog.install_specs == (
-        "git:github.com/HomericIntelligence/Athena@496815b00f6fb4c8e97466489371b364d52588b5",
+        "git:github.com/HomericIntelligence/Athena@44a22b8dfab986f505a99ce52e8521f645da3e2b",
         "npm:pi-subagents@0.37.2",
         "npm:pi-web-access@0.15.0",
     )
@@ -136,7 +136,7 @@ def test_dry_run_emits_exact_argv_without_subprocess_or_filesystem_writes() -> N
     assert report.commands[1] == (
         "/opt/pi/bin/pi",
         "install",
-        "git:github.com/HomericIntelligence/Athena@496815b00f6fb4c8e97466489371b364d52588b5",
+        "git:github.com/HomericIntelligence/Athena@44a22b8dfab986f505a99ce52e8521f645da3e2b",
         "-l",
         "--approve",
     )
@@ -199,7 +199,7 @@ def test_inventory_respects_pi_coding_agent_dir_and_exact_package_identity(
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
     user_npm_root = pi_dir / "npm" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(athena_root, "@homericintelligence/athena", "0.5.0")
     _write_package(user_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
     _write_package(user_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
@@ -231,7 +231,7 @@ def test_project_inventory_uses_pi_npm_node_modules_layout(tmp_path: Path) -> No
     )
     athena_root = project_root / "git" / "github.com" / "HomericIntelligence" / "Athena"
     project_npm_root = project_root / "npm" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(athena_root, "@homericintelligence/athena", "0.5.0")
     _write_package(project_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
     _write_package(project_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
@@ -282,7 +282,7 @@ def test_inventory_rejects_dirty_git_package_at_pinned_head(tmp_path: Path) -> N
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
     npm_root = pi_dir / "npm" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(athena_root, "@homericintelligence/athena", "0.5.0")
     _write_package(npm_root / "pi-subagents", "pi-subagents", "0.37.2")
     _write_package(npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 
@@ -436,7 +436,7 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
     user_npm_root = pi_dir / "npm" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(athena_root, "@homericintelligence/athena", "0.5.0")
     _write_package(user_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
     _write_package(user_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
     rpc_calls: list[tuple[str, ...]] = []
@@ -479,7 +479,7 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         probe_cwd = kwargs["cwd"]
         assert probe_env is not None
         assert probe_cwd is not None
-        isolated_agent_dir = Path(probe_env["PI_CODING_AGENT_DIR"])
+        isolated_agent_dir = Path(probe_env["HOME"]) / ".pi" / "agent"
         isolated_paths.extend((isolated_agent_dir, probe_cwd))
         if isolated_agent_dir == pi_dir or probe_cwd == cwd:
             ambient_sentinel.write_text("loaded", encoding="utf-8")
@@ -568,7 +568,7 @@ def test_isolated_probe_preserves_verified_package_scopes(tmp_path: Path) -> Non
         probe_env,
         trust,
     ):
-        agent_dir = Path(probe_env["PI_CODING_AGENT_DIR"])
+        agent_dir = Path(probe_env["HOME"]) / ".pi" / "agent"
         user_settings = json.loads((agent_dir / "settings.json").read_text(encoding="utf-8"))
         project_settings = json.loads(
             (probe_cwd / ".pi" / "settings.json").read_text(encoding="utf-8")
@@ -771,9 +771,9 @@ def test_pi_child_environment_honors_the_operator_agent_directory(
     from hephaestus.agents import pi_plugins
 
     pi_dir = tmp_path / "pi-agent"
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "poison"))
 
-    assert pi_plugins._pi_child_env()["PI_CODING_AGENT_DIR"] == str(pi_dir)
+    assert pi_plugins._pi_child_env(pi_dir=pi_dir)["PI_CODING_AGENT_DIR"] == str(pi_dir)
 
 
 def test_installer_rejects_invalid_controls_and_reports_timeout(tmp_path: Path) -> None:
@@ -954,7 +954,7 @@ def test_global_no_approve_inventory_ignores_project_package_shadow(tmp_path: Pa
     )
     athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
     user_npm_root = pi_dir / "npm" / "node_modules"
-    _write_package(athena_root, "@homericintelligence/athena", "0.4.0")
+    _write_package(athena_root, "@homericintelligence/athena", "0.5.0")
     _write_package(user_npm_root / "pi-subagents", "pi-subagents", "0.37.2")
     _write_package(user_npm_root / "pi-web-access", "pi-web-access", "0.15.0")
 

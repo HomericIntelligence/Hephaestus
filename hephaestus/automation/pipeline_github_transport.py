@@ -5,14 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import quote
 
 import hephaestus.automation.github_api as github_api
@@ -68,7 +67,6 @@ from hephaestus.automation.state_labels import (
     has_label,
     is_implementation_go,
 )
-from hephaestus.constants import read_timeout_env
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 
 from .pipeline_github_contract import _PipelineGitHubHost
@@ -109,7 +107,7 @@ def _parse_included_http_response(
     return (status, parsed, False) if isinstance(parsed, dict) else (status, None, True)
 
 
-def rate_limit_remaining() -> tuple[int, int] | None:
+def rate_limit_remaining(*, timeout: int | None = None) -> tuple[int, int] | None:
     """Return ``(remaining, reset_epoch)`` for the GraphQL budget, or ``None``.
 
     Feeds the coordinator's non-blocking rate gate. A blocking *sleeping* guard
@@ -117,7 +115,7 @@ def rate_limit_remaining() -> tuple[int, int] | None:
     instead (see ``coordinator._rate_budget_ok``).
     """
     try:
-        out = gh_call(["api", "rate_limit"])
+        out = gh_call(["api", "rate_limit"], timeout=timeout)
     except (subprocess.SubprocessError, RuntimeError, OSError):
         return None
     try:
@@ -128,7 +126,13 @@ def rate_limit_remaining() -> tuple[int, int] | None:
         return None
 
 
-def _rate_budget_ok_impl(now_epoch: float | None = None) -> tuple[bool, float]:
+def rate_budget_ok(
+    now_epoch: float | None = None,
+    *,
+    enabled: bool = True,
+    threshold: int = 200,
+    timeout: int | None = None,
+) -> tuple[bool, float]:
     """Non-blocking GraphQL rate-budget gate for the coordinator.
 
     Args:
@@ -136,16 +140,15 @@ def _rate_budget_ok_impl(now_epoch: float | None = None) -> tuple[bool, float]:
 
     Returns:
         ``(ok, park_delay_s)``. ``ok`` is False when the GraphQL budget is
-        below ``HEPHAESTUS_RATE_GUARD_THRESHOLD`` (default 200) and the
-        ``HEPHAESTUS_RATE_GUARD`` env gate is enabled; ``park_delay_s`` is the
+        below the explicit threshold (default 200) and the guard is enabled;
+        ``park_delay_s`` is the
         seconds until the upstream reset (+5s slack, mirroring the legacy
         guard), 0.0 when ``ok``.
 
     """
-    if os.environ.get("HEPHAESTUS_RATE_GUARD", "1") == "0":
+    if not enabled:
         return True, 0.0
-    threshold = read_timeout_env("HEPHAESTUS_RATE_GUARD_THRESHOLD", 200)
-    rl = rate_limit_remaining()
+    rl = rate_limit_remaining(timeout=timeout)
     if rl is None:
         return True, 0.0
     remaining, reset_epoch = rl
@@ -153,6 +156,9 @@ def _rate_budget_ok_impl(now_epoch: float | None = None) -> tuple[bool, float]:
         return True, 0.0
     now = time.time() if now_epoch is None else now_epoch
     return False, max(0.0, reset_epoch - now + 5.0)
+
+
+_rate_budget_ok_impl = rate_budget_ok
 
 
 def _with_severity_marker(comment: dict[str, Any]) -> str:
@@ -232,9 +238,11 @@ find_merged_pr_for_issue = _CompatCallable("find_merged_pr_for_issue")
 get_pr_head_branch = _CompatCallable("get_pr_head_branch")
 issue_auto_impl_branch_name = _CompatCallable("issue_auto_impl_branch_name")
 file_lock = _CompatCallable("file_lock")
-# Keep the coordinator's historical patch seam on the façade while allowing
-# the runtime collaborator to depend only on this transport module.
-rate_budget_ok = cast(Callable[[], tuple[bool, float]], _CompatCallable("rate_budget_ok"))
+# Preserve the façade patch seam and static function signature.
+if TYPE_CHECKING:
+    rate_budget_ok = _rate_budget_ok_impl
+else:  # pragma: no cover - runtime seam exercised by coordinator tests
+    rate_budget_ok = cast(Callable[[], tuple[bool, float]], _CompatCallable("rate_budget_ok"))
 
 
 class PipelineGitHubTransport(_PipelineGitHubHost):
@@ -247,6 +255,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         repo: str | None = None,
         dry_run: bool = False,
         repo_root: Path | None = None,
+        gh_timeout: int = 120,
     ) -> None:
         """Initialize the accessor.
 
@@ -258,12 +267,14 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
             dry_run: When True, every mutator logs-and-skips.
             repo_root: Repo checkout root anchoring the drive-green arming
                 state dir (defaults to the current working directory).
+            gh_timeout: Maximum seconds for one GitHub CLI operation.
 
         """
         self.org = org
         self.repo = repo
         self.dry_run = dry_run
         self._repo_root = repo_root or Path.cwd()
+        self._gh_timeout = gh_timeout
         self._arming = ArmingStateStore(lambda: ensure_state_dir(self._repo_root))
         self._viewer_login_cache: str | None = None
 
@@ -282,7 +293,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
     def _viewer_login(self) -> str:
         """Return the authenticated actor used to own mutable journal comments."""
         if self._viewer_login_cache is None:
-            self._viewer_login_cache = github_api.gh_current_login() or ""
+            self._viewer_login_cache = github_api.gh_current_login(timeout=self._gh_timeout) or ""
         if not self._viewer_login_cache:
             raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
         return self._viewer_login_cache
@@ -328,6 +339,7 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         return [*argv, "--repo", self._repo_slug]
 
     def _gh(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        kwargs.setdefault("timeout", self._gh_timeout)
         return gh_call(self._with_repo(argv), **kwargs)
 
     def _label_names(self) -> set[str]:
@@ -392,7 +404,6 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         return False
 
 
-# Include private internal APIs used by the service mixins.
 # fmt: off
 __all__ = [
     'ALL_IMPLEMENTATION_STATE_LABELS', 'ALL_STATE_LABELS', 'PLAN_CANONICAL_MARKER',
@@ -410,6 +421,5 @@ __all__ = [
     'find_merged_pr_for_issue', 'format_skip_reason_comment', 'get_pr_head_branch', 'gh_call',
     'github_api', 'has_exact_closing_line', 'has_label', 'hashlib', 'is_implementation_go',
     'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
-    'os', 'quote', 'rate_budget_ok', 'rate_limit_remaining', 're',
-    'read_timeout_env', 'scope_retraction_marker', 'subprocess', 'sys', 'time']
-# fmt: on
+    'quote', 'rate_budget_ok', 'rate_limit_remaining', 're',
+    'scope_retraction_marker', 'subprocess', 'sys', 'time']
