@@ -225,6 +225,18 @@ class _CompatCallable:
         return _compat(self.name)(*args, **kwargs)
 
 
+def _graphql_call_seam(argv: list[str], **kwargs: Any) -> Any:
+    """Raw one-attempt GraphQL transport that stays monkeypatch-friendly.
+
+    Resolution goes through the module-level ``gh_call`` seam so tests can
+    intercept it, but always sets ``_graphql_internal`` — the escape hatch
+    ``github_api.gh_call`` uses to allow GraphQL argvs — because the façade
+    resolution lands on that forbidding wrapper at runtime. This mirrors
+    what ``run_graphql`` does on its own ``call is gh_call`` identity branch.
+    """
+    return gh_call(argv, **{**kwargs, "_graphql_internal": True})
+
+
 gh_call = _CompatCallable("gh_call")
 close_issue_as_covered = _CompatCallable("close_issue_as_covered")
 find_merged_closing_pr = _CompatCallable("find_merged_closing_pr")
@@ -304,14 +316,16 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         if isinstance(spec, GraphQLMutationSpec):
             if fields:
                 raise ValueError("mutation variables are owned by the typed spec")
-            return run_graphql(spec, call=gh_call)
+            # Route through the monkeypatch-friendly raw seam; see
+            # _graphql_call_seam for why the internal flag is required.
+            return run_graphql(spec, call=_graphql_call_seam)
         owner, name = self._owner_name()
         if "owner" in fields or "name" in fields:
             raise ValueError("repository identity is owned by PipelineGitHub")
         return run_graphql(
             spec,
             {"owner": owner, "name": name, **fields},
-            call=gh_call,
+            call=_graphql_call_seam,
         )
 
     def _with_repo(self, argv: list[str]) -> list[str]:
