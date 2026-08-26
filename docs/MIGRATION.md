@@ -1,9 +1,8 @@
 # Migration Guide
 
-> **Release status:** **0.10.4 is the pending release; it is not released until the signed `v0.10.4` tag is published.** After that tag is published, the latest released version is **0.10.4**
-> (tag-driven via hatch-vcs). **1.0 has not been released yet** — the section below is forthcoming 1.0 migration guidance. The package remains on the 0.x release line until a signed `v1.0.0` tag is published.
+> **Release status:** The latest signed `vX.Y.Z` git tag is the release-status source of truth (tag-driven via hatch-vcs). See [GitHub Releases](https://github.com/HomericIntelligence/Hephaestus/releases) for published releases. **1.0 has not been released yet** — the section below is forthcoming 1.0 migration guidance. The package remains on the 0.x release line until a signed `v1.0.0` tag is published.
 
-## Current main (unreleased; post-v0.10.2)
+## Current main (unreleased)
 
 The 15-minute operational readiness wait described below is part of the released
 0.10.2 behavior.
