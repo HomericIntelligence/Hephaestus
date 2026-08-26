@@ -5,8 +5,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
+PRE_COMMIT_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
 
 
 def test_debian_packages_use_one_immutable_snapshot() -> None:
@@ -120,6 +123,23 @@ def test_shell_tool_versions_are_explicit_and_verified() -> None:
     assert 'shellcheck="${SHELLCHECK_VERSION}"' in source
     assert 'test "$(bats --version)" = "Bats 1.11.1"' in source
     assert 'grep -Fx "version: 0.10.0"' in source
+
+
+def test_precommit_shellcheck_uses_the_snapshot_pinned_binary() -> None:
+    """Baking hook environments must not download ShellCheck from a third party."""
+    source = PRE_COMMIT_CONFIG.read_text(encoding="utf-8")
+    config = yaml.safe_load(source)
+
+    assert "https://github.com/shellcheck-py/shellcheck-py" not in source
+    local_hooks = [
+        hook
+        for repository in config["repos"]
+        if repository["repo"] == "local"
+        for hook in repository["hooks"]
+    ]
+    shellcheck = next(hook for hook in local_hooks if hook["id"] == "shellcheck")
+    assert shellcheck["language"] == "system"
+    assert shellcheck["entry"] == "shellcheck"
 
 
 def test_github_artifact_downloads_retry_transient_network_failures() -> None:
