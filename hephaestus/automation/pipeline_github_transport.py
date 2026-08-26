@@ -301,17 +301,24 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         **fields: int | str,
     ) -> T:
         """Run a typed operation with repository identity owned by this adapter."""
+
+        def _run_internal_graphql(
+            argv: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            """Pass the capability marker consumed only by the guarded façade."""
+            return gh_call(argv, _graphql_internal=True, **kwargs)
+
         if isinstance(spec, GraphQLMutationSpec):
             if fields:
                 raise ValueError("mutation variables are owned by the typed spec")
-            return run_graphql(spec, call=gh_call)
+            return run_graphql(spec, call=_run_internal_graphql)
         owner, name = self._owner_name()
         if "owner" in fields or "name" in fields:
             raise ValueError("repository identity is owned by PipelineGitHub")
         return run_graphql(
             spec,
             {"owner": owner, "name": name, **fields},
-            call=gh_call,
+            call=_run_internal_graphql,
         )
 
     def _with_repo(self, argv: list[str]) -> list[str]:
