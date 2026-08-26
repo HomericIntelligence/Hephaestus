@@ -33,11 +33,10 @@ Before triggering the workflow, ensure:
 - [ ] All changes merged to `main` and CI is green.
 - [ ] `uv.lock` is up to date (`uv sync` produces no changes).
 - [ ] No open issues in the milestone you are releasing.
-- [ ] `docs/MIGRATION.md`'s "latest released version is **X.Y.Z**" line already names
-  the version you are about to tag. The Release workflow's test job runs
-  `test_migration_md_version_does_not_trail_latest_git_tag`, and tags are immutable —
-  tagging before the doc bump strands the tag unreleased (this broke the first
-  v0.9.7 attempt and all of v0.9.8; see #1802). Bump the doc, merge, then tag.
+- [ ] `docs/MIGRATION.md` says that the latest signed `vX.Y.Z` tag is the release-status
+  source of truth. The Release workflow's test job runs
+  `test_migration_md_derives_release_status_from_signed_git_tag`; a release-specific
+  migration-guide update is not required before tagging.
 
 The package version itself does **not** need to be edited in any file: this project uses
 hatch-vcs dynamic versioning, so the package version is derived from the git tag the
