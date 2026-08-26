@@ -238,10 +238,7 @@ find_merged_pr_for_issue = _CompatCallable("find_merged_pr_for_issue")
 get_pr_head_branch = _CompatCallable("get_pr_head_branch")
 issue_auto_impl_branch_name = _CompatCallable("issue_auto_impl_branch_name")
 file_lock = _CompatCallable("file_lock")
-# Keep the coordinator's historical patch seam on the façade while allowing
-# the runtime collaborator to depend only on this transport module. Under
-# type checking the name keeps its declared function type; at runtime it
-# resolves through the façade compatibility shim.
+# Preserve the façade patch seam and static function signature.
 if TYPE_CHECKING:
     rate_budget_ok = _rate_budget_ok_impl
 else:  # pragma: no cover - runtime seam exercised by coordinator tests
@@ -407,7 +404,6 @@ class PipelineGitHubTransport(_PipelineGitHubHost):
         return False
 
 
-# Include private internal APIs used by the service mixins.
 # fmt: off
 __all__ = [
     'ALL_IMPLEMENTATION_STATE_LABELS', 'ALL_STATE_LABELS', 'PLAN_CANONICAL_MARKER',
@@ -427,4 +423,3 @@ __all__ = [
     'issue_auto_impl_branch_name', 'json', 'logger', 'logging', 'normalize_scope_retraction_paths',
     'quote', 'rate_budget_ok', 'rate_limit_remaining', 're',
     'scope_retraction_marker', 'subprocess', 'sys', 'time']
-# fmt: on
