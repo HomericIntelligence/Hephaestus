@@ -151,10 +151,11 @@ def test_successful_installs_run_post_install_preflight(
 
     catalog = pi_plugins.load_pi_package_catalog()
     executable = _fake_pi_install(tmp_path)
-    calls: list[tuple[str, ...]] = []
+    calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+    pi_dir = tmp_path / "pi-agent"
 
-    def runner(argv: tuple[str, ...], **_kwargs: Any) -> pi_plugins.ProcessResult:
-        calls.append(argv)
+    def runner(argv: tuple[str, ...], **kwargs: Any) -> pi_plugins.ProcessResult:
+        calls.append((argv, kwargs.get("env")))
         if argv[-1] == "--version":
             return pi_plugins.ProcessResult(0, "0.80.2\n", "")
         return pi_plugins.ProcessResult(0, "installed\n", "")
@@ -164,7 +165,7 @@ def test_successful_installs_run_post_install_preflight(
     monkeypatch.setattr(pi_plugins, "preflight_pi_environment", preflight)
 
     report = pi_plugins.install_pi_plugins(
-        pi_plugins.InstallOptions(yes=True),
+        pi_plugins.InstallOptions(yes=True, pi_dir=pi_dir),
         catalog=catalog,
         pi_bin=executable,
         runner=runner,
@@ -173,6 +174,12 @@ def test_successful_installs_run_post_install_preflight(
     assert report.ready is True
     assert report.status == "ready"
     assert len(calls) == 4
+    assert all(call[1] is not None for call in calls[1:])
+    assert all(call[1]["PI_CODING_AGENT_DIR"] == str(pi_dir) for call in calls[1:] if call[1])
+    install_environments = [call[1] for call in calls[1:] if call[1] is not None]
+    assert install_environments[0]["NPM_CONFIG_PACKAGE_LOCK"] == "false"
+    assert all("NPM_CONFIG_PACKAGE_LOCK" not in env for env in install_environments[1:])
+    assert preflight.call_args.kwargs["pi_dir"] == pi_dir
     assert preflight.call_args.kwargs["trust_override"] == "--no-approve"
 
 
@@ -405,7 +412,17 @@ def test_parser_exposes_scope_dry_run_json_approval_timeout_and_yes() -> None:
     from hephaestus.agents.pi_plugins import build_parser
 
     args = build_parser().parse_args(
-        ["--project-local", "--dry-run", "--json", "--yes", "--approve", "--timeout", "17"]
+        [
+            "--project-local",
+            "--dry-run",
+            "--json",
+            "--yes",
+            "--approve",
+            "--timeout",
+            "17",
+            "--pi-dir",
+            "/tmp/pi-agent",
+        ]
     )
 
     assert args.project_local is True
@@ -414,6 +431,7 @@ def test_parser_exposes_scope_dry_run_json_approval_timeout_and_yes() -> None:
     assert args.yes is True
     assert args.approve is True
     assert args.timeout == 17.0
+    assert args.pi_dir == Path("/tmp/pi-agent")
 
 
 def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
@@ -479,6 +497,7 @@ def test_preflight_runs_inventory_before_rpc_extension(tmp_path: Path) -> None:
         probe_cwd = kwargs["cwd"]
         assert probe_env is not None
         assert probe_cwd is not None
+        assert "NPM_CONFIG_PACKAGE_LOCK" not in probe_env
         isolated_agent_dir = Path(probe_env["HOME"]) / ".pi" / "agent"
         isolated_paths.extend((isolated_agent_dir, probe_cwd))
         if isolated_agent_dir == pi_dir or probe_cwd == cwd:
@@ -761,7 +780,11 @@ def test_installer_safe_defaults_confirmation_and_partial_state(tmp_path: Path) 
     install_env = calls[1][1]
     assert install_env is not None
     assert install_env["NPM_CONFIG_IGNORE_SCRIPTS"] == "true"
+    assert install_env["NPM_CONFIG_PACKAGE_LOCK"] == "false"
     assert install_env["GIT_TERMINAL_PROMPT"] == "0"
+    npm_install_env = calls[2][1]
+    assert npm_install_env is not None
+    assert "NPM_CONFIG_PACKAGE_LOCK" not in npm_install_env
 
 
 def test_pi_child_environment_honors_the_operator_agent_directory(
@@ -773,7 +796,10 @@ def test_pi_child_environment_honors_the_operator_agent_directory(
     pi_dir = tmp_path / "pi-agent"
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "poison"))
 
-    assert pi_plugins._pi_child_env(pi_dir=pi_dir)["PI_CODING_AGENT_DIR"] == str(pi_dir)
+    environment = pi_plugins._pi_child_env(pi_dir=pi_dir)
+
+    assert environment["PI_CODING_AGENT_DIR"] == str(pi_dir)
+    assert "NPM_CONFIG_PACKAGE_LOCK" not in environment
 
 
 def test_installer_rejects_invalid_controls_and_reports_timeout(tmp_path: Path) -> None:

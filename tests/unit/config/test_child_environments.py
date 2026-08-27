@@ -69,6 +69,7 @@ def test_pi_builder_uses_only_explicit_directory_and_temporary_paths(
     assert environment["PI_CODING_AGENT_DIR"] == str(pi_dir)
     assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {str(temporary)}
     assert environment["NPM_CONFIG_IGNORE_SCRIPTS"] == "true"
+    assert "NPM_CONFIG_PACKAGE_LOCK" not in environment
     assert environment["PI_TELEMETRY"] == "0"
     assert environment["PI_SKIP_VERSION_CHECK"] == "1"
 

@@ -754,6 +754,14 @@ def _pi_child_env(*, pi_dir: Path | None = None) -> dict[str, str]:
     return build_pi_child_env(pi_dir=pi_dir)
 
 
+def _package_install_env(base_env: dict[str, str], package: PiPackageRequirement) -> dict[str, str]:
+    """Return the environment for one catalog package installation."""
+    env = dict(base_env)
+    if package.kind == "git":
+        env["NPM_CONFIG_PACKAGE_LOCK"] = "false"
+    return env
+
+
 def install_pi_plugins(
     options: InstallOptions,
     *,
@@ -787,8 +795,12 @@ def install_pi_plugins(
         return InstallReport(False, identity.status, commands, identity.remediation, states)
     env = _pi_child_env(pi_dir=options.pi_dir)
     mutable_states = list(states)
-    for index, command in enumerate(commands[1:-1]):
-        result = runner(command, env=env, timeout=options.timeout)
+    for index, (command, package) in enumerate(zip(commands[1:-1], catalog.packages, strict=True)):
+        result = runner(
+            command,
+            env=_package_install_env(env, package),
+            timeout=options.timeout,
+        )
         if result.timed_out:
             mutable_states[index] = PiPackageState(
                 catalog.packages[index].key, command[2], "failed", "timeout"
