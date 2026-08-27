@@ -92,6 +92,16 @@ SONNET_46 = "claude-sonnet-4-6"
 HAIKU_45 = "claude-haiku-4-5"
 CODEX_ADVISE = "gpt-5.4-mini"
 
+# OpenCode provider — Muse Spark 1.2 (opencode.ai/zen). Supports reasoning
+# variants minimal/low/medium/high/xhigh via provider model options; Hephaestus
+# pins the variant through opencode.json model aliases
+# (muse-spark-1.2-{high,medium,low}) so the loop can enforce tiered thinking
+# without a --variant flag. Reviewer must be medium or higher.
+MUSE_SPARK_12 = "opencode/muse-spark-1.2-contributor-free"
+MUSE_SPARK_12_HIGH = "opencode/muse-spark-1.2-high"
+MUSE_SPARK_12_MEDIUM = "opencode/muse-spark-1.2-medium"
+MUSE_SPARK_12_LOW = "opencode/muse-spark-1.2-low"
+
 # Newer tiers that are valid model IDs but not the per-phase defaults. Listed in
 # the known set so pinning them via explicit model options doesn't emit a spurious
 # "Unknown model" warning. (Fable and Mythos sit above Opus; 4.8 is the
@@ -110,7 +120,19 @@ FABLE = FABLE_5
 # outside this set are still accepted (operators may have preview access) but
 # trigger a one-time warning so misconfigured/typo'd env vars are visible.
 _KNOWN_MODELS: frozenset[str] = frozenset(
-    {OPUS_47, SONNET_46, SONNET_5, HAIKU_45, OPUS_48, FABLE_5, MYTHOS}
+    {
+        OPUS_47,
+        SONNET_46,
+        SONNET_5,
+        HAIKU_45,
+        OPUS_48,
+        FABLE_5,
+        MYTHOS,
+        MUSE_SPARK_12,
+        MUSE_SPARK_12_HIGH,
+        MUSE_SPARK_12_MEDIUM,
+        MUSE_SPARK_12_LOW,
+    }
 )
 _MODEL_ALIASES: dict[str, str] = {
     "fable": FABLE,
