@@ -27,12 +27,32 @@ from .pr_review_recovery import (
     restart_direct_pr_review,
 )
 from .pr_review_threads import *
+from ...pr_review_core import _build_opencode_review_prompt  # noqa: F401
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
     _REPLY_HANDOFF_RECEIPT_ERROR,
     POST_APPLY,
     _finding_key,
 )
+
+
+def _make_review_prompt_builder(agent: str) -> Callable[..., str]:
+    """Create a prompt builder that selects the right prompt for the agent."""
+    if agent == "opencode":
+
+        def _opencode_builder(**kwargs: object) -> str:
+            pr_number = kwargs.get("pr_number", 0)
+            issue_number = kwargs.get("issue_number", 0)
+            return _build_opencode_review_prompt(
+                pr_number=int(pr_number) if isinstance(pr_number, int) else 0,
+                issue_number=int(issue_number) if isinstance(issue_number, int) else 0,
+                pr_diff=str(kwargs.get("pr_diff", "")),
+                issue_body=str(kwargs.get("issue_body", "")),
+                pr_description=str(kwargs.get("pr_description", "")),
+            )
+
+        return _opencode_builder
+    return get_pr_review_analysis_prompt
 
 _PENDING_GITHUB_REQUEST = "_pending_github_request"
 _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
@@ -366,7 +386,7 @@ class PrReviewJobs(_PrReviewHost):
             issue=issue,
             agent=agent_provider(ctx),
             model=stage_model(ctx, "reviewer", reviewer_model),
-            prompt_builder=get_pr_review_analysis_prompt,
+            prompt_builder=_make_review_prompt_builder(agent_provider(ctx)),
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
             timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
             workspace=workspace,

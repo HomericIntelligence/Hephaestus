@@ -1956,7 +1956,7 @@ def _opencode_sandbox_args(sandbox: str) -> list[str]:
     and stays fail-closed (#773 precedent).
     """
     if sandbox == "read-only":
-        return ["--agent", OPENCODE_PLAN_AGENT]
+        return ["--agent", OPENCODE_PLAN_AGENT, "--pure"]
     if sandbox == "workspace-write":
         return []
     raise AgentExecutionError(

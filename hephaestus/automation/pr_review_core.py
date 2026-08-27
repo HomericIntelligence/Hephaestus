@@ -51,6 +51,65 @@ from .review_audit import ReviewAudit, parse_review_audit
 from .session_naming import AGENT_PR_REVIEWER
 
 logger = logging.getLogger(__name__)
+def _build_opencode_review_prompt(
+    pr_number: int,
+    issue_number: int,
+    pr_diff: str,
+    issue_body: str,
+    pr_description: str,
+    **_ignored: object,
+) -> str:
+    """Build a truncated review prompt for opencode.
+
+    opencode's models cannot handle the full 14K review prompt — they either
+    invoke the $athena:pr-review skill (producing markdown) or hit server errors.
+    This condensed prompt (~1.3K) includes only the essential GRADING rubric and
+    JSON output format contract, which opencode can follow when run with --pure.
+    """
+    # Opencode server rejects large prompts (~14k) with "Unexpected server error".
+    # Budget aggressively: keep total prompt < ~4k chars so the 348-line PR 473
+    # diff fits. Use a tiny 2k diff budget; the rubric itself is ~1k.
+    max_opencode_diff = 2000
+    raw_diff = pr_diff or "(no diff)"
+    if len(raw_diff) > max_opencode_diff:
+        raw_diff = (
+            raw_diff[:max_opencode_diff] + "\n\n[... diff truncated for opencode review ...]\n"
+        )
+    diff_text = raw_diff
+    issue_text = issue_body or "(no issue body)"
+    if len(issue_text) > 800:
+        issue_text = issue_text[:800] + " ...[truncated]"
+    return (
+        "Review this PR diff.\n\n"
+        "File: (from diff)\n"
+        f"Diff: {diff_text}\n\n"
+        f"Issue: {issue_text}\n\n"
+        "GRADING (every dimension starts at F; A must be EARNED with concrete evidence):\n"
+        "- A  (93-100%) Exemplary. ZERO critical/major findings; \u22642 minor.\n"
+        "- B  (80-89%)  Solid. ZERO critical findings, \u22641 major.\n"
+        "- C  (70-79%)  Mediocre. Multiple gaps that should be prioritized.\n"
+        "- D  (60-69%)  Poor. Fundamental practices missing or broken.\n"
+        "- F  (<60%)    Failing / misaligned / dangerous.\n\n"
+        "ANTI-INFLATION RULES:\n"
+        "- DEFAULT IS F. Find concrete evidence to justify ANY upgrade.\n"
+        '- "It looks done" is NOT sufficient.\n\n'
+        "Output format (structural audit contract \u2014 MANDATORY):\n"
+        "End with exactly one fenced JSON block.\n"
+        "Do not emit Verdict or any other textual decision line.\n\n"
+        "```json\n"
+        '{"grade": "A", "summary": "...", "comments": [\n'
+        '  {"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}\n'
+        "]}"
+        "\n```\n\n"
+        "Rules for the JSON block:\n"
+        "- comments: array of inline comment objects. Each must have: "
+        "path, line, side, severity, body\n"
+        "- grade: one of A, B, C, D, E, or F.\n"
+        "- summary: bounded informational review summary, max 200 characters.\n"
+        '- If no inline comments, emit {"grade": "A", "summary": "LGTM", "comments": []}\n'
+        "- Emit only one JSON block, at the very end."
+    )
+
 
 #: Fixed non-diff prompt overhead (rubric + terse-output directive + fence
 #: markers), measured via get_pr_review_analysis_prompt(pr_diff="", ...) with
@@ -304,6 +363,14 @@ def run_pr_review_analysis(
 
     def _build_prompt(diff_override: str | None = None) -> str:
         diff_text = diff_override if diff_override is not None else context.get("pr_diff", "")
+        if agent == "opencode":
+            return _build_opencode_review_prompt(
+                pr_number=pr_number,
+                issue_number=issue_number,
+                pr_diff=diff_text,
+                issue_body=context.get("issue_body", ""),
+                pr_description=context.get("pr_description", ""),
+            )
         return get_pr_review_analysis_prompt(
             pr_number=pr_number,
             issue_number=issue_number,
