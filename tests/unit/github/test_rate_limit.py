@@ -11,8 +11,8 @@ import time
 import types
 from datetime import UTC
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, call, patch
 from typing import Any
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
