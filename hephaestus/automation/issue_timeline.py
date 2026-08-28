@@ -135,11 +135,6 @@ def _latest_owned_role(comments: Sequence[IssueComment], marker: str) -> IssueCo
     return matches[-1] if matches else None
 
 
-def _has_exact_leading_marker(body: str, marker: str) -> bool:
-    """Return whether *marker* is the exact first raw line of *body*."""
-    return has_exact_leading_marker(body, marker)
-
-
 def _deletable_history_ids(
     owned: Sequence[IssueComment],
     *,
@@ -235,24 +230,8 @@ def plan_issue_timeline_compaction(
     snapshot = journal_snapshot(owned)
     plan_comments = [comment for comment in owned if is_plan_comment(comment.body)]
     review_comments = [comment for comment in owned if is_plan_review_comment(comment.body)]
-    canonical_plans = [
-        comment
-        for comment in plan_comments
-        if _has_exact_leading_marker(comment.body, PLAN_CANONICAL_MARKER)
-    ]
-    canonical_reviews = [
-        comment
-        for comment in review_comments
-        if _has_exact_leading_marker(comment.body, PLAN_REVIEW_CANONICAL_MARKER)
-    ]
-    target_plan = (
-        canonical_plans[-1] if canonical_plans else (plan_comments[-1] if plan_comments else None)
-    )
-    target_review = (
-        canonical_reviews[-1]
-        if canonical_reviews
-        else (review_comments[-1] if review_comments else None)
-    )
+    target_plan = plan_comments[-1] if plan_comments else None
+    target_review = review_comments[-1] if review_comments else None
     target_recovery = _latest_owned_role(owned, RECOVERY_PROVENANCE_PREFIX)
     target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 

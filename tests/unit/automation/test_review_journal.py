@@ -18,6 +18,7 @@ from hephaestus.automation.review_journal import (
     current_revision_context,
     discover_plan_from_comments,
     is_journal_comment,
+    is_plan_review_comment,
     journal_snapshot,
     normalize_issue_comments,
     render_current_plan,
@@ -39,6 +40,37 @@ def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
     assert found.plan_text is not None
     assert absent.status is PlanDiscoveryStatus.ABSENT
     assert failed.status is PlanDiscoveryStatus.READ_ERROR
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- HomericIntelligence:plan-issue -->",
+        "<!-- hephaestus-plan:canonical -->",
+        "<!-- athena:plan-issue -->",
+    ],
+)
+def test_plan_discovery_accepts_shared_and_legacy_plan_markers(marker: str) -> None:
+    """The shared marker works now while old actor-owned plans can migrate."""
+    body = f"{marker}\n# Implementation Plan\n\nPlan"
+
+    result = discover_plan_from_comments([_owned(body)])
+
+    assert result.status is PlanDiscoveryStatus.FOUND
+    assert result.plan_text == body
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- HomericIntelligence:issue-review -->",
+        "<!-- hephaestus-plan-review:canonical -->",
+        "<!-- athena:issue-review -->",
+    ],
+)
+def test_plan_review_detection_accepts_shared_and_legacy_markers(marker: str) -> None:
+    """Review identity uses the same migration rule as plan identity."""
+    assert is_plan_review_comment(f"{marker}\n## Review")
 
 
 @pytest.mark.parametrize(

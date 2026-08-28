@@ -8,6 +8,10 @@ import pytest
 
 from hephaestus.automation.models import PlanReviewerOptions
 from hephaestus.automation.plan_reviewer import PlanReviewer
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+)
 from hephaestus.automation.review_journal import (
     IssueComment,
     PlanDiscoveryResult,
@@ -201,9 +205,7 @@ class TestGetLatestPlan:
         assert result.status is PlanDiscoveryStatus.FOUND
         assert result.plan_text is not None
         # Must be the actual plan, NOT the review comment.
-        assert result.plan_text.startswith(
-            "<!-- hephaestus-plan:canonical -->\n# Implementation Plan"
-        )
+        assert result.plan_text.startswith(f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan")
         assert "🔍 Plan Review" not in result.plan_text
 
     def test_get_latest_plan_review_only_issue_returns_none(self, reviewer: PlanReviewer) -> None:
@@ -666,9 +668,9 @@ class TestReviewIssue:
 
         assert result.success is True
         mock_upsert.assert_called_once()
-        assert mock_upsert.call_args[0][1] == "<!-- hephaestus-plan-review:canonical -->"
+        assert mock_upsert.call_args[0][1] == PLAN_REVIEW_CANONICAL_MARKER
         posted_body: str = mock_upsert.call_args[0][2]
-        assert posted_body.startswith("<!-- hephaestus-plan-review:canonical -->")
+        assert posted_body.startswith(PLAN_REVIEW_CANONICAL_MARKER)
         assert "Concrete review explanation." in posted_body
         assert posted_body.rstrip().endswith(token)
         assert "Verdict:" not in posted_body

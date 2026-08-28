@@ -15,6 +15,7 @@ from hephaestus.automation.protocol import (
 )
 from hephaestus.automation.requirements_recovery import (
     ATHENA_FINALIZED_PLAN_PREFIX,
+    HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
     RecoveryDisposition,
     RecoveryVerdict,
     build_recovery_prompt,
@@ -32,12 +33,14 @@ from hephaestus.automation.requirements_recovery import (
 from hephaestus.automation.review_journal import HISTORY_MARKER
 
 
-def _finalized_body(content: str = "## Why\n\nPreserve the approved behavior.") -> str:
-    """Return a body carrying a correctly self-bound Athena final marker."""
+def _finalized_body(
+    content: str = "## Why\n\nPreserve the approved behavior.",
+    *,
+    prefix: str = HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
+) -> str:
+    """Return a body carrying a correctly self-bound finalized-plan marker."""
     placeholder = (
-        f"{content}\n\n{ATHENA_FINALIZED_PLAN_PREFIX}"
-        f"R={'a' * 64} P=123456789:{'b' * 64} "
-        f"V=987654321:{'c' * 64} F=<F> -->"
+        f"{content}\n\n{prefix}R={'a' * 64} P=123456789:{'b' * 64} V=987654321:{'c' * 64} F=<F> -->"
     )
     digest = hashlib.sha256(placeholder.encode("utf-8")).hexdigest()
     return placeholder.replace("F=<F>", f"F={digest}")
@@ -69,7 +72,7 @@ def test_noncanonical_or_nonleading_markers_are_not_contamination(body: str) -> 
     assert has_contaminated_issue_body(body) is False
 
 
-def test_verified_athena_finalized_body_is_not_recovered_as_generated_requirements() -> None:
+def test_verified_shared_finalized_body_is_not_recovered_as_generated_requirements() -> None:
     body = _finalized_body()
 
     identity = verified_finalized_plan(body)
@@ -84,6 +87,23 @@ def test_verified_athena_finalized_body_is_not_recovered_as_generated_requiremen
             body.replace(f"F={identity.final_body_digest}", "F=<F>").encode("utf-8")
         ).hexdigest()
     )
+    assert has_contaminated_issue_body(body) is False
+
+
+def test_shared_homeric_intelligence_finalized_body_is_recognized() -> None:
+    """Finalized output from the shared planning contract remains sealed evidence."""
+    assert HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX == "<!-- HomericIntelligence:finalize-plan "
+    body = _finalized_body()
+
+    assert verified_finalized_plan(body) is not None
+    assert has_contaminated_issue_body(body) is False
+
+
+def test_legacy_athena_finalized_body_remains_recognized() -> None:
+    """Existing sealed Athena bodies remain valid through the one-write migration."""
+    body = _finalized_body(prefix=ATHENA_FINALIZED_PLAN_PREFIX)
+
+    assert verified_finalized_plan(body) is not None
     assert has_contaminated_issue_body(body) is False
 
 
@@ -105,8 +125,8 @@ def test_self_checksummed_role_names_are_not_comment_identities() -> None:
 def test_indented_finalized_claim_fails_closed(indent: str) -> None:
     """Top-level Markdown indentation cannot hide an invalid finalization claim."""
     body = _finalized_body().replace(
-        ATHENA_FINALIZED_PLAN_PREFIX,
-        indent + ATHENA_FINALIZED_PLAN_PREFIX,
+        HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
+        indent + HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
     )
 
     assert verified_finalized_plan(body) is None
@@ -115,8 +135,8 @@ def test_indented_finalized_claim_fails_closed(indent: str) -> None:
 
 def test_four_space_indented_finalized_example_is_not_top_level_authority() -> None:
     body = _finalized_body().replace(
-        ATHENA_FINALIZED_PLAN_PREFIX,
-        "    " + ATHENA_FINALIZED_PLAN_PREFIX,
+        HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
+        "    " + HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX,
     )
 
     assert verified_finalized_plan(body) is None

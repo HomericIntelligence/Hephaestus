@@ -17,6 +17,7 @@ import hephaestus.automation.github_api as _api
 from hephaestus.utils.helpers import strip_null_bytes
 
 from ..models import IssueInfo, IssueState
+from ..protocol import comment_marker_aliases
 from ..review_journal import has_exact_leading_marker
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
@@ -418,23 +419,28 @@ def gh_issue_upsert_owned_comment(
         login = user.get("login") if isinstance(user, dict) else ""
         return bool(login) and str(login).lower() == viewer_login
 
-    def owned_with(comments: list[dict[str, Any]], marker: str) -> list[dict[str, Any]]:
+    marker_aliases = comment_marker_aliases(marker_prefix)
+
+    def owned_with(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             comment
             for comment in comments
             if is_owned(comment)
-            and has_exact_leading_marker(str(comment.get("body", "")), marker)
+            and any(
+                has_exact_leading_marker(str(comment.get("body", "")), marker)
+                for marker in marker_aliases
+            )
             and comment.get("databaseId") is not None
         ]
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-    owned = owned_with(comments, marker_prefix)
+    owned = owned_with(comments)
     if not owned:
         _api.gh_issue_comment(issue_number, body, repo=repo)
         # Re-read after create. This closes the concurrent-create window and
         # proves that the authenticated actor owns the canonical pointer.
         comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-        owned = owned_with(comments, marker_prefix)
+        owned = owned_with(comments)
         if not owned:
             raise RuntimeError(
                 f"created canonical comment on #{issue_number} was not observable as actor-owned"

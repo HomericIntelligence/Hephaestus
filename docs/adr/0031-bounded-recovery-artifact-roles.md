@@ -40,7 +40,7 @@ publication, successor binding, and pending-review label normalization form a
 resumable transaction, so retries complete missing follow-up writes without
 republishing identical plan prose.
 
-A self-verifying Athena finalized-plan marker lives in the issue body rather
+A self-verifying HomericIntelligence finalized-plan marker lives in the issue body rather
 than occupying a comment role. It seals the completed plan/review epoch after
 Athena may delete those intermediate comments. The body marker therefore
 suppresses recovery only while its exact `F` binding verifies. On first

@@ -2969,6 +2969,7 @@ class TestMutatorMapping:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         body = render_current_plan("body")
+        assert body.startswith("<!-- HomericIntelligence:plan-issue -->\n")
         fetch = MagicMock(
             side_effect=[
                 [],
@@ -2983,6 +2984,28 @@ class TestMutatorMapping:
 
         assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
+
+    def test_upsert_plan_comment_migrates_owned_legacy_marker_in_place(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One-write migration upgrades an owned legacy plan without a duplicate."""
+        legacy_body = "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\n\nOld plan"
+        body = "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nNew plan"
+        legacy = {"body": legacy_body, "databaseId": 100, "viewerDidAuthor": True}
+        migrated = {"body": body, "databaseId": 100, "viewerDidAuthor": True}
+        fetch = MagicMock(side_effect=[[legacy], [migrated]])
+        patch_comment = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        adapter.upsert_plan_comment(5, body)
+
+        post.assert_not_called()
+        patch_comment.assert_called_once()
+        assert patch_comment.call_args.args == (100, body)
+        assert fetch.call_args_list == [call(5), call(5)]
 
     def test_upsert_create_requires_owned_exact_body_readback(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3748,7 +3771,10 @@ class TestRepoScoping:
             "_repo_issue_comments",
             lambda issue: [
                 {
-                    "body": render_current_plan("Do the thing."),
+                    "body": (
+                        "<!-- HomericIntelligence:plan-issue -->\n"
+                        "# Implementation Plan\n\nDo the thing."
+                    ),
                     "user": {"login": "bot"},
                 }
             ],

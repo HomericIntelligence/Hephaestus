@@ -2934,6 +2934,41 @@ class TestUpsertAndDeleteComment:
         mock_create.assert_called_once_with(5, body, repo=None)
         mock_delete.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "legacy_marker",
+        [
+            "<!-- hephaestus-plan:canonical -->",
+            "<!-- athena:plan-issue -->",
+        ],
+    )
+    def test_owned_upsert_migrates_legacy_plan_marker_in_place(self, legacy_marker: str) -> None:
+        """An owned #250-style plan is patched to the shared marker, not duplicated."""
+        body = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew plan"
+        legacy = {
+            "databaseId": 101,
+            "body": f"{legacy_marker}\n# Implementation Plan\nold plan",
+            "user": {"login": "hephaestus-bot"},
+        }
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                return_value=[legacy],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+        ):
+            result = gh_issue_upsert_owned_comment(5, PLAN_CANONICAL_MARKER, body, repo=("o", "r"))
+
+        assert result == 101
+        mock_create.assert_not_called()
+        (args,) = mock_gh_call.call_args.args
+        assert args[:3] == ["api", "--method", "PATCH"]
+        assert "/repos/o/r/issues/comments/101" in args
+
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
     @patch("hephaestus.automation.github_api.gh_issue_delete_comment")

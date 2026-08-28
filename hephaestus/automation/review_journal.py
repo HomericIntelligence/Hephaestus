@@ -17,8 +17,10 @@ from typing import Final
 
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
+    PLAN_CANONICAL_MARKERS,
     PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKERS,
     PLAN_REVIEW_PREFIX,
 )
 
@@ -151,12 +153,12 @@ def comment_body(comment: IssueComment | str) -> str:
 
 def is_plan_comment(body: str) -> bool:
     """Recognize a plan comment only by its opaque leading marker."""
-    return has_exact_leading_marker(body, PLAN_CANONICAL_MARKER)
+    return any(has_exact_leading_marker(body, marker) for marker in PLAN_CANONICAL_MARKERS)
 
 
 def is_plan_review_comment(body: str) -> bool:
     """Recognize a plan-review comment only by its opaque leading marker."""
-    return has_exact_leading_marker(body, PLAN_REVIEW_CANONICAL_MARKER)
+    return any(has_exact_leading_marker(body, marker) for marker in PLAN_REVIEW_CANONICAL_MARKERS)
 
 
 def has_exact_leading_marker(body: str, marker: str) -> bool:
@@ -164,6 +166,11 @@ def has_exact_leading_marker(body: str, marker: str) -> bool:
     return bool(marker) and (
         body == marker or body.startswith(f"{marker}\n") or body.startswith(f"{marker}\r\n")
     )
+
+
+def _leading_marker(body: str, markers: Sequence[str]) -> str | None:
+    """Return the exact raw-leading marker selected from one protocol family."""
+    return next((marker for marker in markers if has_exact_leading_marker(body, marker)), None)
 
 
 def normalize_issue_comments(
@@ -287,13 +294,13 @@ def _without_fingerprint_line(text: str) -> str:
 def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | None]:
     """Parse host metadata only from the canonical plan-comment header."""
     stripped = body.lstrip()
-    canonical = stripped.startswith(PLAN_CANONICAL_MARKER) or stripped.startswith(
-        PLAN_COMMENT_MARKER
-    )
-    if not canonical:
+    canonical_marker = _leading_marker(body, PLAN_CANONICAL_MARKERS)
+    if canonical_marker is None and not stripped.startswith(PLAN_COMMENT_MARKER):
         return stripped.strip(), (), False, None
 
-    text = _without_leading_line(stripped, PLAN_CANONICAL_MARKER)
+    text = (
+        _without_leading_line(body, canonical_marker) if canonical_marker is not None else stripped
+    )
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
     first = text.lstrip().partition("\n")[0].strip()
@@ -327,7 +334,8 @@ def extract_current_plan(body: str) -> str:
 
 def extract_current_review(body: str) -> str:
     """Return only reviewer output from a current or legacy review comment."""
-    text = _without_leading_line(body, PLAN_REVIEW_CANONICAL_MARKER)
+    marker = _leading_marker(body, PLAN_REVIEW_CANONICAL_MARKERS)
+    text = _without_leading_line(body, marker) if marker is not None else body
     text = _without_leading_line(text, PLAN_REVIEW_PREFIX)
     return _without_revision_line(text).strip()
 

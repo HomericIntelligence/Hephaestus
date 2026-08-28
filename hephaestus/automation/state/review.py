@@ -14,7 +14,10 @@ import hephaestus.automation.github_api as _api
 
 from ..git_utils import get_repo_info, get_repo_root, issue_ref
 from ..github_api.graphql import GraphQLMutationSpec, GraphQLQuerySpec
-from ..protocol import PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX
+from ..protocol import (
+    PLAN_REVIEW_CANONICAL_MARKERS,
+    PLAN_REVIEW_PREFIX as PLAN_REVIEW_PREFIX,
+)
 from ..review_journal import is_plan_review_comment
 from ..state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 
@@ -101,7 +104,9 @@ def _extract_verdict_context(review_body: str) -> str:
     # Fall back to first non-prefix content line
     for line in lines:
         stripped = line.strip()
-        if stripped and not stripped.startswith((PLAN_REVIEW_PREFIX, "<!-- hephaestus-")):
+        if stripped and not stripped.startswith(
+            (PLAN_REVIEW_PREFIX, *PLAN_REVIEW_CANONICAL_MARKERS, "<!-- hephaestus-")
+        ):
             return stripped[:_VERDICT_LOG_PREVIEW_CHARS]
 
     return ""

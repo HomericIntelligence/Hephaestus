@@ -13,8 +13,11 @@ from markdown_it import MarkdownIt
 
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.protocol import (
-    PLAN_CANONICAL_MARKER,
-    PLAN_REVIEW_CANONICAL_MARKER,
+    FINALIZED_PLAN_PREFIX,
+    FINALIZED_PLAN_PREFIXES,
+    LEGACY_FINALIZED_PLAN_PREFIXES,
+    PLAN_CANONICAL_MARKERS,
+    PLAN_REVIEW_CANONICAL_MARKERS,
 )
 from hephaestus.automation.review_journal import HISTORY_RE
 from hephaestus.automation.state_labels import is_epic
@@ -23,7 +26,11 @@ from hephaestus.prompts import PromptCatalog
 RECOVERY_PROVENANCE_VERSION: Final[int] = 3
 RECOVERY_PROVENANCE_PREFIX: Final[str] = "<!-- hephaestus-recovered-requirements:"
 OBSOLETE_EXPLANATION_MARKER: Final[str] = "<!-- hephaestus-obsolete-explanation:v=1 -->"
-ATHENA_FINALIZED_PLAN_PREFIX: Final[str] = "<!-- athena:finalize-plan "
+HOMERIC_INTELLIGENCE_FINALIZED_PLAN_PREFIX: Final[str] = FINALIZED_PLAN_PREFIX
+"""Current shared finalized-plan marker prefix."""
+
+ATHENA_FINALIZED_PLAN_PREFIX: Final[str] = LEGACY_FINALIZED_PLAN_PREFIXES[0]
+"""Deprecated read-only prefix retained for existing Athena-finalized bodies."""
 
 _DIGEST_RE = r"[0-9a-f]{64}"
 # GitHub issue comments expose a positive REST ``id`` and an ``IC_`` GraphQL
@@ -39,8 +46,9 @@ _PROVENANCE_RE = re.compile(
     rf"(?::successor_revision=(?P<successor_revision>\d+):"
     rf"successor_plan=(?P<successor_plan>{_DIGEST_RE}))? -->$"
 )
+_FINALIZED_PLAN_PREFIX_RE = "|".join(re.escape(prefix) for prefix in FINALIZED_PLAN_PREFIXES)
 _FINALIZED_PLAN_RE = re.compile(
-    rf"^{re.escape(ATHENA_FINALIZED_PLAN_PREFIX)}"
+    rf"^(?:{_FINALIZED_PLAN_PREFIX_RE})"
     rf"R=(?P<requirements>{_DIGEST_RE}) "
     rf"P=(?P<plan>{_FINALIZED_ARTIFACT_IDENTITY_RE}) "
     rf"V=(?P<review>{_FINALIZED_ARTIFACT_IDENTITY_RE}) "
@@ -50,7 +58,7 @@ _FINALIZED_PLAN_RE = re.compile(
 # top-level content. Keep the raw line as the candidate so any indentation
 # fails exact seal verification instead of hiding a malformed authority claim.
 _FINALIZED_PLAN_CANDIDATE_RE = re.compile(
-    rf"^ {{0,3}}{re.escape(ATHENA_FINALIZED_PLAN_PREFIX.rstrip())}"
+    rf"^ {{0,3}}(?:{'|'.join(re.escape(prefix.rstrip()) for prefix in FINALIZED_PLAN_PREFIXES)})"
 )
 _COMMONMARK_LINE_END_RE = re.compile(r"\r\n|\r|\n")
 _OBSOLETE_TITLE_RE = re.compile(r"^\s*(?:\[[^]]*obsolete[^]]*\]|obsolete\s*:)", re.IGNORECASE)
@@ -111,7 +119,7 @@ class RecoveryProvenance:
 
 @dataclass(frozen=True, slots=True)
 class FinalizedPlanIdentity:
-    """Sealed identities from one self-verifying Athena finalized body."""
+    """Sealed identities from one self-verifying shared finalized-plan body."""
 
     requirements_identity: str
     plan_identity: str
@@ -124,7 +132,7 @@ def _sha256(text: str) -> str:
 
 
 def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
-    """Return offsets and lines for top-level Athena finalization claims."""
+    """Return offsets and lines for top-level shared finalization claims."""
     # CommonMark recognizes CR, LF, and CRLF as line endings. ``splitlines``
     # recognizes additional Unicode separators and would desynchronize these
     # raw indexes from markdown-it-py's token ``map`` line numbers.
@@ -159,14 +167,14 @@ def _finalized_plan_candidate_lines(body: str) -> list[tuple[int, str]]:
 
 
 def _has_finalized_plan_candidate(body: str) -> bool:
-    """Return whether a top-level line claims Athena finalization."""
+    """Return whether a top-level line claims shared finalization."""
     return bool(_finalized_plan_candidate_lines(body))
 
 
 def verified_finalized_plan(body: str) -> FinalizedPlanIdentity | None:
     """Return a finalized-plan identity only when its exact body verifies ``F``.
 
-    Athena defines ``F`` as SHA-256 over the complete UTF-8 issue body after
+    The shared planning protocol defines ``F`` as SHA-256 over the complete UTF-8 issue body after
     replacing the marker's concrete ``F`` value with the literal ``<F>``.
     Requiring one exact top-level marker means malformed, duplicated, inline,
     or materially edited bodies cannot suppress a fresh planning epoch.
@@ -199,7 +207,7 @@ def has_contaminated_issue_body(body: str) -> bool:
     """Return whether the first non-whitespace line is a canonical derived artifact."""
     first_line = body.lstrip().partition("\n")[0].strip()
     return bool(
-        first_line in {PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER}
+        first_line in {*PLAN_CANONICAL_MARKERS, *PLAN_REVIEW_CANONICAL_MARKERS}
         or HISTORY_RE.fullmatch(first_line)
         or (_has_finalized_plan_candidate(body) and verified_finalized_plan(body) is None)
     )

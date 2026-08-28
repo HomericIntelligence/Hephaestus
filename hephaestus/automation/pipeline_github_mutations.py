@@ -3,6 +3,7 @@
 import subprocess
 
 from hephaestus.automation.merge_authorization import MergeAuthorization
+from hephaestus.automation.protocol import comment_marker_aliases
 
 from .pipeline_github_contract import _PipelineGitHubHost
 from .pipeline_github_transport import *
@@ -197,12 +198,20 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         legacy_marker: str | None = None,
     ) -> None:
         """Execute canonical comment upsert after the public error boundary."""
+        markers = tuple(
+            dict.fromkeys(
+                (*comment_marker_aliases(marker), *((legacy_marker,) if legacy_marker else ()))
+            )
+        )
 
         def owned_matching(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [
                 comment
                 for comment in comments
-                if has_exact_leading_marker(str(comment.get("body", "")), marker)
+                if any(
+                    has_exact_leading_marker(str(comment.get("body", "")), candidate)
+                    for candidate in markers
+                )
                 and self._comment_owned_by_viewer(comment)
             ]
 
