@@ -427,6 +427,12 @@ class WorktreeManager:
                         self.worktrees.pop(worktree_key, None)
                         if base_sha is None:
                             self._remove_worktree_path_forcefully(worktree_path, timeout=timeout)
+                        else:
+                            self._release_failed_direct_scope_local_branch(
+                                branch_name,
+                                base_sha,
+                                timeout=timeout,
+                            )
                         raise
                 self.worktrees[worktree_key] = worktree_path
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
@@ -659,6 +665,37 @@ class WorktreeManager:
         if local.returncode != 1:
             raise RuntimeError(f"cannot verify local branch {branch_name!r}")
         return False
+
+    def _release_failed_direct_scope_local_branch(
+        self,
+        branch_name: str,
+        base_sha: str,
+        *,
+        timeout: int | None,
+    ) -> None:
+        """Delete only an unattached direct branch left at its immutable base.
+
+        ``git worktree add -b`` can create the local branch before a later
+        checkout failure.  Leaving that exact-base branch makes the next
+        direct-scope retry look like unsafe reuse.  A holder or a changed head
+        is evidence we do not own, so it is deliberately preserved.
+        """
+        if self._worktree_holding_branch(branch_name, timeout=timeout) is not None:
+            return
+        local = run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{branch_name}"],
+            cwd=self.repo_root,
+            capture_output=True,
+            check=False,
+            **_timeout_kw(timeout),
+        )
+        if local.returncode != 0 or local.stdout.strip() != base_sha:
+            return
+        run(
+            ["git", "branch", "-D", branch_name],
+            cwd=self.repo_root,
+            **_timeout_kw(timeout),
+        )
 
     def _add_isolated_worktree_for_branch(
         self,
