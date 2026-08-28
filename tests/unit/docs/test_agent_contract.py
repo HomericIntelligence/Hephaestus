@@ -29,6 +29,7 @@ EXCLUDED_PARTS = {
     ".tmp",
     ".venv",
     "build",
+    "plugins",
 }
 
 

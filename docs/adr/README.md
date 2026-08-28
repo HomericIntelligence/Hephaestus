@@ -46,3 +46,4 @@ numbered, and listed here.
 | [0031](0031-bounded-recovery-artifact-roles.md) | Bounded recovery artifact roles on issue timelines | Accepted |
 | [0032](0032-host-owned-learning-preparation.md) | Host-owned learning preparation | Accepted |
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
+| [0034](0034-hephaestus-plugin-compatibility-distribution.md) | Hephaestus nested compatibility distribution stays package data only | Accepted |

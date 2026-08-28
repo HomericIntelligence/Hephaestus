@@ -89,6 +89,11 @@ dev = [
     # Workflow schema validation must resolve from uv.lock; uvx would install
     # mutable registry state during the required gate.
     "check-jsonschema>=0.38,<1",
+    # Hephaestus compatibility-distribution compliance tests assemble package
+    # trees, validate strict manifests, and classify markdown links.
+    "pathspec>=1.1,<2",
+    "jsonschema>=4.0,<5",
+    "markdown-it-py>=4.0,<5",
     # Property-based fuzz testing of LLM-output parsers (issue #1470).
     "hypothesis>=6.0,<7",
     "bandit>=1.9.4,<2",

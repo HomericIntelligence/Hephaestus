@@ -757,8 +757,10 @@ this single-maintainer repository.
 ## Skill catalog (agent highlights)
 
 The Athena plugins enabled in `.claude/settings.json` provide 23 reusable skills
-the agents can invoke. See the [Skill Catalog](#skill-catalog) table above for
-the full listing. Highlights:
+the agents can invoke. The nested `plugins/hephaestus/` tree is a packaged
+compatibility distribution only; it is not the runtime source of truth and
+must not be enabled in `.claude/settings.json`. See the [Skill Catalog](#skill-catalog)
+table above for the full listing. Highlights:
 
 - **Workflow**: `skill-advisor`, `advise`, `brainstorm`, `test-driven-development`,
   `systematic-debugging`, `verification`, `finish-branch`, `code-review`.
@@ -773,6 +775,9 @@ the full listing. Highlights:
 - Skill hooks, frontmatter, and per-skill `allowed-tools` are owned by the
   installed Athena plugins; `.claude/settings.json` is the repository-local
   source of truth for plugin enablement.
+- The nested `plugins/hephaestus/` tree is compatibility package data. It
+  stays out of runtime plugin enablement, and the Athena marketplace remains
+  the only runtime skill source of truth.
 - **MCP** (Model Context Protocol): `.mcp.json` is the version-controlled
   configuration surface for optional project-scoped agent tooling and remains
   intentionally empty. MCP is not a Hephaestus runtime API or ecosystem

@@ -15,9 +15,9 @@ TOPOLOGY_FILES = (
 LOCAL_SKILLS_PATH = re.compile(r"(?<![\w.-])(?:\./|Hephaestus/)?skills(?=[/\\`)])")
 LEGACY_PLUGIN_PATHS = (
     REPO_ROOT / "skills",
-    REPO_ROOT / "plugins" / "hephaestus",
     REPO_ROOT / ".codex-plugin",
 )
+COMPATIBILITY_PLUGIN_ROOT = REPO_ROOT / "plugins" / "hephaestus"
 RETIRED_PLUGIN_SCANNER_INPUTS = (
     REPO_ROOT / ".github" / "workflows" / "hol-plugin-scanner.yml",
     REPO_ROOT / ".plugin-scanner.toml",
@@ -47,11 +47,35 @@ def _enabled_plugins_from_marketplace(enabled: Mapping[str, object], marketplace
     )
 
 
-def test_repository_has_no_local_plugin_distribution() -> None:
-    """Retired Hephaestus plugin roots must not be recreated."""
+def test_repository_has_no_root_plugin_distribution() -> None:
+    """Retired root plugin surfaces must not be recreated."""
     present = _present_path_names(LEGACY_PLUGIN_PATHS, REPO_ROOT)
 
-    assert present == [], "repository-local plugin content must not reappear: " + ", ".join(present)
+    assert present == [], "repository-root plugin content must not reappear: " + ", ".join(present)
+
+
+def test_nested_hephaestus_distribution_is_packaged_content_only() -> None:
+    """The nested compatibility distribution must stay as regular package data."""
+    required_files = (
+        COMPATIBILITY_PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
+        COMPATIBILITY_PLUGIN_ROOT / ".codexignore",
+        COMPATIBILITY_PLUGIN_ROOT / "README.md",
+        COMPATIBILITY_PLUGIN_ROOT / "LICENSE",
+        COMPATIBILITY_PLUGIN_ROOT / "assets" / "icon.svg",
+        COMPATIBILITY_PLUGIN_ROOT / "skills" / "THIRD_PARTY_LICENSES.md",
+    )
+
+    assert COMPATIBILITY_PLUGIN_ROOT.is_dir()
+    assert not COMPATIBILITY_PLUGIN_ROOT.is_symlink()
+    assert not any(path.is_symlink() for path in COMPATIBILITY_PLUGIN_ROOT.rglob("*"))
+    assert _present_path_names(required_files, REPO_ROOT) == [
+        "plugins/hephaestus/.codex-plugin/plugin.json",
+        "plugins/hephaestus/.codexignore",
+        "plugins/hephaestus/README.md",
+        "plugins/hephaestus/LICENSE",
+        "plugins/hephaestus/assets/icon.svg",
+        "plugins/hephaestus/skills/THIRD_PARTY_LICENSES.md",
+    ]
 
 
 def test_repository_has_no_retired_plugin_scanner_inputs() -> None:

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title>Hephaestus plugin mark</title>
+  <rect width="512" height="512" rx="96" fill="#18222e"/>
+  <path d="M118 360h276v48H118z" fill="#f0b44c"/>
+  <path d="M168 314 300 182l42 42-132 132z" fill="#e8edf2"/>
+  <path d="m294 124 94 94-42 42-94-94z" fill="#f0b44c"/>
+  <path d="M132 132h116v44H132z" fill="#61b3a6"/>
+  <path d="M132 196h82v44h-82z" fill="#61b3a6"/>
+</svg>
