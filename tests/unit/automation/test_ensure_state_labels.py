@@ -212,9 +212,7 @@ class TestMain:
         assert mock_gh_call.call_count == 1
 
     def test_main_specific_repo_skips_org_enumeration(self, mock_gh_call: MagicMock) -> None:
-        mock_gh_call.side_effect = [
-            _ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))
-        ]
+        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))]
         rc = main(["--repo", "owner/name"])
         assert rc == 0
         # No 'gh repo list' call — exactly one create per label.
@@ -236,9 +234,7 @@ class TestMain:
 
     def test_main_configures_cli_logging(self, mock_gh_call: MagicMock) -> None:
         """main() routes log setup through the shared configure_cli_logging helper."""
-        mock_gh_call.side_effect = [
-            _ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))
-        ]
+        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))]
         with patch("hephaestus.automation.ensure_state_labels.configure_cli_logging") as configure:
             rc = main(["--repo", "owner/name"])
         assert rc == 0
@@ -279,9 +275,7 @@ class TestSignalWiring:
     """main() must wrap the per-repo loop in terminal_guard for Ctrl+C/Ctrl+Z."""
 
     def test_main_installs_cooperative_terminal_guard(self, mock_gh_call: MagicMock) -> None:
-        mock_gh_call.side_effect = [
-            _ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))
-        ]
+        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))]
         with patch("hephaestus.automation.ensure_state_labels.terminal_guard") as mock_guard:
             rc = main(["--repo", "owner/name"])
         assert rc == 0
