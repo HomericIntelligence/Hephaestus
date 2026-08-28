@@ -199,6 +199,10 @@ class PrReviewGate(_PrReviewHost):
                 ctx.budget("pr_review_hard"),
             )
 
+        scope_expansion_outcome = self._handle_scope_expansions(item, ctx, audit)
+        if scope_expansion_outcome is not None:
+            return scope_expansion_outcome
+
         # A fresh total open-thread count after the address/push leg is the
         # only thread fact that can downgrade a GO decision.
         try:

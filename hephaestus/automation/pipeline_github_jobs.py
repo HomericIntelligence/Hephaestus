@@ -16,6 +16,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     FrozenJson,
     GitHubJob,
     GitHubReceipt,
+    EnsureScopeExpansionChildrenRequest,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
@@ -23,6 +24,7 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalAppended,
     ReplyJournalRecovered,
     RunMergeWaitCycleRequest,
+    ScopeExpansionChildrenEnsured,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
@@ -76,9 +78,107 @@ class PipelineGitHubJobRunner:
                 return self._reconcile_pr_review(job.request, github)
             case RunMergeWaitCycleRequest():
                 return self._run_merge_wait_cycle(job.request, github)
+            case EnsureScopeExpansionChildrenRequest():
+                return self._ensure_scope_expansion_children(job.request, github)
             case unknown:
                 return assert_never(unknown)
         raise AssertionError("unreachable closed GitHub request dispatch")
+
+    @staticmethod
+    def _ensure_scope_expansion_children(
+        request: EnsureScopeExpansionChildrenRequest,
+        github: Any,
+    ) -> ScopeExpansionChildrenEnsured:
+        """Ensure one durable child issue per expansion and record the source block."""
+        from hephaestus.automation.pipeline.scope_expansion_records import (
+            render_scope_expansion_blocking_review,
+            render_scope_expansion_child_body,
+            render_scope_expansion_lifecycle_comment,
+            scope_expansion_blocking_review_marker,
+            scope_expansion_child_marker,
+            scope_expansion_lifecycle_marker,
+        )
+        from hephaestus.automation.scope_expansion_domain import ScopeExpansion
+
+        def repository() -> str:
+            value = getattr(github, "_repo_slug", None)
+            if isinstance(value, str) and value:
+                return value
+            value = getattr(github, "repo", None)
+            return value if isinstance(value, str) else ""
+
+        repo = repository()
+        if not isinstance(repo, str) or not repo:
+            raise RuntimeError("repository identity is unavailable")
+        child_issue_numbers: list[int] = []
+        overall_status: str = "resolved"
+        for expansion in request.scope_expansions:
+            if not isinstance(expansion, ScopeExpansion):
+                raise TypeError("scope_expansions must contain scope-expansion records")
+            child_marker = scope_expansion_child_marker(repo, request.issue_number, expansion)
+            lifecycle_marker = scope_expansion_lifecycle_marker(repo, request.issue_number, expansion)
+            blocking_marker = scope_expansion_blocking_review_marker(
+                repo,
+                request.issue_number,
+                expansion,
+            )
+            existing_child = github.issue_with_marker(child_marker)
+            if existing_child is None:
+                child_body = render_scope_expansion_child_body(
+                    repository=repo,
+                    parent_issue=request.issue_number,
+                    pr_number=request.pr_number,
+                    reviewed_head_sha=request.reviewed_head_sha,
+                    expansion=expansion,
+                )
+                child_issue_number = github.create_issue(expansion.title, child_body)
+            else:
+                child_issue_number = existing_child.get("number")
+            if not isinstance(child_issue_number, int) or child_issue_number <= 0:
+                overall_status = "dry_run"
+                continue
+            child_issue_numbers.append(child_issue_number)
+            child_state = str(github.gh_issue_json(child_issue_number).get("state") or "").upper()
+            merged_pr = github.find_merged_pr_for_issue(child_issue_number)
+            if child_state == "OPEN":
+                lifecycle_state = "pending-child"
+                overall_status = "blocked" if overall_status != "operator_required" else overall_status
+            elif merged_pr is None:
+                lifecycle_state = "blocked"
+                overall_status = "operator_required"
+            else:
+                lifecycle_state = "pending-review"
+            lifecycle_body = render_scope_expansion_lifecycle_comment(
+                repository=repo,
+                parent_issue=request.issue_number,
+                pr_number=request.pr_number,
+                reviewed_head_sha=request.reviewed_head_sha,
+                expansion=expansion,
+                state=lifecycle_state,
+                child_issue_number=child_issue_number,
+                merge_sha=None,
+            )
+            github.upsert_issue_comment(request.issue_number, lifecycle_marker, lifecycle_body)
+            blocking_body = render_scope_expansion_blocking_review(
+                repository=repo,
+                parent_issue=request.issue_number,
+                pr_number=request.pr_number,
+                reviewed_head_sha=request.reviewed_head_sha,
+                child_issue_number=child_issue_number,
+                expansion=expansion,
+            )
+            github.post_scope_expansion_blocking_review(
+                request.pr_number,
+                body=blocking_body,
+                marker=blocking_marker,
+            )
+        if overall_status != "resolved":
+            github.mark_pr_implementation_no_go(request.pr_number)
+        return ScopeExpansionChildrenEnsured(
+            request=request,
+            status=overall_status,  # type: ignore[arg-type]
+            child_issue_numbers=tuple(child_issue_numbers),
+        )
 
     @staticmethod
     def _reconcile_pr_review(  # noqa: C901

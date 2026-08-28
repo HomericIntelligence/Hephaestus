@@ -19,6 +19,10 @@ from hephaestus.automation.pipeline.scope_retraction import (
     is_scope_retraction_finding,
     normalize_scope_retraction_paths,
 )
+from hephaestus.automation.scope_expansion_domain import (
+    ScopeExpansion,
+    normalize_scope_expansions,
+)
 
 _JSON_BLOCK_RE = re.compile(
     r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n^[ \t]*```[ \t]*$",
@@ -53,6 +57,7 @@ class ReviewAudit:
     raw_feedback: str
     valid: bool
     verdict: ReviewVerdict | None = None
+    scope_expansions: tuple[ScopeExpansion, ...] = ()
 
 
 def is_clean_go_review(audit: object | None) -> bool:
@@ -82,9 +87,13 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
     raw_verdict = payload.get("verdict")
     summary = payload.get("summary")
     comments = payload.get("comments")
+    scope_expansions = payload.get("scope_expansions")
     if not isinstance(grade, str) or grade.strip().upper() not in _VALID_GRADES:
         return _invalid_audit(raw_feedback)
     if not isinstance(summary, str) or not isinstance(comments, list):
+        return _invalid_audit(raw_feedback)
+    normalized_scope_expansions = normalize_scope_expansions(scope_expansions)
+    if normalized_scope_expansions is None:
         return _invalid_audit(raw_feedback)
 
     # The implementation-GO boundary requires an explicit reviewer verdict.
@@ -108,6 +117,7 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
         verdict=verdict,
         summary=_sanitize_summary(summary),
         findings=tuple(findings),
+        scope_expansions=normalized_scope_expansions,
         raw_feedback=raw_feedback,
         valid=True,
     )
@@ -249,6 +259,7 @@ def _invalid_audit(raw_feedback: str) -> ReviewAudit:
         verdict=None,
         summary=_INVALID_SUMMARY,
         findings=(),
+        scope_expansions=(),
         raw_feedback=raw_feedback,
         valid=False,
     )

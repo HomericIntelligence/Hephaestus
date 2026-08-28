@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, Self
 
+from hephaestus.automation.scope_expansion_domain import ScopeExpansion
+
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _JOURNAL_MARKER_RE = re.compile(
     r"<!-- hephaestus-implementation-reply-handoff:"
@@ -197,12 +199,33 @@ class RunMergeWaitCycleRequest:
             _positive_identifier(self.issue_number, "issue_number")
 
 
+@dataclass(frozen=True)
+class EnsureScopeExpansionChildrenRequest:
+    """Ensure one durable child issue per validated scope expansion."""
+
+    issue_number: int
+    pr_number: int
+    reviewed_head_sha: str
+    scope_expansions: tuple[ScopeExpansion, ...]
+
+    def __post_init__(self) -> None:
+        """Validate the immutable child-issue ensure request."""
+        _positive_identifier(self.issue_number, "issue_number")
+        _positive_identifier(self.pr_number, "pr_number")
+        _full_sha(self.reviewed_head_sha, "reviewed_head_sha")
+        if not isinstance(self.scope_expansions, tuple) or not self.scope_expansions:
+            raise ValueError("scope_expansions must be a non-empty tuple")
+        if not all(isinstance(expansion, ScopeExpansion) for expansion in self.scope_expansions):
+            raise ValueError("scope_expansions must contain scope-expansion records")
+
+
 type GitHubRequest = (
     RecoverReplyJournalRequest
     | AppendReplyJournalRequest
     | DeliverReplyHandoffRequest
     | ReconcilePrReviewRequest
     | RunMergeWaitCycleRequest
+    | EnsureScopeExpansionChildrenRequest
 )
 
 
@@ -229,6 +252,7 @@ class GitHubJob:
                 DeliverReplyHandoffRequest,
                 ReconcilePrReviewRequest,
                 RunMergeWaitCycleRequest,
+                EnsureScopeExpansionChildrenRequest,
             ),
         ):
             raise TypeError("request must be a supported GitHub request")
@@ -356,12 +380,32 @@ class MergeWaitCycleCompleted:
             raise ValueError("merge_sha must be a full commit SHA or None")
 
 
+@dataclass(frozen=True)
+class ScopeExpansionChildrenEnsured:
+    """Immutable result of idempotently ensuring scope-expansion children."""
+
+    request: EnsureScopeExpansionChildrenRequest
+    status: Literal["blocked", "resolved", "operator_required", "dry_run"]
+    child_issue_numbers: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """Validate the closed child-issue result."""
+        if self.status not in {"blocked", "resolved", "operator_required", "dry_run"}:
+            raise ValueError("status must be a supported scope-expansion outcome")
+        if not isinstance(self.child_issue_numbers, tuple) or not all(
+            isinstance(issue_number, int) and issue_number > 0
+            for issue_number in self.child_issue_numbers
+        ):
+            raise ValueError("child_issue_numbers must be a tuple of positive integers")
+
+
 type GitHubReceipt = (
     ReplyJournalRecovered
     | ReplyJournalAppended
     | ReplyHandoffAttempted
     | PrReviewReconciled
     | MergeWaitCycleCompleted
+    | ScopeExpansionChildrenEnsured
 )
 
 

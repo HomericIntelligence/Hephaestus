@@ -1,5 +1,6 @@
 # This mixin consumes the adapter transport namespace by design.
 # ruff: noqa: F403, F405
+import json
 import subprocess
 
 from hephaestus.automation.merge_authorization import MergeAuthorization

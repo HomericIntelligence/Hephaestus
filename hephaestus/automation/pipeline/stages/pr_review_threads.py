@@ -285,6 +285,9 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
 
 _REPLY_HANDOFF_RECEIPT = "_reply_handoff_receipt"
 _REPLY_HANDOFF_RECEIPT_ERROR = "_reply_handoff_receipt_error"
+_SCOPE_EXPANSION_PENDING_REQUEST = "_scope_expansion_pending_request"
+_SCOPE_EXPANSION_RECEIPT = "_scope_expansion_receipt"
+_SCOPE_EXPANSION_RECEIPT_ERROR = "_scope_expansion_receipt_error"
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -338,6 +341,9 @@ _ROUND_PAYLOAD_KEYS = (
     "validation_receipt_fingerprints",
     "validation_pr_metadata_fingerprint",
     "scope_retraction_paths",
+    _SCOPE_EXPANSION_PENDING_REQUEST,
+    _SCOPE_EXPANSION_RECEIPT,
+    _SCOPE_EXPANSION_RECEIPT_ERROR,
     "reviewed_pr_base_sha",
     "host_verification_receipts",
     "host_verification_repository_profile",
@@ -815,6 +821,8 @@ __all__ = [
     '_PENDING_IMPLEMENTATION_REPLY_HANDOFF_RETRIES',
     '_REPLY_HANDOFF_RECEIPT', '_REPLY_HANDOFF_RECEIPT_ERROR', '_REPLY_VISIBILITY_RETRIES',
     '_ROUND_PAYLOAD_KEYS', '_STEP_HANDLER_NAMES',
+    '_SCOPE_EXPANSION_PENDING_REQUEST', '_SCOPE_EXPANSION_RECEIPT',
+    '_SCOPE_EXPANSION_RECEIPT_ERROR',
     'AgentJob', 'Any', 'BuildTestJob', 'Callable', 'CompactJob', 'Continue', 'Disposition',
     'GitJob', 'ItemKind', 'JobRequest', 'JobResult', 'PrReviewStage', 'ReviewAudit', 'Stage',
     'StageContext', 'StageOutcome', 'StepResult', 'WorkItem', '_HostVerificationSpec',

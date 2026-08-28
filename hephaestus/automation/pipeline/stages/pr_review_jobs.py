@@ -30,6 +30,7 @@ from .pr_review_recovery import (
     empty_diff_outcome,
     restart_direct_pr_review,
 )
+from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 from .pr_review_threads import (
     _REPLY_HANDOFF_RECEIPT,
@@ -43,7 +44,7 @@ _PR_REVIEW_RECEIPT = "_pr_review_reconciliation_receipt"
 _PR_REVIEW_RECEIPT_ERROR = "_pr_review_reconciliation_error"
 
 
-class PrReviewJobs(_PrReviewHost):
+class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
     """Own review worktrees, validation jobs, and result handoffs."""
 
     @staticmethod
@@ -864,6 +865,8 @@ class PrReviewJobs(_PrReviewHost):
             return
         if self._consume_host_verification_result(item, result):
             self._store_host_verification_result(item, result)
+            return
+        if self._consume_scope_expansion_result(item, result):
             return
 
         review_job_pending = bool(item.payload.pop("review_job_pending", None))

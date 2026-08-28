@@ -11,6 +11,7 @@ import pytest
 
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
+    EnsureScopeExpansionChildrenRequest,
     DeliverReplyHandoffRequest,
     FrozenJson,
     GitHubJob,
@@ -22,12 +23,14 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalAppended,
     ReplyJournalRecovered,
     RunMergeWaitCycleRequest,
+    ScopeExpansionChildrenEnsured,
 )
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
 )
 from hephaestus.automation.review_journal import IssueComment
+from hephaestus.automation.scope_expansion_domain import ScopeExpansion
 
 
 def test_frozen_json_is_detached_from_sources_and_thawed_values() -> None:
@@ -189,6 +192,199 @@ def test_runner_recovers_version_one_journal_and_delivers_exact_batch(
         retry_delay_s=None,
     )
     assert delivery_calls == []
+
+
+def test_runner_ensures_scope_expansion_children_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Child issues are created once and then recovered by marker on retry."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    expansion = ScopeExpansion(
+        title="Extract shared helper",
+        reason="Prerequisite work must ship first",
+        source_path="hephaestus/automation/example.py",
+        source_line=17,
+        required_paths=("hephaestus/automation/example.py", "tests/unit/automation/test_example.py"),
+        acceptance_criteria=("Helper exists", "Tests pass"),
+    )
+    events: list[tuple[str, tuple[object, ...]]] = []
+    shared_state = {"issues": {}, "next_issue": 900}
+
+    class FakePipelineGitHub:
+        def __init__(self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object) -> None:
+            self.repo = repo or "org/repo"
+            self.dry_run = dry_run
+
+        def issue_with_marker(self, marker: str) -> dict[str, object] | None:
+            matches = [
+                {"number": issue_number, **issue}
+                for issue_number, issue in shared_state["issues"].items()
+                if str(issue.get("body") or "").startswith(marker)
+            ]
+            if not matches:
+                return None
+            return matches[0]
+
+        def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
+            del labels
+            if self.dry_run:
+                return 0
+            shared_state["next_issue"] += 1
+            issue_number = shared_state["next_issue"]
+            shared_state["issues"][issue_number] = {"title": title, "body": body, "state": "OPEN"}
+            events.append(("create_issue", (issue_number, title)))
+            return issue_number
+
+        def gh_issue_json(self, issue_number: int) -> dict[str, object]:
+            issue = shared_state["issues"].get(issue_number, {"title": "child", "body": "", "state": "OPEN"})
+            return {
+                "number": issue_number,
+                "title": issue.get("title", "child"),
+                "body": issue.get("body", ""),
+                "state": issue.get("state", "OPEN"),
+            }
+
+        def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+            del issue_number
+            return None
+
+        def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+            if self.dry_run:
+                return
+            events.append(("upsert_issue_comment", (issue_number, marker, body)))
+
+        def post_scope_expansion_blocking_review(
+            self,
+            pr_number: int,
+            *,
+            body: str,
+            marker: str,
+        ) -> str:
+            if self.dry_run:
+                return "review-dry-run"
+            events.append(("post_scope_expansion_blocking_review", (pr_number, marker, body)))
+            return f"review-{pr_number}"
+
+        def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+            if self.dry_run:
+                return
+            events.append(("mark_pr_implementation_no_go", (pr_number,)))
+
+    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    request = EnsureScopeExpansionChildrenRequest(
+        issue_number=17,
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        scope_expansions=(expansion,),
+    )
+    job = GitHubJob(
+        repo="example",
+        repo_root=tmp_path.resolve(),
+        request=request,
+        descr="ensure scope expansion children",
+    )
+
+    runner = module.PipelineGitHubJobRunner(org="example-org", dry_run=False)
+    first = runner.run(job)
+    second = runner.run(job)
+
+    assert first == ScopeExpansionChildrenEnsured(
+        request=request,
+        status="blocked",
+        child_issue_numbers=(901,),
+    )
+    assert second == ScopeExpansionChildrenEnsured(
+        request=request,
+        status="blocked",
+        child_issue_numbers=(901,),
+    )
+    assert [event for event, _ in events].count("create_issue") == 1
+    assert any(event == "post_scope_expansion_blocking_review" for event, _ in events)
+    assert any(event == "mark_pr_implementation_no_go" for event, _ in events)
+
+
+def test_runner_dry_run_reports_scope_expansion_split_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dry-run reports the proposed split without creating GitHub objects."""
+    module = importlib.import_module("hephaestus.automation.pipeline_github_jobs")
+    expansion = ScopeExpansion(
+        title="Extract shared helper",
+        reason="Prerequisite work must ship first",
+        source_path="hephaestus/automation/example.py",
+        source_line=17,
+        required_paths=("hephaestus/automation/example.py", "tests/unit/automation/test_example.py"),
+        acceptance_criteria=("Helper exists", "Tests pass"),
+    )
+    events: list[tuple[str, tuple[object, ...]]] = []
+
+    class FakePipelineGitHub:
+        def __init__(self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object) -> None:
+            self.repo = repo or "org/repo"
+            self.dry_run = dry_run
+
+        def issue_with_marker(self, marker: str) -> dict[str, object] | None:
+            del marker
+            return None
+
+        def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
+            del title, body, labels
+            return 0
+
+        def gh_issue_json(self, issue_number: int) -> dict[str, object]:
+            del issue_number
+            return {"number": 901, "title": "child", "body": "", "state": "OPEN"}
+
+        def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
+            del issue_number
+            return None
+
+        def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+            if self.dry_run:
+                return
+            events.append(("upsert_issue_comment", (issue_number, marker, body)))
+
+        def post_scope_expansion_blocking_review(
+            self,
+            pr_number: int,
+            *,
+            body: str,
+            marker: str,
+        ) -> str:
+            if self.dry_run:
+                return "review-dry-run"
+            events.append(("post_scope_expansion_blocking_review", (pr_number, marker, body)))
+            return "review-1"
+
+        def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+            if self.dry_run:
+                return
+            events.append(("mark_pr_implementation_no_go", (pr_number,)))
+
+    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    request = EnsureScopeExpansionChildrenRequest(
+        issue_number=17,
+        pr_number=7,
+        reviewed_head_sha="a" * 40,
+        scope_expansions=(expansion,),
+    )
+    job = GitHubJob(
+        repo="example",
+        repo_root=tmp_path.resolve(),
+        request=request,
+        descr="ensure scope expansion children",
+    )
+
+    receipt = module.PipelineGitHubJobRunner(org="example-org", dry_run=True).run(job)
+
+    assert receipt == ScopeExpansionChildrenEnsured(
+        request=request,
+        status="dry_run",
+        child_issue_numbers=(),
+    )
+    assert events == []
 
 
 def test_pr_reconciliation_reads_back_late_threads_before_apply(

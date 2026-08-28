@@ -22,10 +22,12 @@ from hephaestus.agents.execution_policy import AgentRole
 from hephaestus.agents.pi_session import create_pi_binding
 from hephaestus.automation.pipeline.github_jobs import (
     DeliverReplyHandoffRequest,
+    EnsureScopeExpansionChildrenRequest,
     FrozenJson,
     GitHubJob,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
+    ScopeExpansionChildrenEnsured,
 )
 from hephaestus.automation.pipeline.jobs import (
     AgentJob,
@@ -76,6 +78,7 @@ from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.automation.prompts.pr_review import MAX_PR_REVIEW_RENDERED_CHARS
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
+from hephaestus.automation.scope_expansion_domain import ScopeExpansion
 from hephaestus.automation.state_labels import STATE_SKIP
 from tests.unit.automation.pipeline.conftest import FakeWorkerPool
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -4842,6 +4845,113 @@ class TestEvalVerdicts:
         result = stage.step(item, ctx)
 
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
+        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+
+    def test_scope_expansion_child_issue_parks_the_source_pr(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A reviewer scope expansion creates a child-issue job before any retry budget."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        expansion = ScopeExpansion(
+            title="Extract shared helper",
+            reason="Prerequisite work must ship first",
+            source_path="hephaestus/automation/example.py",
+            source_line=17,
+            required_paths=(
+                "hephaestus/automation/example.py",
+                "tests/unit/automation/test_example.py",
+            ),
+            acceptance_criteria=("Helper exists", "Tests pass"),
+        )
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="Split prerequisite work",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+            scope_expansions=(expansion,),
+        )
+
+        request_result = stage.step(item, ctx)
+
+        assert isinstance(request_result, JobRequest)
+        assert isinstance(request_result.job, GitHubJob)
+        assert isinstance(request_result.job.request, EnsureScopeExpansionChildrenRequest)
+        assert item.attempts.get("pr_review_iter", 0) == 0
+        assert item.payload.get("review_audit_failure") is not True
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionChildrenEnsured(
+                    request=request_result.job.request,
+                    status="blocked",
+                    child_issue_numbers=(901,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.BLOCKED, "scope_expansion_blocked")
+        assert item.attempts.get("pr_review_iter", 0) == 0
+        assert ("mark_pr_implementation_no_go", (1001,)) not in github.mutation_log
+
+    def test_resolved_scope_expansion_returns_to_the_normal_go_path(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A merged child issue lets the source PR re-enter the ordinary GO flow."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        ctx = make_ctx(github=github)
+        expansion = ScopeExpansion(
+            title="Extract shared helper",
+            reason="Prerequisite work must ship first",
+            source_path="hephaestus/automation/example.py",
+            source_line=17,
+            required_paths=(
+                "hephaestus/automation/example.py",
+                "tests/unit/automation/test_example.py",
+            ),
+            acceptance_criteria=("Helper exists", "Tests pass"),
+        )
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = ReviewAudit(
+            grade="F",
+            summary="Split prerequisite work",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+            scope_expansions=(expansion,),
+        )
+
+        request_result = stage.step(item, ctx)
+
+        assert isinstance(request_result, JobRequest)
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=True,
+                value=ScopeExpansionChildrenEnsured(
+                    request=request_result.job.request,
+                    status="resolved",
+                    child_issue_numbers=(901,),
+                ),
+            ),
+            ctx,
+        )
+        item.state = "EVAL"
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
+        assert item.attempts["pr_review_iter"] == 1
         assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
 
     def test_go_with_preexisting_thread_reenters_remediation_cycle(

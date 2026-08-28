@@ -279,11 +279,32 @@ class FakeGitHub:
     def gh_issue_create(self, title: str, body: str, labels: list[str] | None = None) -> int:
         """Mirror github_api.gh_issue_create (returns the new issue number)."""
         self._next_issue += 1
-        self.issues[self._next_issue] = {"title": title, "body": body}
+        self.issues[self._next_issue] = {"title": title, "body": body, "state": "OPEN"}
         if labels:
             self.labels.setdefault(self._next_issue, set()).update(labels)
         self._log("gh_issue_create", self._next_issue)
         return self._next_issue
+
+    def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
+        """Mirror the coordinator-neutral issue create helper."""
+        return self.gh_issue_create(title, body, labels)
+
+    def issues_with_marker(self, marker: str) -> list[dict[str, Any]]:
+        """Return every fake issue whose body begins with the exact marker."""
+        return [
+            {"number": issue_number, **issue}
+            for issue_number, issue in self.issues.items()
+            if isinstance(issue, dict) and str(issue.get("body") or "").startswith(marker)
+        ]
+
+    def issue_with_marker(self, marker: str) -> dict[str, Any] | None:
+        """Return the unique fake issue whose body begins with the exact marker."""
+        matches = self.issues_with_marker(marker)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise RuntimeError("issue marker matched multiple repository issues")
+        return matches[0]
 
     def gh_issue_delete_comment(self, comment_id: int) -> None:
         """Mirror github_api.gh_issue_delete_comment."""
@@ -332,6 +353,19 @@ class FakeGitHub:
         """Mirror github_api.gh_pr_update_review_comment."""
         del body  # state not modelled; the log entry is the observable
         self._log("gh_pr_update_review_comment", comment_node_id)
+
+    def post_scope_expansion_blocking_review(
+        self,
+        pr_number: int,
+        *,
+        body: str,
+        marker: str,
+    ) -> str:
+        """Record one idempotent scope-expansion blocking review."""
+        if not body.startswith(marker):
+            raise ValueError(f"blocking review body must start with marker {marker!r}")
+        self._log("post_scope_expansion_blocking_review", pr_number, marker)
+        return f"review-{pr_number}-{len(self.reviews.get(pr_number, [])) + 1}"
 
 
 @pytest.fixture

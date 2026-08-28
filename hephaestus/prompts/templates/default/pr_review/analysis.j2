@@ -73,6 +73,14 @@ Classify each inline comment with a `severity`:
 
 {{ nitpick_directive }}
 
+**Scope-expansion handling:**
+
+- Use `scope_expansions` for a required fix that must ship as its own child issue.
+- Keep `comments` for ordinary inline findings that still belong to the current PR.
+- Keep `scope_retraction_paths` only on a comment that removes already-present
+  out-of-scope work.
+- Do not write pipeline-owned labels, child links, or state markers in reviewer prose.
+
 **Output format (structural audit contract — MANDATORY):**
 Write concise analysis as needed, then end with exactly one fenced JSON block.
 Do not emit `Verdict:` or any other textual decision line. Put the required
@@ -82,7 +90,7 @@ and head checks to select the implementation state.
 ```json
 {"verdict": "GO", "grade": "A", "summary": "...", "comments": [
   {"path": "...", "line": 1, "side": "RIGHT", "severity": "minor", "body": "..."}
-]}
+], "scope_expansions": []}
 ```
 
 Rules for the JSON block:
@@ -90,6 +98,13 @@ Rules for the JSON block:
   - `path`: file path relative to repo root (string)
   - `line`: line number in the file (integer, must be a changed line in the diff)
   - `side`: always `"RIGHT"` for new code
+- `scope_expansions`: array of child-issue expansion objects. Each must have:
+  - `title`: concise child-issue title
+  - `reason`: why the fix must ship as its own child
+  - `source_path`: source file path where the prerequisite is observed
+  - `source_line`: source line number for the prerequisite
+  - `required_paths`: repo-relative paths needed for the child
+  - `acceptance_criteria`: bounded child acceptance criteria
 - `severity`: one of `"critical"`, `"major"`, `"minor"`, `"nitpick"` (see above)
 - `body`: the review comment text (string)
 - `scope_retraction_paths`: REQUIRED only when the body asks to drop, remove,
@@ -104,5 +119,5 @@ Rules for the JSON block:
   invalid.
 - `summary`: bounded informational review summary, max 200 characters.
 - If there are no findings and the code meets the review criteria, emit
-  `{"verdict": "GO", "grade": "A", "summary": "LGTM", "comments": []}`.
+  `{"verdict": "GO", "grade": "A", "summary": "LGTM", "comments": [], "scope_expansions": []}`.
 - Emit only one JSON block, at the very end of your response (the parser takes the LAST one).
