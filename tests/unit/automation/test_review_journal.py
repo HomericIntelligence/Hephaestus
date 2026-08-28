@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation.protocol import PLAN_REVIEW_PREFIX
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     MAX_CURRENT_REVISION_CONTEXT_CHARS,
@@ -23,6 +24,7 @@ from hephaestus.automation.review_journal import (
     normalize_issue_comments,
     render_current_plan,
     render_current_review,
+    top_level_marker_occurrences,
 )
 
 
@@ -58,6 +60,100 @@ def test_plan_discovery_accepts_shared_and_legacy_plan_markers(marker: str) -> N
 
     assert result.status is PlanDiscoveryStatus.FOUND
     assert result.plan_text == body
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_status", "expected_plan"),
+    [
+        (
+            "# Implementation Plan\n\nExisting plan context.\n"
+            "<!-- HomericIntelligence:plan-issue -->\n\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Existing plan context.\n\nPlan",
+        ),
+        (
+            "# Implementation Plan\n\nExisting plan context.\n<!-- athena:plan-issue -->\n\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Existing plan context.\n\nPlan",
+        ),
+        (
+            "# Implementation Plan\r\n\r\nExisting plan context.\r\n"
+            "<!-- athena:plan-issue -->\r\n\r\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Existing plan context.\r\n\r\nPlan",
+        ),
+        (
+            "```markdown\n<!-- HomericIntelligence:plan-issue -->\n```",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "> <!-- athena:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "- <!-- HomericIntelligence:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "    <!-- athena:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "Plan text <!-- HomericIntelligence:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "`<!-- athena:plan-issue -->`",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "\n<!-- HomericIntelligence:plan-issue -->\n\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Plan",
+        ),
+    ],
+)
+def test_plan_discovery_uses_top_level_markdown_marker_grammar(
+    body: str,
+    expected_status: PlanDiscoveryStatus,
+    expected_plan: str,
+) -> None:
+    """Only exact top-level marker lines can identify plans during migration."""
+    comments = [_owned(body)]
+    result = discover_plan_from_comments(comments)
+
+    assert result.status is expected_status
+    assert journal_snapshot(comments).current_plan == expected_plan
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- HomericIntelligence:issue-review -->",
+        "<!-- athena:issue-review -->",
+    ],
+)
+def test_plan_review_detection_accepts_top_level_shared_and_legacy_markers(marker: str) -> None:
+    """Top-level review markers keep the same migration grammar as plans."""
+    body = f"{PLAN_REVIEW_PREFIX}\n\nPrior review context.\n{marker}\n\nReview"
+
+    snapshot = journal_snapshot([_owned(body)])
+
+    assert snapshot.current_review == "Prior review context.\n\nReview"
+
+
+def test_top_level_marker_occurrences_preserve_repeated_marker_claims() -> None:
+    """Identity resolution can detect repeated markers rather than select one."""
+    marker = "<!-- HomericIntelligence:plan-issue -->"
+    body = f"```markdown\n{marker}\n```\n\n{marker}\n\n{marker}"
+
+    assert top_level_marker_occurrences(body, (marker,)) == (marker, marker)
 
 
 @pytest.mark.parametrize(
@@ -129,8 +225,8 @@ def test_snapshot_ignores_foreign_marker_spoofing() -> None:
     assert snapshot.current_review.endswith("state:plan-go")
 
 
-def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
-    """Whitespace-prefixed journal markers are inert rather than canonical state."""
+def test_snapshot_rejects_whitespace_prefixed_markers_but_accepts_blank_lines() -> None:
+    """Blank lines retain top-level identity, but marker-line whitespace is inert."""
     snapshot = journal_snapshot(
         [
             _owned(f" \t{render_current_plan('spoofed', revision=8)}"),
@@ -141,7 +237,7 @@ def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
 
     assert snapshot.revision == 1
     assert snapshot.current_plan == ""
-    assert snapshot.current_review == ""
+    assert snapshot.current_review == "spoofed"
     assert snapshot.history == ()
 
 
@@ -172,16 +268,16 @@ def test_crlf_canonical_and_history_markers_are_recognized() -> None:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "expected"),
     [
-        f" {render_current_plan('spoofed')}",
-        f"\n{render_current_review('spoofed', revision=1)}",
-        f"\t{archive_plan_body(1, 'old', 'new')}",
+        (f" {render_current_plan('spoofed')}", False),
+        (f"\n{render_current_review('spoofed', revision=1)}", True),
+        (f"\t{archive_plan_body(1, 'old', 'new')}", False),
     ],
 )
-def test_journal_comment_requires_marker_at_first_raw_byte(body: str) -> None:
-    """Whitespace-prefixed protocol text is not removable journal state."""
-    assert is_journal_comment(body) is False
+def test_journal_comment_respects_markdown_marker_placement(body: str, expected: bool) -> None:
+    """Only exact top-level marker lines establish mutable journal identity."""
+    assert is_journal_comment(body) is expected
 
 
 def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:

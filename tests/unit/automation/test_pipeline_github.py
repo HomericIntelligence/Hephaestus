@@ -2989,7 +2989,7 @@ class TestMutatorMapping:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """One-write migration upgrades an owned legacy plan without a duplicate."""
-        legacy_body = "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\n\nOld plan"
+        legacy_body = "# Implementation Plan\n\n<!-- hephaestus-plan:canonical -->\n\nOld plan"
         body = "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nNew plan"
         legacy = {"body": legacy_body, "databaseId": 100, "viewerDidAuthor": True}
         migrated = {"body": body, "databaseId": 100, "viewerDidAuthor": True}
@@ -3006,6 +3006,37 @@ class TestMutatorMapping:
         patch_comment.assert_called_once()
         assert patch_comment.call_args.args == (100, body)
         assert fetch.call_args_list == [call(5), call(5)]
+
+    def test_upsert_plan_comment_rejects_mixed_current_and_legacy_aliases_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A current and legacy actor-owned plan are an identity conflict, not duplicates."""
+        body = render_current_plan("new plan")
+        legacy = {
+            "body": "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\nold plan",
+            "databaseId": 100,
+            "viewerDidAuthor": True,
+        }
+        current = {
+            "body": render_current_plan("old current plan"),
+            "databaseId": 101,
+            "viewerDidAuthor": True,
+        }
+        patch_comment = MagicMock()
+        delete_comment = MagicMock()
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(return_value=[legacy, current]),
+        )
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
+
+        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            adapter.upsert_plan_comment(5, body)
+
+        patch_comment.assert_not_called()
+        delete_comment.assert_not_called()
 
     def test_upsert_create_requires_owned_exact_body_readback(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3072,10 +3103,10 @@ class TestMutatorMapping:
         post.assert_called_once_with(5, body)
         assert fetch.call_count == 2
 
-    def test_canonical_create_converges_owned_race_duplicates(
+    def test_canonical_create_rejects_owned_race_duplicates(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A post-create reconciliation leaves one actor-owned canonical pointer."""
+        """A post-create duplicate requires manual recovery before any delete."""
         body = render_current_plan("safe plan")
         monkeypatch.setattr(
             adapter,
@@ -3094,9 +3125,10 @@ class TestMutatorMapping:
         delete = MagicMock()
         monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
 
-        adapter.upsert_plan_comment(5, body)
+        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            adapter.upsert_plan_comment(5, body)
 
-        delete.assert_called_once_with(100)
+        delete.assert_not_called()
 
     def test_ensure_blocked_audit_repairs_missing_explanation_without_label_write(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch

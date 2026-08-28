@@ -7,7 +7,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.comment_identity import has_marker_alias, select_unambiguous_comment
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+    comment_marker_aliases,
+)
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
     RECOVERY_PROVENANCE_PREFIX,
@@ -225,13 +230,30 @@ def plan_issue_timeline_compaction(
     _validate_legacy_markers(owned)
     _validate_recovery_roles(owned)
 
-    # Parsing first makes conflicting or malformed legacy journal identities a
-    # per-issue hard failure before a destructive action is planned.
+    # A current and legacy marker can each identify a real artifact. Reject
+    # that ambiguity before parsing or planning a delete.
+    plan_aliases = comment_marker_aliases(PLAN_CANONICAL_MARKER)
+    review_aliases = comment_marker_aliases(PLAN_REVIEW_CANONICAL_MARKER)
+    plan_comments = [comment for comment in owned if has_marker_alias(comment.body, plan_aliases)]
+    review_comments = [
+        comment for comment in owned if has_marker_alias(comment.body, review_aliases)
+    ]
+    target_plan = select_unambiguous_comment(
+        plan_comments,
+        marker=PLAN_CANONICAL_MARKER,
+        aliases=plan_aliases,
+        body_of=lambda comment: comment.body,
+    )
+    target_review = select_unambiguous_comment(
+        review_comments,
+        marker=PLAN_REVIEW_CANONICAL_MARKER,
+        aliases=review_aliases,
+        body_of=lambda comment: comment.body,
+    )
+
+    # Parsing follows identity validation so no destructive compaction plan
+    # can select a newest alias from an ambiguous journal.
     snapshot = journal_snapshot(owned)
-    plan_comments = [comment for comment in owned if is_plan_comment(comment.body)]
-    review_comments = [comment for comment in owned if is_plan_review_comment(comment.body)]
-    target_plan = plan_comments[-1] if plan_comments else None
-    target_review = review_comments[-1] if review_comments else None
     target_recovery = _latest_owned_role(owned, RECOVERY_PROVENANCE_PREFIX)
     target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 

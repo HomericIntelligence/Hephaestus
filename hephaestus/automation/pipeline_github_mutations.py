@@ -2,6 +2,10 @@
 # ruff: noqa: F403, F405
 import subprocess
 
+from hephaestus.automation.comment_identity import (
+    has_marker_alias,
+    select_unambiguous_comment,
+)
 from hephaestus.automation.merge_authorization import MergeAuthorization
 from hephaestus.automation.protocol import comment_marker_aliases
 
@@ -208,10 +212,7 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             return [
                 comment
                 for comment in comments
-                if any(
-                    has_exact_leading_marker(str(comment.get("body", "")), candidate)
-                    for candidate in markers
-                )
+                if has_marker_alias(str(comment.get("body", "")), markers)
                 and self._comment_owned_by_viewer(comment)
             ]
 
@@ -220,27 +221,45 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
         owned = owned_matching(self._repo_issue_comments(issue_number))
-        if not owned:
+        target = select_unambiguous_comment(
+            owned,
+            marker=marker,
+            aliases=markers,
+            body_of=lambda comment: str(comment.get("body", "")),
+        )
+        if target is None:
             self._post_issue_comment(issue_number, body)
             owned = owned_matching(self._repo_issue_comments(issue_number))
-            if not owned:
+            target = select_unambiguous_comment(
+                owned,
+                marker=marker,
+                aliases=markers,
+                body_of=lambda comment: str(comment.get("body", "")),
+            )
+            if target is None:
                 raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
 
-        target_id = owned[-1].get("databaseId")
+        target_id = target.get("databaseId")
         if target_id is None:
             raise RuntimeError(f"owned comment for {marker!r} has no database id")
         owner, name = (
             self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
         )
-        if str(owned[-1].get("body", "")) != body:
+        if str(target.get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
             owned = owned_matching(self._repo_issue_comments(issue_number))
-        if not owned or str(owned[-1].get("body", "")) != body:
+            target = select_unambiguous_comment(
+                owned,
+                marker=marker,
+                aliases=markers,
+                body_of=lambda comment: str(comment.get("body", "")),
+            )
+        if (
+            target is None
+            or target.get("databaseId") != target_id
+            or str(target.get("body", "")) != body
+        ):
             raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
-        for duplicate in owned[:-1]:
-            duplicate_id = duplicate.get("databaseId")
-            if duplicate_id is not None:
-                self._delete_issue_comment(int(duplicate_id))
 
     def _post_issue_comment(self, issue_number: int, body: str) -> None:
         """Post one issue comment in the adapter's configured repository."""

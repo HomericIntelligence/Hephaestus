@@ -16,6 +16,7 @@ from typing import Any, cast
 import hephaestus.automation.github_api as _api
 from hephaestus.utils.helpers import strip_null_bytes
 
+from ..comment_identity import has_marker_alias, select_unambiguous_comment
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
 from ..review_journal import has_exact_leading_marker
@@ -329,11 +330,11 @@ def gh_issue_upsert_comment(
     body. Display headings and historical heading-only comments are inert.
 
     Behaviour:
-    - Find every existing comment whose body has the exact leading marker.
+    - Find every existing comment whose body has the exact top-level marker.
     - If none: create a new comment.
-    - If one or more: PATCH the newest matching comment with ``body`` and
-      DELETE the older duplicates (one-time convergence for issues that
-      already accumulated multiple plan/review comments).
+    - If one: PATCH it with ``body`` and verify the exact replacement.
+    - If more than one: stop for manual recovery. Selecting a newest comment
+      could delete an independent artifact.
 
     Args:
         issue_number: GitHub issue number.
@@ -352,45 +353,65 @@ def gh_issue_upsert_comment(
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
     comments = _api._fetch_issue_comment_ids(issue_number, repo)
     matching = [
-        c
-        for c in comments
-        if has_exact_leading_marker(str(c.get("body", "")), marker_prefix)
-        and c.get("databaseId") is not None
+        comment
+        for comment in comments
+        if has_marker_alias(str(comment.get("body", "")), (marker_prefix,))
+        and comment.get("databaseId") is not None
     ]
 
-    if not matching:
+    target = select_unambiguous_comment(
+        matching,
+        marker=marker_prefix,
+        aliases=(marker_prefix,),
+        body_of=lambda comment: str(comment.get("body", "")),
+        ownership="canonical",
+    )
+    if target is None:
         # No existing comment with this marker — create a fresh one.
         _api.gh_issue_comment(issue_number, body, repo=repo)
         return None
 
-    # Newest matching comment wins (list is chronological → last element).
-    target = matching[-1]
     target_id = int(target["databaseId"])
     owner, name = repo if repo is not None else _api.get_repo_info()
+    if str(target.get("body", "")) != body:
+        try:
+            with _body_file(body) as path:
+                _api._gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                        "-F",
+                        f"body=@{path}",
+                    ],
+                )
+            _api.logger.info("Updated issue comment %s (marker %r)", target_id, marker_prefix)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to update issue comment {target_id} on #{issue_number}: {e}"
+            ) from e
 
-    # Delete older duplicates so only one comment with this marker remains.
-    for dup in matching[:-1]:
-        dup_id = dup.get("databaseId")
-        if dup_id is not None:
-            _api.gh_issue_delete_comment(int(dup_id), repo=repo)
-
-    try:
-        with _body_file(body) as path:
-            _api._gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ],
+        confirmed = select_unambiguous_comment(
+            [
+                comment
+                for comment in _api._fetch_issue_comment_ids(issue_number, repo)
+                if has_marker_alias(str(comment.get("body", "")), (marker_prefix,))
+                and comment.get("databaseId") is not None
+            ],
+            marker=marker_prefix,
+            aliases=(marker_prefix,),
+            body_of=lambda comment: str(comment.get("body", "")),
+            ownership="canonical",
+        )
+        if (
+            confirmed is None
+            or int(confirmed["databaseId"]) != target_id
+            or str(confirmed.get("body", "")) != body
+        ):
+            raise RuntimeError(
+                f"updated canonical comment {target_id} on #{issue_number} was not confirmed"
             )
-        _api.logger.info("Updated issue comment %s (marker %r)", target_id, marker_prefix)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Failed to update issue comment {target_id} on #{issue_number}: {e}"
-        ) from e
     return target_id
 
 
@@ -426,33 +447,37 @@ def gh_issue_upsert_owned_comment(
             comment
             for comment in comments
             if is_owned(comment)
-            and any(
-                has_exact_leading_marker(str(comment.get("body", "")), marker)
-                for marker in marker_aliases
-            )
+            and has_marker_alias(str(comment.get("body", "")), marker_aliases)
             and comment.get("databaseId") is not None
         ]
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
     owned = owned_with(comments)
-    if not owned:
+    target = select_unambiguous_comment(
+        owned,
+        marker=marker_prefix,
+        aliases=marker_aliases,
+        body_of=lambda comment: str(comment.get("body", "")),
+    )
+    if target is None:
         _api.gh_issue_comment(issue_number, body, repo=repo)
         # Re-read after create. This closes the concurrent-create window and
         # proves that the authenticated actor owns the canonical pointer.
         comments = _api.fetch_issue_comments_metadata(issue_number, repo)
         owned = owned_with(comments)
-        if not owned:
+        target = select_unambiguous_comment(
+            owned,
+            marker=marker_prefix,
+            aliases=marker_aliases,
+            body_of=lambda comment: str(comment.get("body", "")),
+        )
+        if target is None:
             raise RuntimeError(
                 f"created canonical comment on #{issue_number} was not observable as actor-owned"
             )
 
-    target = owned[-1]
     target_id = int(target["databaseId"])
     owner, name = repo if repo is not None else _api.get_repo_info()
-    for duplicate in owned[:-1]:
-        duplicate_id = duplicate.get("databaseId")
-        if duplicate_id is not None:
-            _api.gh_issue_delete_comment(int(duplicate_id), repo=repo, missing_ok=True)
     if str(target.get("body", "")) != body:
         with _body_file(body) as path:
             _api._gh_call(
@@ -464,6 +489,21 @@ def gh_issue_upsert_owned_comment(
                     "-F",
                     f"body=@{path}",
                 ]
+            )
+        owned = owned_with(_api.fetch_issue_comments_metadata(issue_number, repo))
+        target = select_unambiguous_comment(
+            owned,
+            marker=marker_prefix,
+            aliases=marker_aliases,
+            body_of=lambda comment: str(comment.get("body", "")),
+        )
+        if (
+            target is None
+            or int(target["databaseId"]) != target_id
+            or str(target.get("body", "")) != body
+        ):
+            raise RuntimeError(
+                f"updated canonical comment on #{issue_number} was not confirmed as actor-owned"
             )
     return target_id
 

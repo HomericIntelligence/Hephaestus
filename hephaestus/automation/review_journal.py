@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from markdown_it import MarkdownIt
+
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_CANONICAL_MARKERS,
@@ -41,6 +43,7 @@ RECOVERY_SOURCE_EPOCH_RE: Final[re.Pattern[str]] = re.compile(
 RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
+_MARKDOWN_LINE_END_RE: Final[re.Pattern[str]] = re.compile(r"\r\n|\r|\n")
 MAX_PRIOR_PLAN_FINGERPRINTS: Final[int] = 16
 PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
     {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
@@ -152,13 +155,13 @@ def comment_body(comment: IssueComment | str) -> str:
 
 
 def is_plan_comment(body: str) -> bool:
-    """Recognize a plan comment only by its opaque leading marker."""
-    return any(has_exact_leading_marker(body, marker) for marker in PLAN_CANONICAL_MARKERS)
+    """Recognize a plan comment only by an exact top-level marker line."""
+    return bool(top_level_marker_occurrences(body, PLAN_CANONICAL_MARKERS))
 
 
 def is_plan_review_comment(body: str) -> bool:
-    """Recognize a plan-review comment only by its opaque leading marker."""
-    return any(has_exact_leading_marker(body, marker) for marker in PLAN_REVIEW_CANONICAL_MARKERS)
+    """Recognize a review comment only by an exact top-level marker line."""
+    return bool(top_level_marker_occurrences(body, PLAN_REVIEW_CANONICAL_MARKERS))
 
 
 def has_exact_leading_marker(body: str, marker: str) -> bool:
@@ -168,9 +171,79 @@ def has_exact_leading_marker(body: str, marker: str) -> bool:
     )
 
 
-def _leading_marker(body: str, markers: Sequence[str]) -> str | None:
-    """Return the exact raw-leading marker selected from one protocol family."""
-    return next((marker for marker in markers if has_exact_leading_marker(body, marker)), None)
+def _raw_markdown_lines(body: str) -> list[str]:
+    """Return raw CommonMark lines without changing their line endings."""
+    lines: list[str] = []
+    line_start = 0
+    for line_end in _MARKDOWN_LINE_END_RE.finditer(body):
+        lines.append(body[line_start : line_end.end()])
+        line_start = line_end.end()
+    if line_start < len(body):
+        lines.append(body[line_start:])
+    return lines
+
+
+def _top_level_marker_line_indexes(
+    body: str,
+    markers: Sequence[str],
+) -> tuple[tuple[int, str], ...]:
+    """Return exact marker lines that CommonMark exposes at document level."""
+    accepted_markers = frozenset(marker for marker in markers if marker)
+    if not accepted_markers:
+        return ()
+
+    raw_lines = _raw_markdown_lines(body)
+    matches: list[tuple[int, str]] = []
+    for token in MarkdownIt("commonmark").parse(body):
+        if token.type != "html_block" or token.level != 0 or token.map is None:
+            continue
+        start_line, _end_line = token.map
+        if start_line >= len(raw_lines):
+            continue
+        line = raw_lines[start_line]
+        if line.endswith("\r\n"):
+            line = line[:-2]
+        elif line.endswith("\n"):
+            line = line[:-1]
+        if line in accepted_markers:
+            matches.append((start_line, line))
+    return tuple(matches)
+
+
+def top_level_marker_occurrences(body: str, markers: Sequence[str]) -> tuple[str, ...]:
+    """Return all exact top-level marker occurrences in document order.
+
+    Repeated values are retained so callers can reject ambiguous ownership
+    claims instead of silently selecting one marker occurrence.
+    """
+    return tuple(marker for _line_index, marker in _top_level_marker_line_indexes(body, markers))
+
+
+def has_exact_top_level_marker(body: str, marker: str) -> bool:
+    """Return whether *marker* is one exact top-level Markdown line in *body*.
+
+    The CommonMark block parser rejects lookalikes in prose, inline code,
+    block quotes, lists, fenced code, and indented code.
+    """
+    return bool(top_level_marker_occurrences(body, (marker,)))
+
+
+def _top_level_marker(body: str, markers: Sequence[str]) -> str | None:
+    """Return the first semantic marker from one protocol family."""
+    matches = top_level_marker_occurrences(body, markers)
+    return matches[0] if matches else None
+
+
+def _without_top_level_marker_line(text: str, marker: str | None) -> str:
+    """Remove one recognized marker line while preserving all other raw text."""
+    if marker is None:
+        return text
+    matches = _top_level_marker_line_indexes(text, (marker,))
+    if not matches:
+        return text
+    line_index, _matched_marker = matches[0]
+    lines = _raw_markdown_lines(text)
+    return "".join((*lines[:line_index], *lines[line_index + 1 :]))
 
 
 def normalize_issue_comments(
@@ -294,12 +367,14 @@ def _without_fingerprint_line(text: str) -> str:
 def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | None]:
     """Parse host metadata only from the canonical plan-comment header."""
     stripped = body.lstrip()
-    canonical_marker = _leading_marker(body, PLAN_CANONICAL_MARKERS)
+    canonical_marker = _top_level_marker(body, PLAN_CANONICAL_MARKERS)
     if canonical_marker is None and not stripped.startswith(PLAN_COMMENT_MARKER):
         return stripped.strip(), (), False, None
 
     text = (
-        _without_leading_line(body, canonical_marker) if canonical_marker is not None else stripped
+        _without_top_level_marker_line(body, canonical_marker)
+        if canonical_marker is not None
+        else stripped
     )
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
@@ -334,8 +409,8 @@ def extract_current_plan(body: str) -> str:
 
 def extract_current_review(body: str) -> str:
     """Return only reviewer output from a current or legacy review comment."""
-    marker = _leading_marker(body, PLAN_REVIEW_CANONICAL_MARKERS)
-    text = _without_leading_line(body, marker) if marker is not None else body
+    marker = _top_level_marker(body, PLAN_REVIEW_CANONICAL_MARKERS)
+    text = _without_top_level_marker_line(body, marker) if marker is not None else body
     text = _without_leading_line(text, PLAN_REVIEW_PREFIX)
     return _without_revision_line(text).strip()
 

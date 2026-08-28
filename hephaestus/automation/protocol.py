@@ -75,8 +75,10 @@ FINALIZED_PLAN_PREFIXES: Final[tuple[str, ...]] = (
 def comment_marker_aliases(marker: str) -> tuple[str, ...]:
     """Return all exact markers equivalent to one current planning artifact.
 
-    New writes always use the first marker.  Readers and actor-owned upserts
-    accept the remaining aliases only to converge already-published comments.
+    New writes always use the first marker. Readers and actor-owned upserts
+    accept a legacy alias only when it is the one unambiguous owned artifact.
+    Multiple aliases or comments are an identity conflict that needs manual
+    recovery; they are never selected by recency or deleted automatically.
     """
     if marker == PLAN_CANONICAL_MARKER:
         return PLAN_CANONICAL_MARKERS

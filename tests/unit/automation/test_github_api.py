@@ -2949,6 +2949,11 @@ class TestUpsertAndDeleteComment:
             "body": f"{legacy_marker}\n# Implementation Plan\nold plan",
             "user": {"login": "hephaestus-bot"},
         }
+        migrated = {
+            "databaseId": 101,
+            "body": body,
+            "user": {"login": "hephaestus-bot"},
+        }
         with (
             patch(
                 "hephaestus.automation.github_api.gh_current_login",
@@ -2956,7 +2961,7 @@ class TestUpsertAndDeleteComment:
             ),
             patch(
                 "hephaestus.automation.github_api.fetch_issue_comments_metadata",
-                return_value=[legacy],
+                side_effect=[[legacy], [migrated]],
             ),
             patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
             patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
@@ -2969,18 +2974,79 @@ class TestUpsertAndDeleteComment:
         assert args[:3] == ["api", "--method", "PATCH"]
         assert "/repos/o/r/issues/comments/101" in args
 
+    def test_owned_upsert_migrates_a_top_level_legacy_plan_marker_in_place(self) -> None:
+        """A legacy marker below a plan heading is still an owned migration candidate."""
+        body = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew plan"
+        legacy = {
+            "databaseId": 101,
+            "body": "# Implementation Plan\n\n<!-- athena:plan-issue -->\n\nold plan",
+            "user": {"login": "hephaestus-bot"},
+        }
+        migrated = {"databaseId": 101, "body": body, "user": {"login": "hephaestus-bot"}}
+        with (
+            patch(
+                "hephaestus.automation.github_api.gh_current_login",
+                return_value="hephaestus-bot",
+            ),
+            patch(
+                "hephaestus.automation.github_api.fetch_issue_comments_metadata",
+                side_effect=[[legacy], [migrated]],
+            ),
+            patch("hephaestus.automation.github_api.gh_issue_comment") as mock_create,
+            patch("hephaestus.automation.github_api._gh_call") as mock_gh_call,
+        ):
+            result = gh_issue_upsert_owned_comment(5, PLAN_CANONICAL_MARKER, body, repo=("o", "r"))
+
+        assert result == 101
+        mock_create.assert_not_called()
+        assert any("PATCH" in str(call) for call in mock_gh_call.call_args_list)
+
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
     @patch("hephaestus.automation.github_api.gh_issue_delete_comment")
     @patch("hephaestus.automation.github_api.gh_issue_comment")
-    def test_owned_upsert_converges_concurrent_creates_in_explicit_repo(
+    @patch("hephaestus.automation.github_api._gh_call")
+    def test_owned_upsert_rejects_mixed_current_and_legacy_aliases_without_mutation(
+        self,
+        mock_gh_call: Any,
+        mock_create: Any,
+        mock_delete: Any,
+        mock_fetch: Any,
+        _mock_login: Any,
+    ) -> None:
+        """Two actor-owned aliases require manual recovery before either artifact changes."""
+        body = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew plan"
+        legacy = {
+            "databaseId": 101,
+            "body": "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\nold plan",
+            "user": {"login": "hephaestus-bot"},
+        }
+        current = {
+            "databaseId": 102,
+            "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold current plan",
+            "user": {"login": "hephaestus-bot"},
+        }
+        mock_fetch.return_value = [legacy, current]
+
+        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            gh_issue_upsert_owned_comment(5, PLAN_CANONICAL_MARKER, body)
+
+        mock_create.assert_not_called()
+        mock_delete.assert_not_called()
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
+    @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
+    @patch("hephaestus.automation.github_api.gh_issue_delete_comment")
+    @patch("hephaestus.automation.github_api.gh_issue_comment")
+    def test_owned_upsert_rejects_concurrent_create_duplicates_in_explicit_repo(
         self,
         mock_create: Any,
         mock_delete: Any,
         mock_fetch: Any,
         _mock_login: Any,
     ) -> None:
-        """Post-create re-read keeps one actor-owned canonical in the target repo."""
+        """A post-create duplicate is a conflict, not a license to delete either comment."""
         repo = ("other-owner", "other-repo")
         marker = "<!-- hephaestus-plan-review:canonical -->"
         body = f"{marker}\nreview"
@@ -2992,14 +3058,14 @@ class TestUpsertAndDeleteComment:
             ],
         ]
 
-        result = gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
+        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            gh_issue_upsert_owned_comment(5, marker, body, repo=repo)
 
-        assert result == 11
         mock_create.assert_called_once_with(5, body, repo=repo)
-        mock_delete.assert_called_once_with(10, repo=repo, missing_ok=True)
+        mock_delete.assert_not_called()
 
-    def test_owned_upsert_barrier_race_converges_after_duplicate_delete_404(self) -> None:
-        """Two real upsert calls tolerate racing to delete the same duplicate."""
+    def test_owned_upsert_barrier_race_preserves_duplicate_comments(self) -> None:
+        """Concurrent creates fail closed and retain both comments for recovery."""
         repo = ("other-owner", "other-repo")
         marker = "<!-- hephaestus-plan-review:canonical -->"
         body = f"{marker}\nreview"
@@ -3074,8 +3140,9 @@ class TestUpsertAndDeleteComment:
                 thread.join(timeout=5)
 
         assert all(not thread.is_alive() for thread in threads)
-        assert errors == []
-        assert [comment["body"] for comment in comments] == [body]
+        assert len(errors) == 2
+        assert all("ambiguous actor-owned comment aliases" in str(error) for error in errors)
+        assert [comment["body"] for comment in comments] == [body, body]
 
     @patch("hephaestus.automation.github_api.gh_current_login", return_value="hephaestus-bot")
     @patch("hephaestus.automation.github_api.fetch_issue_comments_metadata")
@@ -3104,7 +3171,7 @@ class TestUpsertAndDeleteComment:
         """Strict complete ingestion finds an older actor-owned canonical pointer."""
         marker = "<!-- hephaestus-plan-review:canonical -->"
         body = f"{marker}\nnew review"
-        mock_fetch.return_value = [
+        before = [
             {
                 "databaseId": 1,
                 "body": f"{marker}\nold review",
@@ -3119,6 +3186,11 @@ class TestUpsertAndDeleteComment:
                 for index in range(100)
             ],
         ]
+        after = [
+            {"databaseId": 1, "body": body, "user": {"login": "hephaestus-bot"}},
+            *before[1:],
+        ]
+        mock_fetch.side_effect = [before, after]
 
         with patch("hephaestus.automation.github_api._gh_call") as mock_gh_call:
             result = gh_issue_upsert_owned_comment(5, marker, body)
@@ -3133,20 +3205,16 @@ class TestUpsertAndDeleteComment:
     def test_upsert_patches_existing(
         self, mock_create: Any, mock_gh_call: Any, _mock_repo: Any
     ) -> None:
+        old = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold"
+        new = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew"
         with patch(
             "hephaestus.automation.github_api._fetch_issue_comment_ids",
-            return_value=[
-                {
-                    "databaseId": 99,
-                    "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold",
-                }
+            side_effect=[
+                [{"databaseId": 99, "body": old}],
+                [{"databaseId": 99, "body": new}],
             ],
         ):
-            rv = gh_issue_upsert_comment(
-                5,
-                PLAN_CANONICAL_MARKER,
-                f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
-            )
+            rv = gh_issue_upsert_comment(5, PLAN_CANONICAL_MARKER, new)
         # No fresh comment created; a PATCH call was issued for id 99.
         mock_create.assert_not_called()
         assert rv == 99
@@ -3159,10 +3227,10 @@ class TestUpsertAndDeleteComment:
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
     @patch("hephaestus.automation.github_api._gh_call")
     @patch("hephaestus.automation.github_api.gh_issue_comment")
-    def test_upsert_deletes_older_duplicates(
+    def test_upsert_rejects_older_duplicates_without_deleting_them(
         self, _mock_create: Any, mock_gh_call: Any, _mock_repo: Any
     ) -> None:
-        # Three canonical plan comments → newest (id 3) patched, 1 and 2 deleted.
+        """More than one matching canonical comment requires manual recovery."""
         with patch(
             "hephaestus.automation.github_api._fetch_issue_comment_ids",
             return_value=[
@@ -3171,16 +3239,68 @@ class TestUpsertAndDeleteComment:
                 {"databaseId": 3, "body": f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nc"},
             ],
         ):
-            rv = gh_issue_upsert_comment(
+            with pytest.raises(RuntimeError, match="ambiguous canonical comment aliases"):
+                gh_issue_upsert_comment(
+                    5,
+                    PLAN_CANONICAL_MARKER,
+                    f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
+                )
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_issue_delete_comment")
+    @patch("hephaestus.automation.github_api._fetch_issue_comment_ids")
+    def test_upsert_rejects_duplicate_candidates_before_a_replacement_patch(
+        self,
+        mock_fetch: Any,
+        mock_delete: Any,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+    ) -> None:
+        """Ambiguous duplicates stop before a PATCH or delete can destroy one."""
+        old = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold"
+        mock_fetch.return_value = [
+            {"databaseId": 1, "body": old},
+            {"databaseId": 2, "body": old},
+        ]
+        mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+
+        with pytest.raises(RuntimeError, match="ambiguous canonical comment aliases"):
+            gh_issue_upsert_comment(
                 5,
                 PLAN_CANONICAL_MARKER,
                 f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
             )
-        assert rv == 3
-        calls = [str(c) for c in mock_gh_call.call_args_list]
-        assert any("DELETE" in c and "comments/1" in c for c in calls), calls
-        assert any("DELETE" in c and "comments/2" in c for c in calls), calls
-        assert any("PATCH" in c and "comments/3" in c for c in calls), calls
+
+        mock_delete.assert_not_called()
+        mock_gh_call.assert_not_called()
+
+    @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
+    @patch("hephaestus.automation.github_api._gh_call")
+    @patch("hephaestus.automation.github_api.gh_issue_delete_comment")
+    @patch("hephaestus.automation.github_api._fetch_issue_comment_ids")
+    def test_upsert_preserves_the_existing_comment_when_its_patch_fails(
+        self,
+        mock_fetch: Any,
+        mock_delete: Any,
+        mock_gh_call: Any,
+        _mock_repo: Any,
+    ) -> None:
+        """A failed PATCH leaves the existing actor-visible artifact untouched."""
+        old = f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nold"
+        mock_fetch.return_value = [{"databaseId": 2, "body": old}]
+        mock_gh_call.side_effect = subprocess.CalledProcessError(1, "gh")
+
+        with pytest.raises(RuntimeError, match="Failed to update issue comment 2"):
+            gh_issue_upsert_comment(
+                5,
+                PLAN_CANONICAL_MARKER,
+                f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\nnew",
+            )
+
+        mock_gh_call.assert_called_once()
+        mock_delete.assert_not_called()
 
     @patch("hephaestus.automation.github_api.get_repo_info", return_value=("o", "r"))
     @patch("hephaestus.automation.github_api._gh_call")

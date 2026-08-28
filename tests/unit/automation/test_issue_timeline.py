@@ -11,7 +11,6 @@ from hephaestus.automation.issue_timeline import (
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
-    PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
@@ -43,8 +42,8 @@ def _comment(
     )
 
 
-def test_compaction_keeps_only_latest_owned_plan_and_review() -> None:
-    """Human text is inert while all obsolete automation artifacts are removed."""
+def test_compaction_rejects_multiple_owned_plan_or_review_pointers() -> None:
+    """A duplicate pointer fails before compaction can select one for deletion."""
     handoff = "<!-- hephaestus-implementation-reply-handoff:pr=22:head=" + "a" * 40
     handoff += ":batch=" + "b" * 32 + " -->\n<!-- {} -->"
     comments = [
@@ -60,30 +59,22 @@ def test_compaction_keeps_only_latest_owned_plan_and_review() -> None:
         _comment(10, f"{HISTORY_MARKER.format(revision=9, kind='review')}\nforeign", owned=False),
     ]
 
-    result = plan_issue_timeline_compaction(comments)
-
-    assert result.plan_body is not None
-    assert result.plan_body.startswith(PLAN_CANONICAL_MARKER)
-    assert "Plan v2" in result.plan_body
-    assert result.review_body is not None
-    assert result.review_body.startswith(PLAN_REVIEW_CANONICAL_MARKER)
-    assert "GO" in result.review_body
-    assert result.delete_comment_ids == (2, 3, 4, 5, 8, 9)
+    with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+        plan_issue_timeline_compaction(comments)
 
 
 def test_compaction_preserves_forced_planning_epoch_marker() -> None:
     """A compacted forced plan remains restart authority for --force."""
     comments = [
-        _comment(1, render_current_plan("Old plan", revision=1)),
         _comment(
-            2,
+            1,
             render_current_plan(
                 "Forced replacement",
                 revision=2,
                 forced_planning_epoch=True,
             ),
         ),
-        _comment(3, render_current_review("Pending", revision=2)),
+        _comment(2, render_current_review("Pending", revision=2)),
     ]
 
     result = plan_issue_timeline_compaction(comments)
@@ -182,6 +173,49 @@ def test_existing_canonical_pointer_ignores_newer_legacy_comment() -> None:
     assert "Older canonical" in result.plan_body
     assert result.plan_needs_update is False
     assert result.delete_comment_ids == ()
+
+
+def test_compaction_rejects_mixed_current_and_legacy_plan_aliases() -> None:
+    """Compaction cannot choose or delete one of two actor-owned plan identities."""
+    comments = [
+        _comment(1, "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\nlegacy"),
+        _comment(2, render_current_plan("current", revision=1)),
+        _comment(3, f"{SKIP_REASON_MARKER}\nold reason"),
+    ]
+
+    with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+        plan_issue_timeline_compaction(comments)
+
+
+def test_compaction_rejects_two_plan_aliases_in_one_owned_comment() -> None:
+    """One body with two plan aliases is ambiguous before compaction can mutate it."""
+    comments = [
+        _comment(
+            1,
+            f"{PLAN_CANONICAL_MARKER}\n"
+            "<!-- hephaestus-plan:canonical -->\n"
+            "# Implementation Plan\ncurrent",
+        ),
+        _comment(2, f"{SKIP_REASON_MARKER}\nold reason"),
+    ]
+
+    with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+        plan_issue_timeline_compaction(comments)
+
+
+def test_compaction_rejects_a_repeated_plan_alias_in_one_owned_comment() -> None:
+    """One marker twice is not a stable plan identity for a destructive operation."""
+    comments = [
+        _comment(
+            1,
+            f"{PLAN_CANONICAL_MARKER}\n\n# Implementation Plan\ncurrent\n\n"
+            f"{PLAN_CANONICAL_MARKER}\n",
+        ),
+        _comment(2, f"{SKIP_REASON_MARKER}\nold reason"),
+    ]
+
+    with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+        plan_issue_timeline_compaction(comments)
 
 
 def test_compaction_retains_history_without_a_canonical_pointer() -> None:
