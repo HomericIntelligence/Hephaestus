@@ -7,7 +7,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hephaestus.automation.comment_identity import has_marker_alias, select_unambiguous_comment
+from hephaestus.automation.comment_identity import (
+    has_marker_alias,
+    select_unambiguous_comment,
+    validate_planning_comment_identities,
+)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
@@ -219,10 +223,15 @@ def plan_issue_timeline_compaction(
 ) -> IssueTimelineCompaction:
     """Return the safe mutations that enforce two canonical automation comments.
 
-    Only comments GitHub identifies as authored by the authenticated viewer are
-    considered. Human and foreign marker-bearing comments are intentionally
-    invisible to this planner.
+    Only actor-owned planning comments can be changed. A shared or legacy
+    planning marker on another comment is an identity conflict, so compaction
+    stops before it creates or updates a shadow artifact.
     """
+    validate_planning_comment_identities(
+        comments,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
     owned = [comment for comment in comments if comment.viewer_did_author]
     if not owned:
         return IssueTimelineCompaction()

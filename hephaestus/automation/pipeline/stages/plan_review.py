@@ -72,6 +72,7 @@ from hephaestus.automation.agent_config import (
     reviewer_model,
 )
 from hephaestus.automation.arming_state import LearningJournalStore
+from hephaestus.automation.comment_identity import validate_planning_body_for_write
 from hephaestus.automation.plan_review_session import PlanReviewSessionLostError
 from hephaestus.automation.prompts._shared import fence_content
 from hephaestus.automation.prompts.planning import (
@@ -206,6 +207,9 @@ def _confirm_pending_amendment_transition(
     if not item.payload.get("needs_plan_transition_pending"):
         return None
     assert item.issue is not None  # noqa: S101 - stage validates the issue
+    # A resumed transition can write a label without re-running the review.
+    # Validate both shared roles before it changes that durable state.
+    journal_snapshot(ctx.github.issue_comments(item.issue))
     labels = _require_issue_labels(item, ctx)
     if STATE_PLAN_BLOCKED in labels:
         return StageOutcome(
@@ -892,6 +896,11 @@ class PlanReviewStage(Stage):
                 "plan was blocked externally while review was in flight",
             )
 
+        # Re-read on every verdict replay. A completed comment write can be
+        # replayed after a crash, but it must not make a conflicting journal
+        # eligible for a later label mutation.
+        current_revision = _current_revision(ctx.github.issue_comments(issue_number))
+
         # Real verdict: this review round counts. Advance the cycle-relative
         # gate and the lifetime audit trail; reset the consecutive-failure cap.
         item.payload["review_error_retries"] = 0
@@ -903,10 +912,7 @@ class PlanReviewStage(Stage):
             """Idempotently update the explanatory journal after safe state ordering."""
             if item.payload.get("review_comment_published"):
                 return
-            revision = int(
-                item.payload.get("plan_revision")
-                or _current_revision(ctx.github.issue_comments(issue_number))
-            )
+            revision = int(item.payload.get("plan_revision") or current_revision)
             ctx.github.upsert_issue_comment(
                 issue_number,
                 PLAN_REVIEW_CANONICAL_MARKER,
@@ -994,18 +1000,20 @@ class PlanReviewStage(Stage):
         verdict: ReviewVerdict,
     ) -> StageOutcome:
         """Latch BLOCKED, confirm it, then persist the required explanation."""
+        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
+        # Resolve the current roles before the latch mutation. This keeps a
+        # marker conflict outside every label-changing path.
+        current_revision = _current_revision(ctx.github.issue_comments(item.issue))
+        revision = int(item.payload.get("plan_revision") or current_revision)
+        comment_body = _normalize_review_comment(verdict.raw, revision=revision)
+        validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
         outcome = self._complete_blocked(item, ctx)
         if outcome.disposition == Disposition.RETRY:
             return outcome
-        assert item.issue is not None  # noqa: S101 - _eval narrows the issue
-        revision = int(
-            item.payload.get("plan_revision")
-            or _current_revision(ctx.github.issue_comments(item.issue))
-        )
         ctx.github.upsert_issue_comment(
             item.issue,
             PLAN_REVIEW_CANONICAL_MARKER,
-            _normalize_review_comment(verdict.raw, revision=revision),
+            comment_body,
         )
         item.payload["review_comment_published"] = True
         return outcome

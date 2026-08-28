@@ -85,8 +85,8 @@ class TestGetLatestPlan:
         assert result.plan_text is not None
         assert "Implementation Plan" in result.plan_text
 
-    def test_get_latest_plan_returns_last_plan(self, reviewer: PlanReviewer) -> None:
-        """_get_latest_plan returns the LAST plan comment when multiple exist."""
+    def test_get_latest_plan_rejects_multiple_owned_plans(self, reviewer: PlanReviewer) -> None:
+        """_get_latest_plan does not select a latest plan from duplicate identities."""
         comments = [
             {"body": render_current_plan("First plan")},
             {"body": render_current_plan("Second plan (updated)")},
@@ -97,9 +97,8 @@ class TestGetLatestPlan:
         ):
             result = reviewer._get_latest_plan(123)
 
-        assert result.status is PlanDiscoveryStatus.FOUND
-        assert result.plan_text is not None
-        assert "Second plan (updated)" in result.plan_text
+        assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+        assert result.error is not None
 
     def test_get_latest_plan_is_not_hidden_by_one_hundred_newer_comments(
         self, reviewer: PlanReviewer
@@ -128,8 +127,8 @@ class TestGetLatestPlan:
         assert result.plan_text is not None
         assert "Owned plan" in result.plan_text
 
-    def test_get_latest_plan_ignores_foreign_marker_comment(self, reviewer: PlanReviewer) -> None:
-        """Only the authenticated actor's canonical plan can be reviewed."""
+    def test_get_latest_plan_rejects_foreign_marker_comment(self, reviewer: PlanReviewer) -> None:
+        """A foreign planning marker blocks review instead of becoming inert."""
         comments = [
             {
                 "body": render_current_plan("Owned plan"),
@@ -146,10 +145,8 @@ class TestGetLatestPlan:
         ):
             result = reviewer._get_latest_plan(123)
 
-        assert result.status is PlanDiscoveryStatus.FOUND
-        assert result.plan_text is not None
-        assert "Owned plan" in result.plan_text
-        assert "Foreign spoof" not in result.plan_text
+        assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+        assert result.error is not None
 
     def test_get_latest_plan_returns_absent_when_no_plan(self, reviewer: PlanReviewer) -> None:
         """_get_latest_plan reports successful absence when no plan exists."""
@@ -404,6 +401,51 @@ class TestPostReviewStateLabels:
             pytest.raises(RuntimeError, match="blocked pending external intervention"),
         ):
             reviewer._post_review(123, "Concrete review.\n\nstate:plan-go")
+
+        upsert.assert_not_called()
+        edit_labels.assert_not_called()
+
+    def test_cross_role_marker_conflict_stops_review_before_all_writes(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """A shared marker conflict cannot update a review or its state label."""
+        comments = [
+            IssueComment(
+                body=(
+                    f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+                    f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+                ),
+                viewer_did_author=True,
+            )
+        ]
+        with (
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[]),
+            patch.object(reviewer, "_fetch_issue_comments", return_value=comments),
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment") as upsert,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
+            pytest.raises(RuntimeError, match="plan and review"),
+        ):
+            reviewer._post_review(123, "Blocked by conflicting metadata.\n\nstate:plan-blocked")
+
+        upsert.assert_not_called()
+        edit_labels.assert_not_called()
+
+    def test_blocked_review_rejects_embedded_plan_marker_before_label_write(
+        self, reviewer: PlanReviewer
+    ) -> None:
+        """The standalone blocked latch validates its review body before labels."""
+        review = (
+            f"Needs recovery.\n\n{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\n"
+            "Injected plan\n\nstate:plan-blocked"
+        )
+        with (
+            patch.object(reviewer, "_read_plan_state_labels", return_value=[]),
+            patch.object(reviewer, "_fetch_issue_comments", return_value=[]),
+            patch("hephaestus.automation.plan_reviewer.gh_issue_upsert_owned_comment") as upsert,
+            patch("hephaestus.automation.plan_reviewer.gh_issue_edit_labels") as edit_labels,
+            pytest.raises(RuntimeError, match="plan and review"),
+        ):
+            reviewer._post_review(123, review)
 
         upsert.assert_not_called()
         edit_labels.assert_not_called()

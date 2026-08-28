@@ -98,7 +98,7 @@ class TestFetchPlannedFiles:
         """Comments present but none is a plan comment → None (fail-open)."""
         comments = [{"body": "just a chat comment"}, {"body": "## 🔍 Plan Review"}]
         with patch(
-            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
             return_value=comments,
         ):
             from hephaestus.automation.pipeline.admission import _fetch_planned_files
@@ -108,7 +108,7 @@ class TestFetchPlannedFiles:
     def test_fetch_planned_files_empty_comment_list_returns_none(self) -> None:
         """An empty fetch (the swallowed-error signal) → None; no try/except needed."""
         with patch(
-            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
             return_value=[],
         ):
             from hephaestus.automation.pipeline.admission import _fetch_planned_files
@@ -118,22 +118,72 @@ class TestFetchPlannedFiles:
     def test_fetch_planned_files_returns_plan_file_set(self) -> None:
         """A real plan comment yields its parsed file set."""
         comments = [
-            {"body": "chatter"},
+            {"body": "chatter", "user": {"login": "someone-else"}},
             {
                 "body": render_current_plan(
                     "## Files to Modify\n\n- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
-                )
+                ),
+                "user": {"login": "bot"},
             },
         ]
-        with patch(
-            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
-            return_value=comments,
+        with (
+            patch(
+                "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
+                return_value=comments,
+            ),
+            patch("hephaestus.automation.pipeline.admission.gh_current_login", return_value="bot"),
         ):
             from hephaestus.automation.pipeline.admission import _fetch_planned_files
 
             assert _fetch_planned_files(103) == {
                 "hephaestus/automation/pipeline/stages/pr_review.py"
             }
+
+    def test_fetch_planned_files_rejects_foreign_marker_identity(self) -> None:
+        """A foreign plan marker cannot control implementation admission."""
+        comments = [
+            {
+                "body": render_current_plan(
+                    "## Files to Modify\n\n- `hephaestus/automation/pipeline/stages/pr_review.py`\n"
+                ),
+                "user": {"login": "other"},
+            }
+        ]
+        with (
+            patch(
+                "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
+                return_value=comments,
+            ),
+            patch("hephaestus.automation.pipeline.admission.gh_current_login", return_value="bot"),
+        ):
+            from hephaestus.automation.pipeline.admission import _fetch_planned_files
+
+            with pytest.raises(RuntimeError, match="plan marker identity conflict"):
+                _fetch_planned_files(103)
+
+    def test_fetch_planned_files_sees_foreign_marker_after_one_hundred_comments(self) -> None:
+        """Complete REST metadata prevents a hidden foreign plan from becoming absent."""
+        comments = [
+            {"body": f"ordinary comment {index}", "user": {"login": "someone-else"}}
+            for index in range(100)
+        ]
+        comments.append(
+            {
+                "body": render_current_plan("## Files to Modify\n\n- `hephaestus/automation/x.py`"),
+                "user": {"login": "other"},
+            }
+        )
+        with (
+            patch(
+                "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
+                return_value=comments,
+            ),
+            patch("hephaestus.automation.pipeline.admission.gh_current_login", return_value="bot"),
+        ):
+            from hephaestus.automation.pipeline.admission import _fetch_planned_files
+
+            with pytest.raises(RuntimeError, match="plan marker identity conflict"):
+                _fetch_planned_files(104)
 
 
 class TestAdmissionRepoScoping:
@@ -142,7 +192,7 @@ class TestAdmissionRepoScoping:
     def test_fetch_planned_files_forwards_repo(self) -> None:
         """``_fetch_planned_files`` threads ``repo`` down to the comment fetch."""
         with patch(
-            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
             return_value=[],
         ) as mock_fetch:
             from hephaestus.automation.pipeline.admission import _fetch_planned_files
@@ -163,7 +213,7 @@ class TestAdmissionRepoScoping:
             121: ("HomericIntelligence", "Nestor"),
         }
         with patch(
-            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
             return_value=[],
         ) as mock_fetch:
             dispatch, defer = _select_non_overlapping([188, 121], repo_of=repo_of)
@@ -176,7 +226,7 @@ class TestAdmissionRepoScoping:
     def test_select_non_overlapping_missing_repo_entry_is_ambient(self) -> None:
         """Back-compat: an issue absent from ``repo_of`` forwards None (ambient)."""
         with patch(
-            "hephaestus.automation.pipeline.admission._fetch_issue_comment_ids",
+            "hephaestus.automation.pipeline.admission.fetch_issue_comments_metadata",
             return_value=[],
         ) as mock_fetch:
             _select_non_overlapping([7])

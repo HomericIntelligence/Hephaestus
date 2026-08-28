@@ -16,7 +16,14 @@ from typing import Any, cast
 import hephaestus.automation.github_api as _api
 from hephaestus.utils.helpers import strip_null_bytes
 
-from ..comment_identity import has_marker_alias, select_unambiguous_comment
+from ..comment_identity import (
+    has_marker_alias,
+    is_current_planning_marker,
+    is_planning_marker,
+    select_unambiguous_comment,
+    validate_planning_body_for_write,
+    validate_planning_comment_identities,
+)
 from ..models import IssueInfo, IssueState
 from ..protocol import comment_marker_aliases
 from ..review_journal import has_exact_leading_marker
@@ -329,7 +336,12 @@ def gh_issue_upsert_comment(
     The marker must be an opaque canonical marker at byte zero of the outgoing
     body. Display headings and historical heading-only comments are inert.
 
-    Behaviour:
+    For a shared plan or review marker, this function delegates to the
+    authenticated-actor upsert path. That path rejects foreign, unverifiable,
+    repeated, and cross-role planning identities before it creates or updates
+    a comment. Other marker families retain the generic behavior below.
+
+    Generic behavior:
     - Find every existing comment whose body has the exact top-level marker.
     - If none: create a new comment.
     - If one: PATCH it with ``body`` and verify the exact replacement.
@@ -342,8 +354,9 @@ def gh_issue_upsert_comment(
         body: The full new comment body (should itself start with the marker).
 
     Returns:
-        The ``databaseId`` of the upserted comment, or ``None`` if a fresh
-        comment was created via ``gh issue comment`` (whose id we do not parse).
+        The ``databaseId`` of an updated comment. A generic fresh comment
+        returns ``None``. A shared plan or review comment returns its verified
+        actor-owned ``databaseId`` after creation or update.
 
     Raises:
         RuntimeError: If a create/update/delete call fails.
@@ -351,6 +364,16 @@ def gh_issue_upsert_comment(
     """
     if not has_exact_leading_marker(body, marker_prefix):
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
+        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
+    validate_planning_body_for_write(marker_prefix, body)
+    if is_planning_marker(marker_prefix):
+        return gh_issue_upsert_owned_comment(
+            issue_number,
+            marker_prefix,
+            body,
+            repo=repo,
+        )
     comments = _api._fetch_issue_comment_ids(issue_number, repo)
     matching = [
         comment
@@ -415,6 +438,21 @@ def gh_issue_upsert_comment(
     return target_id
 
 
+def _validate_shared_planning_identities(
+    marker_prefix: str,
+    comments: list[dict[str, Any]],
+    *,
+    owned_of: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Reject unsafe shared planning identities before a role mutation."""
+    if is_planning_marker(marker_prefix):
+        validate_planning_comment_identities(
+            comments,
+            body_of=lambda comment: str(comment.get("body", "")),
+            owned_of=owned_of,
+        )
+
+
 def gh_issue_upsert_owned_comment(
     issue_number: int,
     marker_prefix: str,
@@ -423,12 +461,16 @@ def gh_issue_upsert_owned_comment(
 ) -> int | None:
     """Upsert only the authenticated actor's canonical comment.
 
-    Foreign marker-bearing comments are inert: they are never selected,
-    mutated, deleted, or treated as replay identity. This helper is the
-    standalone automation equivalent of ``PipelineGitHub.upsert_issue_comment``.
+    A shared or legacy planning marker on a foreign or unverifiable comment is
+    an identity conflict. Other marker families keep their existing ownership
+    behavior. This helper is the standalone automation equivalent of
+    ``PipelineGitHub.upsert_issue_comment``.
     """
+    if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
+        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
     if not has_exact_leading_marker(body, marker_prefix):
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    validate_planning_body_for_write(marker_prefix, body)
     viewer_login = (_api.gh_current_login() or "").lower()
     if not viewer_login:
         raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
@@ -452,6 +494,7 @@ def gh_issue_upsert_owned_comment(
         ]
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+    _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
     owned = owned_with(comments)
     target = select_unambiguous_comment(
         owned,
@@ -464,6 +507,7 @@ def gh_issue_upsert_owned_comment(
         # Re-read after create. This closes the concurrent-create window and
         # proves that the authenticated actor owns the canonical pointer.
         comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
         owned = owned_with(comments)
         target = select_unambiguous_comment(
             owned,
@@ -479,18 +523,25 @@ def gh_issue_upsert_owned_comment(
     target_id = int(target["databaseId"])
     owner, name = repo if repo is not None else _api.get_repo_info()
     if str(target.get("body", "")) != body:
-        with _body_file(body) as path:
-            _api._gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ]
-            )
-        owned = owned_with(_api.fetch_issue_comments_metadata(issue_number, repo))
+        try:
+            with _body_file(body) as path:
+                _api._gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                        "-F",
+                        f"body=@{path}",
+                    ]
+                )
+        except subprocess.CalledProcessError as error:
+            raise RuntimeError(
+                f"Failed to update issue comment {target_id} on #{issue_number}: {error}"
+            ) from error
+        comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+        owned = owned_with(comments)
         target = select_unambiguous_comment(
             owned,
             marker=marker_prefix,

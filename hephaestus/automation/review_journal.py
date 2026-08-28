@@ -15,8 +15,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from markdown_it import MarkdownIt
-
+from hephaestus.automation.comment_identity import (
+    CommentAliasConflictError,
+    validate_planning_comment_identities,
+)
+from hephaestus.automation.markdown_markers import (
+    raw_markdown_lines as _raw_markdown_lines,
+    top_level_marker_line_indexes as _top_level_marker_line_indexes,
+    top_level_marker_occurrences as top_level_marker_occurrences,
+)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_CANONICAL_MARKERS,
@@ -43,7 +50,6 @@ RECOVERY_SOURCE_EPOCH_RE: Final[re.Pattern[str]] = re.compile(
 RAW_PATCH_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*```diff\s*$|^\s*diff --git\s+|^\s*@@\s+-\d+(?:,\d+)?\s+\+\d+"
 )
-_MARKDOWN_LINE_END_RE: Final[re.Pattern[str]] = re.compile(r"\r\n|\r|\n")
 MAX_PRIOR_PLAN_FINGERPRINTS: Final[int] = 16
 PLAN_REVIEW_STATES: Final[frozenset[str]] = frozenset(
     {"state:plan-go", "state:plan-no-go", "state:plan-blocked"}
@@ -93,6 +99,7 @@ class PlanDiscoveryStatus(StrEnum):
     FOUND = "found"
     ABSENT = "absent"
     READ_ERROR = "read_error"
+    IDENTITY_CONFLICT = "identity_conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +124,11 @@ class PlanDiscoveryResult:
     def read_error(cls, error: object) -> PlanDiscoveryResult:
         """Create a result describing an incomplete or invalid journal read."""
         return cls(PlanDiscoveryStatus.READ_ERROR, error=str(error))
+
+    @classmethod
+    def identity_conflict(cls, error: object) -> PlanDiscoveryResult:
+        """Create a result describing an unsafe planning-marker identity."""
+        return cls(PlanDiscoveryStatus.IDENTITY_CONFLICT, error=str(error))
 
 
 @dataclass(frozen=True)
@@ -169,63 +181,6 @@ def has_exact_leading_marker(body: str, marker: str) -> bool:
     return bool(marker) and (
         body == marker or body.startswith(f"{marker}\n") or body.startswith(f"{marker}\r\n")
     )
-
-
-def _raw_markdown_lines(body: str) -> list[str]:
-    """Return raw CommonMark lines without changing their line endings."""
-    lines: list[str] = []
-    line_start = 0
-    for line_end in _MARKDOWN_LINE_END_RE.finditer(body):
-        lines.append(body[line_start : line_end.end()])
-        line_start = line_end.end()
-    if line_start < len(body):
-        lines.append(body[line_start:])
-    return lines
-
-
-def _top_level_marker_line_indexes(
-    body: str,
-    markers: Sequence[str],
-) -> tuple[tuple[int, str], ...]:
-    """Return exact marker lines that CommonMark exposes at document level."""
-    accepted_markers = frozenset(marker for marker in markers if marker)
-    if not accepted_markers:
-        return ()
-
-    raw_lines = _raw_markdown_lines(body)
-    matches: list[tuple[int, str]] = []
-    for token in MarkdownIt("commonmark").parse(body):
-        if token.type != "html_block" or token.level != 0 or token.map is None:
-            continue
-        start_line, _end_line = token.map
-        if start_line >= len(raw_lines):
-            continue
-        line = raw_lines[start_line]
-        if line.endswith("\r\n"):
-            line = line[:-2]
-        elif line.endswith("\n"):
-            line = line[:-1]
-        if line in accepted_markers:
-            matches.append((start_line, line))
-    return tuple(matches)
-
-
-def top_level_marker_occurrences(body: str, markers: Sequence[str]) -> tuple[str, ...]:
-    """Return all exact top-level marker occurrences in document order.
-
-    Repeated values are retained so callers can reject ambiguous ownership
-    claims instead of silently selecting one marker occurrence.
-    """
-    return tuple(marker for _line_index, marker in _top_level_marker_line_indexes(body, markers))
-
-
-def has_exact_top_level_marker(body: str, marker: str) -> bool:
-    """Return whether *marker* is one exact top-level Markdown line in *body*.
-
-    The CommonMark block parser rejects lookalikes in prose, inline code,
-    block quotes, lists, fenced code, and indented code.
-    """
-    return bool(top_level_marker_occurrences(body, (marker,)))
 
 
 def _top_level_marker(body: str, markers: Sequence[str]) -> str | None:
@@ -320,6 +275,14 @@ def discover_plan_from_comments(
     comments: Sequence[IssueComment],
 ) -> PlanDiscoveryResult:
     """Select the latest actor-owned plan from a validated complete journal."""
+    try:
+        validate_planning_comment_identities(
+            comments,
+            body_of=lambda comment: comment.body,
+            owned_of=lambda comment: comment.viewer_did_author,
+        )
+    except CommentAliasConflictError as exc:
+        return PlanDiscoveryResult.identity_conflict(exc)
     for comment in reversed(comments):
         if not comment.viewer_did_author:
             continue
@@ -598,7 +561,13 @@ def _owned_comments(comments: Sequence[IssueComment | str]) -> list[IssueComment
 
 def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     """Reconstruct current plan/review and ordered legacy history."""
-    owned = _owned_comments(comments)
+    normalized_comments = [as_issue_comment(comment) for comment in comments]
+    validate_planning_comment_identities(
+        normalized_comments,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
+    owned = [comment for comment in normalized_comments if comment.viewer_did_author]
     history: list[HistoryArtifact] = []
     history_bodies: dict[tuple[int, str], str] = {}
     current_plan_body = ""

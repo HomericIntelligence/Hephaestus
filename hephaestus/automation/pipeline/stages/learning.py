@@ -9,7 +9,8 @@ from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.agent_config import learn_claude_timeout, learn_model
 from hephaestus.automation.arming_state import LearningJournalStore
 from hephaestus.automation.mnemosyne_delivery import valid_delivery_receipt
-from hephaestus.automation.review_journal import journal_snapshot, plan_fingerprint
+from hephaestus.automation.mnemosyne_learning_preparation import approved_plan_learning_snapshot
+from hephaestus.automation.review_journal import plan_fingerprint
 from hephaestus.automation.state_labels import STATE_PLAN_GO, is_exclusive_plan_state
 
 from ..athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
@@ -237,7 +238,7 @@ class LearningStage:
         if not is_exclusive_plan_state(labels, STATE_PLAN_GO):
             return False
         try:
-            snapshot = journal_snapshot(ctx.github.issue_comments(intent.issue))
+            snapshot = approved_plan_learning_snapshot(ctx.github.issue_comments(intent.issue))
         except Exception:
             return None
         return bool(

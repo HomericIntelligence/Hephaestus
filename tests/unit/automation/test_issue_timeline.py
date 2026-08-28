@@ -11,6 +11,7 @@ from hephaestus.automation.issue_timeline import (
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
     PLAN_COMMENT_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
 )
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
@@ -104,14 +105,47 @@ def test_compaction_preserves_recovery_source_epoch_marker() -> None:
     assert source_digest in result.plan_body
 
 
-def test_compaction_never_claims_or_deletes_foreign_marker_comments() -> None:
-    """Marker text alone cannot authorize mutation of another actor's comment."""
+def test_compaction_rejects_foreign_marker_comments() -> None:
+    """A foreign planning marker blocks compaction before a shadow write."""
     comments = [
         _comment(1, render_current_plan("Foreign plan", revision=1), owned=False),
         _comment(2, render_current_review("Foreign review", revision=1), owned=False),
     ]
 
-    assert plan_issue_timeline_compaction(comments).delete_comment_ids == ()
+    with pytest.raises(RuntimeError, match="foreign or unverifiable"):
+        plan_issue_timeline_compaction(comments)
+
+
+def test_compaction_rejects_one_owned_comment_with_plan_and_review_markers() -> None:
+    """Compaction cannot patch one comment once as a plan and again as a review."""
+    comments = [
+        _comment(
+            1,
+            f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+            f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview",
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="plan and review"):
+        plan_issue_timeline_compaction(comments)
+
+
+def test_compaction_rejects_plan_alias_embedded_in_owned_history() -> None:
+    """An immutable history artifact must not become a plan migration target."""
+    history = (
+        f"{HISTORY_MARKER.format(revision=1, kind='plan')}\n"
+        "## Previous plan\n\n"
+        f"{PLAN_CANONICAL_MARKER}\n"
+        "# Historical payload"
+    )
+    comments = [
+        _comment(1, history),
+        _comment(2, render_current_review("GO", revision=2)),
+        _comment(3, f"{SKIP_REASON_MARKER}\nobsolete"),
+    ]
+
+    with pytest.raises(RuntimeError, match="immutable history artifact"):
+        plan_issue_timeline_compaction(comments)
 
 
 def test_compaction_keeps_same_line_history_marker_lookalikes() -> None:

@@ -28,6 +28,8 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.planning import (
     PlanningStage,
+    _mark_published_plan_pending_review,
+    _publish_plan_blocked,
     build_plan_prompt,
 )
 from hephaestus.automation.prompts._shared import get_untrusted_notice
@@ -3000,6 +3002,28 @@ class TestPlanningStageStep:
         assert item.attempts.get("plan", 0) == 0
         assert github.mutation_log == []
 
+    def test_verify_blocks_marker_identity_conflict_before_publication(
+        self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A conflicting plan identity cannot create a replacement artifact."""
+        stage = PlanningStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        monkeypatch.setattr(
+            github,
+            "discover_plan",
+            lambda _issue: PlanDiscoveryResult.identity_conflict("foreign planning marker"),
+        )
+        item = make_work_item(issue=151, state="VERIFY")
+        item.payload["plan_text"] = "Candidate plan"
+
+        outcome = stage.step(item, make_ctx(github=github))
+
+        assert outcome == StageOutcome(
+            Disposition.BLOCKED,
+            "plan marker identity conflict: foreign planning marker",
+        )
+        assert github.mutation_log == []
+
     def test_verify_retries_when_plan_disappears_before_advancing(
         self, make_ctx: Any, make_work_item: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3370,6 +3394,64 @@ class TestPlanningStageStep:
             ),
             ("gh_issue_upsert_comment", (28, PLAN_REVIEW_CANONICAL_MARKER)),
         ]
+
+    def test_blocked_publish_rejects_cross_role_marker_before_label_mutation(
+        self, make_ctx: Any
+    ) -> None:
+        """A combined plan/review comment cannot trigger the BLOCKED latch."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[152] = [
+            f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+            f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+        ]
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            _publish_plan_blocked(
+                152,
+                make_ctx(github=github),
+                raw_review="Needs external recovery.",
+                revision=1,
+            )
+
+        assert github.mutation_log == []
+
+    def test_published_plan_followup_rechecks_identity_before_label_mutation(
+        self, make_ctx: Any
+    ) -> None:
+        """A resumed plan follow-up cannot replay its transition over a conflict."""
+        github = FakeStageGitHub(labels=[STATE_PLAN_NO_GO])
+        github.comments[153] = [
+            f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+            f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+        ]
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            _mark_published_plan_pending_review(
+                153,
+                make_ctx(github=github),
+                was_revision=True,
+            )
+
+        assert github.mutation_log == []
+
+    def test_blocked_publish_rejects_embedded_plan_marker_before_label_mutation(
+        self, make_ctx: Any
+    ) -> None:
+        """A blocked audit payload is checked before the label-first latch."""
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            _publish_plan_blocked(
+                154,
+                make_ctx(github=github),
+                raw_review=(
+                    f"Needs recovery.\n\n{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\n"
+                    "Injected plan\n\nstate:plan-blocked"
+                ),
+                revision=1,
+            )
+
+        assert github.mutation_log == []
 
     def test_replan_without_change_latches_blocked_if_comment_write_fails(
         self, make_ctx: Any, make_work_item: Any

@@ -83,6 +83,7 @@ def _apply_issue(
     plan: IssueTimelineCompaction,
     *,
     repo: tuple[str, str],
+    viewer_login: str,
 ) -> None:
     if plan.plan_needs_update and plan.plan_body is not None:
         github_api.gh_issue_upsert_owned_comment(
@@ -98,6 +99,14 @@ def _apply_issue(
             plan.review_body,
             repo=repo,
         )
+    if plan.delete_comment_ids:
+        current = _plan_issue(issue_number, repo=repo, viewer_login=viewer_login)
+        if (
+            current.plan_needs_update
+            or current.review_needs_update
+            or current.delete_comment_ids != plan.delete_comment_ids
+        ):
+            raise RuntimeError("issue timeline changed before deletion")
     for comment_id in plan.delete_comment_ids:
         github_api.gh_issue_delete_comment(comment_id, repo=repo, missing_ok=True)
 
@@ -144,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"delete={list(plan.delete_comment_ids)}"
             )
             if args.apply:
-                _apply_issue(issue_number, plan, repo=repo)
+                _apply_issue(issue_number, plan, repo=repo, viewer_login=viewer_login)
                 remaining = _plan_issue(issue_number, repo=repo, viewer_login=viewer_login)
                 if remaining.has_changes:
                     raise RuntimeError("post-apply verification did not converge")

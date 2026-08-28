@@ -27,14 +27,26 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from hephaestus.automation.comment_identity import has_marker_alias
 from hephaestus.automation.dependency_resolver import CyclicDependencyError, DependencyResolver
 from hephaestus.automation.github_api import (
-    _fetch_issue_comment_ids,
+    fetch_issue_comments_metadata,
+    gh_current_login,
     is_issue_closed,
     prefetch_issue_states,
 )
 from hephaestus.automation.models import IssueInfo
-from hephaestus.automation.review_journal import is_plan_comment
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+    comment_marker_aliases,
+)
+from hephaestus.automation.review_journal import (
+    CommentJournalReadError,
+    PlanDiscoveryStatus,
+    discover_plan_from_comments,
+    normalize_issue_comments,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -91,10 +103,10 @@ def _parse_planned_files(plan_body: str) -> set[str]:
 def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:
     """Return the file set an issue's plan claims, or None if unknown.
 
-    None (no plan comment / empty fetch) → caller fails OPEN and dispatches the
-    issue this round. :func:`_fetch_issue_comment_ids` already swallows all
-    errors and returns ``[]`` on failure, so NO try/except is needed here — the
-    "no plan" signal is simply an empty/no-match list.
+    No planning marker or an empty fetch returns ``None``. The caller then
+    dispatches the issue this round. If a shared plan or review marker exists,
+    the full journal must prove its ownership and one unambiguous plan role.
+    A conflict raises instead of making a foreign marker look like no plan.
 
     Args:
         issue: GitHub issue number.
@@ -106,11 +118,27 @@ def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set
         The parsed plan file set, or None when no plan comment is present.
 
     """
-    for comment in _fetch_issue_comment_ids(issue, repo=repo):
-        body = str(comment.get("body", ""))
-        if is_plan_comment(body):
-            return _parse_planned_files(body)
-    return None
+    metadata = fetch_issue_comments_metadata(issue, repo=repo)
+    planning_aliases = (
+        *comment_marker_aliases(PLAN_CANONICAL_MARKER),
+        *comment_marker_aliases(PLAN_REVIEW_CANONICAL_MARKER),
+    )
+    if not any(
+        has_marker_alias(str(comment.get("body", "")), planning_aliases) for comment in metadata
+    ):
+        return None
+
+    try:
+        comments = normalize_issue_comments(metadata, viewer_login=gh_current_login() or "")
+    except CommentJournalReadError as exc:
+        raise RuntimeError(f"plan marker identity conflict: {exc}") from exc
+
+    discovered = discover_plan_from_comments(comments)
+    if discovered.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
+        raise RuntimeError(f"plan marker identity conflict: {discovered.error}")
+    if discovered.status is not PlanDiscoveryStatus.FOUND or discovered.plan_text is None:
+        return None
+    return _parse_planned_files(discovered.plan_text)
 
 
 def _select_non_overlapping(

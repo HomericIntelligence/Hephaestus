@@ -44,6 +44,72 @@ def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
     assert failed.status is PlanDiscoveryStatus.READ_ERROR
 
 
+def test_plan_discovery_reports_foreign_shared_marker_as_identity_conflict() -> None:
+    """A foreign planning marker is a conflict and not an absent plan."""
+    foreign = IssueComment(
+        body="<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nForeign plan",
+        author_login="other-bot",
+        viewer_did_author=False,
+    )
+
+    result = discover_plan_from_comments([foreign])
+
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    assert result.error is not None
+
+
+@pytest.mark.parametrize(
+    "comments",
+    [
+        [
+            _owned("<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nCurrent"),
+            _owned("<!-- athena:plan-issue -->\n# Implementation Plan\n\nLegacy"),
+        ],
+        [
+            _owned(
+                "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nPlan\n\n"
+                "<!-- HomericIntelligence:plan-issue -->"
+            )
+        ],
+    ],
+)
+def test_plan_discovery_reports_ambiguous_owned_plan_identity(
+    comments: list[IssueComment],
+) -> None:
+    """Multiple qualifying plan aliases do not select a latest plan."""
+    result = discover_plan_from_comments(comments)
+
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    assert result.error is not None
+
+
+def test_journal_snapshot_rejects_one_owned_comment_with_plan_and_review_markers() -> None:
+    """One comment cannot identify both mutable planning roles."""
+    body = (
+        "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nPlan\n\n"
+        "<!-- HomericIntelligence:issue-review -->\n## Plan Review\n\nReview"
+    )
+
+    with pytest.raises(RuntimeError, match="plan and review"):
+        journal_snapshot([_owned(body)])
+
+
+def test_history_payload_marker_is_not_reinterpreted_as_a_current_plan() -> None:
+    """An immutable history artifact must not become a current plan."""
+    body = (
+        f"{HISTORY_MARKER.format(revision=1, kind='plan')}\n"
+        "## Previous plan\n\n"
+        "<!-- HomericIntelligence:plan-issue -->\n"
+        "# Historical payload"
+    )
+
+    result = discover_plan_from_comments([_owned(body)])
+
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    with pytest.raises(RuntimeError, match="immutable history artifact"):
+        journal_snapshot([_owned(body)])
+
+
 @pytest.mark.parametrize(
     "marker",
     [
@@ -183,8 +249,8 @@ def test_plan_discovery_rejects_whitespace_prefixed_journal_markers(body: str) -
     assert result.status is PlanDiscoveryStatus.ABSENT
 
 
-def test_normalization_derives_ownership_from_validated_logins() -> None:
-    """Ownership comes from REST author metadata and the authenticated viewer."""
+def test_normalization_reports_foreign_planning_marker_as_identity_conflict() -> None:
+    """Ownership metadata prevents a foreign plan from becoming a local plan."""
     comments = normalize_issue_comments(
         [
             {"body": render_current_plan("foreign"), "user": {"login": "other"}},
@@ -195,9 +261,8 @@ def test_normalization_derives_ownership_from_validated_logins() -> None:
 
     result = discover_plan_from_comments(comments)
 
-    assert result.status is PlanDiscoveryStatus.FOUND
-    assert result.plan_text is not None
-    assert "owned" in result.plan_text
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    assert result.error is not None
 
 
 @pytest.mark.parametrize("body", [None, 1, {}, []])
@@ -210,19 +275,16 @@ def test_normalization_rejects_non_string_body(body: object) -> None:
         )
 
 
-def test_snapshot_ignores_foreign_marker_spoofing() -> None:
-    """Only comments proven to be actor-owned reconstruct canonical state."""
+def test_snapshot_rejects_foreign_marker_spoofing() -> None:
+    """A foreign planning marker is a conflict before journal reconstruction."""
     comments = [
         IssueComment(body=render_current_plan("foreign"), author_login="attacker"),
         _owned(render_current_plan("owned", revision=2)),
         _owned(render_current_review("Looks good.\n\nstate:plan-go", revision=2)),
     ]
 
-    snapshot = journal_snapshot(comments)
-
-    assert snapshot.revision == 2
-    assert snapshot.current_plan == "owned"
-    assert snapshot.current_review.endswith("state:plan-go")
+    with pytest.raises(RuntimeError, match="foreign or unverifiable"):
+        journal_snapshot(comments)
 
 
 def test_snapshot_rejects_whitespace_prefixed_markers_but_accepts_blank_lines() -> None:

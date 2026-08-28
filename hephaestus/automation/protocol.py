@@ -80,9 +80,9 @@ def comment_marker_aliases(marker: str) -> tuple[str, ...]:
     Multiple aliases or comments are an identity conflict that needs manual
     recovery; they are never selected by recency or deleted automatically.
     """
-    if marker == PLAN_CANONICAL_MARKER:
+    if marker in PLAN_CANONICAL_MARKERS:
         return PLAN_CANONICAL_MARKERS
-    if marker == PLAN_REVIEW_CANONICAL_MARKER:
+    if marker in PLAN_REVIEW_CANONICAL_MARKERS:
         return PLAN_REVIEW_CANONICAL_MARKERS
     return (marker,)
 

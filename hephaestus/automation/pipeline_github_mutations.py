@@ -2,19 +2,13 @@
 # ruff: noqa: F403, F405
 import subprocess
 
-from hephaestus.automation.comment_identity import (
-    has_marker_alias,
-    select_unambiguous_comment,
-)
 from hephaestus.automation.merge_authorization import MergeAuthorization
-from hephaestus.automation.protocol import comment_marker_aliases
 
-from .pipeline_github_contract import _PipelineGitHubHost
+from .pipeline_github_comments import PipelineGitHubIssueComments
 from .pipeline_github_transport import *
-from .review_journal import has_exact_leading_marker
 
 
-class PipelineGitHubMutations(_PipelineGitHubHost):
+class PipelineGitHubMutations(PipelineGitHubIssueComments):
     """Own coordinator-approved non-review GitHub mutations."""
 
     def merge_pr_if_head(
@@ -158,181 +152,6 @@ class PipelineGitHubMutations(_PipelineGitHubHost):
             )
             return
         close_issue_as_covered(issue_number, pr_number)
-
-    def upsert_plan_comment(self, issue_number: int, body: str) -> None:
-        """Upsert the actor-owned current plan by its opaque marker."""
-        self.upsert_issue_comment(
-            issue_number,
-            PLAN_CANONICAL_MARKER,
-            body,
-        )
-
-    def upsert_issue_comment(
-        self,
-        issue_number: int,
-        marker: str,
-        body: str,
-        *,
-        legacy_marker: str | None = None,
-    ) -> None:
-        """Upsert one actor-owned canonical comment keyed on an opaque marker.
-
-        Human-authored marker collisions are inert: they are neither trusted,
-        patched, deleted, nor allowed to deny service. Historical
-        human-readable heading-only comments are never migration candidates.
-        """
-        try:
-            self._upsert_issue_comment(
-                issue_number,
-                marker,
-                body,
-                legacy_marker=legacy_marker,
-            )
-        except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
-            raise RuntimeError(
-                f"failed to upsert issue #{issue_number} comment {marker!r}: {exc}"
-            ) from exc
-
-    def _upsert_issue_comment(
-        self,
-        issue_number: int,
-        marker: str,
-        body: str,
-        *,
-        legacy_marker: str | None = None,
-    ) -> None:
-        """Execute canonical comment upsert after the public error boundary."""
-        markers = tuple(
-            dict.fromkeys(
-                (*comment_marker_aliases(marker), *((legacy_marker,) if legacy_marker else ()))
-            )
-        )
-
-        def owned_matching(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return [
-                comment
-                for comment in comments
-                if has_marker_alias(str(comment.get("body", "")), markers)
-                and self._comment_owned_by_viewer(comment)
-            ]
-
-        if not has_exact_leading_marker(body, marker):
-            raise ValueError(f"canonical comment body must start with marker {marker!r}")
-        if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
-            return
-        owned = owned_matching(self._repo_issue_comments(issue_number))
-        target = select_unambiguous_comment(
-            owned,
-            marker=marker,
-            aliases=markers,
-            body_of=lambda comment: str(comment.get("body", "")),
-        )
-        if target is None:
-            self._post_issue_comment(issue_number, body)
-            owned = owned_matching(self._repo_issue_comments(issue_number))
-            target = select_unambiguous_comment(
-                owned,
-                marker=marker,
-                aliases=markers,
-                body_of=lambda comment: str(comment.get("body", "")),
-            )
-            if target is None:
-                raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
-
-        target_id = target.get("databaseId")
-        if target_id is None:
-            raise RuntimeError(f"owned comment for {marker!r} has no database id")
-        owner, name = (
-            self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
-        )
-        if str(target.get("body", "")) != body:
-            self._patch_issue_comment(int(target_id), body, repo=(owner, name))
-            owned = owned_matching(self._repo_issue_comments(issue_number))
-            target = select_unambiguous_comment(
-                owned,
-                marker=marker,
-                aliases=markers,
-                body_of=lambda comment: str(comment.get("body", "")),
-            )
-        if (
-            target is None
-            or target.get("databaseId") != target_id
-            or str(target.get("body", "")) != body
-        ):
-            raise RuntimeError(f"owned comment publication was not confirmed for {marker!r}")
-
-    def _post_issue_comment(self, issue_number: int, body: str) -> None:
-        """Post one issue comment in the adapter's configured repository."""
-        if self._repo_slug is not None:
-            with github_api._body_file(body) as path:
-                self._gh(["issue", "comment", str(issue_number), "--body-file", path])
-            return
-        github_api.gh_issue_comment(issue_number, body)
-
-    def _patch_issue_comment(
-        self,
-        comment_id: int,
-        body: str,
-        *,
-        repo: tuple[str, str] | None = None,
-    ) -> None:
-        """Replace one known actor-owned comment body."""
-        owner, name = repo or (
-            self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
-        )
-        with github_api._body_file(body) as path:
-            gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{comment_id}",
-                    "-F",
-                    f"body=@{path}",
-                ],
-                timeout=self._gh_timeout,
-            )
-
-    def _delete_issue_comment(self, comment_id: int) -> None:
-        """Delete one duplicate actor-owned comment in the configured repository."""
-        owner, name = (
-            self._owner_name() if self._repo_slug is not None else github_api.get_repo_info()
-        )
-        github_api.gh_issue_delete_comment(
-            comment_id,
-            repo=(owner, name),
-            missing_ok=True,
-        )
-
-    def append_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-        """Append an immutable actor-owned artifact once, failing on mismatched replay."""
-        if not has_exact_leading_marker(body, marker):
-            raise ValueError(f"immutable comment body must start with marker {marker!r}")
-        if self._skip(f"append immutable {marker!r} comment on #{issue_number}"):
-            return
-        comments = self._repo_issue_comments(issue_number)
-        matching = [
-            comment
-            for comment in comments
-            if has_exact_leading_marker(str(comment.get("body", "")), marker)
-            and self._comment_owned_by_viewer(comment)
-        ]
-        if matching:
-            if any(str(comment.get("body", "")) != body for comment in matching):
-                raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
-            # This primitive still supports immutable non-issue artifacts.
-            # Identical actor-owned copies can arise from a create race.
-            return
-        self._post_issue_comment(issue_number, body)
-        comments = self._repo_issue_comments(issue_number)
-        matching = [
-            comment
-            for comment in comments
-            if has_exact_leading_marker(str(comment.get("body", "")), marker)
-            and self._comment_owned_by_viewer(comment)
-        ]
-        if any(str(comment.get("body", "")) != body for comment in matching):
-            raise RuntimeError(f"immutable journal conflict for marker {marker!r}")
 
     def create_pr(self, issue_number: int, branch: str, title: str, body: str) -> int:
         """Durably ensure the PR exists and return its number (idempotent).
