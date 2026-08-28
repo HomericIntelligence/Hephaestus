@@ -67,7 +67,8 @@ mis-routes issues.
 ## Rollout and rollback
 
 Run [`hephaestus-ensure-state-labels --org HomericIntelligence`](../hephaestus/automation/ensure_state_labels.py)
-first so every repo has the planning `state:*` labels defined. The reusable
+first so every repo has the planning `state:*` labels and the documented
+repository labels (`tech-debt`, `wontfix`) defined. The reusable
 `issue_number` input is required, so an existing caller that does not pass it
 fails before any label API request. Inventory callers, update each stub with
 the `with` block above, and deploy the callers and reusable workflow as a

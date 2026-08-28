@@ -324,7 +324,7 @@ The package currently installs 58 console scripts from `[project.scripts]`.
 | `hephaestus-implement-issues` | Bulk issue implementation using Claude Code, Codex, or an explicitly admitted Pi host adapter in parallel worktrees |
 | `hephaestus-review-prs` | PR review/remediation automation using Claude Code, Codex, or an explicitly admitted Pi host adapter in parallel worktrees; reviewer agents are read-only, while the coordinator may apply implementation fixes and reconcile threads |
 | `hephaestus-agent-stage` | Run one Claude, Codex, or explicitly admitted Pi automation stage with prompt and skill context |
-| `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) on one or more repos |
+| `hephaestus-ensure-state-labels` | Idempotently provision the planning labels (`state:needs-plan`, `state:plan-no-go`, `state:plan-go`, and `state:plan-blocked`) and the documented repository labels (`tech-debt`, `wontfix`) on one or more repos |
 | `hephaestus-audit-prs` | Audit ALL open PRs in one coordinator agent invocation |
 | `hephaestus-drive-prs-green` | Review directly scoped PRs or PRs linked from discovered issues through the pr_review/merge_wait pipeline slice; it does not sweep unrelated open PRs |
 

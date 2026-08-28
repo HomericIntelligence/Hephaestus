@@ -23,10 +23,14 @@ from hephaestus.automation.ensure_state_labels import (
     ensure_labels_on_repo,
     main,
 )
+from hephaestus.automation.label_taxonomy import (
+    REQUIRED_REPOSITORY_LABEL_SPECS,
+    TECH_DEBT_LABEL,
+    WONTFIX_LABEL,
+)
 from hephaestus.automation.state_labels import (
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
-    STATE_LABEL_SPECS,
     STATE_NEEDS_PLAN,
     STATE_PLAN_GO,
     STATE_PLAN_NO_GO,
@@ -54,8 +58,8 @@ class TestEnsureLabelsOnRepo:
     def test_issues_one_create_per_label(self, mock_gh_call: MagicMock) -> None:
         mock_gh_call.return_value = _ok_proc()
         issued = ensure_labels_on_repo("owner/name")
-        assert issued == len(STATE_LABEL_SPECS)
-        assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
+        assert issued == len(REQUIRED_REPOSITORY_LABEL_SPECS)
+        assert mock_gh_call.call_count == len(REQUIRED_REPOSITORY_LABEL_SPECS)
 
     def test_passes_label_name_color_description_and_force(self, mock_gh_call: MagicMock) -> None:
         mock_gh_call.return_value = _ok_proc()
@@ -70,11 +74,12 @@ class TestEnsureLabelsOnRepo:
             assert "--description" in args
             assert "--force" in args
             seen_labels.add(args[2])
-        # Every spec'd label was exercised (includes implementation labels and
-        # state:skip, #1083).
-        assert seen_labels == set(STATE_LABEL_SPECS.keys())
+        # Every spec'd label was exercised (includes implementation labels,
+        # state:skip, and the documented repository debt labels).
+        assert seen_labels == set(REQUIRED_REPOSITORY_LABEL_SPECS.keys())
         assert {STATE_NEEDS_PLAN, STATE_PLAN_NO_GO, STATE_PLAN_GO} <= seen_labels
         assert {STATE_IMPLEMENTATION_NO_GO, STATE_IMPLEMENTATION_GO} <= seen_labels
+        assert {TECH_DEBT_LABEL, WONTFIX_LABEL} <= seen_labels
 
     def test_dry_run_issues_zero_calls(self, mock_gh_call: MagicMock) -> None:
         issued = ensure_labels_on_repo("owner/name", dry_run=True)
@@ -84,7 +89,7 @@ class TestEnsureLabelsOnRepo:
     def test_label_create_failure_does_not_abort(self, mock_gh_call: MagicMock) -> None:
         """A single failed label-create is logged but the others are still attempted."""
         # First call fails, remaining succeed.
-        n = len(STATE_LABEL_SPECS)
+        n = len(REQUIRED_REPOSITORY_LABEL_SPECS)
         mock_gh_call.side_effect = [
             subprocess.CalledProcessError(2, ["gh"], stderr="not authorized"),
             *(_ok_proc() for _ in range(n - 1)),
@@ -101,7 +106,7 @@ class TestEnsureLabelsOnRepo:
         """
         mock_gh_call.return_value = _ok_proc()
         ensure_labels_on_repo("owner/name")
-        assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
+        assert mock_gh_call.call_count == len(REQUIRED_REPOSITORY_LABEL_SPECS)
         for call in mock_gh_call.call_args_list:
             assert "timeout" not in call.kwargs
 
@@ -166,7 +171,7 @@ class TestMain:
 
     def test_main_default_uses_detected_repo(self, mock_gh_call: MagicMock) -> None:
         # ``gh repo view`` discovers the repo; then one create per label runs.
-        n = len(STATE_LABEL_SPECS)
+        n = len(REQUIRED_REPOSITORY_LABEL_SPECS)
         mock_gh_call.side_effect = [
             _ok_proc(stdout="HomericIntelligence/Scylla"),  # gh repo view
             *(_ok_proc() for _ in range(n)),  # one create per label
@@ -188,11 +193,11 @@ class TestMain:
                 )
             ),
             # n labels x 2 repos label creates
-            *(_ok_proc() for _ in range(len(STATE_LABEL_SPECS) * 2)),
+            *(_ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS) * 2)),
         ]
         rc = main(["--org", "AnOrg"])
         assert rc == 0
-        assert mock_gh_call.call_count == 1 + len(STATE_LABEL_SPECS) * 2
+        assert mock_gh_call.call_count == 1 + len(REQUIRED_REPOSITORY_LABEL_SPECS) * 2
 
     def test_main_dry_run_calls_no_label_create(self, mock_gh_call: MagicMock) -> None:
         mock_gh_call.side_effect = [
@@ -207,11 +212,13 @@ class TestMain:
         assert mock_gh_call.call_count == 1
 
     def test_main_specific_repo_skips_org_enumeration(self, mock_gh_call: MagicMock) -> None:
-        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
+        mock_gh_call.side_effect = [
+            _ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))
+        ]
         rc = main(["--repo", "owner/name"])
         assert rc == 0
         # No 'gh repo list' call — exactly one create per label.
-        assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
+        assert mock_gh_call.call_count == len(REQUIRED_REPOSITORY_LABEL_SPECS)
         for call in mock_gh_call.call_args_list:
             args = call[0][0]
             assert args[:2] == ["label", "create"]
@@ -229,7 +236,9 @@ class TestMain:
 
     def test_main_configures_cli_logging(self, mock_gh_call: MagicMock) -> None:
         """main() routes log setup through the shared configure_cli_logging helper."""
-        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
+        mock_gh_call.side_effect = [
+            _ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))
+        ]
         with patch("hephaestus.automation.ensure_state_labels.configure_cli_logging") as configure:
             rc = main(["--repo", "owner/name"])
         assert rc == 0
@@ -245,8 +254,8 @@ class TestCircuitBreakerBoundary:
         with patch("hephaestus.automation.ensure_state_labels.subprocess.run") as run:
             issued = ensure_labels_on_repo("owner/name")
         run.assert_not_called()
-        assert issued == len(STATE_LABEL_SPECS)
-        assert mock_gh_call.call_count == len(STATE_LABEL_SPECS)
+        assert issued == len(REQUIRED_REPOSITORY_LABEL_SPECS)
+        assert mock_gh_call.call_count == len(REQUIRED_REPOSITORY_LABEL_SPECS)
 
     def test_circuit_breaker_error_propagates_from_gh_call(self, mock_gh_call: MagicMock) -> None:
         """A GitHubUnavailableError from the open breaker surfaces to the caller."""
@@ -270,7 +279,9 @@ class TestSignalWiring:
     """main() must wrap the per-repo loop in terminal_guard for Ctrl+C/Ctrl+Z."""
 
     def test_main_installs_cooperative_terminal_guard(self, mock_gh_call: MagicMock) -> None:
-        mock_gh_call.side_effect = [_ok_proc() for _ in range(len(STATE_LABEL_SPECS))]
+        mock_gh_call.side_effect = [
+            _ok_proc() for _ in range(len(REQUIRED_REPOSITORY_LABEL_SPECS))
+        ]
         with patch("hephaestus.automation.ensure_state_labels.terminal_guard") as mock_guard:
             rc = main(["--repo", "owner/name"])
         assert rc == 0

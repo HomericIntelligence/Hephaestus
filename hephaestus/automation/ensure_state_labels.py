@@ -1,10 +1,11 @@
-"""Idempotently provision automation ``state:*`` labels on one or more repos.
+"""Idempotently provision automation ``state:*`` and repository labels.
 
-Pairs with :mod:`hephaestus.automation.state_labels` (the single source of truth
-for the labels) and is the one-shot operator tool used after #704 ships: run
-once with ``--org`` to create/update the plan-state, implementation-review, and
-skip labels across the whole HomericIntelligence org so the first
-label-application call doesn't race against a missing label.
+Pairs with :mod:`hephaestus.automation.label_taxonomy`, which composes
+:mod:`hephaestus.automation.state_labels`, and is the one-shot operator tool
+used after #704 ships: run once with ``--org`` to create/update the plan-state,
+implementation-review, skip, tech-debt, and wontfix labels across the whole
+HomericIntelligence org so the first label-application call doesn't race
+against a missing label.
 
 The script is idempotent: GitHub's ``gh label create --force`` upserts the
 label (creating it if absent, updating colour/description if present), so
@@ -43,7 +44,7 @@ from hephaestus.cli.utils import (
 from hephaestus.utils.terminal import terminal_guard
 
 from ._review_utils import build_automation_parser
-from .state_labels import STATE_LABEL_SPECS
+from .label_taxonomy import REQUIRED_REPOSITORY_LABEL_SPECS
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def _gh_list_org_repos(org: str, *, timeout: int = 60) -> list[str]:
 
 
 def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
-    """Create/update the automation ``state:*`` labels on ``repo``.
+    """Create/update the automation and repository labels on ``repo``.
 
     Args:
         repo: ``OWNER/NAME`` slug.
@@ -97,7 +98,7 @@ def ensure_labels_on_repo(repo: str, *, dry_run: bool = False) -> int:
 
     """
     issued = 0
-    for label, spec in STATE_LABEL_SPECS.items():
+    for label, spec in REQUIRED_REPOSITORY_LABEL_SPECS.items():
         if dry_run:
             logger.info(
                 "[dry-run] %s ← gh label create %r colour=%s",
@@ -155,8 +156,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = build_automation_parser(
         prog="hephaestus-ensure-state-labels",
         description=(
-            "Idempotently provision automation state:* labels "
-            "(plan-state, implementation-review, and skip) on one or more repos."
+            "Idempotently provision automation state:* labels and documented "
+            "repository labels (tech-debt and wontfix) on one or more repos."
         ),
         add_agent=False,
         add_max_workers=False,
@@ -200,7 +201,11 @@ def main(argv: list[str] | None = None) -> int:
                         emit_json_status(0, "no-repos", org=args.org)
                     return 0
                 slugs = [f"{args.org}/{name}" for name in repos]
-                logger.info("Ensuring state:* labels on %d repos in %s", len(slugs), args.org)
+                logger.info(
+                    "Ensuring state:* and repository labels on %d repos in %s",
+                    len(slugs),
+                    args.org,
+                )
             elif args.repo:
                 slugs = [args.repo]
             else:
@@ -215,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 logger.info(
                     "[dry-run] Would ensure %d labels across %d repo(s).",
-                    len(STATE_LABEL_SPECS) * len(slugs),
+                    len(REQUIRED_REPOSITORY_LABEL_SPECS) * len(slugs),
                     len(slugs),
                 )
             else:
