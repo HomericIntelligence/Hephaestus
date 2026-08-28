@@ -105,4 +105,3 @@ ct = SimpleNamespace(
     _preflight_prompt_catalog=_preflight_prompt_catalog,
     _work_window=_work_window,
 )
-
