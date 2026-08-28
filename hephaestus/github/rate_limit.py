@@ -370,6 +370,44 @@ def _open_secure_state_file(path: Path) -> TextIO:
     return os.fdopen(fd, "r+")
 
 
+def _load_persisted_throttle_number(value: object) -> float | None:
+    """Return a finite persisted number or ``None`` when the value is invalid."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _load_persisted_throttle_state(raw: str, *, burst: float, now: float) -> tuple[float, float]:
+    """Return persisted throttle state, or recover conservatively from corruption.
+
+    Empty files behave like a new full bucket. Non-empty malformed payloads
+    recover as a depleted bucket at ``now`` so the next wait stays bounded.
+    """
+    if not raw:
+        return burst, 0.0
+
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return 0.0, now
+
+    if not isinstance(state, dict):
+        return 0.0, now
+
+    tokens = _load_persisted_throttle_number(state.get("tokens"))
+    updated = _load_persisted_throttle_number(state.get("updated"))
+    if tokens is None or updated is None:
+        return 0.0, now
+    if tokens < 0.0 or tokens > burst:
+        return 0.0, now
+    if updated < 0.0 or updated > now:
+        return 0.0, now
+    return tokens, updated
+
+
 def gh_global_throttle_acquire() -> None:
     """Block until one token from the global ``gh`` rate budget is available.
 
@@ -404,14 +442,8 @@ def gh_global_throttle_acquire() -> None:
             try:
                 fh.seek(0)
                 raw = fh.read()
-                try:
-                    state = json.loads(raw) if raw else {}
-                except json.JSONDecodeError:
-                    state = {}
-
-                tokens = float(state.get("tokens", burst))
-                updated = float(state.get("updated", 0.0))
                 now = time.monotonic()
+                tokens, updated = _load_persisted_throttle_state(raw, burst=burst, now=now)
                 if updated <= 0.0:
                     updated = now
 
@@ -426,7 +458,7 @@ def gh_global_throttle_acquire() -> None:
 
                 fh.seek(0)
                 fh.truncate()
-                json.dump({"tokens": tokens, "updated": now}, fh)
+                json.dump({"tokens": float(tokens), "updated": float(now)}, fh, allow_nan=False)
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
