@@ -120,12 +120,12 @@ COPY hephaestus/ hephaestus/
 RUN git init . && \
     git -c user.email=ci@localhost -c user.name=ci commit --allow-empty --quiet -m base && \
     git tag 0.0.0 && \
-    uv sync --all-groups --all-extras --locked
+    uv sync --all-groups --all-extras --locked --no-editable
 
 # Layer 3: Install pre-commit hook environments.
 # Baking this in means 'pre-commit run --all-files' starts immediately,
 # without downloading hook repos or creating virtualenvs at CI time.
-RUN uv run pre-commit install-hooks && \
+RUN uv run --no-sync pre-commit install-hooks && \
     rm -rf .git
 
 # ============================================================================
@@ -213,6 +213,8 @@ RUN chown -R ci:ci /opt/hephaestus-venv
 
 ENV HOME=/home/ci \
     PI_CODING_AGENT_DIR=/home/ci/.pi/agent
+
+WORKDIR /home/ci
 
 USER ci
 

@@ -821,6 +821,11 @@ def install_pi_plugins(
                 tuple(mutable_states),
             )
         mutable_states[index] = PiPackageState(catalog.packages[index].key, command[2], "installed")
+    discard_generated_git_package_lockfiles(
+        catalog,
+        pi_dir=options.pi_dir,
+        project_local=options.project_local,
+    )
     if options.project_local and not options.approve:
         return InstallReport(
             False,
@@ -912,6 +917,35 @@ def _default_git_status(root: Path) -> str:
     if result.returncode != 0 or result.timed_out or result.output_overflow:
         return "unavailable"
     return result.stdout.strip()
+
+
+def discard_generated_git_package_lockfiles(
+    catalog: PiPackageCatalog,
+    *,
+    pi_dir: Path | None,
+    project_local: bool,
+    git_status: Callable[[Path], str] = _default_git_status,
+) -> None:
+    """Remove Pi's sole generated Git-package lock file after installation.
+
+    Pi runs ``npm install`` in Git-backed package roots and creates an untracked
+    ``package-lock.json``. This cleanup is deliberately narrow: any additional
+    or different checkout change remains for preflight to reject.
+    """
+    scope_root = Path.cwd() / ".pi" if project_local else (pi_dir or Path("~/.pi/agent"))
+    scope_root = scope_root.expanduser()
+    for package in catalog.packages:
+        if package.kind != "git":
+            continue
+        root = scope_root / "git" / package.identity
+        package_lock = root / "package-lock.json"
+        if (
+            package_lock.is_symlink()
+            or not package_lock.is_file()
+            or git_status(root) != "?? package-lock.json"
+        ):
+            continue
+        package_lock.unlink()
 
 
 def package_tree_digest(root: Path) -> str:

@@ -306,6 +306,37 @@ def test_inventory_rejects_dirty_git_package_at_pinned_head(tmp_path: Path) -> N
     assert result.detail == "athena: ?? skills/injected/SKILL.md"
 
 
+def test_installer_discards_only_its_generated_git_package_lockfile(tmp_path: Path) -> None:
+    """Pi's npm bootstrap lock file must not mask other checkout mutations."""
+    from hephaestus.agents import pi_plugins
+
+    catalog = pi_plugins.load_pi_package_catalog()
+    pi_dir = tmp_path / "pi-home"
+    athena_root = pi_dir / "git" / "github.com" / "HomericIntelligence" / "Athena"
+    athena_root.mkdir(parents=True)
+    package_lock = athena_root / "package-lock.json"
+    package_lock.write_text("{}", encoding="utf-8")
+
+    pi_plugins.discard_generated_git_package_lockfiles(
+        catalog,
+        pi_dir=pi_dir,
+        project_local=False,
+        git_status=lambda _root: "?? package-lock.json",
+    )
+
+    assert not package_lock.exists()
+
+    package_lock.write_text("{}", encoding="utf-8")
+    pi_plugins.discard_generated_git_package_lockfiles(
+        catalog,
+        pi_dir=pi_dir,
+        project_local=False,
+        git_status=lambda _root: "?? package-lock.json\n?? skills/injected/SKILL.md",
+    )
+
+    assert package_lock.exists()
+
+
 def test_probe_requires_verified_source_info_provenance(tmp_path: Path) -> None:
     """A colliding command or tool name from another root cannot satisfy preflight."""
     from hephaestus.agents.pi_plugins import (
