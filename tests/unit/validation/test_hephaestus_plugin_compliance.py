@@ -183,11 +183,14 @@ def test_skill_frontmatter_is_safe_and_whitelisted() -> None:
         assert set(frontmatter).issubset(EXPECTED_FRONTMATTER_KEYS)
         assert frontmatter["license"] == "BSD-3-Clause"
         assert frontmatter["name"] == path.parent.name
-        assert validate_frontmatter(
-            frontmatter,
-            required_fields=EXPECTED_FRONTMATTER_FIELDS,
-            optional_fields=EXPECTED_OPTIONAL_FIELDS,
-        ) == []
+        assert (
+            validate_frontmatter(
+                frontmatter,
+                required_fields=EXPECTED_FRONTMATTER_FIELDS,
+                optional_fields=EXPECTED_OPTIONAL_FIELDS,
+            )
+            == []
+        )
 
 
 def test_invalid_frontmatter_is_rejected() -> None:

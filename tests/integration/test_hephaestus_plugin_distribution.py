@@ -144,11 +144,7 @@ def test_codexignore_assembles_package_without_dropping_required_files(tmp_path:
     assembled_root = tmp_path / "assembled"
     _assemble_package(PLUGIN_ROOT, assembled_root, spec)
 
-    expected = {
-        relpath
-        for relpath in _regular_files(PLUGIN_ROOT)
-        if not _match(spec, relpath)
-    }
+    expected = {relpath for relpath in _regular_files(PLUGIN_ROOT) if not _match(spec, relpath)}
     actual = _regular_files(assembled_root)
 
     assert actual == expected

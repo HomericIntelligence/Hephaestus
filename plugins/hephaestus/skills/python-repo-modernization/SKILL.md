@@ -50,6 +50,7 @@ from hephaestus import __version__
 
 # ✅ Direct importlib.metadata
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
 try:
     __version__ = _pkg_version("hephaestus")
 except PackageNotFoundError:
@@ -72,17 +73,17 @@ When detecting floats from string env vars, the condition must check for the pre
 
 ```python
 # ❌ Original — backwards, tries float when no dot present
-if '.' not in value and value.isdigit():
+if "." not in value and value.isdigit():
     value = int(value)
-elif '.' not in value:           # ← This also matches non-float strings
+elif "." not in value:  # ← This also matches non-float strings
     value = float(value)
 
 # ✅ Fixed — use a separate typed variable, don't reassign value
 typed_value: int | float | str = value
 try:
-    if '.' not in value and value.isdigit():
+    if "." not in value and value.isdigit():
         typed_value = int(value)
-    elif '.' in value:
+    elif "." in value:
         typed_value = float(value)
 except ValueError:
     pass

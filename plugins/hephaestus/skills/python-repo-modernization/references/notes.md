@@ -55,10 +55,10 @@ pixi run hephaestus-check-test-structure
 Original buggy code:
 
 ```python
-if '.' not in value and value.isdigit():  # int branch
+if "." not in value and value.isdigit():  # int branch
     value = int(value)
-elif '.' not in value:                     # ← WRONG: this catches non-numeric strings too
-    value = float(value)                   # raises ValueError for "hello"
+elif "." not in value:  # ← WRONG: this catches non-numeric strings too
+    value = float(value)  # raises ValueError for "hello"
 ```
 
 Fixed code:
@@ -66,9 +66,9 @@ Fixed code:
 ```python
 typed_value: int | float | str = value
 try:
-    if '.' not in value and value.isdigit():
+    if "." not in value and value.isdigit():
         typed_value = int(value)
-    elif '.' in value:                    # ← CORRECT: only try float when dot present
+    elif "." in value:  # ← CORRECT: only try float when dot present
         typed_value = float(value)
 except ValueError:
     pass

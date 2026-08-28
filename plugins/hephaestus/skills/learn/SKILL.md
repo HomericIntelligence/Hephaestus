@@ -65,7 +65,7 @@ Agent(
     5. Commit, push, create PR against the resolved repo, enable auto-merge
     6. Clean up the worktree
 
-    Session learnings to capture: <extracted learnings from conversation>"""
+    Session learnings to capture: <extracted learnings from conversation>""",
 )
 ```
 

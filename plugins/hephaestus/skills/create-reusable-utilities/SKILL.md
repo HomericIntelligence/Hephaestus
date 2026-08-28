@@ -59,6 +59,7 @@ def fix_thing(content: str) -> str:
     hardcoded_pattern = r"/home/user/project-manual/"
     return re.sub(hardcoded_pattern, "", content)
 
+
 # Ported: hephaestus/<category>/utility.py (class-based)
 class ThingFixer:
     """Fixes things in a configurable way."""
