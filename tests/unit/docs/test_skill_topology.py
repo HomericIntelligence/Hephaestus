@@ -29,6 +29,11 @@ REQUIRED_ROOT_METADATA = (
     REPO_ROOT / ".codexignore",
 )
 ATHENA_REPOSITORY = "https://github.com/HomericIntelligence/Athena.git"
+MYRMIDON_SWARM_PATTERNS = (
+    r"/athena:myrmidon-swarm",
+    r"host\s+or task requires it",
+    r"safe\s+in-scope work",
+)
 
 
 def _present_path_names(paths: tuple[Path, ...], root: Path) -> list[str]:
@@ -116,6 +121,22 @@ def test_repository_has_no_local_skills_directory() -> None:
         "repository-local skills content must not reappear without updating "
         "the documented plugin topology"
     )
+
+
+def test_agents_md_myrmidon_swarm_gate_is_conditional() -> None:
+    """AGENTS.md must match the conditional myrmidon-swarm contract."""
+    agents_md = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "STOP HERE" not in agents_md
+    for pattern in MYRMIDON_SWARM_PATTERNS:
+        assert re.search(pattern, agents_md) is not None
+
+
+def test_repository_has_no_vendored_myrmidon_swarm_skill() -> None:
+    """The repository must not restore a local myrmidon-swarm skill tree."""
+    vendored_skill = REPO_ROOT / ".agents" / "skills" / "myrmidon-swarm" / "SKILL.md"
+
+    assert not vendored_skill.exists()
 
 
 def test_topology_files_have_no_local_skill_path_references() -> None:
