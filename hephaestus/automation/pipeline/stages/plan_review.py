@@ -246,12 +246,26 @@ def _restore_review_conversation(
     if reset:
         ctx.plan_review_session_resets.discard(item.issue)
     try:
-        active = None if reset else store.recover_active(repo=item.repo, issue=item.issue)
+        try:
+            active = None if reset else store.recover_active(repo=item.repo, issue=item.issue)
+        except PlanReviewSessionLostError as exc:
+            # The GitHub journal is the canonical plan/review record.  A local
+            # provider conversation can be replaced after that record was
+            # freshly reconciled; it never authorizes a prior verdict.
+            logger.warning(
+                "plan_review:%d: replacing unusable local review session: %s",
+                item.issue,
+                exc,
+            )
+            active = None
+            reset = True
         cycle_number = item.attempts.get("plan_cycles", 0)
         if active is None and has_prior_review and not reset:
-            raise PlanReviewSessionLostError(
-                "durable review exists without resumable session state"
+            logger.info(
+                "plan_review:%d: starting a fresh review cycle after local session loss",
+                item.issue,
             )
+            reset = True
         if active is not None and active.canonical_cwd != str(Path(ctx.paths.worktree).resolve()):
             raise PlanReviewSessionLostError("reviewer checkout identity changed")
         if active is not None and active.plan_fingerprint != plan_fingerprint(plan_text):
@@ -288,6 +302,36 @@ def _restore_review_conversation(
         _publish_plan_blocked(item.issue, ctx, raw_review=raw_review, revision=revision)
         item.payload["review_session_error"] = "review-session-lost"
         return StageOutcome(Disposition.BLOCKED, "review-session-lost")
+    return None
+
+
+def _restart_review_conversation(item: WorkItem, ctx: StageContext) -> StageOutcome | None:
+    """Replace a lost local session after the admitted plan was validated.
+
+    A provider session is process-local evidence, not an approval record.  The
+    current canonical plan was reconciled on stage admission, so a lost or
+    corrupt local transcript can safely start a new cycle without changing
+    GitHub labels.  The old record is retained for audit by the session store.
+    """
+    if item.issue is None:
+        return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+    plan_text = str(item.payload.get("plan_text") or "")
+    revision = int(item.payload.get("plan_revision") or 0)
+    if not plan_text or revision < 1:
+        return StageOutcome(Disposition.FAIL_BACK, "plan_missing")
+    ctx.plan_review_session_resets.add(item.issue)
+    outcome = _restore_review_conversation(
+        item,
+        ctx,
+        plan_text=plan_text,
+        revision=revision,
+        has_prior_review=True,
+    )
+    if outcome is not None:
+        return outcome
+    item.payload.pop("review_session_error", None)
+    item.payload.pop("review_verdict", None)
+    item.payload["review_round"] = 0
     return None
 
 
@@ -597,7 +641,7 @@ class PlanReviewStage(Stage):
             item.payload.pop("review_error_retries", None)
         return None
 
-    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def step(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901
         """Execute the next plan-review action for the item's current state.
 
         Args:
@@ -612,14 +656,10 @@ class PlanReviewStage(Stage):
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
 
         if item.payload.get("review_session_error") == "review-session-lost":
-            raw_review = f"Reviewer conversation recovery required.\n\n{STATE_PLAN_BLOCKED}"
-            _publish_plan_blocked(
-                item.issue,
-                ctx,
-                raw_review=raw_review,
-                revision=int(item.payload.get("plan_revision") or 1),
-            )
-            return StageOutcome(Disposition.BLOCKED, "review-session-lost")
+            recovery_outcome = _restart_review_conversation(item, ctx)
+            if recovery_outcome is not None:
+                return recovery_outcome
+            return Continue(next_state="REVIEW_WAIT")
 
         # on_enter is not a durable lock. Re-check the operator latch before
         # every agent request and before the delayed post-learn transition.
@@ -670,14 +710,10 @@ class PlanReviewStage(Stage):
                 assert store is not None and cycle_id  # noqa: S101 - guarded store access above
                 store.mark_recovery_required(cycle_id)
                 item.payload["review_session_error"] = "review-session-lost"
-                raw_review = f"Reviewer conversation recovery required.\n\n{STATE_PLAN_BLOCKED}"
-                _publish_plan_blocked(
-                    item.issue,
-                    ctx,
-                    raw_review=raw_review,
-                    revision=int(item.payload.get("plan_revision") or 1),
-                )
-                return StageOutcome(Disposition.BLOCKED, "review-session-lost")
+                recovery_outcome = _restart_review_conversation(item, ctx)
+                if recovery_outcome is not None:
+                    return recovery_outcome
+                return Continue(next_state="REVIEW_WAIT")
             # Clear any stale verdict at submission so a failed later round
             # can never replay an earlier round's verdict in EVAL.
             item.payload.pop("review_verdict", None)

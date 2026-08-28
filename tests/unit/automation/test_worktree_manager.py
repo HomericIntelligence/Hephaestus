@@ -1649,6 +1649,34 @@ class TestCreateWorktreeBranchCollision:
         assert ["git", "worktree", "remove", "--force", str(worktree_path)] in argvs
         assert ["git", "worktree", "prune"] in argvs
 
+    def test_direct_create_failure_releases_unattached_base_branch(
+        self, worktree_mocks: Any, tmp_path: Any
+    ) -> None:
+        """A failed direct writer setup cannot poison its retry with a base branch."""
+        worktree_mocks.repo_root.return_value = tmp_path
+        manager = WorktreeManager()
+        branch = "1797-auto-impl-direct-" + "d" * 32
+        pin = "a" * 40
+
+        with (
+            patch.object(manager, "_worktree_holding_branch", return_value=None),
+            patch.object(manager, "_direct_scope_local_branch_exists", return_value=False),
+            patch.object(
+                manager, "_add_worktree_for_branch", side_effect=RuntimeError("setup failed")
+            ),
+            patch.object(manager, "_release_failed_direct_scope_local_branch") as release,
+            pytest.raises(RuntimeError, match="Failed to create worktree"),
+        ):
+            manager.create_worktree(
+                1797,
+                branch,
+                base_sha=pin,
+                remote_branch_reserved=True,
+                direct_worktree_nonce="d" * 32,
+            )
+
+        release.assert_called_once_with(branch, pin, timeout=None)
+
     def test_create_worktree_prunes_partial_worktree_after_gone_dir_add_failure(
         self, worktree_mocks: Any, tmp_path: Any
     ) -> None:

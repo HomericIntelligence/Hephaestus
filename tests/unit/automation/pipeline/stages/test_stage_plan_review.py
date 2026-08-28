@@ -532,10 +532,10 @@ class TestPlanReviewStageStep:
         assert request.job.execution_request is not None
         assert request.job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
 
-    def test_resume_failure_enters_observable_recovery_required_state(
+    def test_resume_failure_restarts_a_revalidated_review_cycle(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
     ) -> None:
-        """Provider session loss blocks instead of creating a fresh reviewer."""
+        """Provider session loss restarts review without blocking the valid plan."""
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
         github.comments[2766] = [render_current_plan("Plan v1")]
         store = PlanReviewSessionStore(lambda: tmp_path)
@@ -554,16 +554,21 @@ class TestPlanReviewStageStep:
         )
         outcome = stage.step(item, ctx)
 
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition is Disposition.BLOCKED
-        assert outcome.note == "review-session-lost"
+        assert outcome == Continue(next_state="REVIEW_WAIT")
         assert store.load(cycle_id).state == "recovery-required"
-        assert STATE_PLAN_BLOCKED in github.labels[2766]
+        assert STATE_PLAN_BLOCKED not in github.labels[2766]
+        assert item.payload["plan_review_cycle_id"] != cycle_id
+        item.state = "REVIEW_WAIT"
+        request = stage.step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.execution_request is not None
+        assert request.job.execution_request.lifecycle is SessionLifecycle.START_NEW
 
-    def test_corrupt_review_transcript_enters_observable_recovery_required_state(
+    def test_corrupt_review_transcript_restarts_a_revalidated_review_cycle(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
     ) -> None:
-        """Transcript corruption blocks review instead of escaping the stage."""
+        """Transcript corruption restarts review from the canonical plan."""
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
         github.comments[2766] = [render_current_plan("Plan v1")]
         store = PlanReviewSessionStore(lambda: tmp_path)
@@ -586,16 +591,15 @@ class TestPlanReviewStageStep:
 
         outcome = stage.step(item, ctx)
 
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition is Disposition.BLOCKED
-        assert outcome.note == "review-session-lost"
+        assert outcome == Continue(next_state="REVIEW_WAIT")
         assert store.load(cycle_id).state == "recovery-required"
-        assert STATE_PLAN_BLOCKED in github.labels[2766]
+        assert STATE_PLAN_BLOCKED not in github.labels[2766]
+        assert item.payload["plan_review_cycle_id"] != cycle_id
 
-    def test_review_comment_without_session_state_fails_closed_after_amendment(
+    def test_review_comment_without_session_state_starts_fresh_review_cycle(
         self, make_ctx: Any, make_work_item: Any, tmp_path: Path
     ) -> None:
-        """A lost journal cannot fork review while an amended plan awaits review."""
+        """A prior review without a local session starts a fresh review cycle."""
         github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
         github.comments[2766] = [
             render_current_plan("Plan v2", revision=2),
@@ -611,10 +615,16 @@ class TestPlanReviewStageStep:
             ctx,
         )
 
-        assert isinstance(outcome, StageOutcome)
-        assert outcome.disposition is Disposition.BLOCKED
-        assert outcome.note == "review-session-lost"
-        assert STATE_PLAN_BLOCKED in github.labels[2766]
+        assert outcome is None
+        item = make_work_item(issue=2766, state="ENTER")
+        assert PlanReviewStage().on_enter(item, ctx) is None
+        item.state = "REVIEW_WAIT"
+        request = PlanReviewStage().step(item, ctx)
+        assert isinstance(request, JobRequest)
+        assert isinstance(request.job, AgentJob)
+        assert request.job.execution_request is not None
+        assert request.job.execution_request.lifecycle is SessionLifecycle.START_NEW
+        assert STATE_PLAN_BLOCKED not in github.labels[2766]
 
     def test_enter_routes_to_review(self, make_ctx: Any, make_work_item: Any) -> None:
         """ENTER advances to REVIEW_WAIT."""
