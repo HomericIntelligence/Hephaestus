@@ -1,19 +1,24 @@
-import sys
+from __future__ import annotations
 
-from hephaestus.automation.issue_waves import WAVE_NON_CODE_INTENT_PAYLOAD
+import logging
+import uuid
+from collections import deque
+from collections.abc import Iterable
+from contextlib import suppress
+from dataclasses import replace
+from pathlib import Path
 
+import hephaestus.automation.pipeline.admission as _admission
+import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.issue_waves import WAVE_NON_CODE_INTENT_PAYLOAD, wave_entry_from_facts
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_types import *
-from .stages.repo import SYNCED_MAIN_SHA_KEY
 
-# This collaborator consumes the façade's shared type namespace by design.
-# ruff: noqa: F403, F405
-
-
-def _compat(name: str) -> Any:
-    """Resolve mutable coordinator constants from the façade at call time."""
-    return getattr(sys.modules["hephaestus.automation.pipeline.coordinator"], name)
-
+# fmt: off
+# ruff: noqa: I001
+from .coordinator_types import (PIPELINE_ORDER, STATE_PLAN_BLOCKED, WAVE_LEASE_PAYLOAD, WAVE_NON_CODE_PAYLOAD, ItemKind, ItemResult, RepoIssueSource, StageGitHub, StageName, WorkItem, _DIRECT_ISSUE_ENTRY_STAGES, _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, _ActiveRepoIssueSource, _DirectIssueSource, _DirectPrSource, _RepoEntrySource, _work_window, product_to_work_item,)
+# fmt: on
+from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 

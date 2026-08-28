@@ -2,17 +2,51 @@
 
 from __future__ import annotations
 
+import logging
+import queue as queue_mod
 from dataclasses import replace
-from typing import Any
 
+from .coordinator_types_ns import ct
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import store_agent_session_result
-from .coordinator_types import *
 from .jobs import CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 
-# This collaborator consumes the facade's shared type namespace by design.
-# ruff: noqa: F403, F405
+Any = ct.Any
+AgentJob = ct.AgentJob
+CompletionQueue = ct.CompletionQueue
+Continue = ct.Continue
+Disposition = ct.Disposition
+ItemKind = ct.ItemKind
+ItemResult = ct.ItemResult
+JobHandle = ct.JobHandle
+JobRequest = ct.JobRequest
+JobResult = ct.JobResult
+PipelineConfig = ct.PipelineConfig
+PipelineScope = ct.PipelineScope
+PreservedWorktree = ct.PreservedWorktree
+Route = ct.Route
+Stage = ct.Stage
+StageContext = ct.StageContext
+StageGitHub = ct.StageGitHub
+StageName = ct.StageName
+StageOutcome = ct.StageOutcome
+StageQueue = ct.StageQueue
+StageQueueLease = ct.StageQueueLease
+StageStepResult = ct.StageStepResult
+TerminalSummary = ct.TerminalSummary
+WorkItem = ct.WorkItem
+_ActiveRepoIssueSource = ct._ActiveRepoIssueSource
+_DirectIssueSource = ct._DirectIssueSource
+_DirectPrSource = ct._DirectPrSource
+_PendingHandoff = ct._PendingHandoff
+_RepoEntrySource = ct._RepoEntrySource
+_StageRunConfig = ct._StageRunConfig
+_budget_lookup = ct._budget_lookup
+_effective_repo_root = ct._effective_repo_root
+_work_window = ct._work_window
+
+logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})

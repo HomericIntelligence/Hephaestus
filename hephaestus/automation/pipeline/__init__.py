@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .athena_skill_jobs import AthenaSkillJob, AthenaSkillRequest, AthenaSkillResult
     from .auxiliary_worker_pool import AuxiliaryWorkerPool
-    from .coordinator import PipelineConfig, run_pipeline
     from .jobs import GIT_OPS, AgentJob, BuildTestJob, CompactJob, GitJob, JobHandle, JobResult
     from .queues import CompletionQueue, StageQueue
     from .routing import (
@@ -27,6 +26,7 @@ if TYPE_CHECKING:
         StageName,
         StageOutcome,
     )
+    from .coordinator import PipelineConfig, run_pipeline
     from .work_item import HistoryEvent, ItemKind, ItemResult, LearningIntent, WorkItem
     from .worker_pool import WorkerPool
 

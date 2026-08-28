@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+import logging
 
 from hephaestus.automation.arming_state import LearningJournalStore
 
+from .coordinator_types_ns import ct
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_types import *
 from .work_item import LearningIntent
 
-# This collaborator consumes the facade's shared type namespace by design.
-# ruff: noqa: F403, F405
+Any = ct.Any
+ItemResult = ct.ItemResult
+StageName = ct.StageName
+WorkItem = ct.WorkItem
+
+logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 
 class LearningRecoveryCoordinator(_CoordinatorHost):

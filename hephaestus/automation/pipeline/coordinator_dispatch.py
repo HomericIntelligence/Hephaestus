@@ -1,17 +1,39 @@
-import sys
-from typing import Any
+import logging
 
+import hephaestus.automation.pipeline.admission as _admission
+
+from .coordinator_types_ns import ct
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_types import *
 
-# This collaborator consumes the façade's shared type namespace by design.
-# ruff: noqa: F403, F405
-
-
-def _compat(name: str) -> Any:
-    """Resolve mutable coordinator constants from the façade at call time."""
-    return getattr(sys.modules["hephaestus.automation.pipeline.coordinator"], name)
-
+Any = ct.Any
+IssueInfo = ct.IssueInfo
+ItemKind = ct.ItemKind
+ItemResult = ct.ItemResult
+JobHandle = ct.JobHandle
+JobRequest = ct.JobRequest
+JobResult = ct.JobResult
+PipelineConfig = ct.PipelineConfig
+PipelineScope = ct.PipelineScope
+PreservedWorktree = ct.PreservedWorktree
+Route = ct.Route
+Stage = ct.Stage
+StageContext = ct.StageContext
+StageGitHub = ct.StageGitHub
+StageName = ct.StageName
+StageOutcome = ct.StageOutcome
+StageQueue = ct.StageQueue
+StageQueueLease = ct.StageQueueLease
+WorkItem = ct.WorkItem
+_FILE_OVERLAP_BLOCKED_CLAIMS_KEY = ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY
+_FILE_OVERLAP_DEFERRALS_KEY = ct._FILE_OVERLAP_DEFERRALS_KEY
+_FILE_OVERLAP_WARNING_THRESHOLD = ct._FILE_OVERLAP_WARNING_THRESHOLD
+_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD
+_FILE_CLAIM_STAGES = ct._FILE_CLAIM_STAGES
+_REALIZED_DIFF_CLAIM_STAGES = ct._REALIZED_DIFF_CLAIM_STAGES
+_StageRunConfig = ct._StageRunConfig
+_budget_lookup = ct._budget_lookup
+_effective_repo_root = ct._effective_repo_root
+_work_window = ct._work_window
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
@@ -121,21 +143,18 @@ class ImplementationDispatcher(_CoordinatorHost):
         """Return whether this run needs parallel file-overlap reservations."""
         return self.config.serialize_file_overlap and self.config.max_workers > 1
 
-    @staticmethod
-    def _record_file_overlap_deferral(item: WorkItem, identity: str) -> None:
+    def _record_file_overlap_deferral(self, item: WorkItem, identity: str) -> None:
         """Age a deferred implementation item and report persistent contention."""
         deferrals = int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)) + 1
         item.payload[_FILE_OVERLAP_DEFERRALS_KEY] = deferrals
         log_deferral = (
-            logger.warning
-            if deferrals > _compat("_FILE_OVERLAP_WARNING_THRESHOLD")
-            else logger.info
+            logger.warning if deferrals > self._file_overlap_warning_threshold else logger.info
         )
         log_deferral(
             "implementation %s deferred (file overlap); deferrals=%s threshold=%s",
             identity,
             deferrals,
-            _compat("_FILE_OVERLAP_WARNING_THRESHOLD"),
+            self._file_overlap_warning_threshold,
         )
 
     @staticmethod

@@ -1,33 +1,31 @@
-import sys
-from typing import Any, cast
+from __future__ import annotations
+
+import heapq
+import logging
+import signal
+from contextlib import suppress
+from pathlib import Path
+from typing import cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
-
+from hephaestus.automation.direct_review_recovery import (
+    is_inspection_only_detached_push_failure,
+    list_direct_review_recovery_paths,
+)
+from hephaestus.automation.pipeline.events import encode_stage_event
+from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob
+from hephaestus.automation.pipeline.stages.repo import is_full_commit_sha
+from hephaestus.automation.pipeline.summary import latest_logical_items, print_summary
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
-from .coordinator_types import *
+
+# fmt: off
+# ruff: noqa: I001
+from .coordinator_types import (Any, BranchWorktreeOwnerStatus, Continue, Disposition, FinishedStage, ImplementationStage, IssueWaveError, IssueWaveStore, ItemKind, ItemResult, JobRequest, JobResult, LearningStage, MergeWaitStage, PlanningStage, PlanReviewStage, PreservedWorktree, PrReviewStage, RepoIssueSource, RepoStage, Route, RunStats, Stage, StageContext, StageEvent, StageName, StageOutcome, StageStepResult, WorkItem, _DRAIN_ORDER, _FAIL_BACK_CAP, _MAX_STEPS_PER_TICK, _SOURCE_REGISTRY_RETRY_DELAY_S, DIRECT_SCOPE_BASE_SHA_KEY, DIRECT_SCOPE_BOOTSTRAP_KEY, _budget_lookup, _effective_repo_root, _Paths, _PendingHandoff,)
+# fmt: on
 from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 
-# ruff: noqa: F403, F405
-
-
-def _compat(name: str) -> Any:
-    """Resolve mutable coordinator constants from the façade at call time."""
-    return getattr(sys.modules["hephaestus.automation.pipeline.coordinator"], name)
-
-
-class _CompatModule:
-    """Proxy a module whose test seams live on the coordinator façade."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(_compat(self._name), name)
-
-
-time = cast(Any, _CompatModule("time"))
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _DYNAMIC_METRIC_SERIES_CAP = 100
@@ -95,7 +93,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     else None
                 ),
             ),
-            now_fn=time.monotonic,
+            now_fn=self._monotonic,
             budget_fn=self._budget_for,
             event_fn=self._record_stage_event,
             learning_journal=LearningJournalStore(
@@ -129,7 +127,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _record_event(self, event: str, *fields: Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
-        _observability.record_event(self, event, *fields, now_fn=time.time, logger=logger)
+        _observability.record_event(self, event, *fields, now_fn=self._wall_time, logger=logger)
 
     def _observability_snapshot(self) -> dict[str, Any]:
         """Read the coordinator lifecycle values that observability exposes."""
@@ -140,7 +138,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         return _observability.health_snapshot(
             self,
             logger=logger,
-            stalled_ticks_threshold=_compat("_STALL_TICKS_BEFORE_FORCE"),
+            stalled_ticks_threshold=self._stall_ticks_before_force,
         )
 
     def _emit_observability_tick(self) -> None:
@@ -265,7 +263,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def run(self) -> int:
         """Run the pipeline to quiescence (or interrupt) and return the exit code."""
-        started = time.monotonic()
+        started = self._monotonic()
         if self._install_signals:
             self._install_signal_handlers()
         try:
@@ -324,7 +322,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 loops_run=self._loops_run,
                 agent_job_count=self._agent_job_count,
                 agent_job_time_s=self._agent_job_time_s,
-                wall_s=time.monotonic() - started,
+                wall_s=self._monotonic() - started,
                 auxiliary_job_count=self._auxiliary_job_count,
                 auxiliary_job_time_s=self._auxiliary_job_time_s,
                 auxiliary_job_failure_count=self._auxiliary_job_failure_count,
@@ -630,7 +628,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         return (
             self.shutdown.is_set()
             and self._grace_deadline is not None
-            and time.monotonic() >= self._grace_deadline
+            and self._monotonic() >= self._grace_deadline
         )
 
     def _idle_wait(self) -> None:
@@ -646,12 +644,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._stalled_ticks = 0
         elif not self.in_flight and not self.auxiliary_in_flight and not self.timers:
             self._stalled_ticks += 1
-            if self._stalled_ticks >= _compat("_STALL_TICKS_BEFORE_FORCE"):
+            if self._stalled_ticks >= self._stall_ticks_before_force:
                 self._force_run_one()
                 return
-        timeout = _compat("_IDLE_POLL_S")
+        timeout = self._idle_poll_s
         if self.timers:
-            timeout = min(timeout, max(0.01, self.timers[0][0] - time.monotonic()))
+            timeout = min(timeout, max(0.01, self.timers[0][0] - self._monotonic()))
         self._wait_for_completion(timeout=timeout)
 
     def _force_run_one(self) -> None:
@@ -682,7 +680,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         # source lease before parking so its capacity is not stranded while
         # preserving the timer's single owner for the work item.
         self._release_source_lease(item)
-        wake = time.monotonic() + max(0.0, delay_s)
+        wake = self._monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
@@ -695,7 +693,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         expired entry whose stage is at capacity remains at the heap head for a
         later tick; it is ordinary bounded backpressure, not a pipeline fault.
         """
-        now = time.monotonic()
+        now = self._monotonic()
         while self.timers and self.timers[0][0] <= now:
             _, _, item = self.timers[0]
             if not self._push_item(item, item.stage, enter=False, defer_if_full=True):
@@ -926,16 +924,16 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self, stage: Stage, item: WorkItem, ctx: StageContext
     ) -> StageStepResult:
         """Run one stage.step, warning when it breaches the <~60s contract."""
-        t0 = time.monotonic()
+        t0 = self._monotonic()
         result = stage.step(item, ctx)
-        elapsed = time.monotonic() - t0
-        if elapsed > _compat("_STEP_WATCHDOG_S"):
+        elapsed = self._monotonic() - t0
+        if elapsed > self._step_watchdog_s:
             logger.warning(
                 "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
                 item.stage.value,
                 self._item_key(item),
                 elapsed,
-                _compat("_STEP_WATCHDOG_S"),
+                self._step_watchdog_s,
             )
         return result
 
@@ -1317,7 +1315,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     shutdown_signal_message(signum, self.config.grace_s, immediate=False)
                 )
                 self.shutdown.set()
-                self._grace_deadline = time.monotonic() + self.config.grace_s
+                self._grace_deadline = self._monotonic() + self.config.grace_s
                 self._wake_completion_wait()
 
         sigs = [signal.SIGINT, signal.SIGTERM]

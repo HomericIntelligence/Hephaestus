@@ -65,10 +65,18 @@ _COLLABORATOR_MODULES = frozenset(
 )
 
 _SHARED_NAMESPACE_MODULES = (
-    "hephaestus/automation/pipeline/coordinator_types.py",
     "hephaestus/automation/pipeline/stages/pr_review_threads.py",
     "hephaestus/automation/pipeline/stages/pr_review_verification.py",
     "hephaestus/automation/pipeline_github_transport.py",
+)
+
+_COORDINATOR_COLLABORATORS = (
+    "hephaestus/automation/pipeline/coordinator.py",
+    "hephaestus/automation/pipeline/coordinator_runtime.py",
+    "hephaestus/automation/pipeline/coordinator_execution.py",
+    "hephaestus/automation/pipeline/coordinator_dispatch.py",
+    "hephaestus/automation/pipeline/coordinator_sources.py",
+    "hephaestus/automation/pipeline/coordinator_learning.py",
 )
 
 _CONTRACT_MODULES = (
@@ -131,6 +139,50 @@ def test_shared_namespaces_declare_static_exports() -> None:
             for element in exports[0].elts
         ):
             violations.append(relative)
+    assert violations == []
+
+
+def test_coordinator_namespace_composition_is_explicit() -> None:
+    """Keep coordinator collaborators on explicit imports and direct seams."""
+    violations: list[str] = []
+    for relative in _COORDINATOR_COLLABORATORS:
+        path = _ROOT / relative
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text, filename=str(path))
+        if "# ruff: noqa: F403, F405" in text:
+            violations.append(f"{relative}:ruff-waiver")
+        if 'sys.modules["hephaestus.automation.pipeline.coordinator"]' in text:
+            violations.append(f"{relative}:sys.modules-facade")
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "coordinator_types"
+                and any(alias.name == "*" for alias in node.names)
+            ):
+                violations.append(f"{relative}:{node.lineno}:star-import")
+            if isinstance(node, ast.ClassDef) and node.name == "_CompatModule":
+                violations.append(f"{relative}:{node.lineno}:compat-module")
+            if isinstance(node, ast.FunctionDef) and node.name == "_compat":
+                violations.append(f"{relative}:{node.lineno}:compat-helper")
+    assert violations == []
+
+
+def test_coordinator_types_has_no_shared_namespace_all() -> None:
+    """Keep coordinator_types free of module-level shared export tables."""
+    path = _ROOT / "hephaestus/automation/pipeline/coordinator_types.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    violations: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
+        ):
+            violations.append(f"{path}:assign")
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "__all__"
+        ):
+            violations.append(f"{path}:annassign")
     assert violations == []
 
 

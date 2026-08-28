@@ -9,13 +9,12 @@ the coordinator consumes it into the heapq timer.
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from hephaestus.automation.merge_authorization import MergeAuthorization
-from hephaestus.automation.pipeline import coordinator as coordinator_mod, seeding as seeding_mod
+from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
     Coordinator,
     PipelineConfig,
@@ -47,15 +46,15 @@ class FakeClock:
 def clocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Coordinator, FakeClock]:
     """Coordinator whose time module is replaced with a fake clock."""
     clock = FakeClock()
-    monkeypatch.setattr(
-        coordinator_mod,
-        "time",
-        SimpleNamespace(monotonic=clock.monotonic, time=lambda: clock.now),
-    )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
     config = PipelineConfig(org="org", repos=["repo-a"], parallel_repos=3, projects_dir=tmp_path)
     coordinator = Coordinator(
-        config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=False
+        config,
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=False,
+        monotonic=clock.monotonic,
+        wall_time=lambda: clock.now,
     )
     return coordinator, clock
 
@@ -72,17 +71,14 @@ class TestTimerHeap:
     ) -> None:
         """C=1 does not drop an expired timer when its source stage is full."""
         clock = FakeClock()
-        monkeypatch.setattr(
-            coordinator_mod,
-            "time",
-            SimpleNamespace(monotonic=clock.monotonic, time=lambda: clock.now),
-        )
         monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: [])
         coordinator = Coordinator(
             PipelineConfig(org="org", repos=["repo-a"], projects_dir=tmp_path),
             github=FakeStageGitHub(),
             pool=FakeWorkerPool(),
             install_signals=False,
+            monotonic=clock.monotonic,
+            wall_time=lambda: clock.now,
         )
         waiting = _item(1)
         # Park a genuinely admitted item so it owns the sole global permit.
@@ -110,6 +106,10 @@ class TestTimerHeap:
     def test_earliest_timer_wakes_first(self, clocked: tuple[Coordinator, FakeClock]) -> None:
         """Wake order follows wake_ts, not insertion order."""
         coordinator, clock = clocked
+        ctx_now = coordinator._ctx_for_repo("repo-a").now_fn
+        assert ctx_now() == clock.now
+        clock.now += 1.0
+        assert ctx_now() == clock.now
         coordinator._timer_park(_item(1), 50.0)
         coordinator._timer_park(_item(2), 10.0)
         coordinator._timer_park(_item(3), 30.0)

@@ -1,17 +1,76 @@
 # The façade deliberately re-exports the coordinator's historical symbols.
-# ruff: noqa: F403, F405
 import logging
+import queue as queue_mod
 import threading
+import time
+import uuid  # noqa: F401
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+import hephaestus.automation.pipeline.admission as _admission
+import hephaestus.automation.pipeline.seeding as _seeding
+from hephaestus.automation.pipeline.athena_executor_scope import (
+    pipeline_requires_athena_executor,
+)
+from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES
+from hephaestus.automation.pipeline.stages.repo import (
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
+    is_full_commit_sha,
+)
+from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
+
+from .coordinator_types_ns import ct
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_execution import ExecutionCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
-from .coordinator_types import *
+
+Any = ct.Any
+BranchWorktreeOwnerStatus = ct.BranchWorktreeOwnerStatus
+CompletionQueue = ct.CompletionQueue
+Disposition = ct.Disposition
+ItemKind = ct.ItemKind
+ItemResult = ct.ItemResult
+JobHandle = ct.JobHandle
+PipelineConfig = ct.PipelineConfig
+PipelineScope = ct.PipelineScope
+PreservedWorktree = ct.PreservedWorktree
+Route = ct.Route
+Stage = ct.Stage
+StageContext = ct.StageContext
+StageGitHub = ct.StageGitHub
+StageName = ct.StageName
+StageOutcome = ct.StageOutcome
+StageQueue = ct.StageQueue
+StageQueueLease = ct.StageQueueLease
+StageStepResult = ct.StageStepResult
+TerminalSummary = ct.TerminalSummary
+WaveLease = ct.WaveLease
+WorkItem = ct.WorkItem
+_ActiveRepoIssueSource = ct._ActiveRepoIssueSource
+_DirectIssueSource = ct._DirectIssueSource
+_DirectPrSource = ct._DirectPrSource
+_FAIL_BACK_CAP = ct._FAIL_BACK_CAP
+_FILE_CLAIM_STAGES = ct._FILE_CLAIM_STAGES
+_FILE_OVERLAP_BLOCKED_CLAIMS_KEY = ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY
+_FILE_OVERLAP_DEFERRALS_KEY = ct._FILE_OVERLAP_DEFERRALS_KEY
+_FILE_OVERLAP_WARNING_THRESHOLD = ct._FILE_OVERLAP_WARNING_THRESHOLD
+_IDLE_POLL_S = ct._IDLE_POLL_S
+_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD
+_PendingHandoff = ct._PendingHandoff
+_RepoEntrySource = ct._RepoEntrySource
+_StageRunConfig = ct._StageRunConfig
+_STALL_TICKS_BEFORE_FORCE = ct._STALL_TICKS_BEFORE_FORCE
+_STEP_WATCHDOG_S = ct._STEP_WATCHDOG_S
+_budget_lookup = ct._budget_lookup
+_effective_repo_root = ct._effective_repo_root
+_json_safe = ct._json_safe
+_preflight_prompt_catalog = ct._preflight_prompt_catalog
+_work_window = ct._work_window
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +112,12 @@ class Coordinator(
         stages: dict[StageName, Stage] | None = None,
         github_factory: Callable[[str, Path], StageGitHub] | None = None,
         install_signals: bool = True,
+        monotonic: Callable[[], float] | None = None,
+        wall_time: Callable[[], float] | None = None,
+        shutdown_event: threading.Event | None = None,
+        force_shutdown_event: threading.Event | None = None,
+        idle_poll_s: float = _IDLE_POLL_S,
+        stall_ticks_before_force: int = _STALL_TICKS_BEFORE_FORCE,
     ) -> None:
         """Initialize coordinator state.
 
@@ -79,8 +144,16 @@ class Coordinator(
             raise ValueError("learning_workers must be positive")
         if config.learning_queue_capacity < 1:
             raise ValueError("learning_queue_capacity must be positive")
-        self.shutdown = threading.Event()
-        self._force_shutdown = threading.Event()
+        self._monotonic = monotonic or time.monotonic
+        self._wall_time = wall_time or time.time
+        self.shutdown = shutdown_event or threading.Event()
+        self.shutdown_event = self.shutdown
+        self._force_shutdown = force_shutdown_event or threading.Event()
+        self.force_shutdown_event = self._force_shutdown
+        self._idle_poll_s = idle_poll_s
+        self._stall_ticks_before_force = stall_ticks_before_force
+        self._step_watchdog_s = _STEP_WATCHDOG_S
+        self._file_overlap_warning_threshold = _FILE_OVERLAP_WARNING_THRESHOLD
         # These latches are the control plane for the bounded completion
         # queue.  They carry no WorkItem/JobResult payload and therefore
         # cannot become a second, unbounded completion buffer.
