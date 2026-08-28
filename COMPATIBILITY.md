@@ -15,6 +15,14 @@ Hephaestus supports **Python 3.13** (`requires-python = ">=3.13,<3.14"` in
 support for a Python minor version is treated as a backwards-incompatible change and
 follows the deprecation policy below.
 
+## Agent Provider Compatibility
+
+| Provider | Selection | CI-covered platforms | Disablement |
+|---|---|---|---|
+| Claude | Default or explicit `--agent claude` | Linux amd64 | N/A |
+| Codex | Explicit `--agent codex` or fallback after Claude | Linux amd64 | N/A |
+| Pi | Explicit `--agent pi` after managed preflight | Linux amd64; Linux arm64 (`ubuntu-24.04-arm`) | `--disable-pi-automation` or omit `--agent pi` |
+
 ## Stability Tiers
 
 Hephaestus documents subpackages with different maturity levels. Only the

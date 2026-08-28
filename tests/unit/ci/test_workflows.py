@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PERFORMANCE_DOC = REPO_ROOT / "docs" / "performance-testing.md"
 SETUP_PI_ACTION = REPO_ROOT / ".github/" / "actions" / "setup-pi-cli" / "action.yml"
 CONTAINERFILE = REPO_ROOT / "ci" / "Containerfile"
+REQUIRED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "_required.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "nightly-tests.yml"
 
 
@@ -392,6 +393,34 @@ class TestPiCliSetup:
         assert "@earendil-works/pi-coding-agent@0.80.2" not in text
         assert 'npm install -g --ignore-scripts "$pi_spec"' in text
         assert "pi --version" in text
+        assert "hephaestus-install-pi-plugins --global --yes --no-approve" in text
+
+    def test_required_workflow_has_a_dedicated_pi_conformance_job(self) -> None:
+        workflow = yaml.safe_load(REQUIRED_WORKFLOW.read_text(encoding="utf-8"))
+        jobs = workflow["jobs"]
+
+        assert "pi-conformance" in jobs
+        assert "unit-tests" in jobs
+        assert "setup-pi-cli" not in yaml.safe_dump(jobs["unit-tests"])
+
+        pi_job = jobs["pi-conformance"]
+        matrix = pi_job["strategy"]["matrix"]["include"]
+        runners = {row["runner"] for row in matrix}
+        assert runners == {"ubuntu-24.04", "ubuntu-24.04-arm"}
+        assert pi_job["needs"] == "changes-gate"
+
+        step_names = [step.get("name") for step in pi_job["steps"]]
+        assert "Install managed Pi runtime" in step_names
+        assert "Run Pi conformance tests" in step_names
+
+        command = next(
+            step["run"]
+            for step in pi_job["steps"]
+            if step.get("name") == "Run Pi conformance tests"
+        )
+        assert "tests/unit/docs/test_pi_rollout_consistency.py" in command
+        assert "--override-ini=\"addopts=\"" in command
+        assert '-m "not nightly"' in command
 
     def test_container_and_nightly_lane_consume_the_catalog(self) -> None:
         container = CONTAINERFILE.read_text(encoding="utf-8")
