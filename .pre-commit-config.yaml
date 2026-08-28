@@ -289,6 +289,16 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-repo-local-skill-surface
+        name: repo-local skill surface must stay absent
+        description: >
+          Hephaestus uses the Athena marketplace plugins declared in
+          .claude/settings.json. Repo-local skill copies, repo-local skill
+          symlinks, and the retired skills-lock.json file must not reappear.
+        entry: python3 scripts/check_repo_local_skill_surface.py
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: check-private-denylist
         name: Check private denylist
         description: >

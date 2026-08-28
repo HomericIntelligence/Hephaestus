@@ -773,6 +773,8 @@ the full listing. Highlights:
 - Skill hooks, frontmatter, and per-skill `allowed-tools` are owned by the
   installed Athena plugins; `.claude/settings.json` is the repository-local
   source of truth for plugin enablement.
+  Local skill copies, local skill symlink sets, and the skill-pin lock file
+  are not repository source for Hephaestus.
 - **MCP** (Model Context Protocol): `.mcp.json` is the version-controlled
   configuration surface for optional project-scoped agent tooling and remains
   intentionally empty. MCP is not a Hephaestus runtime API or ecosystem

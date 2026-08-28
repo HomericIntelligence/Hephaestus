@@ -27,6 +27,9 @@ through installed `hephaestus-*` console scripts.
   dependency's license is incompatible with BSD-3-Clause (see `NOTICE`).
 - **`check_private_denylist.py`** — Reject strings from an operator-local
   `.heph-private-denylist` in tracked/staged files, without echoing values.
+- **`check_repo_local_skill_surface.py`** — Fail if repo-local skill copies,
+  repo-local skill symlinks, or `skills-lock.json` reappear. The Athena
+  marketplace plugins in `.claude/settings.json` remain the source of truth.
 - **`check_security_policy_no_hardcoded_date.py`** — Reject hard-coded
   `As of YYYY-MM-DD` stamps in `SECURITY.md` (issue #730).
 
