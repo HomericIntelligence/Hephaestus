@@ -13,7 +13,16 @@ from ..github_jobs import (
 )
 from hephaestus.automation.review_audit import ReviewAudit
 
-from .base import Continue, Disposition, JobRequest, JobResult, StageContext, StageOutcome, StepResult, WorkItem
+from .base import (
+    Continue,
+    Disposition,
+    JobRequest,
+    JobResult,
+    StageContext,
+    StageOutcome,
+    StepResult,
+    WorkItem,
+)
 from .repo import is_full_commit_sha
 from .pr_review_threads import EVAL, _issue_number
 
@@ -32,13 +41,14 @@ class PrReviewScopeExpansionMixin:
         if item.payload.get(_SCOPE_EXPANSION_PENDING_REQUEST) is None:
             return False
         if not result.ok:
-            item.payload[_SCOPE_EXPANSION_RECEIPT_ERROR] = result.error or "scope expansion job failed"
+            item.payload[_SCOPE_EXPANSION_RECEIPT_ERROR] = (
+                result.error or "scope expansion job failed"
+            )
             return True
         receipt = result.value
-        if (
-            not isinstance(receipt, ScopeExpansionChildrenEnsured)
-            or receipt.request != item.payload.get(_SCOPE_EXPANSION_PENDING_REQUEST)
-        ):
+        if not isinstance(
+            receipt, ScopeExpansionChildrenEnsured
+        ) or receipt.request != item.payload.get(_SCOPE_EXPANSION_PENDING_REQUEST):
             item.payload[_SCOPE_EXPANSION_RECEIPT_ERROR] = "invalid"
             return True
         item.payload[_SCOPE_EXPANSION_RECEIPT] = receipt

@@ -205,14 +205,19 @@ def test_runner_ensures_scope_expansion_children_idempotently(
         reason="Prerequisite work must ship first",
         source_path="hephaestus/automation/example.py",
         source_line=17,
-        required_paths=("hephaestus/automation/example.py", "tests/unit/automation/test_example.py"),
+        required_paths=(
+            "hephaestus/automation/example.py",
+            "tests/unit/automation/test_example.py",
+        ),
         acceptance_criteria=("Helper exists", "Tests pass"),
     )
     events: list[tuple[str, tuple[object, ...]]] = []
     shared_state = {"issues": {}, "next_issue": 900}
 
     class FakePipelineGitHub:
-        def __init__(self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object) -> None:
+        def __init__(
+            self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object
+        ) -> None:
             self.repo = repo or "org/repo"
             self.dry_run = dry_run
 
@@ -237,7 +242,9 @@ def test_runner_ensures_scope_expansion_children_idempotently(
             return issue_number
 
         def gh_issue_json(self, issue_number: int) -> dict[str, object]:
-            issue = shared_state["issues"].get(issue_number, {"title": "child", "body": "", "state": "OPEN"})
+            issue = shared_state["issues"].get(
+                issue_number, {"title": "child", "body": "", "state": "OPEN"}
+            )
             return {
                 "number": issue_number,
                 "title": issue.get("title", "child"),
@@ -315,13 +322,18 @@ def test_runner_dry_run_reports_scope_expansion_split_without_mutation(
         reason="Prerequisite work must ship first",
         source_path="hephaestus/automation/example.py",
         source_line=17,
-        required_paths=("hephaestus/automation/example.py", "tests/unit/automation/test_example.py"),
+        required_paths=(
+            "hephaestus/automation/example.py",
+            "tests/unit/automation/test_example.py",
+        ),
         acceptance_criteria=("Helper exists", "Tests pass"),
     )
     events: list[tuple[str, tuple[object, ...]]] = []
 
     class FakePipelineGitHub:
-        def __init__(self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object) -> None:
+        def __init__(
+            self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object
+        ) -> None:
             self.repo = repo or "org/repo"
             self.dry_run = dry_run
 

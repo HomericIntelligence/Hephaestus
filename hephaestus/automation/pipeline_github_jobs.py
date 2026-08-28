@@ -116,7 +116,9 @@ class PipelineGitHubJobRunner:
             if not isinstance(expansion, ScopeExpansion):
                 raise TypeError("scope_expansions must contain scope-expansion records")
             child_marker = scope_expansion_child_marker(repo, request.issue_number, expansion)
-            lifecycle_marker = scope_expansion_lifecycle_marker(repo, request.issue_number, expansion)
+            lifecycle_marker = scope_expansion_lifecycle_marker(
+                repo, request.issue_number, expansion
+            )
             blocking_marker = scope_expansion_blocking_review_marker(
                 repo,
                 request.issue_number,
@@ -142,7 +144,9 @@ class PipelineGitHubJobRunner:
             merged_pr = github.find_merged_pr_for_issue(child_issue_number)
             if child_state == "OPEN":
                 lifecycle_state = "pending-child"
-                overall_status = "blocked" if overall_status != "operator_required" else overall_status
+                overall_status = (
+                    "blocked" if overall_status != "operator_required" else overall_status
+                )
             elif merged_pr is None:
                 lifecycle_state = "blocked"
                 overall_status = "operator_required"

@@ -15,14 +15,12 @@ from hephaestus.automation.scope_expansion_domain import (
 
 SCOPE_EXPANSION_CHILD_MARKER_PREFIX = "<!-- hephaestus-scope-expansion-child:"
 SCOPE_EXPANSION_LIFECYCLE_MARKER_PREFIX = "<!-- hephaestus-scope-expansion-lifecycle:"
-SCOPE_EXPANSION_BLOCKING_REVIEW_MARKER_PREFIX = (
-    "<!-- hephaestus-scope-expansion-blocking-review:"
-)
-SCOPE_EXPANSION_RETRACTION_MARKER_PREFIX = (
-    "<!-- hephaestus-scope-expansion-retraction-projection:"
-)
+SCOPE_EXPANSION_BLOCKING_REVIEW_MARKER_PREFIX = "<!-- hephaestus-scope-expansion-blocking-review:"
+SCOPE_EXPANSION_RETRACTION_MARKER_PREFIX = "<!-- hephaestus-scope-expansion-retraction-projection:"
 ScopeExpansionLifecycleState = Literal["pending-child", "pending-review", "blocked"]
-ScopeExpansionReviewAction = Literal["none", "parked", "operator_required", "sync_required", "fresh_review"]
+ScopeExpansionReviewAction = Literal[
+    "none", "parked", "operator_required", "sync_required", "fresh_review"
+]
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _FULL_MARKER_RE = re.compile(r"<!-- hephaestus-scope-expansion-[a-z-]+:([0-9a-f]{64}) -->")
@@ -93,7 +91,9 @@ def _parse_marker(body: object, prefix: str) -> tuple[str, list[str]] | None:
     return marker_match.group(1), lines[1:]
 
 
-def scope_expansion_child_marker(repository: str, parent_issue: int, expansion: ScopeExpansion) -> str:
+def scope_expansion_child_marker(
+    repository: str, parent_issue: int, expansion: ScopeExpansion
+) -> str:
     """Return the hidden marker line for one child issue body."""
     return scope_expansion_marker(repository, parent_issue, expansion).replace(
         "scope-expansion:", "scope-expansion-child:"
@@ -390,7 +390,11 @@ def _lines_to_mapping(lines: list[str]) -> dict[str, object] | None:
                 data[key] = int(value[1:])
             elif value.isdigit():
                 data[key] = int(value)
-            elif value.startswith("`") and value.endswith("`") and _FULL_SHA_RE.fullmatch(value[1:-1]):
+            elif (
+                value.startswith("`")
+                and value.endswith("`")
+                and _FULL_SHA_RE.fullmatch(value[1:-1])
+            ):
                 data[key] = value[1:-1]
             else:
                 data[key] = value

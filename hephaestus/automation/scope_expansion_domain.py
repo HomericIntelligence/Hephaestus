@@ -124,7 +124,9 @@ def normalize_scope_expansion_criteria(value: object) -> tuple[str, ...] | None:
     normalized: list[str] = []
     seen: set[str] = set()
     for item in value:
-        criterion = _normalize_text(item, field_name="acceptance_criteria", max_chars=_MAX_CRITERION_CHARS)
+        criterion = _normalize_text(
+            item, field_name="acceptance_criteria", max_chars=_MAX_CRITERION_CHARS
+        )
         if criterion is None or criterion in seen:
             return None
         seen.add(criterion)
@@ -145,7 +147,9 @@ def normalize_scope_expansion(value: object) -> ScopeExpansion | None:
     source_path = _normalize_single_path(
         value.get("source_path") if value.get("source_path") is not None else value.get("path")
     )
-    source_line = value.get("source_line") if value.get("source_line") is not None else value.get("line")
+    source_line = (
+        value.get("source_line") if value.get("source_line") is not None else value.get("line")
+    )
     required_paths = normalize_scope_expansion_paths(value.get("required_paths"))
     acceptance_criteria = normalize_scope_expansion_criteria(value.get("acceptance_criteria"))
     if (
@@ -231,9 +235,7 @@ def scope_expansion_canonical_json(
     return json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
-def scope_expansion_digest(
-    repository: str, parent_issue: int, expansion: ScopeExpansion
-) -> str:
+def scope_expansion_digest(repository: str, parent_issue: int, expansion: ScopeExpansion) -> str:
     """Return the deterministic identifier for one expansion."""
     canonical = scope_expansion_canonical_json(repository, parent_issue, expansion)
     seed = f"{_SCOPE_EXPANSION_DOMAIN_SEPARATOR}:{canonical}"
