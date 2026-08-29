@@ -5,14 +5,14 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
-    EnsureScopeExpansionChildrenRequest,
     DeliverReplyHandoffRequest,
+    EnsureScopeExpansionChildrenRequest,
     FrozenJson,
     GitHubJob,
     MergeWaitCycleCompleted,
@@ -31,6 +31,70 @@ from hephaestus.automation.pipeline.reply_handoff import (
 )
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.scope_expansion_domain import ScopeExpansion
+
+
+class _ScopeExpansionFakeGitHub:
+    """Small mutable GitHub double for child-issue idempotency tests."""
+
+    issues: ClassVar[dict[int, dict[str, object]]] = {}
+    events: ClassVar[list[tuple[str, tuple[object, ...]]]] = []
+    next_issue_number: ClassVar[int] = 900
+
+    @classmethod
+    def reset(cls, events: list[tuple[str, tuple[object, ...]]]) -> None:
+        """Reset the class-owned fake repository for one test."""
+        cls.issues = {}
+        cls.events = events
+        cls.next_issue_number = 900
+
+    def __init__(
+        self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object
+    ) -> None:
+        self.repo = repo or "org/repo"
+        self.dry_run = dry_run
+
+    def issue_with_marker(self, marker: str) -> dict[str, object] | None:
+        matches = [
+            {"number": issue_number, **issue}
+            for issue_number, issue in self.issues.items()
+            if str(issue.get("body") or "").startswith(marker)
+        ]
+        return matches[0] if matches else None
+
+    def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
+        del labels
+        if self.dry_run:
+            return 0
+        type(self).next_issue_number += 1
+        issue_number = type(self).next_issue_number
+        self.issues[issue_number] = {"title": title, "body": body, "state": "OPEN"}
+        self.events.append(("create_issue", (issue_number, title)))
+        return issue_number
+
+    def gh_issue_json(self, issue_number: int) -> dict[str, object]:
+        issue = self.issues.get(issue_number, {"title": "child", "body": "", "state": "OPEN"})
+        return {"number": issue_number, **issue}
+
+    @staticmethod
+    def find_merged_pr_for_issue(issue_number: int) -> int | None:
+        del issue_number
+        return None
+
+    def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
+        if not self.dry_run:
+            self.events.append(("upsert_issue_comment", (issue_number, marker, body)))
+
+    def post_scope_expansion_blocking_review(
+        self, pr_number: int, *, body: str, marker: str
+    ) -> str:
+        if self.dry_run:
+            return "review-dry-run"
+        self.events.append(("post_scope_expansion_blocking_review", (pr_number, marker, body)))
+        return f"review-{pr_number}"
+
+    def mark_pr_implementation_no_go(self, pr_number: int) -> None:
+        if not self.dry_run:
+            self.events.append(("mark_pr_implementation_no_go", (pr_number,)))
 
 
 def test_frozen_json_is_detached_from_sources_and_thawed_values() -> None:
@@ -212,73 +276,8 @@ def test_runner_ensures_scope_expansion_children_idempotently(
         acceptance_criteria=("Helper exists", "Tests pass"),
     )
     events: list[tuple[str, tuple[object, ...]]] = []
-    shared_state = {"issues": {}, "next_issue": 900}
-
-    class FakePipelineGitHub:
-        def __init__(
-            self, *_args: object, repo: str | None = None, dry_run: bool = False, **_kwargs: object
-        ) -> None:
-            self.repo = repo or "org/repo"
-            self.dry_run = dry_run
-
-        def issue_with_marker(self, marker: str) -> dict[str, object] | None:
-            matches = [
-                {"number": issue_number, **issue}
-                for issue_number, issue in shared_state["issues"].items()
-                if str(issue.get("body") or "").startswith(marker)
-            ]
-            if not matches:
-                return None
-            return matches[0]
-
-        def create_issue(self, title: str, body: str, labels: list[str] | None = None) -> int:
-            del labels
-            if self.dry_run:
-                return 0
-            shared_state["next_issue"] += 1
-            issue_number = shared_state["next_issue"]
-            shared_state["issues"][issue_number] = {"title": title, "body": body, "state": "OPEN"}
-            events.append(("create_issue", (issue_number, title)))
-            return issue_number
-
-        def gh_issue_json(self, issue_number: int) -> dict[str, object]:
-            issue = shared_state["issues"].get(
-                issue_number, {"title": "child", "body": "", "state": "OPEN"}
-            )
-            return {
-                "number": issue_number,
-                "title": issue.get("title", "child"),
-                "body": issue.get("body", ""),
-                "state": issue.get("state", "OPEN"),
-            }
-
-        def find_merged_pr_for_issue(self, issue_number: int) -> int | None:
-            del issue_number
-            return None
-
-        def upsert_issue_comment(self, issue_number: int, marker: str, body: str) -> None:
-            if self.dry_run:
-                return
-            events.append(("upsert_issue_comment", (issue_number, marker, body)))
-
-        def post_scope_expansion_blocking_review(
-            self,
-            pr_number: int,
-            *,
-            body: str,
-            marker: str,
-        ) -> str:
-            if self.dry_run:
-                return "review-dry-run"
-            events.append(("post_scope_expansion_blocking_review", (pr_number, marker, body)))
-            return f"review-{pr_number}"
-
-        def mark_pr_implementation_no_go(self, pr_number: int) -> None:
-            if self.dry_run:
-                return
-            events.append(("mark_pr_implementation_no_go", (pr_number,)))
-
-    monkeypatch.setattr(module, "PipelineGitHub", FakePipelineGitHub)
+    _ScopeExpansionFakeGitHub.reset(events)
+    monkeypatch.setattr(module, "PipelineGitHub", _ScopeExpansionFakeGitHub)
     request = EnsureScopeExpansionChildrenRequest(
         issue_number=17,
         pr_number=7,

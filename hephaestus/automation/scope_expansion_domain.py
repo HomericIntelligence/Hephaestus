@@ -111,7 +111,10 @@ def normalize_scope_expansion_paths(value: object) -> tuple[str, ...] | None:
     normalized = [_normalize_single_path(path) for path in value]
     if any(path is None for path in normalized):
         return None
-    unique = sorted(set(normalized))
+    # The guard above narrows the runtime values but not the list element type
+    # for static checkers, so retain the safe strings explicitly.
+    safe_paths = [path for path in normalized if path is not None]
+    unique = sorted(set(safe_paths))
     if len(unique) != len(normalized) or len(unique) > _MAX_REQUIRED_PATHS:
         return None
     return tuple(unique)

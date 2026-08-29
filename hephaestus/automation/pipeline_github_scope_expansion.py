@@ -11,7 +11,7 @@ import hephaestus.automation.github_api as github_api
 from hephaestus.automation.github_api import gh_call
 
 from .pipeline_github_contract import _PipelineGitHubHost
-from .pipeline_github_transport import *  # noqa: F403, F405
+from .pipeline_github_transport import *  # noqa: F403
 from .review_journal import has_exact_leading_marker
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, assert_never
+from typing import Any, Literal, assert_never
 
 from hephaestus.automation.merge_authorization import (
     MergeAuthorization,
@@ -13,10 +13,10 @@ from hephaestus.automation.merge_authorization import (
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     DeliverReplyHandoffRequest,
+    EnsureScopeExpansionChildrenRequest,
     FrozenJson,
     GitHubJob,
     GitHubReceipt,
-    EnsureScopeExpansionChildrenRequest,
     MergeWaitCycleCompleted,
     PrReviewReconciled,
     ReconcilePrReviewRequest,
@@ -30,6 +30,7 @@ from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     journaled_implementation_reply_handoff,
 )
+from hephaestus.automation.pipeline.scope_expansion_records import ScopeExpansionLifecycleState
 from hephaestus.automation.pipeline.stages.base import StageGitHub
 from hephaestus.automation.pipeline_github import PipelineGitHub
 
@@ -111,7 +112,7 @@ class PipelineGitHubJobRunner:
         if not isinstance(repo, str) or not repo:
             raise RuntimeError("repository identity is unavailable")
         child_issue_numbers: list[int] = []
-        overall_status: str = "resolved"
+        overall_status: Literal["blocked", "resolved", "operator_required", "dry_run"] = "resolved"
         for expansion in request.scope_expansions:
             if not isinstance(expansion, ScopeExpansion):
                 raise TypeError("scope_expansions must contain scope-expansion records")
@@ -143,7 +144,7 @@ class PipelineGitHubJobRunner:
             child_state = str(github.gh_issue_json(child_issue_number).get("state") or "").upper()
             merged_pr = github.find_merged_pr_for_issue(child_issue_number)
             if child_state == "OPEN":
-                lifecycle_state = "pending-child"
+                lifecycle_state: ScopeExpansionLifecycleState = "pending-child"
                 overall_status = (
                     "blocked" if overall_status != "operator_required" else overall_status
                 )
@@ -180,7 +181,7 @@ class PipelineGitHubJobRunner:
             github.mark_pr_implementation_no_go(request.pr_number)
         return ScopeExpansionChildrenEnsured(
             request=request,
-            status=overall_status,  # type: ignore[arg-type]
+            status=overall_status,
             child_issue_numbers=tuple(child_issue_numbers),
         )
 

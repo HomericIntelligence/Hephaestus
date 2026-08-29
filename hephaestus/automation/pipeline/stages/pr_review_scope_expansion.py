@@ -6,13 +6,13 @@ import logging
 from pathlib import Path
 from typing import cast
 
+from hephaestus.automation.review_audit import ReviewAudit
+
 from ..github_jobs import (
     EnsureScopeExpansionChildrenRequest,
     GitHubJob,
     ScopeExpansionChildrenEnsured,
 )
-from hephaestus.automation.review_audit import ReviewAudit
-
 from .base import (
     Continue,
     Disposition,
@@ -23,8 +23,8 @@ from .base import (
     StepResult,
     WorkItem,
 )
-from .repo import is_full_commit_sha
 from .pr_review_threads import EVAL, _issue_number
+from .repo import is_full_commit_sha
 
 logger = logging.getLogger(__name__)
 _SCOPE_EXPANSION_PENDING_REQUEST = "_scope_expansion_pending_request"

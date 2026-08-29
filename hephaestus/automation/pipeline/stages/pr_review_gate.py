@@ -2,10 +2,11 @@
 # ruff: noqa: F403, F405
 from hephaestus.automation.review_audit import is_clean_go_review
 
+from .pr_review_scope_expansion import PrReviewScopeExpansionMixin
 from .pr_review_threads import *
 
 
-class PrReviewGate(_PrReviewHost):
+class PrReviewGate(PrReviewScopeExpansionMixin, _PrReviewHost):
     """Own bounded review iteration, label proofs, and GO/NO-GO routing."""
 
     def _eval(self, item: WorkItem, ctx: StageContext) -> StepResult:  # noqa: C901 - state-machine gate

@@ -172,7 +172,7 @@ def parse_scope_expansion_child_body(body: object) -> ScopeExpansionChildIssueRe
     repository = data.get("repository")
     parent_issue = data.get("parent issue")
     pr_number = data.get("source pr")
-    reviewed_head_sha = data.get("reviewed head")
+    reviewed_head_value = data.get("reviewed head")
     title = data.get("title")
     reason = data.get("reason")
     source_path = data.get("source path")
@@ -188,11 +188,12 @@ def parse_scope_expansion_child_body(body: object) -> ScopeExpansionChildIssueRe
         or not isinstance(parent_issue, int)
         or not isinstance(pr_number, int)
         or not isinstance(source_line, int)
-        or reviewed_head_sha is None
+        or not isinstance(reviewed_head_value, str)
         or not isinstance(required_paths, tuple)
         or not isinstance(acceptance_criteria, tuple)
     ):
         return None
+    reviewed_head_sha = reviewed_head_value
     if reviewed_head_sha.startswith("`") and reviewed_head_sha.endswith("`"):
         reviewed_head_sha = reviewed_head_sha[1:-1]
     if _FULL_SHA_RE.fullmatch(reviewed_head_sha) is None:

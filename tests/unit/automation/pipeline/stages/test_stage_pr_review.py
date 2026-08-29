@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import queue
 import sys
 import tarfile
 import threading
@@ -36,6 +37,7 @@ from hephaestus.automation.pipeline.jobs import (
     GitJob,
     JobResult,
 )
+from hephaestus.automation.pipeline.queues import CompletionQueue
 from hephaestus.automation.pipeline.reply_handoff import (
     implementation_reply_handoff_journal_entry,
     journaled_implementation_reply_handoff,
@@ -1869,7 +1871,7 @@ class TestPrReviewStageStep:
         )
 
     def test_changed_conftest_directory_host_verification_receipt_is_head_bound(
-        self, tmp_path: Path, completion_q: Any
+        self, tmp_path: Path
     ) -> None:
         """The emitted conftest directory target runs through the immutable receipt path."""
         directory = "tests/unit/host_conftest_receipt"
@@ -1968,6 +1970,7 @@ class TestPrReviewStageStep:
             immutable_source=True,
         )
         shutdown = threading.Event()
+        completion_q: CompletionQueue = queue.Queue()
         pool = WorkerPool(
             size=1,
             shutdown=shutdown,
