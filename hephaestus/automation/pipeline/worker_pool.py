@@ -3825,12 +3825,16 @@ class WorkerPool:
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
+        signing_env = _controlled_git_signing_env(Path(worktree_path), timeout=job.timeout_s)
+        if isinstance(signing_env, JobResult):
+            return signing_env
         if agent_model is None:
             changed = git_utils.commit_if_changes(
                 *commit_args,
                 allowed_paths=allowed_paths,
                 timeout=job.timeout_s,
                 git_message_timeout=git_message_timeout,
+                signing_env=signing_env,
             )
         else:
             changed = git_utils.commit_if_changes(
@@ -3839,6 +3843,7 @@ class WorkerPool:
                 timeout=job.timeout_s,
                 agent_model=str(agent_model),
                 git_message_timeout=git_message_timeout,
+                signing_env=signing_env,
             )
         branch = str(job.kwargs.get("branch") or "")
         if not changed:

@@ -4722,7 +4722,12 @@ class TestGitOps:
                 "agent_model": "sol:medium",
             },
         )
+        signing_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gpg.format"}
         with (
+            patch(
+                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
+                return_value=signing_env,
+            ),
             patch(
                 "hephaestus.automation.git_utils.commit_if_changes", return_value=True
             ) as mock_commit,
@@ -4740,6 +4745,7 @@ class TestGitOps:
             timeout=60,
             agent_model="sol:medium",
             git_message_timeout=1200,
+            signing_env=signing_env,
         )
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
