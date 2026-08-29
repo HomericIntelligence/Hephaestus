@@ -12,12 +12,28 @@ import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.issue_waves import WAVE_NON_CODE_INTENT_PAYLOAD, wave_entry_from_facts
 from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
-from .coordinator_contract import _CoordinatorHost
 
-# fmt: off
-# ruff: noqa: I001
-from .coordinator_types import (PIPELINE_ORDER, STATE_PLAN_BLOCKED, WAVE_LEASE_PAYLOAD, WAVE_NON_CODE_PAYLOAD, ItemKind, ItemResult, RepoIssueSource, StageGitHub, StageName, WorkItem, _DIRECT_ISSUE_ENTRY_STAGES, _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, _ActiveRepoIssueSource, _DirectIssueSource, _DirectPrSource, _RepoEntrySource, _work_window, product_to_work_item,)  # noqa: E501
-# fmt: on
+from .coordinator_contract import _CoordinatorHost
+from .coordinator_types import (
+    _DIRECT_ISSUE_ENTRY_STAGES,
+    _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD,
+    PIPELINE_ORDER,
+    STATE_PLAN_BLOCKED,
+    WAVE_LEASE_PAYLOAD,
+    WAVE_NON_CODE_PAYLOAD,
+    ItemKind,
+    ItemResult,
+    RepoIssueSource,
+    StageGitHub,
+    StageName,
+    WorkItem,
+    _ActiveRepoIssueSource,
+    _DirectIssueSource,
+    _DirectPrSource,
+    _RepoEntrySource,
+    _work_window,
+    product_to_work_item,
+)
 from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")

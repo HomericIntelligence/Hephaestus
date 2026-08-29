@@ -16,14 +16,51 @@ from hephaestus.automation.pipeline.events import encode_stage_event
 from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob
 from hephaestus.automation.pipeline.stages.repo import is_full_commit_sha
 from hephaestus.automation.pipeline.summary import latest_logical_items, print_summary
+
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
-
-# fmt: off
-# ruff: noqa: I001
-from .coordinator_types import (Any, BranchWorktreeOwnerStatus, Continue, Disposition, FinishedStage, ImplementationStage, IssueWaveError, IssueWaveStore, ItemKind, ItemResult, JobRequest, JobResult, LearningStage, MergeWaitStage, PlanningStage, PlanReviewStage, PreservedWorktree, PrReviewStage, RepoIssueSource, RepoStage, Route, RunStats, Stage, StageContext, StageEvent, StageName, StageOutcome, StageStepResult, WorkItem, _DRAIN_ORDER, _FAIL_BACK_CAP, _MAX_STEPS_PER_TICK, _SOURCE_REGISTRY_RETRY_DELAY_S, DIRECT_SCOPE_BASE_SHA_KEY, DIRECT_SCOPE_BOOTSTRAP_KEY, _budget_lookup, _effective_repo_root, _Paths, _PendingHandoff,)  # noqa: E501
-# fmt: on
+from .coordinator_types import (
+    _DRAIN_ORDER,
+    _FAIL_BACK_CAP,
+    _MAX_STEPS_PER_TICK,
+    _SOURCE_REGISTRY_RETRY_DELAY_S,
+    DIRECT_SCOPE_BASE_SHA_KEY,
+    DIRECT_SCOPE_BOOTSTRAP_KEY,
+    Any,
+    BranchWorktreeOwnerStatus,
+    Continue,
+    Disposition,
+    FinishedStage,
+    ImplementationStage,
+    IssueWaveError,
+    IssueWaveStore,
+    ItemKind,
+    ItemResult,
+    JobRequest,
+    JobResult,
+    LearningStage,
+    MergeWaitStage,
+    PlanningStage,
+    PlanReviewStage,
+    PreservedWorktree,
+    PrReviewStage,
+    RepoIssueSource,
+    RepoStage,
+    Route,
+    RunStats,
+    Stage,
+    StageContext,
+    StageEvent,
+    StageName,
+    StageOutcome,
+    StageStepResult,
+    WorkItem,
+    _budget_lookup,
+    _effective_repo_root,
+    _Paths,
+    _PendingHandoff,
+)
 from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
