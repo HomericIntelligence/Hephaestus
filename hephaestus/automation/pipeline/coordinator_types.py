@@ -330,7 +330,7 @@ class PipelineConfig:
     metadata_timeout: int = 10
     rebase_timeout: int = 2400
     diff_collect_timeout: int = 60
-    pre_pr_test_timeout: int = 600
+    pre_pr_test_timeout: int | None = None
     no_advise: bool = False
     nitpick: bool = False
     drive_green_all: bool = False

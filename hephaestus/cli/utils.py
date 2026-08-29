@@ -702,7 +702,9 @@ def add_pipeline_runtime_args(
         "metadata": 10,
         "rebase": 2400,
         "diff-collect": 60,
-        "pre-pr-test": 600,
+        # Keep this unset by default so the implementation stage can select
+        # its repository-specific fallback.
+        "pre-pr-test": None,
     }
     for name in timeouts:
         default = timeout_defaults[name]

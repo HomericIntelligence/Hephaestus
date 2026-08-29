@@ -188,6 +188,12 @@ def test_parse_args_accepts_run_pre_pr_tests() -> None:
     assert loop_runner._parse_args([]).run_pre_pr_tests is False
 
 
+def test_parse_args_keeps_pre_pr_timeout_unset_until_an_operator_overrides_it() -> None:
+    """The stage selects its repository-specific timeout when the flag is absent."""
+    assert loop_runner._parse_args([]).pre_pr_test_timeout is None
+    assert loop_runner._parse_args(["--pre-pr-test-timeout", "9000"]).pre_pr_test_timeout == 9000
+
+
 def test_parse_args_accepts_nitpick() -> None:
     """The loop runner can enable nitpick comments across review phases."""
     assert loop_runner._parse_args(["--nitpick"]).nitpick is True

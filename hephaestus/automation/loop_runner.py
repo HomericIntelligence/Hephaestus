@@ -272,7 +272,9 @@ class LoopConfig:
     metadata_timeout: int = 10
     rebase_timeout: int = 2400
     diff_collect_timeout: int = 60
-    pre_pr_test_timeout: int = 600
+    # ``None`` preserves the implementation stage's repository-specific
+    # fallback (7200s for Hephaestus's serial required suite).
+    pre_pr_test_timeout: int | None = None
     # Org is resolved at runtime from --org / --repos / cwd detection; no
     # hardcoded fallback. Always set by main() before dispatch.
     org: str = ""
@@ -552,7 +554,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("metadata", 10),
         ("rebase", 2400),
         ("diff-collect", 60),
-        ("pre-pr-test", 600),
+        ("pre-pr-test", None),
     )
     for timeout_name, timeout_default in timeout_defaults:
         p.add_argument(
