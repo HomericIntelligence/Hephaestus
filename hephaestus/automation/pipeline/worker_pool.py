@@ -30,7 +30,7 @@ from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TypeGuard, cast
+from typing import Any, TypeGuard, cast
 
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
@@ -3825,26 +3825,15 @@ class WorkerPool:
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
-        signing_env = _controlled_git_signing_env(Path(worktree_path), timeout=job.timeout_s)
-        if isinstance(signing_env, JobResult):
-            return signing_env
-        if agent_model is None:
-            changed = git_utils.commit_if_changes(
-                *commit_args,
-                allowed_paths=allowed_paths,
-                timeout=job.timeout_s,
-                git_message_timeout=git_message_timeout,
-                signing_env=signing_env,
-            )
-        else:
-            changed = git_utils.commit_if_changes(
-                *commit_args,
-                allowed_paths=allowed_paths,
-                timeout=job.timeout_s,
-                agent_model=str(agent_model),
-                git_message_timeout=git_message_timeout,
-                signing_env=signing_env,
-            )
+        changed = self._commit_if_changes_with_controlled_signing(
+            job,
+            commit_args,
+            allowed_paths,
+            agent_model,
+            git_message_timeout,
+        )
+        if isinstance(changed, JobResult):
+            return changed
         branch = str(job.kwargs.get("branch") or "")
         if not changed:
             publish_state = self._commit_push_requires_publish(
@@ -3874,6 +3863,39 @@ class WorkerPool:
         if scope_retraction is not None:
             return scope_retraction
         return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    @staticmethod
+    def _commit_if_changes_with_controlled_signing(
+        job: GitJob,
+        commit_args: tuple[int, Path, str],
+        allowed_paths: Collection[str] | None,
+        agent_model: object,
+        git_message_timeout: int,
+    ) -> bool | JobResult:
+        """Commit only dirty worktrees with the validated host signing identity."""
+
+        def signing_env_factory() -> dict[str, str]:
+            signing_env = _controlled_git_signing_env(commit_args[1], timeout=job.timeout_s)
+            if isinstance(signing_env, JobResult):
+                raise git_utils.SigningEnvironmentUnavailableError(signing_env.error)
+            return signing_env
+
+        commit_kwargs: dict[str, Any] = {
+            "allowed_paths": allowed_paths,
+            "timeout": job.timeout_s,
+            "git_message_timeout": git_message_timeout,
+            "signing_env_factory": signing_env_factory,
+        }
+        if agent_model is not None:
+            commit_kwargs["agent_model"] = str(agent_model)
+        try:
+            return git_utils.commit_if_changes(*commit_args, **commit_kwargs)
+        except git_utils.SigningEnvironmentUnavailableError as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "signing_configuration"},
+                error=str(exc),
+            )
 
     @staticmethod
     def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:

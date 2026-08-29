@@ -9,7 +9,7 @@ Provides helpers for:
 
 import logging
 import subprocess
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,10 @@ class DirectBranchReservationCollisionError(RuntimeError):
         super().__init__(f"Direct-scope branch {branch_name} already exists")
 
 
+class SigningEnvironmentUnavailableError(RuntimeError):
+    """A required controlled signing environment could not be obtained."""
+
+
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
@@ -109,7 +113,7 @@ def commit_if_changes(
     allowed_paths: Collection[str] | None = None,
     timeout: int | None = None,
     git_message_timeout: int = 1200,
-    signing_env: dict[str, str] | None = None,
+    signing_env_factory: Callable[[], dict[str, str]] | None = None,
 ) -> bool:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -123,6 +127,8 @@ def commit_if_changes(
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
         timeout: Optional timeout in seconds for local git commands.
+        signing_env_factory: Optional lazy provider for the controlled Git
+            signing environment. It is invoked only after a dirty check.
 
     Returns:
         True if a commit was created, otherwise False.
@@ -150,8 +156,8 @@ def commit_if_changes(
         if timeout is not None:
             commit_kwargs["git_timeout"] = timeout
         commit_kwargs["git_message_timeout"] = git_message_timeout
-        if signing_env is not None:
-            commit_kwargs["signing_env"] = signing_env
+        if signing_env_factory is not None:
+            commit_kwargs["signing_env"] = signing_env_factory()
         commit_changes(
             issue_number,
             worktree_path,
@@ -160,6 +166,8 @@ def commit_if_changes(
         )
         logger.info(committed_log_message, issue_number)
         return True
+    except SigningEnvironmentUnavailableError:
+        raise
     except RuntimeError as e:
         logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
         return False

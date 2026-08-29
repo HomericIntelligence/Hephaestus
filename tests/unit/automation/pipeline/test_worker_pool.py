@@ -4722,12 +4722,7 @@ class TestGitOps:
                 "agent_model": "sol:medium",
             },
         )
-        signing_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gpg.format"}
         with (
-            patch(
-                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
-                return_value=signing_env,
-            ),
             patch(
                 "hephaestus.automation.git_utils.commit_if_changes", return_value=True
             ) as mock_commit,
@@ -4745,11 +4740,48 @@ class TestGitOps:
             timeout=60,
             agent_model="sol:medium",
             git_message_timeout=1200,
-            signing_env=signing_env,
+            signing_env_factory=mock_commit.call_args.kwargs["signing_env_factory"],
         )
         mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
+
+    def test_commit_push_fails_before_commit_when_signing_is_unavailable(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A dirty worktree cannot stage or commit without a validated signing identity."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={"issue_number": 5, "worktree_path": tmp_path, "branch": "5-auto"},
+        )
+        signing_failure = JobResult(
+            ok=False,
+            value={"failure_kind": "signing_configuration"},
+            error="host signing configuration unavailable",
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.run",
+                return_value=MagicMock(stdout=" M pending.py\\n"),
+            ),
+            patch(
+                "hephaestus.automation.pipeline.worker_pool._controlled_git_signing_env",
+                return_value=signing_failure,
+            ),
+            patch("hephaestus.automation.pr_manager.commit_changes") as commit,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        commit.assert_not_called()
+        assert result.ok is False
+        assert result.value == {"failure_kind": "signing_configuration"}
+        assert result.error == "host signing configuration unavailable"
 
     def test_commit_push_rejects_incomplete_scope_retraction_before_publish(
         self,

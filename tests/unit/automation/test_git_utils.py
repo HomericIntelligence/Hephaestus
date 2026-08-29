@@ -225,6 +225,56 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         mock_commit.assert_not_called()
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_clean_tree_does_not_request_signing_environment(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A no-op commit-push does not require an operator signing key."""
+        signing_factory = Mock(side_effect=AssertionError("must not be called"))
+        git_utils_mocks.run.return_value = Mock(stdout="")
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "claude",
+                signing_env_factory=signing_factory,
+            )
+            is False
+        )
+
+        signing_factory.assert_not_called()
+        mock_commit.assert_not_called()
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_resolves_signing_environment_before_commit(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A dirty tree obtains the controlled environment before it can commit."""
+        signing_env = {"GIT_CONFIG_COUNT": "1"}
+        signing_factory = Mock(return_value=signing_env)
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\\n")
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "claude",
+                signing_env_factory=signing_factory,
+            )
+            is True
+        )
+
+        signing_factory.assert_called_once_with()
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "claude",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            signing_env=signing_env,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_commit_runtime_error_returns_false(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
