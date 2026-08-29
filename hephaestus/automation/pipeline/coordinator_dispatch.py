@@ -2,8 +2,8 @@ import logging
 
 import hephaestus.automation.pipeline.admission as _admission
 
-from .coordinator_types_ns import ct
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_types_ns import ct
 
 Any = ct.Any
 IssueInfo = ct.IssueInfo

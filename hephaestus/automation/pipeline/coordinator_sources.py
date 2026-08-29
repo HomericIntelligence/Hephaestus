@@ -16,7 +16,7 @@ from .coordinator_contract import _CoordinatorHost
 
 # fmt: off
 # ruff: noqa: I001
-from .coordinator_types import (PIPELINE_ORDER, STATE_PLAN_BLOCKED, WAVE_LEASE_PAYLOAD, WAVE_NON_CODE_PAYLOAD, ItemKind, ItemResult, RepoIssueSource, StageGitHub, StageName, WorkItem, _DIRECT_ISSUE_ENTRY_STAGES, _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, _ActiveRepoIssueSource, _DirectIssueSource, _DirectPrSource, _RepoEntrySource, _work_window, product_to_work_item,)
+from .coordinator_types import (PIPELINE_ORDER, STATE_PLAN_BLOCKED, WAVE_LEASE_PAYLOAD, WAVE_NON_CODE_PAYLOAD, ItemKind, ItemResult, RepoIssueSource, StageGitHub, StageName, WorkItem, _DIRECT_ISSUE_ENTRY_STAGES, _IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, _ActiveRepoIssueSource, _DirectIssueSource, _DirectPrSource, _RepoEntrySource, _work_window, product_to_work_item,)  # noqa: E501
 # fmt: on
 from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY
 

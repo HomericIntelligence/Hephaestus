@@ -6,8 +6,8 @@ import logging
 
 from hephaestus.automation.arming_state import LearningJournalStore
 
-from .coordinator_types_ns import ct
 from .coordinator_contract import _CoordinatorHost
+from .coordinator_types_ns import ct
 from .work_item import LearningIntent
 
 Any = ct.Any

@@ -22,7 +22,7 @@ from .coordinator_shutdown import shutdown_signal_message
 
 # fmt: off
 # ruff: noqa: I001
-from .coordinator_types import (Any, BranchWorktreeOwnerStatus, Continue, Disposition, FinishedStage, ImplementationStage, IssueWaveError, IssueWaveStore, ItemKind, ItemResult, JobRequest, JobResult, LearningStage, MergeWaitStage, PlanningStage, PlanReviewStage, PreservedWorktree, PrReviewStage, RepoIssueSource, RepoStage, Route, RunStats, Stage, StageContext, StageEvent, StageName, StageOutcome, StageStepResult, WorkItem, _DRAIN_ORDER, _FAIL_BACK_CAP, _MAX_STEPS_PER_TICK, _SOURCE_REGISTRY_RETRY_DELAY_S, DIRECT_SCOPE_BASE_SHA_KEY, DIRECT_SCOPE_BOOTSTRAP_KEY, _budget_lookup, _effective_repo_root, _Paths, _PendingHandoff,)
+from .coordinator_types import (Any, BranchWorktreeOwnerStatus, Continue, Disposition, FinishedStage, ImplementationStage, IssueWaveError, IssueWaveStore, ItemKind, ItemResult, JobRequest, JobResult, LearningStage, MergeWaitStage, PlanningStage, PlanReviewStage, PreservedWorktree, PrReviewStage, RepoIssueSource, RepoStage, Route, RunStats, Stage, StageContext, StageEvent, StageName, StageOutcome, StageStepResult, WorkItem, _DRAIN_ORDER, _FAIL_BACK_CAP, _MAX_STEPS_PER_TICK, _SOURCE_REGISTRY_RETRY_DELAY_S, DIRECT_SCOPE_BASE_SHA_KEY, DIRECT_SCOPE_BOOTSTRAP_KEY, _budget_lookup, _effective_repo_root, _Paths, _PendingHandoff,)  # noqa: E501
 # fmt: on
 from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 

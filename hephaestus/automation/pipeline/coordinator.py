@@ -22,12 +22,12 @@ from hephaestus.automation.pipeline.stages.repo import (
 )
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
-from .coordinator_types_ns import ct
 from .coordinator_dispatch import ImplementationDispatcher
 from .coordinator_execution import ExecutionCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
+from .coordinator_types_ns import ct
 
 Any = ct.Any
 BranchWorktreeOwnerStatus = ct.BranchWorktreeOwnerStatus
