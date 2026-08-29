@@ -7,7 +7,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hephaestus.automation.protocol import PLAN_CANONICAL_MARKER, PLAN_REVIEW_CANONICAL_MARKER
+from hephaestus.automation.comment_identity import (
+    has_marker_alias,
+    select_unambiguous_comment,
+    validate_planning_comment_identities,
+)
+from hephaestus.automation.protocol import (
+    PLAN_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKER,
+    comment_marker_aliases,
+)
 from hephaestus.automation.requirements_recovery import (
     OBSOLETE_EXPLANATION_MARKER,
     RECOVERY_PROVENANCE_PREFIX,
@@ -135,11 +144,6 @@ def _latest_owned_role(comments: Sequence[IssueComment], marker: str) -> IssueCo
     return matches[-1] if matches else None
 
 
-def _has_exact_leading_marker(body: str, marker: str) -> bool:
-    """Return whether *marker* is the exact first raw line of *body*."""
-    return has_exact_leading_marker(body, marker)
-
-
 def _deletable_history_ids(
     owned: Sequence[IssueComment],
     *,
@@ -219,10 +223,15 @@ def plan_issue_timeline_compaction(
 ) -> IssueTimelineCompaction:
     """Return the safe mutations that enforce two canonical automation comments.
 
-    Only comments GitHub identifies as authored by the authenticated viewer are
-    considered. Human and foreign marker-bearing comments are intentionally
-    invisible to this planner.
+    Only actor-owned planning comments can be changed. A shared or legacy
+    planning marker on another comment is an identity conflict, so compaction
+    stops before it creates or updates a shadow artifact.
     """
+    validate_planning_comment_identities(
+        comments,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
     owned = [comment for comment in comments if comment.viewer_did_author]
     if not owned:
         return IssueTimelineCompaction()
@@ -230,29 +239,30 @@ def plan_issue_timeline_compaction(
     _validate_legacy_markers(owned)
     _validate_recovery_roles(owned)
 
-    # Parsing first makes conflicting or malformed legacy journal identities a
-    # per-issue hard failure before a destructive action is planned.
+    # A current and legacy marker can each identify a real artifact. Reject
+    # that ambiguity before parsing or planning a delete.
+    plan_aliases = comment_marker_aliases(PLAN_CANONICAL_MARKER)
+    review_aliases = comment_marker_aliases(PLAN_REVIEW_CANONICAL_MARKER)
+    plan_comments = [comment for comment in owned if has_marker_alias(comment.body, plan_aliases)]
+    review_comments = [
+        comment for comment in owned if has_marker_alias(comment.body, review_aliases)
+    ]
+    target_plan = select_unambiguous_comment(
+        plan_comments,
+        marker=PLAN_CANONICAL_MARKER,
+        aliases=plan_aliases,
+        body_of=lambda comment: comment.body,
+    )
+    target_review = select_unambiguous_comment(
+        review_comments,
+        marker=PLAN_REVIEW_CANONICAL_MARKER,
+        aliases=review_aliases,
+        body_of=lambda comment: comment.body,
+    )
+
+    # Parsing follows identity validation so no destructive compaction plan
+    # can select a newest alias from an ambiguous journal.
     snapshot = journal_snapshot(owned)
-    plan_comments = [comment for comment in owned if is_plan_comment(comment.body)]
-    review_comments = [comment for comment in owned if is_plan_review_comment(comment.body)]
-    canonical_plans = [
-        comment
-        for comment in plan_comments
-        if _has_exact_leading_marker(comment.body, PLAN_CANONICAL_MARKER)
-    ]
-    canonical_reviews = [
-        comment
-        for comment in review_comments
-        if _has_exact_leading_marker(comment.body, PLAN_REVIEW_CANONICAL_MARKER)
-    ]
-    target_plan = (
-        canonical_plans[-1] if canonical_plans else (plan_comments[-1] if plan_comments else None)
-    )
-    target_review = (
-        canonical_reviews[-1]
-        if canonical_reviews
-        else (review_comments[-1] if review_comments else None)
-    )
     target_recovery = _latest_owned_role(owned, RECOVERY_PROVENANCE_PREFIX)
     target_obsolete = _latest_owned_role(owned, OBSOLETE_EXPLANATION_MARKER)
 

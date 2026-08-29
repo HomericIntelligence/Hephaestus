@@ -352,6 +352,50 @@ def test_approved_plan_source_rejects_conflicting_current_canonical_plans() -> N
         GitHubLearningSourceReader(Adapter()).read(intent)
 
 
+def test_approved_plan_source_rejects_nonincreasing_owned_plan_history() -> None:
+    """A retained plan history must advance revision numbers in comment order."""
+    old_plan = (
+        "# Implementation Plan\n\n## Objective\n\nOld objective.\n\n"
+        "## Approach\n\nOld approach.\n\n## Implementation Order\n\nOld order.\n\n"
+        "## Verification\n\nOld verification."
+    )
+    current_plan = (
+        "# Implementation Plan\n\n## Objective\n\nCurrent objective.\n\n"
+        "## Approach\n\nCurrent approach.\n\n## Implementation Order\n\nCurrent order.\n\n"
+        "## Verification\n\nCurrent verification."
+    )
+    intent = LearningIntent.approved_plan(
+        repo="HomericIntelligence/ProjectHephaestus",
+        issue=2754,
+        plan_revision=1,
+        plan_fingerprint=plan_fingerprint(current_plan),
+    )
+
+    class Adapter:
+        def issue(self, _repository: str, issue: int) -> dict[str, object]:
+            return {"number": issue, "state": "OPEN", "labels": [{"name": STATE_PLAN_GO}]}
+
+        def comments(self, _repository: str, _issue: int) -> list[IssueComment]:
+            return [
+                IssueComment(
+                    body=render_current_plan(old_plan, revision=2),
+                    viewer_did_author=True,
+                    database_id=10,
+                ),
+                IssueComment(
+                    body=render_current_plan(current_plan, revision=1),
+                    viewer_did_author=True,
+                    database_id=11,
+                ),
+            ]
+
+        def pull_request(self, _repository: str, _pr: int) -> dict[str, object]:
+            raise AssertionError("unexpected PR read")
+
+    with pytest.raises(LearnDeliveryError, match="absent or ambiguous"):
+        GitHubLearningSourceReader(Adapter()).read(intent)
+
+
 def test_approved_plan_source_rejects_changed_fingerprint() -> None:
     """A journal claim cannot authorize a later edited canonical plan."""
     intent = _intent()

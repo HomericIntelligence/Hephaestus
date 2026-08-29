@@ -15,10 +15,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from hephaestus.automation.comment_identity import (
+    CommentAliasConflictError,
+    validate_planning_comment_identities,
+)
+from hephaestus.automation.markdown_markers import (
+    raw_markdown_lines as _raw_markdown_lines,
+    top_level_marker_line_indexes as _top_level_marker_line_indexes,
+    top_level_marker_occurrences as top_level_marker_occurrences,
+)
 from hephaestus.automation.protocol import (
     PLAN_CANONICAL_MARKER,
+    PLAN_CANONICAL_MARKERS,
     PLAN_COMMENT_MARKER,
     PLAN_REVIEW_CANONICAL_MARKER,
+    PLAN_REVIEW_CANONICAL_MARKERS,
     PLAN_REVIEW_PREFIX,
 )
 
@@ -88,6 +99,7 @@ class PlanDiscoveryStatus(StrEnum):
     FOUND = "found"
     ABSENT = "absent"
     READ_ERROR = "read_error"
+    IDENTITY_CONFLICT = "identity_conflict"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +124,11 @@ class PlanDiscoveryResult:
     def read_error(cls, error: object) -> PlanDiscoveryResult:
         """Create a result describing an incomplete or invalid journal read."""
         return cls(PlanDiscoveryStatus.READ_ERROR, error=str(error))
+
+    @classmethod
+    def identity_conflict(cls, error: object) -> PlanDiscoveryResult:
+        """Create a result describing an unsafe planning-marker identity."""
+        return cls(PlanDiscoveryStatus.IDENTITY_CONFLICT, error=str(error))
 
 
 @dataclass(frozen=True)
@@ -150,13 +167,13 @@ def comment_body(comment: IssueComment | str) -> str:
 
 
 def is_plan_comment(body: str) -> bool:
-    """Recognize a plan comment only by its opaque leading marker."""
-    return has_exact_leading_marker(body, PLAN_CANONICAL_MARKER)
+    """Recognize a plan comment only by an exact top-level marker line."""
+    return bool(top_level_marker_occurrences(body, PLAN_CANONICAL_MARKERS))
 
 
 def is_plan_review_comment(body: str) -> bool:
-    """Recognize a plan-review comment only by its opaque leading marker."""
-    return has_exact_leading_marker(body, PLAN_REVIEW_CANONICAL_MARKER)
+    """Recognize a review comment only by an exact top-level marker line."""
+    return bool(top_level_marker_occurrences(body, PLAN_REVIEW_CANONICAL_MARKERS))
 
 
 def has_exact_leading_marker(body: str, marker: str) -> bool:
@@ -164,6 +181,24 @@ def has_exact_leading_marker(body: str, marker: str) -> bool:
     return bool(marker) and (
         body == marker or body.startswith(f"{marker}\n") or body.startswith(f"{marker}\r\n")
     )
+
+
+def _top_level_marker(body: str, markers: Sequence[str]) -> str | None:
+    """Return the first semantic marker from one protocol family."""
+    matches = top_level_marker_occurrences(body, markers)
+    return matches[0] if matches else None
+
+
+def _without_top_level_marker_line(text: str, marker: str | None) -> str:
+    """Remove one recognized marker line while preserving all other raw text."""
+    if marker is None:
+        return text
+    matches = _top_level_marker_line_indexes(text, (marker,))
+    if not matches:
+        return text
+    line_index, _matched_marker = matches[0]
+    lines = _raw_markdown_lines(text)
+    return "".join((*lines[:line_index], *lines[line_index + 1 :]))
 
 
 def normalize_issue_comments(
@@ -240,6 +275,14 @@ def discover_plan_from_comments(
     comments: Sequence[IssueComment],
 ) -> PlanDiscoveryResult:
     """Select the latest actor-owned plan from a validated complete journal."""
+    try:
+        validate_planning_comment_identities(
+            comments,
+            body_of=lambda comment: comment.body,
+            owned_of=lambda comment: comment.viewer_did_author,
+        )
+    except CommentAliasConflictError as exc:
+        return PlanDiscoveryResult.identity_conflict(exc)
     for comment in reversed(comments):
         if not comment.viewer_did_author:
             continue
@@ -287,13 +330,15 @@ def _without_fingerprint_line(text: str) -> str:
 def _current_plan_parts(body: str) -> tuple[str, tuple[str, ...], bool, str | None]:
     """Parse host metadata only from the canonical plan-comment header."""
     stripped = body.lstrip()
-    canonical = stripped.startswith(PLAN_CANONICAL_MARKER) or stripped.startswith(
-        PLAN_COMMENT_MARKER
-    )
-    if not canonical:
+    canonical_marker = _top_level_marker(body, PLAN_CANONICAL_MARKERS)
+    if canonical_marker is None and not stripped.startswith(PLAN_COMMENT_MARKER):
         return stripped.strip(), (), False, None
 
-    text = _without_leading_line(stripped, PLAN_CANONICAL_MARKER)
+    text = (
+        _without_top_level_marker_line(body, canonical_marker)
+        if canonical_marker is not None
+        else stripped
+    )
     text = _without_leading_line(text, PLAN_COMMENT_MARKER)
     text = _without_revision_line(text)
     first = text.lstrip().partition("\n")[0].strip()
@@ -327,7 +372,8 @@ def extract_current_plan(body: str) -> str:
 
 def extract_current_review(body: str) -> str:
     """Return only reviewer output from a current or legacy review comment."""
-    text = _without_leading_line(body, PLAN_REVIEW_CANONICAL_MARKER)
+    marker = _top_level_marker(body, PLAN_REVIEW_CANONICAL_MARKERS)
+    text = _without_top_level_marker_line(body, marker) if marker is not None else body
     text = _without_leading_line(text, PLAN_REVIEW_PREFIX)
     return _without_revision_line(text).strip()
 
@@ -515,7 +561,13 @@ def _owned_comments(comments: Sequence[IssueComment | str]) -> list[IssueComment
 
 def journal_snapshot(comments: Sequence[IssueComment | str]) -> JournalSnapshot:
     """Reconstruct current plan/review and ordered legacy history."""
-    owned = _owned_comments(comments)
+    normalized_comments = [as_issue_comment(comment) for comment in comments]
+    validate_planning_comment_identities(
+        normalized_comments,
+        body_of=lambda comment: comment.body,
+        owned_of=lambda comment: comment.viewer_did_author,
+    )
+    owned = [comment for comment in normalized_comments if comment.viewer_did_author]
     history: list[HistoryArtifact] = []
     history_bodies: dict[tuple[int, str], str] = {}
     current_plan_body = ""

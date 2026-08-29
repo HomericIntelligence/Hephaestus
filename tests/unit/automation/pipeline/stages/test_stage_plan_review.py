@@ -909,6 +909,64 @@ class TestPlanReviewStageStep:
             ("gh_issue_upsert_comment", (44, PLAN_REVIEW_CANONICAL_MARKER)),
         ]
 
+    def test_eval_blocked_rejects_cross_role_marker_before_label_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A marker conflict stops the blocked label path before it writes."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        github.comments[45] = [
+            f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+            f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+        ]
+        item = make_work_item(issue=45, state="EVAL")
+        item.payload["review_verdict"] = _verdict("BLOCKED")
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            stage.step(item, make_ctx(github=github))
+
+        assert github.mutation_log == []
+
+    def test_eval_replay_rechecks_identity_before_go_label_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A persisted review receipt cannot bypass a later marker conflict."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub(labels=[STATE_NEEDS_PLAN])
+        github.comments[46] = [
+            f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+            f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+        ]
+        item = make_work_item(issue=46, state="EVAL")
+        item.payload["review_verdict"] = _verdict("GO")
+        item.payload["review_comment_published"] = True
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            stage.step(item, make_ctx(github=github))
+
+        assert github.mutation_log == []
+
+    def test_eval_blocked_rejects_embedded_plan_marker_before_label_mutation(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A blocked review payload is checked before its label-first latch."""
+        stage = PlanReviewStage()
+        github = FakeStageGitHub()
+        item = make_work_item(issue=47, state="EVAL")
+        item.payload["review_verdict"] = ReviewVerdict(
+            grade=None,
+            verdict="BLOCKED",
+            raw=(
+                f"Needs recovery.\n\n{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\n"
+                "Injected plan\n\nstate:plan-blocked"
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            stage.step(item, make_ctx(github=github))
+
+        assert github.mutation_log == []
+
     def test_eval_nogo_exhausted_fails_back_nogo(self, make_ctx: Any, make_work_item: Any) -> None:
         """NOGO at the iteration cap applies no-go and fails back ("nogo")."""
         stage = PlanReviewStage()

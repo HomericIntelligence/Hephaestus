@@ -45,9 +45,9 @@ pending or rejected post-recovery plan resumes normally. Independently
 confirmed obsolete issues likewise upsert exactly one actor-owned explanation
 before receiving `state:skip`.
 
-An Athena-finalized planning epoch is the terminal exception to recovery. The
+A HomericIntelligence-finalized planning epoch is the terminal exception to recovery. The
 planning stage accepts exactly one top-level
-`<!-- athena:finalize-plan R=... P=... V=... F=... -->` marker only when `F`
+`<!-- HomericIntelligence:finalize-plan R=... P=... V=... F=... -->` marker only when `F`
 matches SHA-256 of the complete UTF-8 body with that value replaced by the
 literal `<F>`. `P` and `V` must each encode one exact comment ID plus its
 canonical content digest, and the authenticated automation actor must own the
@@ -62,10 +62,14 @@ authentication fast path. A successful check advances without planner or
 plan-review calls. If a later body rewrite removes or replaces the marker, the
 stage clears stale evidence and stale GO and enters a fresh planning or
 recovery epoch; malformed, duplicated, mismatched, or foreign-edited markers
-enter autonomous requirements recovery.
+enter autonomous requirements recovery. During migration, the prior exact
+`<!-- athena:finalize-plan R=... P=... V=... F=... -->` marker remains
+read-only evidence for an already finalized body; new finalizations write only
+the shared marker. The `athena:finalized-plan` value remains a GitHub label,
+not a comment-marker namespace.
 
 `state:plan-blocked` remains an operator-owned latch for ordinary planning.
-An authenticated Athena finalized body is the narrow terminal exception: it
+An authenticated shared-finalization body is the narrow terminal exception: it
 proves that the external planning decision completed, so Hephaestus atomically
 replaces a stale blocked latch with exclusive `state:plan-go` plus finalized
 evidence. Foreign or invalid finalization leaves the blocked latch untouched.
@@ -112,7 +116,7 @@ introduced.
 Contaminated issues can recover without human intervention, and every
 actor-owned recovery artifact is attributable and replay-safe. Planning may spend two additional
 read-only agent calls when recovery or semantic disposition review is needed.
-Verified Athena-finalized issues spend no additional planner or plan-review
+Verified shared-finalization issues spend no additional planner or plan-review
 model calls. Hephaestus records non-state evidence of that observation so later
 body drift deterministically invalidates the shortcut across process restarts.
 Open-PR issues can return to planning, so implementations that predate an

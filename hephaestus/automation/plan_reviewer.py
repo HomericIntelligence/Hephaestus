@@ -43,6 +43,7 @@ from hephaestus.utils.terminal import terminal_guard
 from .agent_config import DEFAULT_AGENT_TIMEOUT, fallback_model
 from .claude_invoke import invoke_claude_with_session, scan_quota_reset
 from .claude_models import reviewer_model
+from .comment_identity import validate_planning_body_for_write
 from .git_utils import (
     get_repo_root,
     get_repo_slug,
@@ -64,9 +65,8 @@ from .review_journal import (
     PlanDiscoveryResult,
     PlanDiscoveryStatus,
     blocked_audit_recovery_body,
-    comment_revision,
     discover_plan_from_comments,
-    is_plan_comment,
+    journal_snapshot,
     normalize_issue_comments,
     parse_plan_review_state,
     render_current_review,
@@ -223,6 +223,12 @@ class PlanReviewer:
                         issue_number=issue_number,
                         success=False,
                         error=f"Failed to discover plan: {plan_lookup.error}",
+                    )
+                if plan_lookup.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
+                    return WorkerResult(
+                        issue_number=issue_number,
+                        success=False,
+                        error=f"Plan marker identity conflict: {plan_lookup.error}",
                     )
                 if plan_lookup.status is PlanDiscoveryStatus.ABSENT:
                     logger.info(
@@ -611,14 +617,11 @@ class PlanReviewer:
         active_states = set(live_labels).intersection(ALL_STATE_LABELS)
         if len(active_states) > 1 and STATE_PLAN_BLOCKED not in active_states:
             raise RuntimeError(f"contradictory plan-state labels: {sorted(active_states)}")
-        revision = 1
-        for comment in reversed(self._fetch_issue_comments(issue_number)):
-            if not comment.viewer_did_author:
-                continue
-            if is_plan_comment(comment.body):
-                revision = comment_revision(comment.body) or 1
-                break
+        # Resolve all plan/review roles before the BLOCKED label path writes
+        # anything. A marker conflict must remain a human-recovery case.
+        revision = journal_snapshot(self._fetch_issue_comments(issue_number)).revision
         comment_body = render_current_review(review_text, revision=revision)
+        validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
         label_to_add, labels_to_remove = apply_plan_state(state)
         # BLOCKED is a safety latch, so make it durable before the fallible
         # audit write. GO/NOGO keep audit-first ordering. In every case only

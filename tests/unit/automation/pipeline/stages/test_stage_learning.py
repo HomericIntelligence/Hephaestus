@@ -76,6 +76,38 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     assert record is not None and record["status"] == "claimed"
 
 
+def test_learning_stage_accepts_superseded_owned_plan_history(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A valid legacy plan sequence remains eligible for host learning."""
+    github = _approved_github()
+    github.comments[2705] = [
+        render_current_plan("Use the superseded plan.", revision=7),
+        render_current_plan(_APPROVED_PLAN, revision=8),
+    ]
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(learning_journal=journal, github=github)
+    item = make_work_item(issue=2705, state="ENTER")
+    intent = LearningIntent.approved_plan(
+        repo=item.repo,
+        issue=2705,
+        plan_revision=8,
+        plan_fingerprint=_APPROVED_FINGERPRINT,
+    )
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.IMPLEMENTATION
+    stage = LearningStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "CLAIM"
+
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    assert isinstance(request.job, AthenaSkillJob)
+    record = journal.load(intent.key)
+    assert record is not None and record["status"] == "claimed"
+
+
 def test_restored_direct_scope_learning_uses_captured_bootstrap_revision(
     tmp_path: Path, make_ctx: Any, make_work_item: Any
 ) -> None:

@@ -19,12 +19,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 import hephaestus.automation.github_api as github_api
+from hephaestus.automation.comment_identity import (
+    CommentAliasConflictError,
+    validate_planning_comment_identities,
+)
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import MnemosyneBindingReceipt
 from hephaestus.automation.mnemosyne_delivery import LearnDeliveryError, LearnDeliveryRequest
 from hephaestus.automation.pipeline.work_item import LearningIntent, LearningIntentKind
 from hephaestus.automation.review_journal import (
     IssueComment,
+    JournalSnapshot,
     comment_revision,
     is_plan_comment,
     journal_snapshot,
@@ -146,6 +151,50 @@ class LearningValidator(Protocol):
 
     def validate(self, path: Path) -> tuple[str, ...]:
         """Return bounded validation evidence or raise."""
+
+
+def approved_plan_learning_snapshot(comments: list[IssueComment]) -> JournalSnapshot:
+    """Read a learning source while retaining only safe superseded plans.
+
+    Normal planning operations reject more than one plan marker. Learning can
+    read a retained plan sequence only when every actor-owned plan is valid and
+    its revision advances in comment order. The current plan remains subject to
+    the normal journal check with every non-superseded comment.
+    """
+    owned_plan_comments = [
+        (index, comment)
+        for index, comment in enumerate(comments)
+        if comment.viewer_did_author and is_plan_comment(comment.body)
+    ]
+    try:
+        if len(owned_plan_comments) > 1:
+            previous_revision: int | None = None
+            for _index, comment in owned_plan_comments:
+                validate_planning_comment_identities(
+                    (comment,),
+                    body_of=lambda candidate: candidate.body,
+                    owned_of=lambda candidate: candidate.viewer_did_author,
+                )
+                revision = comment_revision(comment.body)
+                if revision is None or (
+                    previous_revision is not None and revision <= previous_revision
+                ):
+                    raise CommentAliasConflictError(
+                        "superseded plan revisions are not strictly increasing; "
+                        "manual recovery is required"
+                    )
+                previous_revision = revision
+
+            current_plan_index = owned_plan_comments[-1][0]
+            comments = [
+                comment
+                for index, comment in enumerate(comments)
+                if index == current_plan_index
+                or not (comment.viewer_did_author and is_plan_comment(comment.body))
+            ]
+        return journal_snapshot(comments)
+    except CommentAliasConflictError as exc:
+        raise LearnDeliveryError("approved plan canonical comment is absent or ambiguous") from exc
 
 
 def _normalized_text(value: str, *, field: str) -> str:
@@ -320,7 +369,7 @@ class GitHubLearningSourceReader:
         if not is_exclusive_plan_state(labels, STATE_PLAN_GO):
             raise LearnDeliveryError("approved plan no longer has exclusive state:plan-go")
         comments = self._adapter.comments(intent.repo, intent.issue)
-        snapshot = journal_snapshot(comments)
+        snapshot = approved_plan_learning_snapshot(comments)
         current_owned_plans = [
             comment
             for comment in comments

@@ -2969,6 +2969,7 @@ class TestMutatorMapping:
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         body = render_current_plan("body")
+        assert body.startswith("<!-- HomericIntelligence:plan-issue -->\n")
         fetch = MagicMock(
             side_effect=[
                 [],
@@ -2983,6 +2984,59 @@ class TestMutatorMapping:
 
         assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
+
+    def test_upsert_plan_comment_migrates_owned_legacy_marker_in_place(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One-write migration upgrades an owned legacy plan without a duplicate."""
+        legacy_body = "# Implementation Plan\n\n<!-- hephaestus-plan:canonical -->\n\nOld plan"
+        body = "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nNew plan"
+        legacy = {"body": legacy_body, "databaseId": 100, "viewerDidAuthor": True}
+        migrated = {"body": body, "databaseId": 100, "viewerDidAuthor": True}
+        fetch = MagicMock(side_effect=[[legacy], [migrated]])
+        patch_comment = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        adapter.upsert_plan_comment(5, body)
+
+        post.assert_not_called()
+        patch_comment.assert_called_once()
+        assert patch_comment.call_args.args == (100, body)
+        assert fetch.call_args_list == [call(5), call(5)]
+
+    def test_upsert_plan_comment_rejects_mixed_current_and_legacy_aliases_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A current and legacy actor-owned plan are an identity conflict, not duplicates."""
+        body = render_current_plan("new plan")
+        legacy = {
+            "body": "<!-- hephaestus-plan:canonical -->\n# Implementation Plan\nold plan",
+            "databaseId": 100,
+            "viewerDidAuthor": True,
+        }
+        current = {
+            "body": render_current_plan("old current plan"),
+            "databaseId": 101,
+            "viewerDidAuthor": True,
+        }
+        patch_comment = MagicMock()
+        delete_comment = MagicMock()
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(return_value=[legacy, current]),
+        )
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete_comment)
+
+        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            adapter.upsert_plan_comment(5, body)
+
+        patch_comment.assert_not_called()
+        delete_comment.assert_not_called()
 
     def test_upsert_create_requires_owned_exact_body_readback(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3012,47 +3066,139 @@ class TestMutatorMapping:
         with pytest.raises(RuntimeError, match="owned comment publication was not confirmed"):
             adapter.upsert_plan_comment(5, new)
 
-    def test_upsert_ignores_foreign_canonical_marker_and_creates_owned_comment(
+    def test_upsert_rejects_foreign_canonical_marker_without_shadow_comment(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Foreign marker text is inert and cannot deny service to the journal."""
+        """A foreign planning marker is an identity conflict, not an absence."""
         body = render_current_plan("safe plan")
         fetch = MagicMock(
-            side_effect=[
-                [
-                    {
-                        "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
-                        "databaseId": 99,
-                        "viewerDidAuthor": False,
-                    }
-                ],
-                [
-                    {
-                        "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
-                        "databaseId": 99,
-                        "viewerDidAuthor": False,
-                    },
-                    {
-                        "body": body,
-                        "databaseId": 100,
-                        "viewerDidAuthor": True,
-                    },
-                ],
+            return_value=[
+                {
+                    "body": f"{PLAN_CANONICAL_MARKER}\nforeign",
+                    "databaseId": 99,
+                    "viewerDidAuthor": False,
+                }
             ]
         )
         monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
         post = MagicMock()
         monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
 
-        adapter.upsert_plan_comment(5, body)
+        with pytest.raises(RuntimeError, match="foreign or unverifiable"):
+            adapter.upsert_plan_comment(5, body)
 
-        post.assert_called_once_with(5, body)
-        assert fetch.call_count == 2
+        post.assert_not_called()
+        assert fetch.call_count == 1
 
-    def test_canonical_create_converges_owned_race_duplicates(
+    def test_upsert_rejects_one_owned_comment_with_plan_and_review_markers(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A post-create reconciliation leaves one actor-owned canonical pointer."""
+        """A shared comment cannot be patched once for each planning role."""
+        body = render_current_plan("safe plan")
+        mixed = {
+            "body": (
+                f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+                f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+            ),
+            "databaseId": 99,
+            "viewerDidAuthor": True,
+        }
+        fetch = MagicMock(return_value=[mixed])
+        patch_comment = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            adapter.upsert_plan_comment(5, body)
+
+        patch_comment.assert_not_called()
+        post.assert_not_called()
+
+    def test_upsert_rejects_cross_role_outgoing_body_before_any_write(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed candidate body stops before it is posted or patched."""
+        body = (
+            f"{PLAN_CANONICAL_MARKER}\n# Implementation Plan\n\nPlan\n\n"
+            f"{PLAN_REVIEW_CANONICAL_MARKER}\n## Plan Review\n\nReview"
+        )
+        fetch = MagicMock()
+        post = MagicMock()
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(RuntimeError, match="plan and review"):
+            adapter.upsert_plan_comment(5, body)
+
+        fetch.assert_not_called()
+        post.assert_not_called()
+        patch_comment.assert_not_called()
+
+    def test_upsert_rejects_planning_marker_in_nonplanning_outgoing_body(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrelated pipeline comment cannot carry a shared planning marker."""
+        marker = "<!-- unrelated:status -->"
+        body = f"{marker}\nordinary text\n\n{PLAN_CANONICAL_MARKER}"
+        fetch = MagicMock()
+        post = MagicMock()
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(RuntimeError, match="nonplanning comment body claims"):
+            adapter.upsert_issue_comment(5, marker, body)
+
+        fetch.assert_not_called()
+        post.assert_not_called()
+        patch_comment.assert_not_called()
+
+    def test_upsert_rejects_cross_role_legacy_marker_without_mutation(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plan upsert cannot use a review alias as a legacy migration key."""
+        body = render_current_plan("safe plan")
+        fetch = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(ValueError, match="does not belong"):
+            adapter.upsert_issue_comment(
+                5,
+                PLAN_CANONICAL_MARKER,
+                body,
+                legacy_marker=PLAN_REVIEW_CANONICAL_MARKER,
+            )
+
+        fetch.assert_not_called()
+        post.assert_not_called()
+
+    def test_upsert_rejects_legacy_marker_as_a_write_target(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy alias may be read for migration but cannot be written."""
+        marker = "<!-- hephaestus-plan:canonical -->"
+        fetch = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(ValueError, match="shared HomericIntelligence marker"):
+            adapter.upsert_issue_comment(5, marker, f"{marker}\n# Implementation Plan\nold")
+
+        fetch.assert_not_called()
+        post.assert_not_called()
+
+    def test_canonical_create_rejects_owned_race_duplicates(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A post-create duplicate requires manual recovery before any delete."""
         body = render_current_plan("safe plan")
         monkeypatch.setattr(
             adapter,
@@ -3071,9 +3217,10 @@ class TestMutatorMapping:
         delete = MagicMock()
         monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
 
-        adapter.upsert_plan_comment(5, body)
+        with pytest.raises(RuntimeError, match="ambiguous actor-owned comment aliases"):
+            adapter.upsert_plan_comment(5, body)
 
-        delete.assert_called_once_with(100)
+        delete.assert_not_called()
 
     def test_ensure_blocked_audit_repairs_missing_explanation_without_label_write(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3187,6 +3334,23 @@ class TestMutatorMapping:
 
         post.assert_called_once_with(5, body)
         assert fetch.call_count == 2
+
+    def test_immutable_append_rejects_embedded_planning_marker_before_post(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An immutable nonplanning artifact must not claim a planning role."""
+        marker = "<!-- hephaestus-plan-history:revision=1:kind=plan -->"
+        body = f"{marker}\narchive\n\n{PLAN_CANONICAL_MARKER}\n# Embedded plan"
+        fetch = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(RuntimeError, match="nonplanning comment body claims"):
+            adapter.append_issue_comment(5, marker, body)
+
+        fetch.assert_not_called()
+        post.assert_not_called()
 
     def test_immutable_append_is_replay_safe_and_conflict_detecting(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
@@ -3748,7 +3912,10 @@ class TestRepoScoping:
             "_repo_issue_comments",
             lambda issue: [
                 {
-                    "body": render_current_plan("Do the thing."),
+                    "body": (
+                        "<!-- HomericIntelligence:plan-issue -->\n"
+                        "# Implementation Plan\n\nDo the thing."
+                    ),
                     "user": {"login": "bot"},
                 }
             ],

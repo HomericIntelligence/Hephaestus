@@ -47,6 +47,7 @@ from hephaestus.automation.agent_config import (
     planner_model,
     reviewer_model,
 )
+from hephaestus.automation.comment_identity import validate_planning_body_for_write
 from hephaestus.automation.issue_waves import (
     WAVE_LEASE_PAYLOAD,
     WAVE_NON_CODE_INTENT_PAYLOAD,
@@ -86,6 +87,7 @@ from hephaestus.automation.review_journal import (
     CommentJournalReadError,
     IssueComment,
     JournalSnapshot,
+    PlanDiscoveryResult,
     PlanDiscoveryStatus,
     current_revision_context,
     is_pending_review,
@@ -1437,6 +1439,9 @@ def _mark_published_plan_pending_review(
 ) -> bool:
     """Transition a rejected plan only after its replacement is durable."""
     if was_revision:
+        # A resumed follow-up may only write the label after a fresh shared
+        # planning identity check. The preceding publication can be stale.
+        journal_snapshot(ctx.github.issue_comments(issue_number))
         add, remove = enter_planning_transition()
         ctx.github.edit_labels(
             issue_number,
@@ -1459,6 +1464,12 @@ def _publish_plan_blocked(
     revision: int,
 ) -> bool:
     """Latch BLOCKED before publishing its required explanatory audit data."""
+    # Resolve the shared plan/review identity before the label write. A
+    # conflict is a human-recovery condition, not a reason to change state.
+    if journal_snapshot(ctx.github.issue_comments(issue_number)).revision != revision:
+        return False
+    comment_body = render_current_review(raw_review, revision=revision)
+    validate_planning_body_for_write(PLAN_REVIEW_CANONICAL_MARKER, comment_body)
     ctx.github.edit_labels(
         issue_number,
         add=[STATE_PLAN_BLOCKED],
@@ -1480,7 +1491,7 @@ def _publish_plan_blocked(
     ctx.github.upsert_issue_comment(
         issue_number,
         PLAN_REVIEW_CANONICAL_MARKER,
-        render_current_review(raw_review, revision=revision),
+        comment_body,
     )
     return True
 
@@ -1639,6 +1650,33 @@ def _verify_published_plan_state(item: WorkItem, ctx: StageContext) -> StageOutc
     return StageOutcome(Disposition.ADVANCE, "plan generated and verified")
 
 
+def _plan_discovery_stop_outcome(
+    item: WorkItem,
+    ctx: StageContext,
+    lookup: PlanDiscoveryResult,
+    *,
+    initial: bool,
+) -> StageOutcome | None:
+    """Convert a failed plan lookup into the stage outcome that preserves state."""
+    if lookup.status is PlanDiscoveryStatus.READ_ERROR:
+        if initial:
+            return _retry_incomplete_requirements_snapshot(
+                item,
+                ctx,
+                f"plan discovery failed: {lookup.error}",
+            )
+        return StageOutcome(
+            Disposition.RETRY,
+            f"plan discovery failed: {lookup.error}",
+        )
+    if lookup.status is PlanDiscoveryStatus.IDENTITY_CONFLICT:
+        return StageOutcome(
+            Disposition.BLOCKED,
+            f"plan marker identity conflict: {lookup.error}",
+        )
+    return None
+
+
 def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     """Publish or recover the candidate plan, then authorize advancement by label."""
     assert item.issue is not None  # noqa: S101 - stage validates the issue
@@ -1646,12 +1684,8 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
         return followup_outcome
 
     lookup = ctx.github.discover_plan(item.issue)
-    if lookup.status is PlanDiscoveryStatus.READ_ERROR:
-        return _retry_incomplete_requirements_snapshot(
-            item,
-            ctx,
-            f"plan discovery failed: {lookup.error}",
-        )
+    if stop_outcome := _plan_discovery_stop_outcome(item, ctx, lookup, initial=True):
+        return stop_outcome
 
     initial_plan_found = lookup.status is PlanDiscoveryStatus.FOUND
     plan_text = item.payload.get("plan_text")
@@ -1683,11 +1717,8 @@ def _verify_plan(item: WorkItem, ctx: StageContext) -> StageOutcome:
     # not authorize the handoff from that stale snapshot: another actor can
     # create or delete the canonical comment while VERIFY is running.
     verified_lookup = ctx.github.discover_plan(item.issue)
-    if verified_lookup.status is PlanDiscoveryStatus.READ_ERROR:
-        return StageOutcome(
-            Disposition.RETRY,
-            f"plan discovery failed: {verified_lookup.error}",
-        )
+    if stop_outcome := _plan_discovery_stop_outcome(item, ctx, verified_lookup, initial=False):
+        return stop_outcome
 
     if not awaiting_revision_candidate and (
         posted_plan or verified_lookup.status is PlanDiscoveryStatus.FOUND

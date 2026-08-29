@@ -16,7 +16,16 @@ from typing import Any, cast
 import hephaestus.automation.github_api as _api
 from hephaestus.utils.helpers import strip_null_bytes
 
+from ..comment_identity import (
+    has_marker_alias,
+    is_current_planning_marker,
+    is_planning_marker,
+    select_unambiguous_comment,
+    validate_planning_body_for_write,
+    validate_planning_comment_identities,
+)
 from ..models import IssueInfo, IssueState
+from ..protocol import comment_marker_aliases
 from ..review_journal import has_exact_leading_marker
 
 MAX_ISSUE_JOURNAL_COMMENTS = 2_000
@@ -327,12 +336,17 @@ def gh_issue_upsert_comment(
     The marker must be an opaque canonical marker at byte zero of the outgoing
     body. Display headings and historical heading-only comments are inert.
 
-    Behaviour:
-    - Find every existing comment whose body has the exact leading marker.
+    For a shared plan or review marker, this function delegates to the
+    authenticated-actor upsert path. That path rejects foreign, unverifiable,
+    repeated, and cross-role planning identities before it creates or updates
+    a comment. Other marker families retain the generic behavior below.
+
+    Generic behavior:
+    - Find every existing comment whose body has the exact top-level marker.
     - If none: create a new comment.
-    - If one or more: PATCH the newest matching comment with ``body`` and
-      DELETE the older duplicates (one-time convergence for issues that
-      already accumulated multiple plan/review comments).
+    - If one: PATCH it with ``body`` and verify the exact replacement.
+    - If more than one: stop for manual recovery. Selecting a newest comment
+      could delete an independent artifact.
 
     Args:
         issue_number: GitHub issue number.
@@ -340,8 +354,9 @@ def gh_issue_upsert_comment(
         body: The full new comment body (should itself start with the marker).
 
     Returns:
-        The ``databaseId`` of the upserted comment, or ``None`` if a fresh
-        comment was created via ``gh issue comment`` (whose id we do not parse).
+        The ``databaseId`` of an updated comment. A generic fresh comment
+        returns ``None``. A shared plan or review comment returns its verified
+        actor-owned ``databaseId`` after creation or update.
 
     Raises:
         RuntimeError: If a create/update/delete call fails.
@@ -349,48 +364,93 @@ def gh_issue_upsert_comment(
     """
     if not has_exact_leading_marker(body, marker_prefix):
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
+        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
+    validate_planning_body_for_write(marker_prefix, body)
+    if is_planning_marker(marker_prefix):
+        return gh_issue_upsert_owned_comment(
+            issue_number,
+            marker_prefix,
+            body,
+            repo=repo,
+        )
     comments = _api._fetch_issue_comment_ids(issue_number, repo)
     matching = [
-        c
-        for c in comments
-        if has_exact_leading_marker(str(c.get("body", "")), marker_prefix)
-        and c.get("databaseId") is not None
+        comment
+        for comment in comments
+        if has_marker_alias(str(comment.get("body", "")), (marker_prefix,))
+        and comment.get("databaseId") is not None
     ]
 
-    if not matching:
+    target = select_unambiguous_comment(
+        matching,
+        marker=marker_prefix,
+        aliases=(marker_prefix,),
+        body_of=lambda comment: str(comment.get("body", "")),
+        ownership="canonical",
+    )
+    if target is None:
         # No existing comment with this marker — create a fresh one.
         _api.gh_issue_comment(issue_number, body, repo=repo)
         return None
 
-    # Newest matching comment wins (list is chronological → last element).
-    target = matching[-1]
     target_id = int(target["databaseId"])
     owner, name = repo if repo is not None else _api.get_repo_info()
+    if str(target.get("body", "")) != body:
+        try:
+            with _body_file(body) as path:
+                _api._gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                        "-F",
+                        f"body=@{path}",
+                    ],
+                )
+            _api.logger.info("Updated issue comment %s (marker %r)", target_id, marker_prefix)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Failed to update issue comment {target_id} on #{issue_number}: {e}"
+            ) from e
 
-    # Delete older duplicates so only one comment with this marker remains.
-    for dup in matching[:-1]:
-        dup_id = dup.get("databaseId")
-        if dup_id is not None:
-            _api.gh_issue_delete_comment(int(dup_id), repo=repo)
-
-    try:
-        with _body_file(body) as path:
-            _api._gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ],
+        confirmed = select_unambiguous_comment(
+            [
+                comment
+                for comment in _api._fetch_issue_comment_ids(issue_number, repo)
+                if has_marker_alias(str(comment.get("body", "")), (marker_prefix,))
+                and comment.get("databaseId") is not None
+            ],
+            marker=marker_prefix,
+            aliases=(marker_prefix,),
+            body_of=lambda comment: str(comment.get("body", "")),
+            ownership="canonical",
+        )
+        if (
+            confirmed is None
+            or int(confirmed["databaseId"]) != target_id
+            or str(confirmed.get("body", "")) != body
+        ):
+            raise RuntimeError(
+                f"updated canonical comment {target_id} on #{issue_number} was not confirmed"
             )
-        _api.logger.info("Updated issue comment %s (marker %r)", target_id, marker_prefix)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Failed to update issue comment {target_id} on #{issue_number}: {e}"
-        ) from e
     return target_id
+
+
+def _validate_shared_planning_identities(
+    marker_prefix: str,
+    comments: list[dict[str, Any]],
+    *,
+    owned_of: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Reject unsafe shared planning identities before a role mutation."""
+    if is_planning_marker(marker_prefix):
+        validate_planning_comment_identities(
+            comments,
+            body_of=lambda comment: str(comment.get("body", "")),
+            owned_of=owned_of,
+        )
 
 
 def gh_issue_upsert_owned_comment(
@@ -401,12 +461,16 @@ def gh_issue_upsert_owned_comment(
 ) -> int | None:
     """Upsert only the authenticated actor's canonical comment.
 
-    Foreign marker-bearing comments are inert: they are never selected,
-    mutated, deleted, or treated as replay identity. This helper is the
-    standalone automation equivalent of ``PipelineGitHub.upsert_issue_comment``.
+    A shared or legacy planning marker on a foreign or unverifiable comment is
+    an identity conflict. Other marker families keep their existing ownership
+    behavior. This helper is the standalone automation equivalent of
+    ``PipelineGitHub.upsert_issue_comment``.
     """
+    if is_planning_marker(marker_prefix) and not is_current_planning_marker(marker_prefix):
+        raise ValueError("new planning comments must use a shared HomericIntelligence marker")
     if not has_exact_leading_marker(body, marker_prefix):
         raise ValueError(f"canonical comment body must start with marker {marker_prefix!r}")
+    validate_planning_body_for_write(marker_prefix, body)
     viewer_login = (_api.gh_current_login() or "").lower()
     if not viewer_login:
         raise RuntimeError("cannot verify GitHub comment ownership: viewer login unavailable")
@@ -418,46 +482,79 @@ def gh_issue_upsert_owned_comment(
         login = user.get("login") if isinstance(user, dict) else ""
         return bool(login) and str(login).lower() == viewer_login
 
-    def owned_with(comments: list[dict[str, Any]], marker: str) -> list[dict[str, Any]]:
+    marker_aliases = comment_marker_aliases(marker_prefix)
+
+    def owned_with(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             comment
             for comment in comments
             if is_owned(comment)
-            and has_exact_leading_marker(str(comment.get("body", "")), marker)
+            and has_marker_alias(str(comment.get("body", "")), marker_aliases)
             and comment.get("databaseId") is not None
         ]
 
     comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-    owned = owned_with(comments, marker_prefix)
-    if not owned:
+    _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+    owned = owned_with(comments)
+    target = select_unambiguous_comment(
+        owned,
+        marker=marker_prefix,
+        aliases=marker_aliases,
+        body_of=lambda comment: str(comment.get("body", "")),
+    )
+    if target is None:
         _api.gh_issue_comment(issue_number, body, repo=repo)
         # Re-read after create. This closes the concurrent-create window and
         # proves that the authenticated actor owns the canonical pointer.
         comments = _api.fetch_issue_comments_metadata(issue_number, repo)
-        owned = owned_with(comments, marker_prefix)
-        if not owned:
+        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+        owned = owned_with(comments)
+        target = select_unambiguous_comment(
+            owned,
+            marker=marker_prefix,
+            aliases=marker_aliases,
+            body_of=lambda comment: str(comment.get("body", "")),
+        )
+        if target is None:
             raise RuntimeError(
                 f"created canonical comment on #{issue_number} was not observable as actor-owned"
             )
 
-    target = owned[-1]
     target_id = int(target["databaseId"])
     owner, name = repo if repo is not None else _api.get_repo_info()
-    for duplicate in owned[:-1]:
-        duplicate_id = duplicate.get("databaseId")
-        if duplicate_id is not None:
-            _api.gh_issue_delete_comment(int(duplicate_id), repo=repo, missing_ok=True)
     if str(target.get("body", "")) != body:
-        with _body_file(body) as path:
-            _api._gh_call(
-                [
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"/repos/{owner}/{name}/issues/comments/{target_id}",
-                    "-F",
-                    f"body=@{path}",
-                ]
+        try:
+            with _body_file(body) as path:
+                _api._gh_call(
+                    [
+                        "api",
+                        "--method",
+                        "PATCH",
+                        f"/repos/{owner}/{name}/issues/comments/{target_id}",
+                        "-F",
+                        f"body=@{path}",
+                    ]
+                )
+        except subprocess.CalledProcessError as error:
+            raise RuntimeError(
+                f"Failed to update issue comment {target_id} on #{issue_number}: {error}"
+            ) from error
+        comments = _api.fetch_issue_comments_metadata(issue_number, repo)
+        _validate_shared_planning_identities(marker_prefix, comments, owned_of=is_owned)
+        owned = owned_with(comments)
+        target = select_unambiguous_comment(
+            owned,
+            marker=marker_prefix,
+            aliases=marker_aliases,
+            body_of=lambda comment: str(comment.get("body", "")),
+        )
+        if (
+            target is None
+            or int(target["databaseId"]) != target_id
+            or str(target.get("body", "")) != body
+        ):
+            raise RuntimeError(
+                f"updated canonical comment on #{issue_number} was not confirmed as actor-owned"
             )
     return target_id
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from hephaestus.automation.protocol import PLAN_REVIEW_PREFIX
 from hephaestus.automation.review_journal import (
     HISTORY_MARKER,
     MAX_CURRENT_REVISION_CONTEXT_CHARS,
@@ -18,10 +19,12 @@ from hephaestus.automation.review_journal import (
     current_revision_context,
     discover_plan_from_comments,
     is_journal_comment,
+    is_plan_review_comment,
     journal_snapshot,
     normalize_issue_comments,
     render_current_plan,
     render_current_review,
+    top_level_marker_occurrences,
 )
 
 
@@ -41,6 +44,197 @@ def test_plan_discovery_distinguishes_found_absent_and_read_error() -> None:
     assert failed.status is PlanDiscoveryStatus.READ_ERROR
 
 
+def test_plan_discovery_reports_foreign_shared_marker_as_identity_conflict() -> None:
+    """A foreign planning marker is a conflict and not an absent plan."""
+    foreign = IssueComment(
+        body="<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nForeign plan",
+        author_login="other-bot",
+        viewer_did_author=False,
+    )
+
+    result = discover_plan_from_comments([foreign])
+
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    assert result.error is not None
+
+
+@pytest.mark.parametrize(
+    "comments",
+    [
+        [
+            _owned("<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nCurrent"),
+            _owned("<!-- athena:plan-issue -->\n# Implementation Plan\n\nLegacy"),
+        ],
+        [
+            _owned(
+                "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nPlan\n\n"
+                "<!-- HomericIntelligence:plan-issue -->"
+            )
+        ],
+    ],
+)
+def test_plan_discovery_reports_ambiguous_owned_plan_identity(
+    comments: list[IssueComment],
+) -> None:
+    """Multiple qualifying plan aliases do not select a latest plan."""
+    result = discover_plan_from_comments(comments)
+
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    assert result.error is not None
+
+
+def test_journal_snapshot_rejects_one_owned_comment_with_plan_and_review_markers() -> None:
+    """One comment cannot identify both mutable planning roles."""
+    body = (
+        "<!-- HomericIntelligence:plan-issue -->\n# Implementation Plan\n\nPlan\n\n"
+        "<!-- HomericIntelligence:issue-review -->\n## Plan Review\n\nReview"
+    )
+
+    with pytest.raises(RuntimeError, match="plan and review"):
+        journal_snapshot([_owned(body)])
+
+
+def test_history_payload_marker_is_not_reinterpreted_as_a_current_plan() -> None:
+    """An immutable history artifact must not become a current plan."""
+    body = (
+        f"{HISTORY_MARKER.format(revision=1, kind='plan')}\n"
+        "## Previous plan\n\n"
+        "<!-- HomericIntelligence:plan-issue -->\n"
+        "# Historical payload"
+    )
+
+    result = discover_plan_from_comments([_owned(body)])
+
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    with pytest.raises(RuntimeError, match="immutable history artifact"):
+        journal_snapshot([_owned(body)])
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- HomericIntelligence:plan-issue -->",
+        "<!-- hephaestus-plan:canonical -->",
+        "<!-- athena:plan-issue -->",
+    ],
+)
+def test_plan_discovery_accepts_shared_and_legacy_plan_markers(marker: str) -> None:
+    """The shared marker works now while old actor-owned plans can migrate."""
+    body = f"{marker}\n# Implementation Plan\n\nPlan"
+
+    result = discover_plan_from_comments([_owned(body)])
+
+    assert result.status is PlanDiscoveryStatus.FOUND
+    assert result.plan_text == body
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_status", "expected_plan"),
+    [
+        (
+            "# Implementation Plan\n\nExisting plan context.\n"
+            "<!-- HomericIntelligence:plan-issue -->\n\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Existing plan context.\n\nPlan",
+        ),
+        (
+            "# Implementation Plan\n\nExisting plan context.\n<!-- athena:plan-issue -->\n\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Existing plan context.\n\nPlan",
+        ),
+        (
+            "# Implementation Plan\r\n\r\nExisting plan context.\r\n"
+            "<!-- athena:plan-issue -->\r\n\r\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Existing plan context.\r\n\r\nPlan",
+        ),
+        (
+            "```markdown\n<!-- HomericIntelligence:plan-issue -->\n```",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "> <!-- athena:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "- <!-- HomericIntelligence:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "    <!-- athena:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "Plan text <!-- HomericIntelligence:plan-issue -->",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "`<!-- athena:plan-issue -->`",
+            PlanDiscoveryStatus.ABSENT,
+            "",
+        ),
+        (
+            "\n<!-- HomericIntelligence:plan-issue -->\n\nPlan",
+            PlanDiscoveryStatus.FOUND,
+            "Plan",
+        ),
+    ],
+)
+def test_plan_discovery_uses_top_level_markdown_marker_grammar(
+    body: str,
+    expected_status: PlanDiscoveryStatus,
+    expected_plan: str,
+) -> None:
+    """Only exact top-level marker lines can identify plans during migration."""
+    comments = [_owned(body)]
+    result = discover_plan_from_comments(comments)
+
+    assert result.status is expected_status
+    assert journal_snapshot(comments).current_plan == expected_plan
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- HomericIntelligence:issue-review -->",
+        "<!-- athena:issue-review -->",
+    ],
+)
+def test_plan_review_detection_accepts_top_level_shared_and_legacy_markers(marker: str) -> None:
+    """Top-level review markers keep the same migration grammar as plans."""
+    body = f"{PLAN_REVIEW_PREFIX}\n\nPrior review context.\n{marker}\n\nReview"
+
+    snapshot = journal_snapshot([_owned(body)])
+
+    assert snapshot.current_review == "Prior review context.\n\nReview"
+
+
+def test_top_level_marker_occurrences_preserve_repeated_marker_claims() -> None:
+    """Identity resolution can detect repeated markers rather than select one."""
+    marker = "<!-- HomericIntelligence:plan-issue -->"
+    body = f"```markdown\n{marker}\n```\n\n{marker}\n\n{marker}"
+
+    assert top_level_marker_occurrences(body, (marker,)) == (marker, marker)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "<!-- HomericIntelligence:issue-review -->",
+        "<!-- hephaestus-plan-review:canonical -->",
+        "<!-- athena:issue-review -->",
+    ],
+)
+def test_plan_review_detection_accepts_shared_and_legacy_markers(marker: str) -> None:
+    """Review identity uses the same migration rule as plan identity."""
+    assert is_plan_review_comment(f"{marker}\n## Review")
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -55,8 +249,8 @@ def test_plan_discovery_rejects_whitespace_prefixed_journal_markers(body: str) -
     assert result.status is PlanDiscoveryStatus.ABSENT
 
 
-def test_normalization_derives_ownership_from_validated_logins() -> None:
-    """Ownership comes from REST author metadata and the authenticated viewer."""
+def test_normalization_reports_foreign_planning_marker_as_identity_conflict() -> None:
+    """Ownership metadata prevents a foreign plan from becoming a local plan."""
     comments = normalize_issue_comments(
         [
             {"body": render_current_plan("foreign"), "user": {"login": "other"}},
@@ -67,9 +261,8 @@ def test_normalization_derives_ownership_from_validated_logins() -> None:
 
     result = discover_plan_from_comments(comments)
 
-    assert result.status is PlanDiscoveryStatus.FOUND
-    assert result.plan_text is not None
-    assert "owned" in result.plan_text
+    assert result.status is PlanDiscoveryStatus.IDENTITY_CONFLICT
+    assert result.error is not None
 
 
 @pytest.mark.parametrize("body", [None, 1, {}, []])
@@ -82,23 +275,20 @@ def test_normalization_rejects_non_string_body(body: object) -> None:
         )
 
 
-def test_snapshot_ignores_foreign_marker_spoofing() -> None:
-    """Only comments proven to be actor-owned reconstruct canonical state."""
+def test_snapshot_rejects_foreign_marker_spoofing() -> None:
+    """A foreign planning marker is a conflict before journal reconstruction."""
     comments = [
         IssueComment(body=render_current_plan("foreign"), author_login="attacker"),
         _owned(render_current_plan("owned", revision=2)),
         _owned(render_current_review("Looks good.\n\nstate:plan-go", revision=2)),
     ]
 
-    snapshot = journal_snapshot(comments)
-
-    assert snapshot.revision == 2
-    assert snapshot.current_plan == "owned"
-    assert snapshot.current_review.endswith("state:plan-go")
+    with pytest.raises(RuntimeError, match="foreign or unverifiable"):
+        journal_snapshot(comments)
 
 
-def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
-    """Whitespace-prefixed journal markers are inert rather than canonical state."""
+def test_snapshot_rejects_whitespace_prefixed_markers_but_accepts_blank_lines() -> None:
+    """Blank lines retain top-level identity, but marker-line whitespace is inert."""
     snapshot = journal_snapshot(
         [
             _owned(f" \t{render_current_plan('spoofed', revision=8)}"),
@@ -109,7 +299,7 @@ def test_snapshot_requires_markers_at_the_first_raw_byte() -> None:
 
     assert snapshot.revision == 1
     assert snapshot.current_plan == ""
-    assert snapshot.current_review == ""
+    assert snapshot.current_review == "spoofed"
     assert snapshot.history == ()
 
 
@@ -140,16 +330,16 @@ def test_crlf_canonical_and_history_markers_are_recognized() -> None:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "expected"),
     [
-        f" {render_current_plan('spoofed')}",
-        f"\n{render_current_review('spoofed', revision=1)}",
-        f"\t{archive_plan_body(1, 'old', 'new')}",
+        (f" {render_current_plan('spoofed')}", False),
+        (f"\n{render_current_review('spoofed', revision=1)}", True),
+        (f"\t{archive_plan_body(1, 'old', 'new')}", False),
     ],
 )
-def test_journal_comment_requires_marker_at_first_raw_byte(body: str) -> None:
-    """Whitespace-prefixed protocol text is not removable journal state."""
-    assert is_journal_comment(body) is False
+def test_journal_comment_respects_markdown_marker_placement(body: str, expected: bool) -> None:
+    """Only exact top-level marker lines establish mutable journal identity."""
+    assert is_journal_comment(body) is expected
 
 
 def test_current_revision_context_excludes_superseded_plan_and_review_artifacts() -> None:
