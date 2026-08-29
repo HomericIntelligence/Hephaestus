@@ -14,7 +14,9 @@ import pytest
 from hephaestus.automation.pr_review_core import (
     AGGRESSIVE_DIFF_BUDGET_CHARS,
     DEFAULT_DIFF_BUDGET_CHARS,
+    MAX_PR_REVIEW_RENDERED_CHARS,
     budget_diff_for_prompt,
+    build_bounded_pr_review_analysis_prompt,
     gather_impl_review_context,
     run_pr_review_analysis,
 )
@@ -546,6 +548,38 @@ class TestRunPrReviewAnalysis:
     def test_prompt_too_long_not_confused_with_usage_cap(self) -> None:
         """PromptTooLongError is a distinct type from ClaudeUsageCapError."""
         assert issubclass(PromptTooLongError, RuntimeError)
+
+
+def test_bounded_review_prompt_preserves_receipts_without_exceeding_agent_limit() -> None:
+    """Large diffs and many host receipts cannot overflow a direct reviewer request."""
+    host_receipts = json.dumps(
+        [
+            {
+                "argv": ["uv", "run", "pytest", f"tests/unit/test_{index}.py"],
+                "head_sha": "a" * 40,
+                "immutable_source": True,
+                "ok": True,
+                "status": "passed",
+                "stdout_tail": "s" * 4_000,
+                "stderr_tail": "e" * 4_000,
+            }
+            for index in range(35)
+        ]
+    )
+
+    prompt = build_bounded_pr_review_analysis_prompt(
+        pr_number=2755,
+        issue_number=2705,
+        pr_diff=_make_diff_file("large.py", 20_000),
+        issue_body="issue context",
+        host_verifications_json=host_receipts,
+    )
+
+    assert len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS
+    assert "[... host verification output truncated ...]" in prompt
+    assert "tests/unit/test_0.py" in prompt
+    assert "tests/unit/test_34.py" in prompt
+    assert "[... PR diff truncated ...]" in prompt
 
 
 class TestStructuralAuditNotProse:

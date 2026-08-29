@@ -9,6 +9,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
 )
 from hephaestus.agents.workspace import SourceLane
+from hephaestus.automation.pr_review_core import build_bounded_pr_review_analysis_prompt
 
 from ..diagnostics import redact_diagnostic_text
 from ..github_jobs import (
@@ -368,7 +369,7 @@ class PrReviewJobs(_PrReviewHost):
             issue=issue,
             agent=agent_provider(ctx),
             model=stage_model(ctx, "reviewer", reviewer_model),
-            prompt_builder=get_pr_review_analysis_prompt,
+            prompt_builder=build_bounded_pr_review_analysis_prompt,
             cwd=workspace.cwd if workspace else _worktree_path(item, ctx),
             timeout_s=stage_timeout(ctx, "reviewer", pr_reviewer_claude_timeout),
             workspace=workspace,

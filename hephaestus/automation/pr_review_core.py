@@ -74,6 +74,18 @@ DEFAULT_DIFF_BUDGET_CHARS = 350_000
 #: "Prompt is too long" (#1847 suggested fix #2). ~60,000 chars ~= 15K tokens.
 AGGRESSIVE_DIFF_BUDGET_CHARS = 60_000
 
+#: Conservative maximum for the fully rendered direct-review prompt.  The
+#: Codex app-server request also includes agent and repository instructions,
+#: so the 1 MiB provider request limit must not be consumed by prompt data.
+MAX_PR_REVIEW_RENDERED_CHARS = 350_000
+
+_MAX_PR_REVIEW_DIFF_CHARS = 180_000
+_MAX_PR_REVIEW_ISSUE_BODY_CHARS = 30_000
+_MAX_PR_REVIEW_DESCRIPTION_CHARS = 20_000
+_MAX_PR_REVIEW_ADVISE_CHARS = 20_000
+_MAX_PR_REVIEW_RECEIPTS_CHARS = 64_000
+_MAX_HOST_RECEIPT_STREAM_CHARS = 512
+
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.* b/(.*)$", re.MULTILINE)
 
 
@@ -151,6 +163,133 @@ def budget_diff_for_prompt(diff_text: str, *, max_chars: int, composed_body_char
             f"trimming) to fit the diff budget ...]\n{index_lines}\n"
         )
     return result
+
+
+def _truncate_review_text(text: str, *, max_chars: int, label: str) -> str:
+    """Keep both ends of oversized untrusted review context with a clear marker."""
+    if len(text) <= max_chars:
+        return text
+    marker = f"\n\n[... {label} truncated ...]\n\n"
+    available = max_chars - len(marker)
+    if available <= 0:
+        return marker[:max_chars]
+    prefix_chars = (available * 3) // 4
+    return f"{text[:prefix_chars]}{marker}{text[-(available - prefix_chars) :]}"
+
+
+def _compact_host_verifications_json(host_verifications_json: str) -> str:
+    """Retain every host receipt while bounding diagnostic stream payloads."""
+    try:
+        parsed = json.loads(host_verifications_json)
+    except (TypeError, json.JSONDecodeError):
+        return _truncate_review_text(
+            host_verifications_json,
+            max_chars=_MAX_PR_REVIEW_RECEIPTS_CHARS,
+            label="host verification receipts",
+        )
+    if not isinstance(parsed, list):
+        return _truncate_review_text(
+            host_verifications_json,
+            max_chars=_MAX_PR_REVIEW_RECEIPTS_CHARS,
+            label="host verification receipts",
+        )
+
+    compacted: list[object] = []
+    for receipt in parsed:
+        if not isinstance(receipt, dict):
+            compacted.append(receipt)
+            continue
+        compact = dict(receipt)
+        for key in ("stdout_tail", "stderr_tail"):
+            value = compact.get(key)
+            if isinstance(value, str):
+                compact[key] = _truncate_review_text(
+                    value,
+                    max_chars=_MAX_HOST_RECEIPT_STREAM_CHARS,
+                    label="host verification output",
+                )
+        compacted.append(compact)
+    return _truncate_review_text(
+        json.dumps(compacted, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        max_chars=_MAX_PR_REVIEW_RECEIPTS_CHARS,
+        label="host verification receipts",
+    )
+
+
+def _budget_review_diff(diff_text: str, *, max_chars: int) -> str:
+    """Bound a review diff while retaining a sample of one oversized file."""
+    budgeted = budget_diff_for_prompt(
+        diff_text,
+        max_chars=max_chars + _PROMPT_FIXED_OVERHEAD_CHARS,
+    )
+    if not diff_text or len(diff_text) <= max_chars or len(budgeted) > max_chars // 4:
+        return budgeted
+    # Whole-file trimming intentionally drops a sole oversized file.  For an
+    # agent review, a bounded prefix/suffix sample is more useful than an
+    # otherwise empty diff index and still satisfies the hard input budget.
+    return _truncate_review_text(diff_text, max_chars=max_chars, label="PR diff")
+
+
+def build_bounded_pr_review_analysis_prompt(
+    pr_number: int,
+    issue_number: int,
+    pr_diff: str = "",
+    issue_body: str = "",
+    pr_description: str = "",
+    advise_findings: str = "",
+    host_verifications_json: str = "",
+    include_nitpicks: bool = False,
+    review_context_kind: str = "issue",
+) -> str:
+    """Render a direct PR-review prompt within the provider-safe input budget.
+
+    This is the shared boundary for direct and legacy review paths.  It keeps
+    the review's diff, issue context, and every receipt identity available,
+    while limiting unbounded diagnostic streams before prompt rendering.
+    """
+    bounded_diff = _budget_review_diff(pr_diff, max_chars=_MAX_PR_REVIEW_DIFF_CHARS)
+    bounded_issue_body = _truncate_review_text(
+        issue_body, max_chars=_MAX_PR_REVIEW_ISSUE_BODY_CHARS, label="issue body"
+    )
+    bounded_description = _truncate_review_text(
+        pr_description,
+        max_chars=_MAX_PR_REVIEW_DESCRIPTION_CHARS,
+        label="PR description",
+    )
+    bounded_advise = _truncate_review_text(
+        advise_findings,
+        max_chars=_MAX_PR_REVIEW_ADVISE_CHARS,
+        label="advise findings",
+    )
+    bounded_receipts = _compact_host_verifications_json(host_verifications_json)
+
+    def render(diff: str) -> str:
+        return get_pr_review_analysis_prompt(
+            pr_number=pr_number,
+            issue_number=issue_number,
+            pr_diff=diff,
+            issue_body=bounded_issue_body,
+            pr_description=bounded_description,
+            advise_findings=bounded_advise,
+            host_verifications_json=bounded_receipts,
+            include_nitpicks=include_nitpicks,
+            review_context_kind=review_context_kind,
+        )
+
+    prompt = render(bounded_diff)
+    if len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS:
+        return prompt
+
+    # The individual caps above retain normal review fidelity.  This final
+    # guard covers unusually large template overhead without corrupting the
+    # fenced prompt structure.
+    overflow = len(prompt) - MAX_PR_REVIEW_RENDERED_CHARS
+    reduced_diff = _truncate_review_text(
+        bounded_diff,
+        max_chars=max(0, len(bounded_diff) - overflow),
+        label="PR diff",
+    )
+    return render(reduced_diff)
 
 
 def _invoke_and_parse_review_session(
@@ -304,7 +443,7 @@ def run_pr_review_analysis(
 
     def _build_prompt(diff_override: str | None = None) -> str:
         diff_text = diff_override if diff_override is not None else context.get("pr_diff", "")
-        return get_pr_review_analysis_prompt(
+        return build_bounded_pr_review_analysis_prompt(
             pr_number=pr_number,
             issue_number=issue_number,
             pr_diff=diff_text,
@@ -335,11 +474,9 @@ def run_pr_review_analysis(
         try:
             parsed = _invoke_and_parse(prompt)
         except PromptTooLongError:
-            aggressive_diff = budget_diff_for_prompt(
+            aggressive_diff = _budget_review_diff(
                 context.get("pr_diff", ""),
-                max_chars=AGGRESSIVE_DIFF_BUDGET_CHARS,
-                composed_body_chars=len(context.get("issue_body", ""))
-                + len(context.get("advise_findings", "")),
+                max_chars=AGGRESSIVE_DIFF_BUDGET_CHARS - _PROMPT_FIXED_OVERHEAD_CHARS,
             )
             retry_prompt = _build_prompt(aggressive_diff)
             logger.warning(
