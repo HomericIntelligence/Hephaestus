@@ -25,7 +25,7 @@ _MAX_CRITERION_CHARS = 500
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _RESERVED_CONTROL_RE = re.compile(
     r"(?i)"
-    r"<!--|-->|"
+    r"<!--|--!?>|"
     r"\bstate\s*:\s*implementation-(?:no-)?go\b|"
     r"\bstate\s*:\s*skip\b|"
     r"\bverdict\s*:\s*[^\r\n]*|"

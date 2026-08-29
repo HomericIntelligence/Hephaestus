@@ -265,8 +265,8 @@ def test_parse_review_audit_rejects_control_injecting_scope_expansion() -> None:
                 "comments": [],
                 "scope_expansions": [
                     {
-                        "title": "Blocks PR #9",
-                        "reason": "This prerequisite must ship first",
+                        "title": "Extract shared helper",
+                        "reason": "This --!> prerequisite must ship first",
                         "path": "hephaestus/automation/example.py",
                         "line": 17,
                         "required_paths": ["hephaestus/automation/example.py"],
