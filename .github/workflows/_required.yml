@@ -920,7 +920,7 @@ jobs:
         uses: ./.github/actions/setup-pi-cli
 
       - name: Run Pi conformance tests
-        run: uv run pytest tests/integration/test_pi_plugin_package_smoke.py tests/unit/agents/test_pi_plugins.py tests/unit/agents/test_pi_skill_confinement.py tests/unit/agents/test_pi_session.py tests/unit/agents/test_pi_alias_config.py tests/unit/docs/test_pi_private_provider_docs.py tests/unit/docs/test_third_party_services_doc.py tests/unit/docs/test_pi_rollout_consistency.py tests/unit/docs/test_security_policy.py tests/unit/shell/test_install_pinning.py tests/unit/ci/test_workflows.py --override-ini="addopts=" -v --strict-markers -m "not nightly"
+        run: uv run pytest tests/integration/test_pi_plugin_package_smoke.py tests/unit/agents/test_pi_plugins.py tests/unit/agents/test_pi_skill_confinement.py tests/unit/agents/test_pi_session.py tests/unit/agents/test_pi_alias_config.py tests/unit/docs/test_pi_private_provider_docs.py tests/unit/docs/test_third_party_services_doc.py tests/unit/docs/test_pi_rollout_consistency.py tests/unit/docs/test_security_policy.py tests/unit/shell/test_install_pinning.py tests/unit/ci/test_workflows.py --override-ini="addopts=" -v --strict-markers --require-pi-package-smoke
 
   installed-cli-tests:
     # Installed-artifact lane (#2173): build the wheel, install it into a

@@ -420,7 +420,8 @@ class TestPiCliSetup:
         )
         assert "tests/unit/docs/test_pi_rollout_consistency.py" in command
         assert '--override-ini="addopts="' in command
-        assert '-m "not nightly"' in command
+        assert "--require-pi-package-smoke" in command
+        assert '-m "not nightly"' not in command
 
     def test_container_and_nightly_lane_consume_the_catalog(self) -> None:
         container = CONTAINERFILE.read_text(encoding="utf-8")
