@@ -65,6 +65,7 @@ credentials.json
 
 # Coverage reports
 .coverage
+coverage.xml
 htmlcov/
 .pytest_cache/
 
