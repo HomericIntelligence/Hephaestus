@@ -81,14 +81,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
     def _route_existing_threads_before_audit(
         item: WorkItem, ctx: StageContext
     ) -> StageOutcome | None:
-        """Route inherited threads to their responsible role before a new audit.
-
-        An unresolved thread lacking a current-head implementation response is
-        writer work, not input for another broad review.  Conversely, a
-        complete current-head response set enters the detached checkout only
-        for reviewer comment validation, where the reviewer may resolve the
-        threads or explain why they remain open.
-        """
+        """Route inherited threads to their responsible role before a new audit."""
         if item.pr is None:  # guarded by on_enter; keeps type narrowing local
             return StageOutcome(Disposition.FINISH_FAIL, "no_pr")
         entry = PrReviewStage._read_existing_thread_entry(item, ctx)
@@ -103,6 +96,15 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             return StageOutcome(Disposition.FINISH_FAIL, "direct_pr_no_head_branch")
         item.branch = branch
         item.payload["existing_pr"] = True
+
+        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
+        if is_full_commit_sha(reviewed_head) and _threads_predate_reviewed_head(
+            live_threads, reviewed_head
+        ):
+            # A later implementation may already address older findings.
+            item.payload.pop("reviewed_pr_head_sha", None)
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return None
 
         if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
             item.payload[_COMMENT_VALIDATION_ONLY] = True

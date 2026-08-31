@@ -363,6 +363,13 @@ def _clear_round_review_state(item: WorkItem) -> None:
     item.payload.pop("review_changed_paths", None)
 
 
+def _threads_predate_reviewed_head(threads: list[dict[str, Any]], head_sha: str) -> bool:
+    review_commits = (thread.get("review_commit_sha") for thread in threads)
+    return bool(threads) and all(
+        is_full_commit_sha(commit) and commit != head_sha for commit in review_commits
+    )
+
+
 def _parse_validation_result(raw: Any) -> dict[str, Any] | None:
     """Parse the validator job's output into its verdict dict, tolerantly.
 
@@ -837,6 +844,7 @@ __all__ = [
     '_parse_review_response', '_parse_validation_result', '_payload_host_verification_specs',
     '_pr_is_current_open_head', '_prepare_host_checks', '_review_context_kind',
     '_reviewer_thread_decisions', '_scope_retraction_paths', '_thread_ids',
+    '_threads_predate_reviewed_head',
     '_validation_pr_metadata_fingerprint', '_validation_receipt_fingerprints',
     '_validation_thread_snapshots', '_without_duplicate_live_findings', '_worktree_path',
     'agent_provider', 'annotations', 'cast', 'dataclass', 'get_pr_review_analysis_prompt',

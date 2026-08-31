@@ -505,6 +505,44 @@ class TestPrReviewStageOnEnter:
         assert item.payload["remediation_thread_snapshots"][0]["id"] == "live-thread-1001-0"
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
+    def test_on_enter_reaudits_when_every_open_thread_predates_the_live_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A new head is reviewed before stale findings can trigger another writer turn."""
+
+        class StaleThreadGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [
+                    {
+                        "id": "stale-thread",
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "body": "<!-- hephaestus-severity: major -->\nfinding",
+                        "author": "hephaestus[bot]",
+                        "authors": ["hephaestus[bot]"],
+                        "comments": [
+                            {
+                                "id": "stale-comment",
+                                "author": "hephaestus[bot]",
+                                "body": "finding",
+                            }
+                        ],
+                        "review_commit_sha": "b" * 40,
+                    }
+                ]
+
+        stage = PrReviewStage()
+        github = StaleThreadGitHub(pr_head_branch="1-auto-impl-direct-" + "b" * 32)
+        item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
+
+        assert stage.on_enter(item, make_ctx(github=github)) is None
+        assert item.payload["existing_pr"] is True
+        assert "implementation_remediation" not in item.payload
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert github.mutation_log == []
+
     def test_on_enter_routes_fully_replied_threads_to_comment_validation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
