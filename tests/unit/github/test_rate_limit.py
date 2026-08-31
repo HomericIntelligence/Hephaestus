@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import sys
 import time
+import types
 from datetime import UTC
 from pathlib import Path
-from unittest.mock import ANY, patch
+from typing import Any
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -546,6 +550,43 @@ class TestGhRateLimitResetEpoch:
 class TestGlobalThrottle:
     """Tests for gh_global_throttle_acquire (cross-process token bucket)."""
 
+    def _acquire_with_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        state_text: str,
+        monotonic_values: list[float],
+        rate: float = 10.0,
+        burst: float = 30.0,
+        fcntl_module: types.ModuleType | None = None,
+    ) -> tuple[list[float], Path]:
+        """Seed persisted state, run the throttle, and capture the repaired file."""
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        configure_gh_global_throttle(rate=rate, burst=burst)
+        state_path = _global_throttle_state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(state_text, encoding="utf-8")
+
+        sleep_calls: list[float] = []
+        if fcntl_module is not None:
+            monkeypatch.setitem(sys.modules, "fcntl", fcntl_module)
+
+        with (
+            patch(
+                "hephaestus.github.rate_limit.time.monotonic",
+                side_effect=monotonic_values,
+            ),
+            patch(
+                "hephaestus.github.rate_limit.time.sleep",
+                side_effect=lambda seconds: sleep_calls.append(seconds),
+            ),
+        ):
+            gh_global_throttle_acquire()
+
+        return sleep_calls, state_path
+
     def test_no_op_when_rate_zero(self, monkeypatch, tmp_path) -> None:
         monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
         monkeypatch.setenv("TMPDIR", str(tmp_path))
@@ -590,6 +631,186 @@ class TestGlobalThrottle:
             "tokens": 9.0,
             "updated": now,
         }
+        assert oct(state_path.parent.stat().st_mode & 0o777) == "0o700"
+        assert oct(state_path.stat().st_mode & 0o777) == "0o600"
+
+    def test_legacy_zero_updated_state_still_consumes_immediately(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Keep the historical ``updated == 0`` compatibility path."""
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text=json.dumps({"tokens": 10.0, "updated": 0.0}),
+            monotonic_values=[1_000.0],
+            rate=10.0,
+            burst=10.0,
+        )
+
+        assert sleep_calls == []
+        assert json.loads(state_path.read_text(encoding="utf-8")) == {
+            "tokens": 9.0,
+            "updated": 1_000.0,
+        }
+
+    def test_recovers_large_negative_persisted_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A large negative token count must not cause an unbounded sleep."""
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text='{"tokens": -48267844.04029503, "updated": 881395.267191934}',
+            monotonic_values=[881_395.367191934, 881_395.567191934],
+        )
+
+        assert sleep_calls == [pytest.approx(0.1)]
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert 0.0 <= state["tokens"] <= 30.0
+        assert state["updated"] == pytest.approx(881_395.567191934)
+
+    def test_recovers_future_persisted_timestamp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A future persisted timestamp must be treated as stale state."""
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text='{"tokens": 7.0, "updated": 1001.0}',
+            monotonic_values=[1_000.0, 1_000.2],
+        )
+
+        assert sleep_calls == [pytest.approx(0.1)]
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert 0.0 <= state["tokens"] <= 30.0
+        assert state["updated"] == pytest.approx(1_000.2)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("tokens", float("nan")),
+            ("tokens", float("inf")),
+            ("tokens", float("-inf")),
+            ("updated", float("nan")),
+            ("updated", float("inf")),
+            ("updated", float("-inf")),
+        ],
+    )
+    def test_recovers_non_finite_persisted_numbers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        field: str,
+        value: float,
+    ) -> None:
+        """Raw JSON non-finite values must be repaired before refill math."""
+        payload = {"tokens": 5.0, "updated": 1_000.0}
+        payload[field] = value
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text=json.dumps(payload),
+            monotonic_values=[1_000.0, 1_000.2],
+        )
+
+        assert sleep_calls == [pytest.approx(0.1)]
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert math.isfinite(state["tokens"])
+        assert math.isfinite(state["updated"])
+        assert 0.0 <= state["tokens"] <= 30.0
+        assert state["updated"] == pytest.approx(1_000.2)
+
+    @pytest.mark.parametrize(
+        "state_text",
+        [
+            "[]",
+            "{}",
+            '{"tokens": 1.0}',
+            '{"updated": 1.0}',
+            '{"tokens": true, "updated": 1.0}',
+            '{"tokens": null, "updated": 1.0}',
+            '{"tokens": "1.0", "updated": 1.0}',
+            '{"tokens": -1.0, "updated": 1.0}',
+            '{"tokens": 31.0, "updated": 1.0}',
+            '{"tokens": 1.0, "updated": -1.0}',
+            "123",
+        ],
+    )
+    def test_recovers_malformed_and_out_of_range_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        state_text: str,
+    ) -> None:
+        """Malformed or out-of-range persisted state must recover safely."""
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text=state_text,
+            monotonic_values=[1_000.0, 1_000.2],
+        )
+
+        assert sleep_calls == [pytest.approx(0.1)]
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert math.isfinite(state["tokens"])
+        assert math.isfinite(state["updated"])
+        assert 0.0 <= state["tokens"] <= 30.0
+        assert state["updated"] == pytest.approx(1_000.2)
+
+    def test_corrupt_state_recovery_is_bounded_and_rewrites_valid_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Recovery must stay within one token interval and write bounded state."""
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text='{"tokens": -1.0, "updated": 999.0}',
+            monotonic_values=[1_000.0, 1_000.2],
+            rate=10.0,
+            burst=30.0,
+        )
+
+        assert sleep_calls == [pytest.approx(0.1)]
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert math.isfinite(state["tokens"])
+        assert math.isfinite(state["updated"])
+        assert 0.0 <= state["tokens"] <= 30.0
+        assert state["updated"] <= 1_000.2
+
+    def test_corrupt_state_recovery_preserves_lock_and_file_security(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Recovery must keep the exclusive lock and secure file modes in place."""
+        fake_fcntl: Any = types.ModuleType("fcntl")
+        fake_fcntl.LOCK_EX = 1
+        fake_fcntl.LOCK_UN = 2
+        fake_fcntl.flock = MagicMock()
+
+        sleep_calls, state_path = self._acquire_with_state(
+            monkeypatch,
+            tmp_path,
+            state_text='{"tokens": -1.0, "updated": 999.0}',
+            monotonic_values=[1_000.0, 1_000.2],
+            fcntl_module=fake_fcntl,
+        )
+
+        assert sleep_calls == [pytest.approx(0.1)]
+        assert fake_fcntl.flock.call_args_list == [
+            call(ANY, fake_fcntl.LOCK_EX),
+            call(ANY, fake_fcntl.LOCK_UN),
+            call(ANY, fake_fcntl.LOCK_EX),
+            call(ANY, fake_fcntl.LOCK_UN),
+        ]
         assert oct(state_path.parent.stat().st_mode & 0o777) == "0o700"
         assert oct(state_path.stat().st_mode & 0o777) == "0o600"
 
