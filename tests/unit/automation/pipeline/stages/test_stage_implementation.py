@@ -49,6 +49,7 @@ from hephaestus.automation.pipeline.stages.implementation import (
 )
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.state_labels import (
+    STATE_BLOCKED,
     STATE_NEEDS_PLAN,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
@@ -296,6 +297,23 @@ class TestGate:
         assert result == StageOutcome(
             Disposition.BLOCKED,
             "plan is blocked pending external intervention",
+        )
+        assert github.mutation_log == []
+
+    def test_gate_live_blocked_label_stops_before_existing_pr_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A post-seeding state:blocked transition cannot dispatch remediation."""
+        stage = ImplementationStage()
+        github = FakeStageGitHub(labels=[STATE_BLOCKED, STATE_PLAN_GO], open_pr=1001)
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=7, state="GATE")
+
+        result = stage.step(item, ctx)
+
+        assert result == StageOutcome(
+            Disposition.BLOCKED,
+            "issue is blocked pending external intervention",
         )
         assert github.mutation_log == []
 

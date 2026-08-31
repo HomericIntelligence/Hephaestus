@@ -51,6 +51,7 @@ from hephaestus.automation.requirements_recovery import (
 )
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
+    STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -313,6 +314,8 @@ def _issue_exclusion_reason(facts: IssueFacts) -> str | None:
         return f"#{facts.number} tagged {STATE_SKIP}"
     if STATE_PLAN_BLOCKED in facts.labels and verified_finalized_plan(facts.body) is None:
         return f"#{facts.number} tagged {STATE_PLAN_BLOCKED} awaiting external intervention"
+    if STATE_BLOCKED in facts.labels:
+        return f"#{facts.number} tagged {STATE_BLOCKED} awaiting external intervention"
     return None
 
 
