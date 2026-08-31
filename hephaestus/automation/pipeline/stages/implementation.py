@@ -1358,6 +1358,13 @@ class ImplementationStage(Stage):
                 return StageOutcome(Disposition.FINISH_FAIL, "scope_retraction_base_unavailable")
             kwargs["scope_retraction_paths"] = scope_retraction_paths
             kwargs["scope_retraction_base_sha"] = base_sha
+            if requires_plan_scope_guard(agent):
+                kwargs["allowed_paths"] = tuple(
+                    sorted(
+                        set(cast(tuple[str, ...], kwargs["allowed_paths"]))
+                        | set(scope_retraction_paths)
+                    )
+                )
         push_job = GitJob(
             repo=item.repo,
             op="commit_push",

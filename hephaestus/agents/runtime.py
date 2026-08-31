@@ -235,10 +235,18 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
         raise AgentExecutionError("Codex automation requires a regular auth.json bridge")
     if not athena_cache_source.is_dir() or athena_cache_source.is_symlink():
         raise AgentExecutionError("Codex automation requires the admitted Athena plugin cache")
+    if any(path.is_symlink() for path in athena_cache_source.rglob("*")):
+        raise AgentExecutionError("Codex automation rejects symlinks in the Athena plugin cache")
 
     with tempfile.TemporaryDirectory(prefix="hephaestus-codex-") as temporary:
         profile = Path(temporary)
         profile.chmod(0o700)
+        profile_tmp = profile / "tmp"
+        profile_xdg_config = profile / "xdg" / "config"
+        profile_xdg_cache = profile / "xdg" / "cache"
+        profile_xdg_data = profile / "xdg" / "data"
+        for directory in (profile_tmp, profile_xdg_config, profile_xdg_cache, profile_xdg_data):
+            directory.mkdir(parents=True, mode=0o700)
         auth_destination = profile / CODEX_AUTH_FILENAME
         shutil.copy2(auth_source, auth_destination)
         auth_destination.chmod(0o600)
@@ -262,7 +270,25 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
                 )
             ),
         )
-        yield build_codex_child_env(codex_home=profile)
+        base_env = build_codex_child_env(codex_home=profile)
+        env: dict[str, str] = {
+            name: base_env[name]
+            for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
+            if name in base_env
+        }
+        env.update(
+            {
+                "CODEX_HOME": str(profile),
+                "HOME": str(profile),
+                "TMPDIR": str(profile_tmp),
+                "TMP": str(profile_tmp),
+                "TEMP": str(profile_tmp),
+                "XDG_CONFIG_HOME": str(profile_xdg_config),
+                "XDG_CACHE_HOME": str(profile_xdg_cache),
+                "XDG_DATA_HOME": str(profile_xdg_data),
+            }
+        )
+        yield env
 
 
 @dataclass(frozen=True)

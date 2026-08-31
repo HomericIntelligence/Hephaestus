@@ -4866,8 +4866,8 @@ class WorkerPool:
         if not allowed:
             return JobResult(ok=False, error="implementation approved scope is unavailable")
         probes = (
-            ["git", "diff", "--name-only", "-z"],
-            ["git", "diff", "--cached", "--name-only", "-z"],
+            ["git", "diff", "--no-renames", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--no-renames", "--name-only", "-z"],
             ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         )
         try:
@@ -4880,6 +4880,25 @@ class WorkerPool:
                     timeout=timeout,
                 )
                 changed.update(path for path in result.stdout.split("\0") if path)
+            upstream = git_utils.run(
+                ["git", "rev-parse", "--verify", "@{upstream}"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            ).stdout.strip()
+            merge_base = git_utils.run(
+                ["git", "merge-base", "HEAD", upstream],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            ).stdout.strip()
+            history = git_utils.run(
+                ["git", "diff", "--no-renames", "--name-only", "-z", f"{merge_base}..HEAD"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout,
+            )
+            changed.update(path for path in history.stdout.split("\0") if path)
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return JobResult(ok=False, error="cannot validate implementation edit scope")
         if not changed.issubset(allowed):

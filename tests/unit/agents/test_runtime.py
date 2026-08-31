@@ -1127,6 +1127,9 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
 
     with agent_runtime._codex_automation_profile() as environment:
         profile = Path(environment["CODEX_HOME"])
+        assert environment["HOME"] == str(profile)
+        assert environment["XDG_CONFIG_HOME"].startswith(f"{profile}/")
+        assert environment["TMPDIR"].startswith(f"{profile}/")
         assert (profile / "auth.json").read_text(encoding="utf-8") == '{"auth": "test"}\n'
         assert (profile / "plugins" / "cache" / "athena" / "marker.txt").read_text(
             encoding="utf-8"
@@ -1135,6 +1138,28 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
         assert '[plugins."athena@athena"]' in config
         assert "enabled = true" in config
         assert not (profile / "plugins" / "cache" / "unrelated").exists()
+
+
+def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The admitted plugin copy must not follow a nested external link."""
+    source_home = tmp_path / "source-codex-home"
+    plugin_cache = source_home / "plugins" / "cache" / "athena"
+    plugin_cache.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.write_text("unrelated\n", encoding="utf-8")
+    (plugin_cache / "nested-link").symlink_to(outside)
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="rejects symlinks"):
+        with agent_runtime._codex_automation_profile():
+            pass
 
 
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:

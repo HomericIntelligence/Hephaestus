@@ -7277,13 +7277,13 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
-    def test_commit_push_rejects_codex_edits_outside_the_canonical_plan(
+    def test_commit_push_rejects_precommitted_unplanned_2472_edit_before_push(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
         tmp_path: Path,
     ) -> None:
-        """A host allowlist stops an unplanned Codex edit before publication."""
+        """A host allowlist blocks #2472 even when the agent committed it first."""
         job = GitJob(
             repo="test/repo",
             op="commit_push",
@@ -7300,9 +7300,12 @@ class TestGitOps:
             patch(
                 "hephaestus.automation.git_utils.run",
                 side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout="origin/2472-auto-impl\n"),
+                    subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n"),
                     subprocess.CompletedProcess([], 0, stdout="scripts/run_ci_local.sh\0"),
-                    subprocess.CompletedProcess([], 0, stdout=""),
-                    subprocess.CompletedProcess([], 0, stdout=""),
                 ],
             ),
             patch("hephaestus.automation.pr_manager.commit_changes") as commit,
