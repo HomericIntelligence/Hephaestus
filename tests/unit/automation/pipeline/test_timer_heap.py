@@ -107,6 +107,7 @@ class TestTimerHeap:
         """Wake order follows wake_ts, not insertion order."""
         coordinator, clock = clocked
         ctx_now = coordinator._ctx_for_repo("repo-a").now_fn
+        assert ctx_now is not None
         assert ctx_now() == clock.now
         clock.now += 1.0
         assert ctx_now() == clock.now
