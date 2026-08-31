@@ -3009,6 +3009,22 @@ class TestMutatorMapping:
         assert fetch.call_args_list == [call(5), call(5)]
         post.assert_called_once_with(5, body)
 
+    def test_upsert_recovered_requirements_rejects_an_unsealed_prefix(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A recovery prefix alone cannot authorize a canonical comment write."""
+        body = f"{RECOVERY_PROVENANCE_PREFIX}v=2:unsealed -->\n\nrequirements"
+        fetch = MagicMock()
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(ValueError, match="canonical comment body must start"):
+            adapter.upsert_issue_comment(5, RECOVERY_PROVENANCE_PREFIX, body)
+
+        fetch.assert_not_called()
+        post.assert_not_called()
+
     def test_upsert_plan_comment_migrates_owned_legacy_marker_in_place(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
