@@ -1130,7 +1130,9 @@ jobs:
   security-workflow-scan:
     name: security/workflow-scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # The job builds the CI image before starting zizmor. Five minutes can
+    # expire while the scanner is still running on a cold runner.
+    timeout-minutes: 15
     needs: changes-gate
     if: needs.changes-gate.outputs.code_event == 'true'
     permissions:
