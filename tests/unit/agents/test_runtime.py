@@ -1123,6 +1123,21 @@ def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
 
 
+def test_resume_agent_session_rejects_unbound_codex_session(tmp_path: Path) -> None:
+    """Automation must not reuse a raw Codex session without a binding."""
+    with pytest.raises(
+        agent_runtime.AgentExecutionError,
+        match="Codex session resume is disabled without a bound session contract",
+    ):
+        agent_runtime.resume_agent_session(
+            "codex",
+            "thread-123",
+            "prompt",
+            cwd=tmp_path,
+            timeout=30,
+        )
+
+
 def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_path: Path) -> None:
     """A resumed read-only session must override permissive local defaults."""
     captured_cmd: list[str] = []

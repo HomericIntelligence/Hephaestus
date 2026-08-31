@@ -3683,7 +3683,6 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
-
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
@@ -3708,12 +3707,34 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
-
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["pi_dir"] == "/tmp/operator-pi"
+
+    def test_commit_push_binds_codex_publication_to_canonical_plan_paths(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A Codex writer can publish only paths named by its canonical plan."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence", config_overrides={"agent": "codex"})
+        item = make_work_item(issue=2472, repo="Hephaestus", state="COMMIT_PUSH_WAIT")
+        item.branch = "2472-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload["_implementation_file_claims"] = {
+            (("HomericIntelligence", "Hephaestus"), "hephaestus/automation/claude_invoke.py"),
+            (("HomericIntelligence", "Hephaestus"), "tests/unit/automation/test_claude_invoke.py"),
+        }
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs.get("allowed_paths") == (
+            "hephaestus/automation/claude_invoke.py",
+            "tests/unit/automation/test_claude_invoke.py",
+        )
 
     def test_commit_push_uses_configured_codex_implementer_model(
         self, make_ctx: Any, make_work_item: Any
@@ -3730,12 +3751,16 @@ class TestCommitPushAndPrCreate:
         item = make_work_item(issue=1, state="COMMIT_PUSH_WAIT")
         item.branch = "1-auto-impl"
         item.worktree = "/tmp/wt"
+        item.payload["_implementation_file_claims"] = {
+            ((ctx.org, item.repo), "hephaestus/automation/agent_config.py")
+        }
 
         result = stage.step(item, ctx)
 
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.kwargs["agent_model"] == "sol:medium"
+        assert result.job.kwargs["allowed_paths"] == ("hephaestus/automation/agent_config.py",)
 
     def test_commit_push_carries_the_sealed_implementation_base(
         self, make_ctx: Any, make_work_item: Any

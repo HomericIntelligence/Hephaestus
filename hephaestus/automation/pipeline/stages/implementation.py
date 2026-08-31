@@ -140,6 +140,7 @@ from ..reply_handoff import (
     implementation_reply_handoff,
     implementation_reply_handoff_journal_entry,
 )
+from ..admission import _fetch_planned_files
 from ..scope_retraction import is_safe_scope_retraction_path, scope_retraction_paths_for_threads
 from .base import (
     GIT_JOB_TIMEOUT_S,
@@ -1305,6 +1306,27 @@ class ImplementationStage(Stage):
         }
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
+        if agent == "codex":
+            planned_claims = item.payload.get("_implementation_file_claims")
+            if planned_claims is None:
+                planned = _fetch_planned_files(item.issue or issue, repo=(ctx.org, item.repo))
+                planned_claims = (
+                    {((ctx.org, item.repo), path) for path in planned} if planned else set()
+                )
+                item.payload["_implementation_file_claims"] = planned_claims
+            allowed_paths = tuple(
+                sorted(
+                    claim[1]
+                    for claim in planned_claims
+                    if isinstance(claim, tuple)
+                    and len(claim) == 2
+                    and claim[0] == (ctx.org, item.repo)
+                    and is_safe_scope_retraction_path(claim[1])
+                )
+            )
+            if not allowed_paths:
+                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
+            kwargs["allowed_paths"] = allowed_paths
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
             "_synced_default_branch_sha"
         )

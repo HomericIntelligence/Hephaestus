@@ -3014,15 +3014,8 @@ def resume_agent_session(
             raise PiSessionBindingError("Pi raw session id does not match its session binding")
         preflight = _require_pi_automation_admission(cwd, pi_dir=pi_dir)
     if is_codex(agent):
-        return resume_codex_session(
-            session_id,
-            prompt,
-            cwd=cwd,
-            timeout=timeout,
-            model=model,
-            sandbox=sandbox,
-            approval=approval,
-            process_tracker=process_tracker,
+        raise AgentExecutionError(
+            "Codex session resume is disabled without a bound session contract"
         )
     if is_opencode(agent):
         return resume_opencode_session(

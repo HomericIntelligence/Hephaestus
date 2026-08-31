@@ -39,6 +39,7 @@ from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_pol
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
+    is_codex,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
@@ -2255,7 +2256,7 @@ class WorkerPool:
                         disable_pi_automation=job.disable_pi_automation,
                         pi_dir=job.pi_dir,
                     )
-                elif job.resume_session_id:
+                elif job.resume_session_id and not is_codex(agent):
                     agent_result = resume_agent_session(
                         agent=agent,
                         session_id=job.resume_session_id,
@@ -4767,6 +4768,13 @@ class WorkerPool:
             str(job.kwargs.get("agent", "claude")),
         )
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
+        allowed_scope = self._verify_allowed_edit_scope(
+            Path(worktree_path),
+            allowed_paths=allowed_paths,
+            timeout=job.timeout_s,
+        )
+        if allowed_scope is not None:
+            return allowed_scope
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed = self._commit_if_changes_with_controlled_signing(
@@ -4843,6 +4851,40 @@ class WorkerPool:
                 value={"failure_kind": "signing_configuration"},
                 error=str(exc),
             )
+
+    @staticmethod
+    def _verify_allowed_edit_scope(
+        worktree_path: Path,
+        *,
+        allowed_paths: Collection[str] | None,
+        timeout: int,
+    ) -> JobResult | None:
+        """Reject an implementation edit outside its host-derived path allowlist."""
+        if allowed_paths is None:
+            return None
+        allowed = set(allowed_paths)
+        if not allowed:
+            return JobResult(ok=False, error="implementation approved scope is unavailable")
+        probes = (
+            ["git", "diff", "--name-only", "-z"],
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        )
+        try:
+            changed: set[str] = set()
+            for argv in probes:
+                result = git_utils.run(
+                    argv,
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout,
+                )
+                changed.update(path for path in result.stdout.split("\0") if path)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate implementation edit scope")
+        if not changed.issubset(allowed):
+            return JobResult(ok=False, error="implementation changed paths outside approved scope")
+        return None
 
     @staticmethod
     def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:

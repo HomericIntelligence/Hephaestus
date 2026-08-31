@@ -873,6 +873,42 @@ class TestWorkerPoolSubmitComplete:
         assert result.value == "codex output"
         assert result.session_id == "new-codex-session"
 
+    def test_codex_agent_job_starts_fresh_when_a_raw_session_is_saved(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+    ) -> None:
+        """Codex never reuses an unbound session ID from an earlier turn."""
+        job = _agent_job(agent="codex", resume_session_id="saved-codex-session")
+        session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
+
+        with (
+            patch(f"{_WP}.resolve_agent", return_value="codex"),
+            patch(f"{_WP}.resume_agent_session", return_value=session_result) as resume,
+            patch(f"{_WP}.run_agent_session", return_value=session_result) as run,
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _handle, result = completion_q.get(timeout=10)
+
+        resume.assert_not_called()
+        run.assert_called_once_with(
+            agent="codex",
+            prompt="test prompt",
+            cwd=job.cwd,
+            timeout=job.timeout_s,
+            model=job.model,
+            sandbox="workspace-write",
+            approval="never",
+            process_tracker=subprocess_registry.track_process_group,
+            execution_request=None,
+            resume_binding=None,
+            disable_pi_automation=False,
+            pi_dir=None,
+        )
+        assert result.ok is True
+        assert result.value == "continued"
+        assert result.session_id == "saved-codex-session"
+
     def test_pi_default_fails_before_worker_agent_admission(
         self,
         pool: WorkerPool,
@@ -7226,6 +7262,45 @@ class TestGitOps:
         )
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
+
+    def test_commit_push_rejects_codex_edits_outside_the_canonical_plan(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A host allowlist stops an unplanned Codex edit before publication."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2472,
+                "worktree_path": tmp_path,
+                "branch": "2472-auto-impl",
+                "agent": "codex",
+                "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+            },
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout="scripts/run_ci_local.sh\0"),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                ],
+            ),
+            patch("hephaestus.automation.pr_manager.commit_changes") as commit,
+            patch("hephaestus.automation.git_utils.push_branch") as push,
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "implementation changed paths outside approved scope"
+        commit.assert_not_called()
+        push.assert_not_called()
 
     def test_commit_push_fails_before_commit_when_signing_is_unavailable(
         self,
