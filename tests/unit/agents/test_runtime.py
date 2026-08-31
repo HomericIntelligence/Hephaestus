@@ -1081,10 +1081,19 @@ def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:
         "exec",
         "resume",
         "session-123",
+        "--ignore-user-config",
         "-c",
         'approval_policy="never"',
         "--json",
     ]
+
+
+def test_codex_base_cmd_ignores_shared_user_config_for_new_sessions(tmp_path: Path) -> None:
+    """Automation jobs must not load unrelated interactive Codex configuration."""
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, sandbox="read-only")
+
+    assert "--ignore-user-config" in cmd
 
 
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:

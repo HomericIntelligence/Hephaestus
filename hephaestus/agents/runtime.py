@@ -1638,6 +1638,10 @@ def _codex_base_cmd(
         ]
     )
     cmd.extend(_codex_model_args(model, use_default=resume_id is None))
+    # Automation must not load the operator's interactive Codex configuration.
+    # Authentication remains available through CODEX_HOME, while the job prompt,
+    # repository rules, and explicitly admitted plugin surface remain authoritative.
+    cmd.append("--ignore-user-config")
     if resume_id is not None:
         # ``codex exec resume`` does not accept the new-session --sandbox or
         # --ask-for-approval flags.  Its generic config overrides are the
