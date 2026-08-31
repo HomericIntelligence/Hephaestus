@@ -7319,6 +7319,56 @@ class TestGitOps:
         commit.assert_not_called()
         push.assert_not_called()
 
+    def test_direct_scope_commit_push_uses_its_base_pin_without_an_upstream(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A newly reserved direct writer validates committed paths from its base pin."""
+        pin = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2472,
+                "worktree_path": tmp_path,
+                "branch": "2472-auto-impl",
+                "agent": "codex",
+                "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+                "expected_remote_sha": pin,
+            },
+        )
+        with (
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout=""),
+                    subprocess.CompletedProcess(
+                        [], 0, stdout="hephaestus/automation/claude_invoke.py\0"
+                    ),
+                ],
+            ),
+            patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
+            patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        push.assert_called_once_with(
+            "2472-auto-impl",
+            pin,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
+
     def test_commit_push_fails_before_commit_when_signing_is_unavailable(
         self,
         pool: WorkerPool,

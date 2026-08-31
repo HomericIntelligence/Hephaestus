@@ -3025,6 +3025,27 @@ class TestMutatorMapping:
         fetch.assert_not_called()
         post.assert_not_called()
 
+    def test_upsert_recovered_requirements_rejects_an_owned_malformed_prefix(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed actor-owned recovery authority stops instead of being shadowed."""
+        malformed = f"{RECOVERY_PROVENANCE_PREFIX}v=2:unsealed -->\\n\\nrequirements"
+        fetch = MagicMock(
+            return_value=[{"body": malformed, "databaseId": 100, "viewerDidAuthor": True}]
+        )
+        post = MagicMock()
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        monkeypatch.setattr(github_api_mod, "gh_issue_comment", post)
+
+        with pytest.raises(RuntimeError, match="malformed actor-owned recovery provenance"):
+            adapter.upsert_issue_comment(
+                5,
+                RECOVERY_PROVENANCE_PREFIX,
+                render_recovered_requirements("source", "requirements", "a" * 64),
+            )
+
+        post.assert_not_called()
+
     def test_upsert_plan_comment_migrates_owned_legacy_marker_in_place(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:

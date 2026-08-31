@@ -4771,6 +4771,7 @@ class WorkerPool:
         allowed_scope = self._verify_allowed_edit_scope(
             Path(worktree_path),
             allowed_paths=allowed_paths,
+            history_base_sha=job.kwargs.get("expected_remote_sha"),
             timeout=job.timeout_s,
         )
         if allowed_scope is not None:
@@ -4857,6 +4858,7 @@ class WorkerPool:
         worktree_path: Path,
         *,
         allowed_paths: Collection[str] | None,
+        history_base_sha: object,
         timeout: int,
     ) -> JobResult | None:
         """Reject an implementation edit outside its host-derived path allowlist."""
@@ -4880,20 +4882,30 @@ class WorkerPool:
                     timeout=timeout,
                 )
                 changed.update(path for path in result.stdout.split("\0") if path)
-            upstream = git_utils.run(
-                ["git", "rev-parse", "--verify", "@{upstream}"],
-                cwd=worktree_path,
-                capture_output=True,
-                timeout=timeout,
-            ).stdout.strip()
-            merge_base = git_utils.run(
-                ["git", "merge-base", "HEAD", upstream],
-                cwd=worktree_path,
-                capture_output=True,
-                timeout=timeout,
-            ).stdout.strip()
+            if history_base_sha is None:
+                upstream = git_utils.run(
+                    ["git", "rev-parse", "--verify", "@{upstream}"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout,
+                ).stdout.strip()
+                history_base_sha = git_utils.run(
+                    ["git", "merge-base", "HEAD", upstream],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout,
+                ).stdout.strip()
+            if not _is_full_commit_sha(history_base_sha):
+                return JobResult(ok=False, error="cannot validate implementation edit scope")
             history = git_utils.run(
-                ["git", "diff", "--no-renames", "--name-only", "-z", f"{merge_base}..HEAD"],
+                [
+                    "git",
+                    "diff",
+                    "--no-renames",
+                    "--name-only",
+                    "-z",
+                    f"{history_base_sha}..HEAD",
+                ],
                 cwd=worktree_path,
                 capture_output=True,
                 timeout=timeout,

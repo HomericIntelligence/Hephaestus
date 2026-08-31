@@ -66,6 +66,35 @@ def _select_owned_comment(
     )
 
 
+def _reject_malformed_owned_recovery_provenance(
+    comments: list[dict[str, Any]],
+    *,
+    owned_of: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Fail closed when an actor-owned recovery prefix has an invalid seal."""
+    for comment in comments:
+        body = str(comment.get("body", ""))
+        if (
+            body.startswith(RECOVERY_PROVENANCE_PREFIX)
+            and owned_of(comment)
+            and parse_recovery_provenance(body) is None
+        ):
+            raise RuntimeError(
+                "malformed actor-owned recovery provenance; manual recovery is required"
+            )
+
+
+def _validate_recovery_provenance_comments(
+    marker: str,
+    comments: list[dict[str, Any]],
+    *,
+    owned_of: Callable[[dict[str, Any]], bool],
+) -> None:
+    """Validate recovery-specific comment authority when that role is selected."""
+    if marker == RECOVERY_PROVENANCE_PREFIX:
+        _reject_malformed_owned_recovery_provenance(comments, owned_of=owned_of)
+
+
 class PipelineGitHubIssueComments(_PipelineGitHubHost):
     """Own issue-comment mutations with planning identity checks."""
 
@@ -144,6 +173,9 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if self._skip(f"upsert {marker!r} comment on #{issue_number}"):
             return
         comments = self._repo_issue_comments(issue_number)
+        _validate_recovery_provenance_comments(
+            marker, comments, owned_of=self._comment_owned_by_viewer
+        )
         _validate_shared_planning_identities(
             comments,
             planning_marker=planning_marker,
@@ -154,6 +186,9 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if target is None:
             self._post_issue_comment(issue_number, body)
             comments = self._repo_issue_comments(issue_number)
+            _validate_recovery_provenance_comments(
+                marker, comments, owned_of=self._comment_owned_by_viewer
+            )
             _validate_shared_planning_identities(
                 comments,
                 planning_marker=planning_marker,
@@ -173,6 +208,9 @@ class PipelineGitHubIssueComments(_PipelineGitHubHost):
         if str(target.get("body", "")) != body:
             self._patch_issue_comment(int(target_id), body, repo=(owner, name))
             comments = self._repo_issue_comments(issue_number)
+            _validate_recovery_provenance_comments(
+                marker, comments, owned_of=self._comment_owned_by_viewer
+            )
             _validate_shared_planning_identities(
                 comments,
                 planning_marker=planning_marker,

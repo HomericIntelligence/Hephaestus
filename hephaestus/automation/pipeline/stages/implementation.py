@@ -417,6 +417,27 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
     )
 
 
+def _allowed_remediation_paths(
+    item: WorkItem,
+    allowed_paths: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    """Extend a plan allowlist with the validated anchors of accepted review findings."""
+    if not item.payload.get("implementation_remediation"):
+        return allowed_paths
+    remediation_threads = item.payload.get("remediation_threads")
+    if not isinstance(remediation_threads, list):
+        return None
+    remediation_paths: set[str] = set()
+    for thread in remediation_threads:
+        path = thread.get("path") if isinstance(thread, dict) else None
+        if not is_safe_scope_retraction_path(path):
+            return None
+        remediation_paths.add(path)
+    if not remediation_paths:
+        return None
+    return tuple(sorted(set(allowed_paths) | remediation_paths))
+
+
 class ImplementationStage(Stage):
     """Stage: gate plan GO, worktree, advise, implement, test, commit, PR."""
 
@@ -439,6 +460,7 @@ class ImplementationStage(Stage):
         if not item.issue:
             logger.warning("implementation: work item has no issue number")
             return StageOutcome(Disposition.FINISH_FAIL, "no issue number")
+
         return None
 
     def step(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -1328,7 +1350,10 @@ class ImplementationStage(Stage):
             )
             if not allowed_paths:
                 return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_paths_unavailable")
-            kwargs["allowed_paths"] = allowed_paths
+            remediation_allowed_paths = _allowed_remediation_paths(item, allowed_paths)
+            if remediation_allowed_paths is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "remediation_path_invalid")
+            kwargs["allowed_paths"] = remediation_allowed_paths
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
             "_synced_default_branch_sha"
         )

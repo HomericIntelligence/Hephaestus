@@ -3736,6 +3736,44 @@ class TestCommitPushAndPrCreate:
             "tests/unit/automation/test_claude_invoke.py",
         )
 
+    def test_commit_push_allows_an_anchored_ordinary_review_remediation_path(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An accepted review finding may add its anchored path to the host allowlist."""
+        stage = ImplementationStage()
+        ctx = make_ctx(org="HomericIntelligence", config_overrides={"agent": "codex"})
+        item = make_work_item(issue=2472, repo="Hephaestus", pr=1001, state="COMMIT_PUSH_WAIT")
+        item.branch = "2472-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "implementation_remediation": True,
+                "remediation_threads": [
+                    {
+                        "thread_id": "thread-1",
+                        "path": "hephaestus/config/guard.py",
+                        "line": 3,
+                        "body": "Fix this behavior.",
+                    }
+                ],
+                "_implementation_file_claims": {
+                    (
+                        ("HomericIntelligence", "Hephaestus"),
+                        "hephaestus/automation/claude_invoke.py",
+                    ),
+                },
+            }
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["allowed_paths"] == (
+            "hephaestus/automation/claude_invoke.py",
+            "hephaestus/config/guard.py",
+        )
+
     def test_commit_push_uses_configured_codex_implementer_model(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
