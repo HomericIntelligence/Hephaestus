@@ -90,6 +90,10 @@ CODEX_HAIKU_MODEL = "gpt-5.4-mini"
 CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
+CODEX_ATHENA_MARKETPLACE_SOURCE = "https://github.com/HomericIntelligence/Athena.git"
+CODEX_ATHENA_MARKETPLACE_REF = "main"
+CODEX_AUTH_FILENAME = "auth.json"
+CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena"
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
 PI_ISOLATION_ADAPTER_ENTRY_POINT_GROUP = "hephaestus.pi_isolation_adapters"
 PI_MODEL_CONFIG_RELATIVE_PATH = Path(".pi") / "agent" / "models.json"
@@ -212,6 +216,53 @@ def _claude_child_env() -> dict[str, str]:
 def _codex_child_env() -> dict[str, str]:
     """Return the named allowlisted environment for Codex."""
     return build_codex_child_env()
+
+
+@contextlib.contextmanager
+def _codex_automation_profile() -> Iterator[dict[str, str]]:
+    """Materialize the minimal Codex home admitted to automation jobs.
+
+    Codex authenticates through ``CODEX_HOME``.  Giving an automation process
+    the operator's full home would also load unrelated interactive settings,
+    hooks, marketplaces, and plugins.  This short-lived profile instead admits
+    only the authentication bridge and the Athena cache/configuration required
+    by the repository workflow.
+    """
+    source_home = Path(_codex_child_env()["CODEX_HOME"])
+    auth_source = source_home / CODEX_AUTH_FILENAME
+    athena_cache_source = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH
+    if not auth_source.is_file() or auth_source.is_symlink():
+        raise AgentExecutionError("Codex automation requires a regular auth.json bridge")
+    if not athena_cache_source.is_dir() or athena_cache_source.is_symlink():
+        raise AgentExecutionError("Codex automation requires the admitted Athena plugin cache")
+
+    with tempfile.TemporaryDirectory(prefix="hephaestus-codex-") as temporary:
+        profile = Path(temporary)
+        profile.chmod(0o700)
+        auth_destination = profile / CODEX_AUTH_FILENAME
+        shutil.copy2(auth_source, auth_destination)
+        auth_destination.chmod(0o600)
+        shutil.copytree(
+            athena_cache_source,
+            profile / CODEX_ATHENA_CACHE_RELATIVE_PATH,
+            ignore=shutil.ignore_patterns(".git"),
+        )
+        write_secure(
+            profile / "config.toml",
+            "\n".join(
+                (
+                    "[marketplaces.athena]",
+                    'source_type = "git"',
+                    f"source = {json.dumps(CODEX_ATHENA_MARKETPLACE_SOURCE)}",
+                    f"ref = {json.dumps(CODEX_ATHENA_MARKETPLACE_REF)}",
+                    "",
+                    '[plugins."athena@athena"]',
+                    "enabled = true",
+                    "",
+                )
+            ),
+        )
+        yield build_codex_child_env(codex_home=profile)
 
 
 @dataclass(frozen=True)
@@ -1652,10 +1703,10 @@ def _codex_base_cmd(
         ]
     )
     cmd.extend(_codex_model_args(model, use_default=resume_id is None))
-    # Automation must not load the operator's interactive Codex configuration.
-    # Authentication remains available through CODEX_HOME, while the job prompt,
-    # repository rules, and explicitly admitted plugin surface remain authoritative.
-    cmd.append("--ignore-user-config")
+    # The child receives a temporary CODEX_HOME with only its authentication
+    # bridge and the admitted Athena plugin.  Ignore ambient execpolicy files
+    # as well; repository instructions remain part of the worktree context.
+    cmd.append("--ignore-rules")
     if resume_id is not None:
         # ``codex exec resume`` does not accept the new-session --sandbox or
         # --ask-for-approval flags.  Its generic config overrides are the
@@ -1942,43 +1993,43 @@ def _run_codex_command(
     """Execute Codex with JSON events and return final text plus session id."""
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt") as output_file:
         cmd.extend(["--output-last-message", output_file.name, "-"])
-        env = _codex_child_env()
-        for key in CODEX_PARENT_CONTEXT_ENV_VARS:
-            env.pop(key, None)
-        try:
-            stdout_text, stderr_text = _communicate_codex_process(
-                cmd,
-                cwd=cwd,
-                prompt=prompt,
-                timeout=timeout,
-                env=env,
-                output_path=Path(output_file.name),
-                process_tracker=process_tracker,
-                final_message_grace_seconds=final_message_grace_seconds,
-            )
-        except subprocess.CalledProcessError as exc:
-            diagnostic = _codex_failure_diagnostic(
-                _coerce_timeout_output(exc.stdout),
-                _coerce_timeout_output(exc.stderr),
-            )
-            if diagnostic is not None:
-                raise AgentExecutionError(diagnostic) from exc
-            raise
-        except subprocess.TimeoutExpired as e:
-            last_message = Path(output_file.name).read_text(encoding="utf-8").strip()
-            stdout_text = _coerce_timeout_output(e.stdout)
-            stderr_text = _coerce_timeout_output(e.stderr)
-            diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
-            if diagnostic is not None:
-                raise AgentExecutionError(diagnostic) from e
-            if not last_message:
+        with _codex_automation_profile() as env:
+            for key in CODEX_PARENT_CONTEXT_ENV_VARS:
+                env.pop(key, None)
+            try:
+                stdout_text, stderr_text = _communicate_codex_process(
+                    cmd,
+                    cwd=cwd,
+                    prompt=prompt,
+                    timeout=timeout,
+                    env=env,
+                    output_path=Path(output_file.name),
+                    process_tracker=process_tracker,
+                    final_message_grace_seconds=final_message_grace_seconds,
+                )
+            except subprocess.CalledProcessError as exc:
+                diagnostic = _codex_failure_diagnostic(
+                    _coerce_timeout_output(exc.stdout),
+                    _coerce_timeout_output(exc.stderr),
+                )
+                if diagnostic is not None:
+                    raise AgentExecutionError(diagnostic) from exc
                 raise
-            session_id, _ = _parse_codex_json_events(stdout_text)
-            return AgentRunResult(
-                stdout=last_message,
-                stderr=stderr_text or f"Codex wrapper timed out after {timeout}s",
-                session_id=session_id,
-            )
+            except subprocess.TimeoutExpired as e:
+                last_message = Path(output_file.name).read_text(encoding="utf-8").strip()
+                stdout_text = _coerce_timeout_output(e.stdout)
+                stderr_text = _coerce_timeout_output(e.stderr)
+                diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)
+                if diagnostic is not None:
+                    raise AgentExecutionError(diagnostic) from e
+                if not last_message:
+                    raise
+                session_id, _ = _parse_codex_json_events(stdout_text)
+                return AgentRunResult(
+                    stdout=last_message,
+                    stderr=stderr_text or f"Codex wrapper timed out after {timeout}s",
+                    session_id=session_id,
+                )
         last_message = Path(output_file.name).read_text(encoding="utf-8")
 
     diagnostic = _codex_failure_diagnostic(stdout_text, stderr_text)

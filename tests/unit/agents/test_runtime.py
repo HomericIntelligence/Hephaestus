@@ -1081,19 +1081,47 @@ def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:
         "exec",
         "resume",
         "session-123",
-        "--ignore-user-config",
+        "--ignore-rules",
         "-c",
         'approval_policy="never"',
         "--json",
     ]
 
 
-def test_codex_base_cmd_ignores_shared_user_config_for_new_sessions(tmp_path: Path) -> None:
+def test_codex_base_cmd_uses_an_isolated_codex_profile_for_new_sessions(tmp_path: Path) -> None:
     """Automation jobs must not load unrelated interactive Codex configuration."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
         cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, sandbox="read-only")
 
-    assert "--ignore-user-config" in cmd
+    assert "--ignore-user-config" not in cmd
+    assert "--ignore-rules" in cmd
+
+
+def test_codex_automation_profile_admits_only_auth_and_athena(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The isolated profile retains auth plus the explicitly admitted Athena plugin."""
+    source_home = tmp_path / "source-codex-home"
+    plugin_cache = source_home / "plugins" / "cache" / "athena"
+    plugin_cache.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    (plugin_cache / "marker.txt").write_text("athena\n", encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+    with agent_runtime._codex_automation_profile() as environment:
+        profile = Path(environment["CODEX_HOME"])
+        assert (profile / "auth.json").read_text(encoding="utf-8") == '{"auth": "test"}\n'
+        assert (profile / "plugins" / "cache" / "athena" / "marker.txt").read_text(
+            encoding="utf-8"
+        ) == "athena\n"
+        config = (profile / "config.toml").read_text(encoding="utf-8")
+        assert '[plugins."athena@athena"]' in config
+        assert "enabled = true" in config
+        assert not (profile / "plugins" / "cache" / "unrelated").exists()
 
 
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
