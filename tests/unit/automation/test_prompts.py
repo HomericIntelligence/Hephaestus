@@ -92,6 +92,17 @@ def test_pr_analysis_prompt_example_is_accepted_by_review_parser() -> None:
     assert audit.findings
 
 
+def test_review_validation_prompt_reinforces_its_terminal_json_contract() -> None:
+    """The shared output directive cannot weaken validator JSON output."""
+    prompt = prompts.get_review_validation_prompt(
+        pr_number=1,
+        issue_number=1,
+        prior_comments_json="[]",
+    )
+
+    assert "End with exactly one fenced validation JSON object." in prompt
+
+
 def test_address_prompt_example_is_accepted_by_address_parser() -> None:
     """The address response example satisfies exhaustive reply validation."""
     rendered = prompts.get_address_review_prompt(
