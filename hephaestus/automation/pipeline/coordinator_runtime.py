@@ -9,14 +9,19 @@ from typing import cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
 import hephaestus.automation.pipeline.coordinator_types as ct
+import hephaestus.automation.pipeline.stages as stages_mod
+import hephaestus.automation.pipeline.stages.base as stage_base_mod
+import hephaestus.automation.pipeline.stages.repo as repo_stage_mod
+import hephaestus.automation.pipeline.summary as summary_mod
+import hephaestus.automation.pipeline.work_item as work_item_mod
 from hephaestus.automation.direct_review_recovery import (
     is_inspection_only_detached_push_failure,
     list_direct_review_recovery_paths,
 )
-from hephaestus.automation.pipeline.events import encode_stage_event
-from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob
-from hephaestus.automation.pipeline.stages.repo import is_full_commit_sha
-from hephaestus.automation.pipeline.summary import latest_logical_items, print_summary
+from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
+from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
+from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
+from hephaestus.automation.pipeline.routing import Disposition, Route
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
@@ -26,6 +31,7 @@ from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _DYNAMIC_METRIC_SERIES_CAP = 100
+_DIRECT_SCOPE_BOOTSTRAP_KEY = repo_stage_mod.DIRECT_SCOPE_BOOTSTRAP_KEY
 _PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
@@ -43,23 +49,23 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     _auxiliary_job_failure_count: int
     _pool_shut_down: bool
 
-    def _default_stages(self) -> dict[ct.StageName, ct.Stage]:
+    def _default_stages(self) -> dict[ct.StageName, stages_mod.Stage]:
         return {
-            ct.StageName.REPO: ct.RepoStage(),
-            ct.StageName.PLANNING: ct.PlanningStage(),
-            ct.StageName.PLAN_REVIEW: ct.PlanReviewStage(),
-            ct.StageName.IMPLEMENTATION: ct.ImplementationStage(),
-            ct.StageName.PR_REVIEW: ct.PrReviewStage(),
-            ct.StageName.MERGE_WAIT: ct.MergeWaitStage(),
-            ct.StageName.LEARNING: ct.LearningStage(),
-            ct.StageName.FINISHED: ct.FinishedStage(
+            ct.StageName.REPO: stages_mod.RepoStage(),
+            ct.StageName.PLANNING: stages_mod.PlanningStage(),
+            ct.StageName.PLAN_REVIEW: stages_mod.PlanReviewStage(),
+            ct.StageName.IMPLEMENTATION: stages_mod.ImplementationStage(),
+            ct.StageName.PR_REVIEW: stages_mod.PrReviewStage(),
+            ct.StageName.MERGE_WAIT: stages_mod.MergeWaitStage(),
+            ct.StageName.LEARNING: stages_mod.LearningStage(),
+            ct.StageName.FINISHED: stages_mod.FinishedStage(
                 self.ledger,
                 self.preserved,
                 self.recovery_preserved,
             ),
         }
 
-    def _ctx_for_repo(self, repo: str) -> ct.StageContext:
+    def _ctx_for_repo(self, repo: str) -> stages_mod.StageContext:
         ctx = self._ctx_cache.get(repo)
         if ctx is not None:
             self._ctx_cache.move_to_end(repo)
@@ -73,7 +79,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return root / "build" / ".automation-state"
 
         github_factory = self._github_factory
-        ctx = ct.StageContext(
+        ctx = stages_mod.StageContext(
             config=self.config,
             org=self.config.org,
             dry_run=self.config.dry_run,
@@ -104,7 +110,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._ctx_cache[repo] = ctx
         return ctx
 
-    def _ctx_for(self, item: ct.WorkItem) -> ct.StageContext:
+    def _ctx_for(self, item: ct.WorkItem) -> stages_mod.StageContext:
         """Return the (cached, per-repo) ct.StageContext for *item*."""
         return self._ctx_for_repo(item.repo)
 
@@ -115,7 +121,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return override
         return ct._budget_lookup(name)
 
-    def _record_stage_event(self, event: ct.StageEvent) -> None:
+    def _record_stage_event(self, event: StageEvent) -> None:
         """Validate and persist a closed-schema event emitted by a stage."""
         event_name, fields = encode_stage_event(event)
         self._record_event(event_name, fields)
@@ -312,7 +318,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._shutdown_pool()
             self._finalize_resumable()
             exit_code = self._exit_code()
-            stats = ct.RunStats(
+            stats = summary_mod.RunStats(
                 exit_code=exit_code,
                 loops_run=self._loops_run,
                 agent_job_count=self._agent_job_count,
@@ -336,7 +342,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                         "wall_s": stats.wall_s,
                     },
                 )
-                print_summary(
+                summary_mod.print_summary(
                     summary_items,
                     stats,
                     preserved,
@@ -353,17 +359,17 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _effective_items(self) -> list[ct.WorkItem]:
         """Return latest logical items, collapsing superseded re-seed attempts."""
-        return latest_logical_items(self.items)
+        return summary_mod.latest_logical_items(self.items)
 
-    def _active_preserved_worktrees(self) -> list[ct.PreservedWorktree]:
+    def _active_preserved_worktrees(self) -> list[work_item_mod.PreservedWorktree]:
         """Return extant failed-item worktrees for the latest logical items."""
         failed_items = {
             (item.repo, item.issue or item.pr or 0)
             for item in self._effective_items()
             if item.result is not None and not item.result.passed
         }
-        active: list[ct.PreservedWorktree] = []
-        seen: set[ct.PreservedWorktree] = set()
+        active: list[work_item_mod.PreservedWorktree] = []
+        seen: set[work_item_mod.PreservedWorktree] = set()
         for repo, issue_or_pr, path in self.preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or (repo, issue_or_pr) not in failed_items or not Path(path).exists():
@@ -372,10 +378,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             active.append(entry)
         return active
 
-    def _active_recovery_worktrees(self) -> list[ct.PreservedWorktree]:
+    def _active_recovery_worktrees(self) -> list[work_item_mod.PreservedWorktree]:
         """Return extant receipt-backed detached-review recovery worktrees."""
-        active: list[ct.PreservedWorktree] = []
-        seen: set[ct.PreservedWorktree] = set()
+        active: list[work_item_mod.PreservedWorktree] = []
+        seen: set[work_item_mod.PreservedWorktree] = set()
         for repo, issue_or_pr, path in self.recovery_preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or not Path(path).exists():
@@ -534,7 +540,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         enter: bool,
         result: ct.ItemResult | None = None,
     ) -> bool:
-        """ct.Route an item destination-first, retaining a full-target intent.
+        """Route an item destination-first, retaining a full-target intent.
 
         Direct unit-test calls do not own a source lease and retain the
         historical push behavior.  Normal drains always carry a lease, so a
@@ -720,11 +726,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
 
     def _record_resumable_recovery_worktrees(self, item: ct.WorkItem) -> None:
-        """Retain receipt-backed recovery paths when shutdown skips ct.FinishedStage.
+        """Retain receipt-backed recovery paths when shutdown skips FinishedStage.
 
         A worker writes a remote-drift receipt before returning the result that
         triggers a fresh review.  A shutdown can park that item before it ever
-        reaches ``ct.FinishedStage``, so collect the same durable evidence here
+        reaches ``FinishedStage``, so collect the same durable evidence here
         for the interrupt summary rather than losing the operator guidance.
         """
         direct_publication_interrupted = (
@@ -760,7 +766,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self.recovery_preserved.append(entry)
 
     @staticmethod
-    def _job_result_event_fields(result: ct.JobResult) -> dict[str, ct.Any]:
+    def _job_result_event_fields(result: JobResult) -> dict[str, ct.Any]:
         """Return bounded, output-free job result fields for durable event logs."""
         fields: dict[str, ct.Any] = {
             "ok": result.ok,
@@ -794,7 +800,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         return fields
 
     @staticmethod
-    def _job_result_error_class(result: ct.JobResult) -> str | None:
+    def _job_result_error_class(result: JobResult) -> str | None:
         """Classify job failures without persisting raw error text."""
         if result.error is None:
             return None
@@ -871,7 +877,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
                     if (
-                        item.kind is ct.ItemKind.REPO
+                        item.kind is work_item_mod.ItemKind.REPO
                         and item.state == "SOURCE"
                         and isinstance(item.payload.get("_repo_issue_source"), ct.RepoIssueSource)
                     ):
@@ -898,7 +904,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                         )
                         self._route(
                             item,
-                            ct.StageOutcome(ct.Disposition.ADVANCE, f"[dry-run] would {descr}"),
+                            ct.StageOutcome(Disposition.ADVANCE, f"[dry-run] would {descr}"),
                         )
                         return
                     self._submit(item, result)
@@ -917,7 +923,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._finish(item, passed=False, reason=f"poisoned: {exc}")
 
     def _step_with_watchdog(
-        self, stage: ct.Stage, item: ct.WorkItem, ctx: ct.StageContext
+        self, stage: stages_mod.Stage, item: ct.WorkItem, ctx: stages_mod.StageContext
     ) -> ct.StageStepResult:
         """Run one stage.step, warning when it breaches the <~60s contract."""
         t0 = self._monotonic()
@@ -936,10 +942,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     def _route(  # noqa: C901 - disposition table includes an auxiliary detour
         self, item: ct.WorkItem, outcome: ct.StageOutcome
     ) -> None:
-        """Apply the ct.Disposition -> action table (plan #1817)."""
-        if item.stage is ct.StageName.REPO and item.payload.get(
-            ct.DIRECT_SCOPE_BOOTSTRAP_KEY, False
-        ):
+        """Apply the Disposition-to-action table (plan #1817)."""
+        if item.stage is ct.StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._route_direct_scope_bootstrap(item, outcome)
             return
         route = self._routes.get(item.stage)
@@ -969,7 +973,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._release_work_permit(item)
             return
 
-        if disposition is ct.Disposition.ADVANCE:
+        if disposition is Disposition.ADVANCE:
             self._seed_products(item)
             if item.stage is ct.StageName.PLAN_REVIEW and item.learning_intents:
                 # Preserve the scope-trimmed primary destination before the
@@ -995,18 +999,18 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._handoff_item(item, target, enter=True)
             return
 
-        if disposition is ct.Disposition.RETRY:
+        if disposition is Disposition.RETRY:
             self._route_retry(item, outcome)
             return
 
-        if disposition is ct.Disposition.FAIL_BACK:
+        if disposition is Disposition.FAIL_BACK:
             self._route_fail_back(item, outcome, route)
             return
 
-        if disposition is ct.Disposition.SKIP:
+        if disposition is Disposition.SKIP:
             self._finish(item, passed=False, reason=f"skip: {outcome.note}")
             return
-        if disposition is ct.Disposition.EJECT:
+        if disposition is Disposition.EJECT:
             item.result = ct.ItemResult(
                 passed=True,
                 reason=f"ejected: {outcome.note}",
@@ -1016,10 +1020,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._release_source_lease(item)
             self._release_work_permit(item)
             return
-        if disposition is ct.Disposition.BLOCKED:
+        if disposition is Disposition.BLOCKED:
             self._finish(item, passed=False, reason=f"blocked: {outcome.note}")
             return
-        if disposition is ct.Disposition.FINISH_PASS:
+        if disposition is Disposition.FINISH_PASS:
             self._seed_products(item)
             if item.stage is ct.StageName.MERGE_WAIT and item.learning_intents:
                 primary_reason = outcome.note or "merged"
@@ -1058,7 +1062,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 return
             self._finish(item, passed=True, reason=outcome.note or "pass")
             return
-        # FINISH_FAIL (exhaustive over ct.Disposition)
+        # FINISH_FAIL (exhaustive over Disposition)
         self._finish(item, passed=False, reason=outcome.note or "fail")
 
     def _route_direct_scope_bootstrap(self, item: ct.WorkItem, outcome: ct.StageOutcome) -> None:
@@ -1070,10 +1074,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         never reaches an agent-capable stage unless the repo stage completed
         clone-plus-sync and then prepared the label vocabulary.
         """
-        if outcome.disposition is ct.Disposition.RETRY:
+        if outcome.disposition is Disposition.RETRY:
             self._route_retry(item, outcome)
             return
-        if outcome.disposition is not ct.Disposition.FINISH_PASS:
+        if outcome.disposition is not Disposition.FINISH_PASS:
             self._direct_scope_bootstrap_pending = False
             self._finish(
                 item,
@@ -1082,8 +1086,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             )
             return
 
-        base_sha = item.payload.get(ct.DIRECT_SCOPE_BASE_SHA_KEY)
-        if not is_full_commit_sha(base_sha):
+        base_sha = item.payload.get(repo_stage_mod.DIRECT_SCOPE_BASE_SHA_KEY)
+        if not repo_stage_mod.is_full_commit_sha(base_sha):
             if not self.config.dry_run:
                 self._direct_scope_bootstrap_pending = False
                 self._finish(
@@ -1108,14 +1112,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._begin_direct_pr_source(item.repo, base_sha)
                 self._begin_direct_issue_source(item.repo, base_sha)
                 raise StopIteration
-            store = ct.IssueWaveStore(repo_root, self.config.org, item.repo)
+            store = IssueWaveStore(repo_root, self.config.org, item.repo)
             checkpoint = store.load()
             if checkpoint is not None and checkpoint.status == "active":
                 linked_issues = set(self.config.issues)
                 for pr_number in self.config.prs:
                     issue_number = self._ctx_for_repo(item.repo).github.find_issue_for_pr(pr_number)
                     if issue_number is None:
-                        raise ct.IssueWaveError(f"PR #{pr_number} has no linked wave issue")
+                        raise IssueWaveError(f"PR #{pr_number} has no linked wave issue")
                     linked_issues.add(issue_number)
                 self._direct_wave_lease = store.bind_recovery_scope(
                     issue_numbers=linked_issues,
@@ -1177,7 +1181,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self,
         item: ct.WorkItem,
         job: object,
-        result: ct.JobResult,
+        result: JobResult,
     ) -> None:
         """Register a successful implementation writer worktree.
 
@@ -1213,7 +1217,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _branch_worktree_owner_status(
         self, item: ct.WorkItem, branch: str, owner_path: str
-    ) -> ct.BranchWorktreeOwnerStatus:
+    ) -> stage_base_mod.BranchWorktreeOwnerStatus:
         """Classify a branch holder as verified, pending, or unverified.
 
         A Git holder result by itself is not evidence of pipeline ownership.
@@ -1253,9 +1257,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 return "pending"
         return "unverified"
 
-    def _route_fail_back(
-        self, item: ct.WorkItem, outcome: ct.StageOutcome, route: ct.Route
-    ) -> None:
+    def _route_fail_back(self, item: ct.WorkItem, outcome: ct.StageOutcome, route: Route) -> None:
         """Apply the FAIL_BACK row: reason-keyed regression, globally capped.
 
         Dry-run mutators never write the gate labels the earlier stage would
@@ -1289,9 +1291,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         writer_key = (item.repo, item.branch)
         if self._pipeline_writer_worktrees.get(writer_key) is item:
             self._pipeline_writer_worktrees.pop(writer_key, None)
-        if item.stage is ct.StageName.REPO and item.payload.get(
-            ct.DIRECT_SCOPE_BOOTSTRAP_KEY, False
-        ):
+        if item.stage is ct.StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._direct_scope_bootstrap_pending = False
         if item.stage is ct.StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.

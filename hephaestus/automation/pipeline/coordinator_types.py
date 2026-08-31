@@ -74,105 +74,36 @@ error, 130 deliberately takes priority because the run did not complete.
 
 from __future__ import annotations
 
-from collections import Counter as Counter, OrderedDict as OrderedDict, deque as deque
+from collections import deque as deque
 from collections.abc import Callable as Callable, Iterator as Iterator
-from contextlib import suppress as suppress
-from dataclasses import dataclass as dataclass, field as field, replace as replace
+from dataclasses import dataclass as dataclass, field as field
 from pathlib import Path as Path
 from typing import Any as Any
 
 from jinja2 import TemplateNotFound as TemplateNotFound
 
 import hephaestus.automation.pipeline.admission as _admission
-from hephaestus.automation.direct_review_recovery import (
-    is_inspection_only_detached_push_failure as is_inspection_only_detached_push_failure,
-    list_direct_review_recovery_paths as list_direct_review_recovery_paths,
-)
-from hephaestus.automation.issue_waves import (
-    WAVE_LEASE_PAYLOAD as WAVE_LEASE_PAYLOAD,
-    WAVE_NON_CODE_PAYLOAD as WAVE_NON_CODE_PAYLOAD,
-    IssueWaveError as IssueWaveError,
-    IssueWaveStore as IssueWaveStore,
-    WaveLease as WaveLease,
-    wave_entry_from_facts as wave_entry_from_facts,
-)
-from hephaestus.automation.models import IssueInfo as IssueInfo
-from hephaestus.automation.pipeline.athena_executor_scope import (
-    pipeline_requires_athena_executor as pipeline_requires_athena_executor,
-)
-from hephaestus.automation.pipeline.coordinator_stage_config import (
-    _StageRunConfig as _StageRunConfig,
-)
-from hephaestus.automation.pipeline.events import (
-    StageEvent as StageEvent,
-    encode_stage_event as encode_stage_event,
-)
-from hephaestus.automation.pipeline.jobs import (
-    WORKTREE_MATERIALIZED_KEY as WORKTREE_MATERIALIZED_KEY,
-    AgentJob as AgentJob,
-    GitJob as GitJob,
-    JobHandle as JobHandle,
-    JobResult as JobResult,
-)
-from hephaestus.automation.pipeline.queues import (
-    CompletionQueue as CompletionQueue,
-    StageQueue as StageQueue,
-    StageQueueLease as StageQueueLease,
-)
+from hephaestus.automation.issue_waves import WaveLease as WaveLease
 from hephaestus.automation.pipeline.routing import (
     PIPELINE_ORDER as PIPELINE_ORDER,
     ROUTES as ROUTES,
-    Disposition as Disposition,
     PipelineScope as PipelineScope,
-    Route as Route,
     StageName as StageName,
     StageOutcome as StageOutcome,
 )
 from hephaestus.automation.pipeline.stages import (
     Continue as Continue,
-    FinishedStage as FinishedStage,
-    ImplementationStage as ImplementationStage,
     JobRequest as JobRequest,
-    LearningStage as LearningStage,
-    MergeWaitStage as MergeWaitStage,
-    PlanningStage as PlanningStage,
-    PlanReviewStage as PlanReviewStage,
-    PrReviewStage as PrReviewStage,
-    RepoStage as RepoStage,
-    Stage as Stage,
-    StageContext as StageContext,
-    StageGitHub as StageGitHub,
-)
-from hephaestus.automation.pipeline.stages.base import (
-    BranchWorktreeOwnerStatus as BranchWorktreeOwnerStatus,
 )
 from hephaestus.automation.pipeline.stages.implementation import (
     PRE_PR_TEST_ARGV as PRE_PR_TEST_ARGV,
 )
 from hephaestus.automation.pipeline.stages.repo import (
-    DIRECT_SCOPE_BASE_SHA_KEY as DIRECT_SCOPE_BASE_SHA_KEY,
-    DIRECT_SCOPE_BOOTSTRAP_KEY as DIRECT_SCOPE_BOOTSTRAP_KEY,
-    DIRECT_SCOPE_WORKTREE_NONCE_KEY as DIRECT_SCOPE_WORKTREE_NONCE_KEY,
     RepoIssueSource as RepoIssueSource,
-    is_full_commit_sha as is_full_commit_sha,
-    product_to_work_item as product_to_work_item,
-)
-from hephaestus.automation.pipeline.summary import (
-    RunStats as RunStats,
-    TerminalSummary as TerminalSummary,
-    latest_logical_items as latest_logical_items,
-    print_summary as print_summary,
 )
 from hephaestus.automation.pipeline.work_item import (
-    ItemKind as ItemKind,
     ItemResult as ItemResult,
-    PreservedWorktree as PreservedWorktree,
     WorkItem as WorkItem,
-)
-from hephaestus.automation.state_labels import (
-    STATE_IMPLEMENTATION_GO as STATE_IMPLEMENTATION_GO,
-    STATE_PLAN_BLOCKED as STATE_PLAN_BLOCKED,
-    is_epic as is_epic,
 )
 from hephaestus.prompts import PromptCatalog as PromptCatalog
 

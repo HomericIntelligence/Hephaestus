@@ -2,7 +2,8 @@
 
 from typing import Any, Protocol, cast
 
-from .coordinator_types import StageQueueLease, _PendingHandoff
+from .coordinator_types import _PendingHandoff
+from .queues import StageQueueLease
 
 
 class _HandoffHost(Protocol):

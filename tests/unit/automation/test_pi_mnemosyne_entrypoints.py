@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-from hephaestus.automation.pipeline.coordinator_types import (
-    PipelineConfig,
-    pipeline_requires_athena_executor,
-)
+from hephaestus.automation.pipeline.athena_executor_scope import pipeline_requires_athena_executor
+from hephaestus.automation.pipeline.coordinator_types import PipelineConfig
 from hephaestus.automation.pipeline.routing import PipelineScope, StageName
 
 

@@ -8,14 +8,16 @@ from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
+import hephaestus.automation.issue_waves as issue_waves_mod
 import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
-from hephaestus.automation.issue_waves import WAVE_NON_CODE_INTENT_PAYLOAD, wave_entry_from_facts
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO
+from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED
 
 from .coordinator_contract import _CoordinatorHost
-from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY
+from .stages import StageGitHub
+from .stages.repo import DIRECT_SCOPE_BOOTSTRAP_KEY, SYNCED_MAIN_SHA_KEY, product_to_work_item
+from .work_item import ItemKind
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
@@ -54,7 +56,7 @@ class SourceCoordinator(_CoordinatorHost):
         for lease in self._leases.values():
             candidates[id(lease.item)] = lease.item
         reservations = sum(
-            item.kind is ct.ItemKind.REPO and id(item) in self._live_work_permit_ids
+            item.kind is ItemKind.REPO and id(item) in self._live_work_permit_ids
             for item in candidates.values()
         )
         return len(self._repo_issue_sources) + reservations
@@ -118,11 +120,11 @@ class SourceCoordinator(_CoordinatorHost):
             github = self._ctx_for_repo(repo).github
             try:
                 facts = _seeding.seed_issue_from_github(number, github)
-                if source.wave_lease is None and ct.STATE_PLAN_BLOCKED in facts.labels:
+                if source.wave_lease is None and STATE_PLAN_BLOCKED in facts.labels:
                     github.ensure_blocked_audit(number)
                 entry = _seeding.seed_entry_from_facts(facts)
                 if source.wave_lease is not None:
-                    entry = wave_entry_from_facts(
+                    entry = issue_waves_mod.wave_entry_from_facts(
                         source.wave_lease,
                         facts,
                         entry,
@@ -156,12 +158,12 @@ class SourceCoordinator(_CoordinatorHost):
                 }:
                     self._pass_work_count += 1
                 if source.wave_lease is not None:
-                    new_item.payload[ct.WAVE_LEASE_PAYLOAD] = source.wave_lease
+                    new_item.payload[issue_waves_mod.WAVE_LEASE_PAYLOAD] = source.wave_lease
                     if entry.non_code:
                         if entry.stage is ct.StageName.FINISHED:
-                            new_item.payload[ct.WAVE_NON_CODE_PAYLOAD] = True
+                            new_item.payload[issue_waves_mod.WAVE_NON_CODE_PAYLOAD] = True
                         else:
-                            new_item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                            new_item.payload[issue_waves_mod.WAVE_NON_CODE_INTENT_PAYLOAD] = {
                                 "reason": entry.reason,
                                 "extra_labels": list(entry.non_code_labels),
                                 "evidence_digest": entry.non_code_evidence_digest,
@@ -185,7 +187,7 @@ class SourceCoordinator(_CoordinatorHost):
 
     def _record_repo_source_failure(self, repo: str, reason: str) -> None:
         """Retain a bounded terminal failure after a detached cursor aborts."""
-        item = ct.WorkItem(repo=repo, kind=ct.ItemKind.REPO, stage=ct.StageName.FINISHED)
+        item = ct.WorkItem(repo=repo, kind=ItemKind.REPO, stage=ct.StageName.FINISHED)
         item.result = ct.ItemResult(passed=False, reason=reason, final_stage=ct.StageName.REPO)
         item.payload["entry_stage"] = ct.StageName.REPO.value
         self.items.append(item)
@@ -193,13 +195,13 @@ class SourceCoordinator(_CoordinatorHost):
 
     def _seed_products(self, item: ct.WorkItem) -> None:
         """Push a terminal repo item's discovered products into entry queues."""
-        if item.kind is not ct.ItemKind.REPO:
+        if item.kind is not ItemKind.REPO:
             return
         for product in item.payload.pop("products", []):
             if product.get("stage") is None:
                 logger.info("[%s] excluded: %s", item.repo, product.get("reason", ""))
                 continue
-            new_item = ct.product_to_work_item(item.repo, product)
+            new_item = product_to_work_item(item.repo, product)
             if new_item is None:  # pragma: no cover - guarded by stage check above
                 continue
             if new_item.stage is ct.StageName.FINISHED:
@@ -222,17 +224,17 @@ class SourceCoordinator(_CoordinatorHost):
         keys: set[tuple[str, int]] = set()
         for q in self.queues.values():
             for it in q.snapshot():
-                if it.kind is ct.ItemKind.ISSUE and it.issue is not None:
+                if it.kind is ItemKind.ISSUE and it.issue is not None:
                     keys.add((it.repo, it.issue))
         for it in self.in_flight.values():
-            if it.kind is ct.ItemKind.ISSUE and it.issue is not None:
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
         for it in self.auxiliary_in_flight.values():
-            if it.kind is ct.ItemKind.ISSUE and it.issue is not None:
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
         for lease in self._leases.values():
             it = lease.item
-            if it.kind is ct.ItemKind.ISSUE and it.issue is not None:
+            if it.kind is ItemKind.ISSUE and it.issue is not None:
                 keys.add((it.repo, it.issue))
         return keys
 
@@ -269,7 +271,7 @@ class SourceCoordinator(_CoordinatorHost):
         is_new_item = id(item) not in self._seen_item_ids
         if (
             is_new_item
-            and item.kind is ct.ItemKind.ISSUE
+            and item.kind is ItemKind.ISSUE
             and item.issue is not None
             and (item.repo, item.issue) in self._live_issue_keys()
         ):
@@ -305,9 +307,9 @@ class SourceCoordinator(_CoordinatorHost):
     @staticmethod
     def _item_key(item: ct.WorkItem) -> str:
         """Human-readable item identity for logs and the event log."""
-        if item.kind is ct.ItemKind.REPO:
+        if item.kind is ItemKind.REPO:
             return item.repo
-        if item.kind is ct.ItemKind.PR:
+        if item.kind is ItemKind.PR:
             return f"{item.repo}!{item.pr}"
         return f"{item.repo}#{item.issue}"
 
@@ -367,14 +369,14 @@ class SourceCoordinator(_CoordinatorHost):
         self._direct_scope_bootstrap_pending = True
         if not repo:
             self._direct_scope_bootstrap_pending = False
-            item = ct.WorkItem(repo="", kind=ct.ItemKind.REPO, stage=ct.StageName.FINISHED)
+            item = ct.WorkItem(repo="", kind=ItemKind.REPO, stage=ct.StageName.FINISHED)
             item.result = ct.ItemResult(
                 passed=False,
                 reason="explicit --issues/--prs scope requires exactly one repository",
                 final_stage=ct.StageName.FINISHED,
             )
             return int(self._push_item(item, ct.StageName.FINISHED, enter=True))
-        item = ct.WorkItem(repo=repo, kind=ct.ItemKind.REPO, stage=ct.StageName.REPO)
+        item = ct.WorkItem(repo=repo, kind=ItemKind.REPO, stage=ct.StageName.REPO)
         item.payload[DIRECT_SCOPE_BOOTSTRAP_KEY] = True
         return int(self._push_item(item, ct.StageName.REPO, enter=True))
 
@@ -415,7 +417,7 @@ class SourceCoordinator(_CoordinatorHost):
                     break
                 except Exception as exc:
                     raise RuntimeError(f"repository discovery source failed: {exc}") from exc
-            item = ct.WorkItem(repo=repo, kind=ct.ItemKind.REPO, stage=ct.StageName.REPO)
+            item = ct.WorkItem(repo=repo, kind=ItemKind.REPO, stage=ct.StageName.REPO)
             if not self._push_item(item, ct.StageName.REPO, enter=True):
                 # The coordinator is single-threaded and the predicate above
                 # reserves both capacities. Retain exactly one retry value if
@@ -473,7 +475,7 @@ class SourceCoordinator(_CoordinatorHost):
             entry = self._seed_direct_issue_entry(source.repo, issue, github=github)
         else:
             facts = _seeding.seed_issue_from_github(issue, github)
-            entry = wave_entry_from_facts(
+            entry = issue_waves_mod.wave_entry_from_facts(
                 source.wave_lease,
                 facts,
                 _seeding.seed_entry_from_facts(facts),
@@ -489,12 +491,12 @@ class SourceCoordinator(_CoordinatorHost):
         if existing_pr is not None:
             item.branch = branch
         if source.wave_lease is not None:
-            item.payload[ct.WAVE_LEASE_PAYLOAD] = source.wave_lease
+            item.payload[issue_waves_mod.WAVE_LEASE_PAYLOAD] = source.wave_lease
             if entry.non_code:
                 if entry.stage is ct.StageName.FINISHED:
-                    item.payload[ct.WAVE_NON_CODE_PAYLOAD] = True
+                    item.payload[issue_waves_mod.WAVE_NON_CODE_PAYLOAD] = True
                 else:
-                    item.payload[WAVE_NON_CODE_INTENT_PAYLOAD] = {
+                    item.payload[issue_waves_mod.WAVE_NON_CODE_INTENT_PAYLOAD] = {
                         "reason": entry.reason,
                         "extra_labels": list(entry.non_code_labels),
                         "evidence_digest": entry.non_code_evidence_digest,
@@ -601,7 +603,7 @@ class SourceCoordinator(_CoordinatorHost):
             item = self._prepare_direct_item(entry, source.repo, source.base_sha)
             self._restore_learning_intents(item, entry.stage, entry.reason)
             if source.wave_lease is not None:
-                item.payload[ct.WAVE_LEASE_PAYLOAD] = source.wave_lease
+                item.payload[issue_waves_mod.WAVE_LEASE_PAYLOAD] = source.wave_lease
             if self._push_item(item, item.stage, enter=True, defer_if_full=True):
                 pushed += 1
             else:
@@ -704,7 +706,7 @@ class SourceCoordinator(_CoordinatorHost):
         return entries
 
     def _seed_direct_pr_scope(
-        self, repo: str, prs: Iterable[int] | None = None, *, github: ct.StageGitHub | None = None
+        self, repo: str, prs: Iterable[int] | None = None, *, github: StageGitHub | None = None
     ) -> list[_seeding.SeedEntry]:
         """Classify explicit PRs for compatibility callers or a one-PR source pull."""
         github = github or (self._ctx_for_repo(repo).github if repo else self.github)
@@ -841,11 +843,11 @@ class SourceCoordinator(_CoordinatorHost):
         """
         assert entry.stage is not None  # noqa: S101  # caller filters exclusions
         if entry.kind == "repo":
-            item = ct.WorkItem(repo=str(entry.identifier), kind=ct.ItemKind.REPO, stage=entry.stage)
+            item = ct.WorkItem(repo=str(entry.identifier), kind=ItemKind.REPO, stage=entry.stage)
         elif entry.kind == "pr":
             item = ct.WorkItem(
                 repo=default_repo,
-                kind=ct.ItemKind.PR,
+                kind=ItemKind.PR,
                 # Only a resolved, linked issue supplies requirements context.
                 # A PR number is not a safe substitute: its author controls
                 # the PR body, so an unlinked direct PR must remain orphaned
@@ -870,7 +872,7 @@ class SourceCoordinator(_CoordinatorHost):
         else:
             item = ct.WorkItem(
                 repo=default_repo,
-                kind=ct.ItemKind.ISSUE,
+                kind=ItemKind.ISSUE,
                 issue=int(entry.identifier),
                 pr=entry.pr_number,
                 stage=entry.stage,

@@ -11,20 +11,9 @@ if TYPE_CHECKING:
 
     from . import admission as _admission
     from .coordinator_types import (
-        CompletionQueue,
         ItemResult,
-        JobHandle,
         PipelineConfig,
-        PreservedWorktree,
         RepoIssueSource,
-        Route,
-        Stage,
-        StageContext,
-        StageGitHub,
-        StageName,
-        StageQueue,
-        StageQueueLease,
-        TerminalSummary,
         WorkItem,
         _ActiveRepoIssueSource,
         _DirectIssueSource,
@@ -32,6 +21,12 @@ if TYPE_CHECKING:
         _PendingHandoff,
         _RepoEntrySource,
     )
+    from .jobs import JobHandle
+    from .queues import CompletionQueue, StageQueue, StageQueueLease
+    from .routing import Route, StageName
+    from .stages import Stage, StageContext, StageGitHub
+    from .summary import TerminalSummary
+    from .work_item import PreservedWorktree
 
     class _CoordinatorHost(Protocol):
         """State and cross-collaborator methods supplied by ``Coordinator``."""

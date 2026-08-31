@@ -14,11 +14,21 @@ import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
 )
-from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES
+from hephaestus.automation.pipeline.jobs import JobHandle
+from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
+from hephaestus.automation.pipeline.routing import PIPELINE_ORDER, ROUTES, StageName
+from hephaestus.automation.pipeline.stages import Stage, StageContext, StageGitHub
 from hephaestus.automation.pipeline.stages.repo import (
     DIRECT_SCOPE_BASE_SHA_KEY,
     DIRECT_SCOPE_WORKTREE_NONCE_KEY,
     is_full_commit_sha,
+)
+from hephaestus.automation.pipeline.summary import TerminalSummary
+from hephaestus.automation.pipeline.work_item import (
+    ItemKind,
+    ItemResult,
+    PreservedWorktree,
+    WorkItem,
 )
 from hephaestus.automation.state_labels import STATE_PLAN_BLOCKED
 
@@ -27,29 +37,12 @@ from .coordinator_execution import ExecutionCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
+from .coordinator_stage_config import _StageRunConfig
 
 Any = ct.Any
-BranchWorktreeOwnerStatus = ct.BranchWorktreeOwnerStatus
-CompletionQueue = ct.CompletionQueue
-Disposition = ct.Disposition
-ItemKind = ct.ItemKind
-ItemResult = ct.ItemResult
-JobHandle = ct.JobHandle
 PipelineConfig = ct.PipelineConfig
-PipelineScope = ct.PipelineScope
-PreservedWorktree = ct.PreservedWorktree
-Route = ct.Route
-Stage = ct.Stage
-StageContext = ct.StageContext
-StageGitHub = ct.StageGitHub
-StageName = ct.StageName
-StageOutcome = ct.StageOutcome
-StageQueue = ct.StageQueue
-StageQueueLease = ct.StageQueueLease
 StageStepResult = ct.StageStepResult
-TerminalSummary = ct.TerminalSummary
 WaveLease = ct.WaveLease
-WorkItem = ct.WorkItem
 _ActiveRepoIssueSource = ct._ActiveRepoIssueSource
 _DirectIssueSource = ct._DirectIssueSource
 _DirectPrSource = ct._DirectPrSource
@@ -57,7 +50,6 @@ _FILE_OVERLAP_WARNING_THRESHOLD = ct._FILE_OVERLAP_WARNING_THRESHOLD
 _IDLE_POLL_S = ct._IDLE_POLL_S
 _PendingHandoff = ct._PendingHandoff
 _RepoEntrySource = ct._RepoEntrySource
-_StageRunConfig = ct._StageRunConfig
 _STALL_TICKS_BEFORE_FORCE = ct._STALL_TICKS_BEFORE_FORCE
 _STEP_WATCHDOG_S = ct._STEP_WATCHDOG_S
 _effective_repo_root = ct._effective_repo_root

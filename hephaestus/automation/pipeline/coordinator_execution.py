@@ -7,6 +7,7 @@ import queue as queue_mod
 from dataclasses import replace
 
 import hephaestus.automation.pipeline.coordinator_types as ct
+from hephaestus.automation.pipeline.jobs import AgentJob, JobHandle, JobResult
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import store_agent_session_result
@@ -95,7 +96,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         """Submit a frozen job to its lane and register its ownership."""
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
         job: ct.Any = request.job
-        if isinstance(job, ct.AgentJob):
+        if isinstance(job, AgentJob):
             ok, delay = self._rate_budget_ok()
             if not ok:
                 self._timer_park(item, delay)
@@ -178,7 +179,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         self._drain_completions()
 
     def _handle_completion(  # noqa: C901 - one protocol serves both closed lanes
-        self, handle: ct.JobHandle, result: ct.JobResult, *, auxiliary: bool = False
+        self, handle: JobHandle, result: JobResult, *, auxiliary: bool = False
     ) -> None:
         """Record and route one result from the lane that owned the job."""
         self._progress = True
@@ -210,7 +211,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             self.inflight_per_repo[item.repo] -= 1
             if self.inflight_per_repo[item.repo] <= 0:
                 del self.inflight_per_repo[item.repo]
-        if isinstance(handle.job, ct.AgentJob):
+        if isinstance(handle.job, AgentJob):
             self._agent_job_count += 1
             self._agent_job_time_s += result.duration_s
         if auxiliary:
@@ -229,7 +230,7 @@ class ExecutionCoordinator(_CoordinatorHost):
                     cancelled(item, ctx)
             self._park_resumable(item)
             return
-        if isinstance(handle.job, ct.AgentJob):
+        if isinstance(handle.job, AgentJob):
             session_error = store_agent_session_result(item, handle.job, result)
             if session_error is not None:
                 self._finish(item, passed=False, reason=session_error)
@@ -265,8 +266,8 @@ class ExecutionCoordinator(_CoordinatorHost):
     def _record_completion_metrics(
         self,
         item: ct.WorkItem,
-        handle: ct.JobHandle,
-        result: ct.JobResult,
+        handle: JobHandle,
+        result: JobResult,
         *,
         auxiliary: bool,
     ) -> None:
@@ -283,7 +284,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             },
             series_cap=len(_PIPELINE_STAGE_LABELS) * len(_JOB_OUTCOME_LABELS),
         ).inc(labels={"stage": item.stage.value, "outcome": outcome})
-        if isinstance(handle.job, ct.AgentJob):
+        if isinstance(handle.job, AgentJob):
             self._metrics_registry.counter(
                 "hephaestus_pipeline_agent_job_seconds_total",
                 "Cumulative agent job wall-clock seconds.",

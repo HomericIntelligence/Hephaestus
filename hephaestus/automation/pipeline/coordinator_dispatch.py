@@ -2,6 +2,7 @@ import logging
 
 import hephaestus.automation.pipeline.admission as _admission
 import hephaestus.automation.pipeline.coordinator_types as ct
+from hephaestus.automation.models import IssueInfo
 
 from .coordinator_contract import _CoordinatorHost
 
@@ -23,7 +24,7 @@ class ImplementationDispatcher(_CoordinatorHost):
 
         The queue is STAGE-keyed, so one drain round can hold issues from
         several repos (#1795), and dependency ordering runs across the whole
-        round on a shared issue-number space (``ct.IssueInfo`` docstring). Two
+        round on a shared issue-number space (``IssueInfo`` docstring). Two
         distinct work items therefore only conflict when they share the SAME
         ``(repo, issue)`` — that is the transient retry/fail-back re-enqueue we
         collapse below. Two DIFFERENT repos that happen to share an issue number
@@ -83,7 +84,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         """
         issue_items, ambiguous = self._index_issue_items(items)
         infos = [
-            ct.IssueInfo(
+            IssueInfo(
                 number=number,
                 title=str(item.payload.get("issue_title", "")),
                 dependencies=list(item.payload.get("dependencies", [])),
@@ -340,7 +341,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         ``ambiguous`` (issue number → its distinct items) and dispatch directly,
         bypassing the number-keyed topo/overlap gates, which cannot represent two
         items under one number. The ambiguity is inherent to the shared
-        issue-number-space dependency model (``ct.IssueInfo``); dispatching both is
+        issue-number-space dependency model (``IssueInfo``); dispatching both is
         correct — neither is a duplicate (#2057). ``issue is None`` items are
         skipped (dispatched elsewhere / re-queued).
         """
