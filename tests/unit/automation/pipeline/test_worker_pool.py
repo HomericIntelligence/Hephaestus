@@ -92,6 +92,20 @@ from hephaestus.resilience import CircuitBreakerOpenError, get_circuit_breaker
 from hephaestus.utils.file_lock import LockUnavailableError, file_lock
 from hephaestus.utils.helpers import get_repo_root
 
+
+@pytest.fixture(autouse=True)
+def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give mocked Codex processes the minimal admitted profile source."""
+    source_home = tmp_path / "codex-home"
+    (source_home / "plugins" / "cache" / "athena").mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+
 WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"

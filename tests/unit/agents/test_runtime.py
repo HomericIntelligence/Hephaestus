@@ -52,6 +52,19 @@ def private_pi_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return temp_dir
 
 
+@pytest.fixture(autouse=True)
+def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Give mocked Codex processes the same minimal profile source as production."""
+    source_home = tmp_path / "codex-home"
+    (source_home / "plugins" / "cache" / "athena").mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+
 def test_pi_capability_contract_separates_native_packages_and_unsupported_controls() -> None:
     """Pi's runtime boundary must expose its fail-closed parity contract."""
     capabilities = agent_runtime.AGENT_CAPABILITIES["pi"]
