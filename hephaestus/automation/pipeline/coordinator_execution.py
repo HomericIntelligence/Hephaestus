@@ -6,9 +6,10 @@ import logging
 import queue as queue_mod
 from dataclasses import replace
 
+import hephaestus.automation.pipeline.coordinator_types as ct
+
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_sessions import store_agent_session_result
-from .coordinator_types_ns import ct
 from .jobs import CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 

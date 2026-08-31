@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import hephaestus.automation.pipeline.admission as _admission
+import hephaestus.automation.pipeline.coordinator_types as ct
 import hephaestus.automation.pipeline.seeding as _seeding
 from hephaestus.automation.pipeline.athena_executor_scope import (
     pipeline_requires_athena_executor,
@@ -27,7 +28,6 @@ from .coordinator_execution import ExecutionCoordinator
 from .coordinator_learning import LearningRecoveryCoordinator
 from .coordinator_runtime import CoordinatorRuntime
 from .coordinator_sources import SourceCoordinator
-from .coordinator_types_ns import ct
 
 Any = ct.Any
 BranchWorktreeOwnerStatus = ct.BranchWorktreeOwnerStatus

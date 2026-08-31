@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 
 from hephaestus.automation.arming_state import LearningJournalStore
+import hephaestus.automation.pipeline.coordinator_types as ct
 
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_types_ns import ct
 from .work_item import LearningIntent
 
 Any = ct.Any

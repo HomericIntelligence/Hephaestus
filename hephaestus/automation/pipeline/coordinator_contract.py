@@ -41,12 +41,12 @@ if TYPE_CHECKING:
         _github_factory: Callable[[str, Path], StageGitHub] | None
         shutdown: Event
         _force_shutdown: Event
-        monotonic: Callable[[], float]
-        wall_time: Callable[[], float]
+        _monotonic: Callable[[], float]
+        _wall_time: Callable[[], float]
         shutdown_event: Event
         force_shutdown_event: Event
-        idle_poll_s: float
-        stall_ticks_before_force: int
+        _idle_poll_s: float
+        _stall_ticks_before_force: int
         _step_watchdog_s: float
         _file_overlap_warning_threshold: int
         completion_q: CompletionQueue
