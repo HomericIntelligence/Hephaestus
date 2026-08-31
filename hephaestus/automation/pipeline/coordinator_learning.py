@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from hephaestus.automation.arming_state import LearningJournalStore
 import hephaestus.automation.pipeline.coordinator_types as ct
+from hephaestus.automation.arming_state import LearningJournalStore
 
 from .coordinator_contract import _CoordinatorHost
 from .work_item import LearningIntent
-
-Any = ct.Any
-ItemResult = ct.ItemResult
-StageName = ct.StageName
-WorkItem = ct.WorkItem
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
@@ -23,8 +18,8 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
 
     def _restore_learning_intents(  # noqa: C901 - recovery validates durable mixed states
         self,
-        item: WorkItem,
-        primary_stage: StageName | None,
+        item: ct.WorkItem,
+        primary_stage: ct.StageName | None,
         primary_reason: str,
     ) -> None:
         """Route durable nonterminal learning records before normal work."""
@@ -34,7 +29,7 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
         if not isinstance(journal, LearningJournalStore):
             return
         records = journal.incomplete_for_issue(repo=item.repo, issue=item.issue)
-        if not records and primary_stage is StageName.FINISHED and item.pr is not None:
+        if not records and primary_stage is ct.StageName.FINISHED and item.pr is not None:
             records = self._adopt_legacy_post_merge_intent(item, journal)
         if not records:
             return
@@ -54,7 +49,7 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
         item.learning_intents = restored
         if not self.config.enable_learn:
             self._disable_valid_records(records, journal)
-            if primary_stage is StageName.FINISHED:
+            if primary_stage is ct.StageName.FINISHED:
                 terminal_record = next(
                     (record for record in records if "post_processing" in record),
                     records[0],
@@ -66,7 +61,7 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
             item.learning_intents.clear()
             return
         item.learning_resume_stage = primary_stage
-        if primary_stage is StageName.FINISHED:
+        if primary_stage is ct.StageName.FINISHED:
             item.payload["_learning_primary_reason"] = primary_reason
             terminal_record = next(
                 (record for record in records if "post_processing" in record),
@@ -77,10 +72,10 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
                 return
             if item.result is not None and not restored_terminal:
                 item.compact_for_post_processing(item.result)
-        item.stage = StageName.LEARNING
+        item.stage = ct.StageName.LEARNING
 
     @staticmethod
-    def _restore_post_processing(item: WorkItem, record: dict[str, Any]) -> bool:
+    def _restore_post_processing(item: ct.WorkItem, record: dict[str, ct.Any]) -> bool:
         """Restore one cleanup receipt or quarantine only its source item."""
         try:
             return item.restore_post_processing(record)
@@ -94,17 +89,17 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
             item.learning_intents = []
             item.learning_resume_stage = None
             item.post_processing = None
-            item.result = ItemResult(
+            item.result = ct.ItemResult(
                 passed=False,
                 reason="invalid durable learning recovery state",
-                final_stage=StageName.LEARNING,
+                final_stage=ct.StageName.LEARNING,
             )
-            item.stage = StageName.FINISHED
+            item.stage = ct.StageName.FINISHED
             return False
 
     @staticmethod
     def _disable_valid_records(
-        records: list[dict[str, Any]], journal: LearningJournalStore
+        records: list[dict[str, ct.Any]], journal: LearningJournalStore
     ) -> bool:
         """Disable records that contain a usable deterministic key."""
         all_disabled = True
@@ -118,9 +113,9 @@ class LearningRecoveryCoordinator(_CoordinatorHost):
 
     def _adopt_legacy_post_merge_intent(
         self,
-        item: WorkItem,
+        item: ct.WorkItem,
         journal: LearningJournalStore,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, ct.Any]]:
         """Convert a merged legacy learning state into the new journal once."""
         assert item.issue is not None and item.pr is not None  # noqa: S101
         github = self._ctx_for_repo(item.repo).github

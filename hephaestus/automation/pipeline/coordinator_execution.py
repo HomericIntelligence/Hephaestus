@@ -13,43 +13,9 @@ from .coordinator_sessions import store_agent_session_result
 from .jobs import CompactJob
 from .routing import AUXILIARY_PIPELINE_ORDER
 
-Any = ct.Any
-AgentJob = ct.AgentJob
-CompletionQueue = ct.CompletionQueue
-Continue = ct.Continue
-Disposition = ct.Disposition
-ItemKind = ct.ItemKind
-ItemResult = ct.ItemResult
-JobHandle = ct.JobHandle
-JobRequest = ct.JobRequest
-JobResult = ct.JobResult
-PipelineConfig = ct.PipelineConfig
-PipelineScope = ct.PipelineScope
-PreservedWorktree = ct.PreservedWorktree
-Route = ct.Route
-Stage = ct.Stage
-StageContext = ct.StageContext
-StageGitHub = ct.StageGitHub
-StageName = ct.StageName
-StageOutcome = ct.StageOutcome
-StageQueue = ct.StageQueue
-StageQueueLease = ct.StageQueueLease
-StageStepResult = ct.StageStepResult
-TerminalSummary = ct.TerminalSummary
-WorkItem = ct.WorkItem
-_ActiveRepoIssueSource = ct._ActiveRepoIssueSource
-_DirectIssueSource = ct._DirectIssueSource
-_DirectPrSource = ct._DirectPrSource
-_PendingHandoff = ct._PendingHandoff
-_RepoEntrySource = ct._RepoEntrySource
-_StageRunConfig = ct._StageRunConfig
-_budget_lookup = ct._budget_lookup
-_effective_repo_root = ct._effective_repo_root
-_work_window = ct._work_window
-
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
-_PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in StageName)
+_PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 
 
@@ -68,7 +34,9 @@ class ExecutionCoordinator(_CoordinatorHost):
         """Return the number of nonterminal auxiliary permits."""
         return len(self._learning_work_permit_ids)
 
-    def _try_acquire_work_permit(self, item: WorkItem, stage: StageName | None = None) -> bool:
+    def _try_acquire_work_permit(
+        self, item: ct.WorkItem, stage: ct.StageName | None = None
+    ) -> bool:
         """Reserve capacity in the lane that owns the target stage."""
         item_id = id(item)
         target = stage or item.stage
@@ -81,39 +49,39 @@ class ExecutionCoordinator(_CoordinatorHost):
             return True
         if item_id in self._live_work_permit_ids:
             return True
-        if self.live_work_count >= _work_window(self.config):
+        if self.live_work_count >= ct._work_window(self.config):
             return False
         self._live_work_permit_ids.add(item_id)
         return True
 
-    def _release_work_permit(self, item: WorkItem) -> None:
+    def _release_work_permit(self, item: ct.WorkItem) -> None:
         """Release every lane permit held by an item."""
         self._live_work_permit_ids.discard(id(item))
         self._learning_work_permit_ids.discard(id(item))
 
-    def _lane_handoff_capacity(self, item: WorkItem, target: StageName) -> bool:
+    def _lane_handoff_capacity(self, item: ct.WorkItem, target: ct.StageName) -> bool:
         """Check destination capacity before source ownership is released."""
         # FINISHED is a terminal sink, not a working lane: it must never reject
         # a handoff or a burst of terminalizations would wedge the source drain
         # (its lease stays active and the drain bails). This is the
         # #2057 duplicate-collapse path — three copies of one issue terminalize
         # in a single drain round while the first copy dispatches.
-        if target is StageName.FINISHED:
+        if target is ct.StageName.FINISHED:
             return True
         source_auxiliary = self._is_auxiliary_stage(item.stage)
         target_auxiliary = self._is_auxiliary_stage(target)
         if not source_auxiliary and target_auxiliary:
             return self.learning_work_count < self.config.learning_queue_capacity
         if source_auxiliary and not target_auxiliary:
-            return self.live_work_count < _work_window(self.config)
+            return self.live_work_count < ct._work_window(self.config)
         return True
 
     @staticmethod
-    def _is_auxiliary_stage(stage: StageName) -> bool:
+    def _is_auxiliary_stage(stage: ct.StageName) -> bool:
         """Return whether a stage uses the auxiliary permit and worker lane."""
         return stage in AUXILIARY_PIPELINE_ORDER
 
-    def _persist_learning_intents(self, item: WorkItem) -> None:
+    def _persist_learning_intents(self, item: ct.WorkItem) -> None:
         """Write every intent before a destination queue owns the item."""
         journal = self._ctx_for_repo(item.repo).learning_journal
         for intent in item.learning_intents:
@@ -123,11 +91,11 @@ class ExecutionCoordinator(_CoordinatorHost):
                 identity=item.learning_journal_identity(intent),
             )
 
-    def _submit(self, item: WorkItem, request: JobRequest) -> None:
+    def _submit(self, item: ct.WorkItem, request: ct.JobRequest) -> None:
         """Submit a frozen job to its lane and register its ownership."""
         assert not self.config.dry_run, "dry-run must never submit jobs"  # noqa: S101
-        job: Any = request.job
-        if isinstance(job, AgentJob):
+        job: ct.Any = request.job
+        if isinstance(job, ct.AgentJob):
             ok, delay = self._rate_budget_ok()
             if not ok:
                 self._timer_park(item, delay)
@@ -210,7 +178,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         self._drain_completions()
 
     def _handle_completion(  # noqa: C901 - one protocol serves both closed lanes
-        self, handle: JobHandle, result: JobResult, *, auxiliary: bool = False
+        self, handle: ct.JobHandle, result: ct.JobResult, *, auxiliary: bool = False
     ) -> None:
         """Record and route one result from the lane that owned the job."""
         self._progress = True
@@ -242,7 +210,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             self.inflight_per_repo[item.repo] -= 1
             if self.inflight_per_repo[item.repo] <= 0:
                 del self.inflight_per_repo[item.repo]
-        if isinstance(handle.job, AgentJob):
+        if isinstance(handle.job, ct.AgentJob):
             self._agent_job_count += 1
             self._agent_job_time_s += result.duration_s
         if auxiliary:
@@ -255,13 +223,13 @@ class ExecutionCoordinator(_CoordinatorHost):
         stage = self.stages[item.stage]
         ctx = self._ctx_for(item)
         if result.interrupted:
-            if item.stage is StageName.LEARNING and result.error == "interrupted_before_start":
+            if item.stage is ct.StageName.LEARNING and result.error == "interrupted_before_start":
                 cancelled = getattr(stage, "on_cancelled_before_start", None)
                 if callable(cancelled):
                     cancelled(item, ctx)
             self._park_resumable(item)
             return
-        if isinstance(handle.job, AgentJob):
+        if isinstance(handle.job, ct.AgentJob):
             session_error = store_agent_session_result(item, handle.job, result)
             if session_error is not None:
                 self._finish(item, passed=False, reason=session_error)
@@ -272,7 +240,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             logger.exception(
                 "on_job_done poisoned item %s at %s", self._item_key(item), item.stage.value
             )
-            if item.stage is StageName.LEARNING:
+            if item.stage is ct.StageName.LEARNING:
                 item.payload.setdefault("learning_failures", []).append(
                     {
                         "key": "journal",
@@ -286,7 +254,7 @@ class ExecutionCoordinator(_CoordinatorHost):
         self._register_pipeline_writer_worktree(item, handle.job, result)
         item.state = (
             handle.on_done_state.value
-            if isinstance(handle.on_done_state, StageName)
+            if isinstance(handle.on_done_state, ct.StageName)
             else handle.on_done_state
         )
         if self.shutdown.is_set():
@@ -296,9 +264,9 @@ class ExecutionCoordinator(_CoordinatorHost):
 
     def _record_completion_metrics(
         self,
-        item: WorkItem,
-        handle: JobHandle,
-        result: JobResult,
+        item: ct.WorkItem,
+        handle: ct.JobHandle,
+        result: ct.JobResult,
         *,
         auxiliary: bool,
     ) -> None:
@@ -315,7 +283,7 @@ class ExecutionCoordinator(_CoordinatorHost):
             },
             series_cap=len(_PIPELINE_STAGE_LABELS) * len(_JOB_OUTCOME_LABELS),
         ).inc(labels={"stage": item.stage.value, "outcome": outcome})
-        if isinstance(handle.job, AgentJob):
+        if isinstance(handle.job, ct.AgentJob):
             self._metrics_registry.counter(
                 "hephaestus_pipeline_agent_job_seconds_total",
                 "Cumulative agent job wall-clock seconds.",
