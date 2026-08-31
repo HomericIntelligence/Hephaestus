@@ -617,6 +617,48 @@ class TestPrReviewStageOnEnter:
         assert result == Continue(next_state="ADDRESS_WAIT")
         assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
 
+    def test_checkout_reaudits_threads_from_an_older_review_head(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A detached checkout sends stale findings to the fresh reviewer."""
+
+        class StaleThreadGitHub(FakeStageGitHub):
+            def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
+                del pr_number
+                return [
+                    {
+                        "id": "stale-thread",
+                        "path": "a.py",
+                        "line": 1,
+                        "side": "RIGHT",
+                        "body": "<!-- hephaestus-severity: major -->\nfinding",
+                        "author": "hephaestus[bot]",
+                        "authors": ["hephaestus[bot]"],
+                        "comments": [
+                            {"id": "stale-comment", "author": "hephaestus[bot]", "body": "finding"}
+                        ],
+                        "review_commit_sha": "b" * 40,
+                    }
+                ]
+
+        stage = PrReviewStage()
+        item = make_work_item(issue=1, pr=1001, state=REVIEW_CHECKOUT_WAIT)
+        item.worktree = "/tmp/detached-review"
+        item.payload.update(
+            {
+                "review_checkout_ready": True,
+                "review_checkout_expected_head": "a" * 40,
+                "review_worktree_expected_head": "a" * 40,
+                "reviewed_pr_head_sha": "a" * 40,
+                "pr_diff": "diff --git a/a.py b/a.py\n+change\n",
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=StaleThreadGitHub()))
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, AgentJob)
+
     def test_checkout_rejects_empty_diff_before_review_or_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

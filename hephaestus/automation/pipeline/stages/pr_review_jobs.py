@@ -451,6 +451,9 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             if empty_diff:
                 return self._cleanup_review_worktree_then(item, empty_diff)
             return self._submit_review_job(item, ctx)
+        if _threads_predate_reviewed_head(live_threads, reviewed_head):
+            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
+            return self._submit_review_job(item, ctx)
         snapshots = _validation_thread_snapshots(live_threads, receipts)
         remediation_threads = _normalize_remediation_threads(live_threads)
         if (
