@@ -49,7 +49,10 @@ repos:
         # standalone `markdownlint` CI job, #1199). .claude/ stays excluded:
         # its two tracked .md files (security/guidelines.md,
         # workflows/development.md) were never linted by that job — keep parity.
-        exclude: ^(build/|\.claude/)
+        # The nested plugin's historical skill bodies are packaged prompt data,
+        # not repository documentation. Their XML-like control tags are part of
+        # the compatibility contract and have dedicated distribution tests.
+        exclude: ^(build/|\.claude/|plugins/hephaestus/skills/)
         args: ['--config', '.markdownlint.yaml', '--fix']
 
   # YAML linting
