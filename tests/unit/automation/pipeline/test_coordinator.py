@@ -24,10 +24,10 @@ from hephaestus.automation.direct_review_recovery import record_direct_review_re
 from hephaestus.automation.merge_authorization import MERGE_AUTHORIZATION_MARKER
 from hephaestus.automation.pipeline import seeding as seeding_mod
 from hephaestus.automation.pipeline.coordinator import (
-    _FAIL_BACK_CAP,
     Coordinator,
     PipelineConfig,
 )
+from hephaestus.automation.pipeline.coordinator_types import _FAIL_BACK_CAP
 from hephaestus.automation.pipeline.github_jobs import (
     AppendReplyJournalRequest,
     GitHubJob,
@@ -362,7 +362,7 @@ class TestQuiescence:
         nonce_one = uuid.UUID(int=1)
         nonce_two = uuid.UUID(int=2)
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator.uuid.uuid4",
+            "hephaestus.automation.pipeline.coordinator_sources.uuid.uuid4",
             lambda: nonce_one,
         )
         first = Coordinator(
@@ -378,7 +378,7 @@ class TestQuiescence:
         first_item = first.queues[StageName.IMPLEMENTATION].snapshot()[0]
 
         monkeypatch.setattr(
-            "hephaestus.automation.pipeline.coordinator.uuid.uuid4",
+            "hephaestus.automation.pipeline.coordinator_sources.uuid.uuid4",
             lambda: nonce_two,
         )
         second = Coordinator(

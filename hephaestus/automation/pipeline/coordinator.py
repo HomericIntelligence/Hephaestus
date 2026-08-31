@@ -3,7 +3,6 @@ import logging
 import queue as queue_mod
 import threading
 import time
-import uuid  # noqa: F401
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import replace
@@ -54,21 +53,14 @@ WorkItem = ct.WorkItem
 _ActiveRepoIssueSource = ct._ActiveRepoIssueSource
 _DirectIssueSource = ct._DirectIssueSource
 _DirectPrSource = ct._DirectPrSource
-_FAIL_BACK_CAP = ct._FAIL_BACK_CAP
-_FILE_CLAIM_STAGES = ct._FILE_CLAIM_STAGES
-_FILE_OVERLAP_BLOCKED_CLAIMS_KEY = ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY
-_FILE_OVERLAP_DEFERRALS_KEY = ct._FILE_OVERLAP_DEFERRALS_KEY
 _FILE_OVERLAP_WARNING_THRESHOLD = ct._FILE_OVERLAP_WARNING_THRESHOLD
 _IDLE_POLL_S = ct._IDLE_POLL_S
-_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD = ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD
 _PendingHandoff = ct._PendingHandoff
 _RepoEntrySource = ct._RepoEntrySource
 _StageRunConfig = ct._StageRunConfig
 _STALL_TICKS_BEFORE_FORCE = ct._STALL_TICKS_BEFORE_FORCE
 _STEP_WATCHDOG_S = ct._STEP_WATCHDOG_S
-_budget_lookup = ct._budget_lookup
 _effective_repo_root = ct._effective_repo_root
-_json_safe = ct._json_safe
 _preflight_prompt_catalog = ct._preflight_prompt_catalog
 _work_window = ct._work_window
 

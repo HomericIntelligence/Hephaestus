@@ -21,6 +21,7 @@ from jinja2 import TemplateSyntaxError
 
 import hephaestus.automation.pipeline as pipeline_pkg
 import hephaestus.automation.pipeline.coordinator as coordinator_mod
+import hephaestus.automation.pipeline.coordinator_types as coordinator_types_mod
 import hephaestus.automation.pipeline.jobs as jobs_mod
 import hephaestus.automation.pipeline.routing as routing_mod
 import hephaestus.automation.pipeline.seeding as seeding_mod
@@ -35,7 +36,7 @@ from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
 
 Coordinator = coordinator_mod.Coordinator
 PipelineConfig = coordinator_mod.PipelineConfig
-_budget_lookup = coordinator_mod._budget_lookup
+_budget_lookup = coordinator_types_mod._budget_lookup
 run_pipeline = coordinator_mod.run_pipeline
 
 AgentJob = jobs_mod.AgentJob

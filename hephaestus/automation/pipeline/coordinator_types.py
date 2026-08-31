@@ -75,7 +75,7 @@ error, 130 deliberately takes priority because the run did not complete.
 from __future__ import annotations
 
 from collections import Counter as Counter, OrderedDict as OrderedDict, deque as deque
-from collections.abc import Callable as Callable, Iterable as Iterable, Iterator as Iterator
+from collections.abc import Callable as Callable, Iterator as Iterator
 from contextlib import suppress as suppress
 from dataclasses import dataclass as dataclass, field as field, replace as replace
 from pathlib import Path as Path
