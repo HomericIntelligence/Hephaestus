@@ -33,6 +33,7 @@ from hephaestus.automation.pipeline.seeding import (
 from hephaestus.automation.review_audit import ReviewAudit
 from hephaestus.automation.state_labels import (
     ATHENA_FINALIZED_PLAN_LABEL,
+    STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_IMPLEMENTATION_NO_GO,
     STATE_NEEDS_PLAN,
@@ -94,6 +95,17 @@ class TestClassifyIssue:
             stage, reason = classify_issue(_facts(labels={STATE_SKIP}))
         assert stage is None
         assert "state:skip" in reason
+        assert any("excluded" in record.message for record in caplog.records)
+
+    def test_blocked_label_excludes_plan_go_issue_before_implementation(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An external hold wins over a previously approved implementation plan."""
+        with caplog.at_level(logging.INFO, logger="hephaestus.automation.pipeline.seeding"):
+            stage, reason = classify_issue(_facts(labels={STATE_BLOCKED, STATE_PLAN_GO}))
+
+        assert stage is None
+        assert STATE_BLOCKED in reason
         assert any("excluded" in record.message for record in caplog.records)
 
     def test_labeled_epic_routes_to_independent_planning_review(

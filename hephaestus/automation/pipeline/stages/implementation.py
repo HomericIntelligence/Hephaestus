@@ -104,6 +104,7 @@ from hephaestus.automation.session_naming import (
     issue_auto_impl_branch_name,
 )
 from hephaestus.automation.state_labels import (
+    STATE_BLOCKED,
     STATE_IMPLEMENTATION_GO,
     STATE_PLAN_BLOCKED,
     STATE_PLAN_GO,
@@ -2006,6 +2007,11 @@ class ImplementationStage(Stage):
             return StageOutcome(
                 Disposition.BLOCKED,
                 "plan is blocked pending external intervention",
+            )
+        if STATE_BLOCKED in gate_labels:
+            return StageOutcome(
+                Disposition.BLOCKED,
+                "issue is blocked pending external intervention",
             )
 
         # Pop the fail-back marker unconditionally: on the fresh-implement

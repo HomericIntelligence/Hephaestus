@@ -48,6 +48,11 @@ STATE_PLAN_NO_GO = "state:plan-no-go"
 STATE_PLAN_GO = "state:plan-go"
 STATE_PLAN_BLOCKED = "state:plan-blocked"
 
+#: Operator-owned execution hold. This is distinct from a plan-review verdict:
+#: an approved issue can become externally blocked after planning, and no
+#: implementation or remediation agent may run until the hold is removed.
+STATE_BLOCKED = "state:blocked"
+
 # Durable evidence that Hephaestus has observed and verified the exact Athena
 # finalization marker in the current issue body. This is metadata, not a plan
 # state: ``state:plan-go`` remains the sole implementation admission gate. The
@@ -137,6 +142,10 @@ STATE_LABEL_SPECS: dict[str, dict[str, str]] = {
             "Automation is stopped; an external actor must resolve the block "
             "and replace this label."
         ),
+    },
+    STATE_BLOCKED: {
+        "color": "000000",  # black — external progress hold
+        "description": "Automation is stopped pending an external dependency or operator action.",
     },
     STATE_IMPLEMENTATION_NO_GO: {
         "color": "d93f0b",  # red — blocked
