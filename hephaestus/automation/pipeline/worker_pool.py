@@ -39,7 +39,7 @@ from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_pol
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
-    is_codex,
+    allows_unbound_session_resume,
     resolve_agent,
     resume_agent_session,
     run_agent_session,
@@ -2256,7 +2256,7 @@ class WorkerPool:
                         disable_pi_automation=job.disable_pi_automation,
                         pi_dir=job.pi_dir,
                     )
-                elif job.resume_session_id and not is_codex(agent):
+                elif job.resume_session_id and allows_unbound_session_resume(agent):
                     agent_result = resume_agent_session(
                         agent=agent,
                         session_id=job.resume_session_id,

@@ -947,6 +947,20 @@ def uses_direct_agent_runner(agent: str) -> bool:
     return AGENT_CAPABILITIES[agent].direct_runner
 
 
+def allows_unbound_session_resume(agent: str) -> bool:
+    """Return whether a provider may resume a raw session identifier.
+
+    Codex has no durable binding contract yet.  Its raw IDs are therefore not
+    safe to reuse from orchestration state.
+    """
+    return not is_codex(agent)
+
+
+def requires_plan_scope_guard(agent: str) -> bool:
+    """Return whether publication needs a canonical-plan path allowlist."""
+    return is_codex(agent)
+
+
 def direct_agent_model(
     agent: str,
     model_value: str | None = None,

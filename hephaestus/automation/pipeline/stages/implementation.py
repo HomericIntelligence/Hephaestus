@@ -78,6 +78,8 @@ from hephaestus.agents.execution_policy import (
     ExecutionRequest,
     SessionLifecycle,
 )
+from hephaestus.agents.runtime import requires_plan_scope_guard
+from hephaestus.agents.runtime import requires_plan_scope_guard
 from hephaestus.agents.workspace import SourceLane
 from hephaestus.automation.address_review_core import (
     MAX_ADDRESS_REPLY_CHARS,
@@ -1306,7 +1308,7 @@ class ImplementationStage(Stage):
         }
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
-        if agent == "codex":
+        if requires_plan_scope_guard(agent):
             planned_claims = item.payload.get("_implementation_file_claims")
             if planned_claims is None:
                 planned = _fetch_planned_files(item.issue or issue, repo=(ctx.org, item.repo))
