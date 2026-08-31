@@ -72,104 +72,40 @@ When an interrupt overlaps a non-passing ledger entry or fatal coordinator
 error, 130 deliberately takes priority because the run did not complete.
 """
 
-# Shared namespace exported to the coordinator mixins.
 from __future__ import annotations
 
-import heapq
-import json
-import logging
-import queue as queue_mod
-import signal
-import threading
-import time
-import uuid
-from collections import Counter, OrderedDict, deque
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import suppress
-from dataclasses import dataclass, field, replace
-from pathlib import Path
-from typing import Any
+from collections import deque as deque
+from collections.abc import Callable as Callable, Iterator as Iterator
+from dataclasses import dataclass as dataclass, field as field
+from pathlib import Path as Path
+from typing import Any as Any
 
-from jinja2 import TemplateNotFound
+from jinja2 import TemplateNotFound as TemplateNotFound
 
 import hephaestus.automation.pipeline.admission as _admission
-import hephaestus.automation.pipeline.seeding as _seeding
-from hephaestus.automation.direct_review_recovery import (
-    is_inspection_only_detached_push_failure,
-    list_direct_review_recovery_paths,
-)
-from hephaestus.automation.issue_waves import (
-    WAVE_LEASE_PAYLOAD,
-    WAVE_NON_CODE_PAYLOAD,
-    IssueWaveError,
-    IssueWaveStore,
-    WaveLease,
-    wave_entry_from_facts,
-)
-from hephaestus.automation.models import IssueInfo
-from hephaestus.automation.pipeline.athena_executor_scope import (
-    pipeline_requires_athena_executor,
-)
-from hephaestus.automation.pipeline.coordinator_stage_config import _StageRunConfig
-from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
-from hephaestus.automation.pipeline.jobs import (
-    WORKTREE_MATERIALIZED_KEY,
-    AgentJob,
-    GitJob,
-    JobHandle,
-    JobResult,
-)
-from hephaestus.automation.pipeline.queues import CompletionQueue, StageQueue, StageQueueLease
+from hephaestus.automation.issue_waves import WaveLease as WaveLease
 from hephaestus.automation.pipeline.routing import (
-    PIPELINE_ORDER,
-    ROUTES,
-    Disposition,
-    PipelineScope,
-    Route,
-    StageName,
-    StageOutcome,
+    PIPELINE_ORDER as PIPELINE_ORDER,
+    ROUTES as ROUTES,
+    PipelineScope as PipelineScope,
+    StageName as StageName,
+    StageOutcome as StageOutcome,
 )
 from hephaestus.automation.pipeline.stages import (
-    Continue,
-    FinishedStage,
-    ImplementationStage,
-    JobRequest,
-    LearningStage,
-    MergeWaitStage,
-    PlanningStage,
-    PlanReviewStage,
-    PrReviewStage,
-    RepoStage,
-    Stage,
-    StageContext,
-    StageGitHub,
+    Continue as Continue,
+    JobRequest as JobRequest,
 )
-from hephaestus.automation.pipeline.stages.base import BranchWorktreeOwnerStatus
-from hephaestus.automation.pipeline.stages.implementation import PRE_PR_TEST_ARGV
+from hephaestus.automation.pipeline.stages.implementation import (
+    PRE_PR_TEST_ARGV as PRE_PR_TEST_ARGV,
+)
 from hephaestus.automation.pipeline.stages.repo import (
-    DIRECT_SCOPE_BASE_SHA_KEY,
-    DIRECT_SCOPE_BOOTSTRAP_KEY,
-    DIRECT_SCOPE_WORKTREE_NONCE_KEY,
-    RepoIssueSource,
-    is_full_commit_sha,
-    product_to_work_item,
-)
-from hephaestus.automation.pipeline.summary import (
-    RunStats,
-    TerminalSummary,
-    latest_logical_items,
-    print_summary,
+    RepoIssueSource as RepoIssueSource,
 )
 from hephaestus.automation.pipeline.work_item import (
-    ItemKind,
-    ItemResult,
-    PreservedWorktree,
-    WorkItem,
+    ItemResult as ItemResult,
+    WorkItem as WorkItem,
 )
-from hephaestus.automation.state_labels import STATE_IMPLEMENTATION_GO, STATE_PLAN_BLOCKED, is_epic
-from hephaestus.prompts import PromptCatalog
-
-logger = logging.getLogger(__name__)
+from hephaestus.prompts import PromptCatalog as PromptCatalog
 
 #: Warn when any stage.step() call exceeds this duration (seconds) — the
 #: stage protocol promises short (<~60s) main-thread steps. 15s proved too
@@ -472,16 +408,3 @@ class _RepoEntrySource:
 def _effective_repo_root(config: PipelineConfig, repo: str) -> Path:
     """Resolve *repo* to its explicit checkout or conventional projects path."""
     return Path(config.repo_roots.get(repo, Path(config.projects_dir) / repo))
-
-
-# fmt: off
-__all__ = [
-    'DIRECT_SCOPE_BASE_SHA_KEY', 'DIRECT_SCOPE_BOOTSTRAP_KEY', 'DIRECT_SCOPE_WORKTREE_NONCE_KEY', 'PIPELINE_ORDER', 'PRE_PR_TEST_ARGV', 'ROUTES', 'STATE_IMPLEMENTATION_GO', 'STATE_PLAN_BLOCKED', 'WAVE_LEASE_PAYLOAD', 'WAVE_NON_CODE_PAYLOAD', 'WORKTREE_MATERIALIZED_KEY',  # noqa: E501
-    '_DEFAULT_EVENT_LOG_CAPACITY', '_DEFAULT_GRACE_S', '_DEFAULT_TERMINAL_DETAIL_CAPACITY', '_DIRECT_ISSUE_ENTRY_STAGES', '_DRAIN_ORDER', '_FAIL_BACK_CAP', '_FILE_CLAIM_STAGES', '_FILE_OVERLAP_BLOCKED_CLAIMS_KEY', '_FILE_OVERLAP_DEFERRALS_KEY', '_FILE_OVERLAP_WARNING_THRESHOLD',  # noqa: E501
-    '_IDLE_POLL_S', '_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD', '_MAX_STEPS_PER_TICK', '_PROMPT_PREFLIGHT_ERROR', '_PROMPT_PREFLIGHT_TEMPLATE', '_REALIZED_DIFF_CLAIM_STAGES', '_SOURCE_REGISTRY_RETRY_DELAY_S', '_STALL_TICKS_BEFORE_FORCE', '_STEP_WATCHDOG_S', 'AgentJob', 'Any', 'BranchWorktreeOwnerStatus', 'Callable',  # noqa: E501
-    'CompletionQueue', 'Continue', 'Counter', 'Disposition', 'FinishedStage', 'GitJob', 'ImplementationStage', 'IssueInfo', 'IssueWaveError', 'IssueWaveStore', 'ItemKind', 'ItemResult', 'Iterable', 'Iterator', 'JobHandle', 'JobRequest', 'JobResult', 'LearningStage', 'MergeWaitStage',  # noqa: E501
-    'OrderedDict', 'Path', 'PipelineConfig', 'PipelineScope', 'PlanReviewStage', 'PlanningStage', 'PrReviewStage', 'PreservedWorktree', 'PromptCatalog', 'RepoIssueSource', 'RepoStage', 'Route', 'RunStats', 'Stage', 'StageContext', 'StageEvent', 'StageGitHub', 'StageName',  # noqa: E501
-    'StageOutcome', 'StageQueue', 'StageQueueLease', 'StageStepResult', 'TemplateNotFound', 'TerminalSummary', 'WaveLease', 'WorkItem', '_ActiveRepoIssueSource', '_DirectIssueSource', '_DirectPrSource', '_Paths', '_PendingHandoff', '_RepoEntrySource', '_StageRunConfig',  # noqa: E501
-    '_admission', '_budget_lookup', '_effective_repo_root', '_json_safe', '_preflight_prompt_catalog', '_seeding', '_work_window', 'annotations', 'dataclass', 'deque', 'encode_stage_event', 'field', 'heapq', 'is_epic', 'is_full_commit_sha', 'is_inspection_only_detached_push_failure', 'json',  # noqa: E501
-    'latest_logical_items', 'list_direct_review_recovery_paths', 'logger', 'logging', 'pipeline_requires_athena_executor', 'print_summary', 'product_to_work_item', 'queue_mod', 'replace', 'signal', 'suppress', 'threading', 'time', 'uuid', 'wave_entry_from_facts']  # noqa: E501
-# fmt: on

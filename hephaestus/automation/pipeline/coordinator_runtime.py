@@ -1,37 +1,38 @@
-import sys
-from typing import Any, cast
+from __future__ import annotations
+
+import heapq
+import logging
+import signal
+from contextlib import suppress
+from pathlib import Path
+from typing import cast
 
 import hephaestus.automation.pipeline.coordinator_observability as _observability
+import hephaestus.automation.pipeline.coordinator_types as ct
+import hephaestus.automation.pipeline.stages as stages_mod
+import hephaestus.automation.pipeline.stages.base as stage_base_mod
+import hephaestus.automation.pipeline.stages.repo as repo_stage_mod
+import hephaestus.automation.pipeline.summary as summary_mod
+import hephaestus.automation.pipeline.work_item as work_item_mod
+from hephaestus.automation.direct_review_recovery import (
+    is_inspection_only_detached_push_failure,
+    list_direct_review_recovery_paths,
+)
+from hephaestus.automation.issue_waves import IssueWaveError, IssueWaveStore
+from hephaestus.automation.pipeline.events import StageEvent, encode_stage_event
+from hephaestus.automation.pipeline.jobs import WORKTREE_MATERIALIZED_KEY, GitJob, JobResult
+from hephaestus.automation.pipeline.routing import Disposition, Route
 
 from .coordinator_contract import _CoordinatorHost
 from .coordinator_handoffs import PendingHandoffCoordinator
 from .coordinator_shutdown import shutdown_signal_message
-from .coordinator_types import *
 from .diagnostics import redact_bounded_diagnostic_tails, redact_diagnostic_text
 
-# ruff: noqa: F403, F405
-
-
-def _compat(name: str) -> Any:
-    """Resolve mutable coordinator constants from the façade at call time."""
-    return getattr(sys.modules["hephaestus.automation.pipeline.coordinator"], name)
-
-
-class _CompatModule:
-    """Proxy a module whose test seams live on the coordinator façade."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(_compat(self._name), name)
-
-
-time = cast(Any, _CompatModule("time"))
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
 _DYNAMIC_METRIC_SERIES_CAP = 100
-_PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in StageName)
+_DIRECT_SCOPE_BOOTSTRAP_KEY = repo_stage_mod.DIRECT_SCOPE_BOOTSTRAP_KEY
+_PIPELINE_STAGE_LABELS = frozenset(stage.value for stage in ct.StageName)
 _JOB_OUTCOME_LABELS = frozenset({"ok", "failed", "interrupted"})
 _LANE_LABELS = frozenset({"main", "auxiliary"})
 _BREAKER_STATE_LABELS = frozenset({"closed", "open", "half_open"})
@@ -48,30 +49,28 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
     _auxiliary_job_failure_count: int
     _pool_shut_down: bool
 
-    def _default_stages(self) -> dict[StageName, Stage]:
-        """Build the full production stage map."""
+    def _default_stages(self) -> dict[ct.StageName, stages_mod.Stage]:
         return {
-            StageName.REPO: RepoStage(),
-            StageName.PLANNING: PlanningStage(),
-            StageName.PLAN_REVIEW: PlanReviewStage(),
-            StageName.IMPLEMENTATION: ImplementationStage(),
-            StageName.PR_REVIEW: PrReviewStage(),
-            StageName.MERGE_WAIT: MergeWaitStage(),
-            StageName.LEARNING: LearningStage(),
-            StageName.FINISHED: FinishedStage(
+            ct.StageName.REPO: stages_mod.RepoStage(),
+            ct.StageName.PLANNING: stages_mod.PlanningStage(),
+            ct.StageName.PLAN_REVIEW: stages_mod.PlanReviewStage(),
+            ct.StageName.IMPLEMENTATION: stages_mod.ImplementationStage(),
+            ct.StageName.PR_REVIEW: stages_mod.PrReviewStage(),
+            ct.StageName.MERGE_WAIT: stages_mod.MergeWaitStage(),
+            ct.StageName.LEARNING: stages_mod.LearningStage(),
+            ct.StageName.FINISHED: stages_mod.FinishedStage(
                 self.ledger,
                 self.preserved,
                 self.recovery_preserved,
             ),
         }
 
-    def _ctx_for_repo(self, repo: str) -> StageContext:
-        """Return the (cached, per-repo) StageContext for *repo*."""
+    def _ctx_for_repo(self, repo: str) -> stages_mod.StageContext:
         ctx = self._ctx_cache.get(repo)
         if ctx is not None:
             self._ctx_cache.move_to_end(repo)
             return ctx
-        root = _effective_repo_root(self.config, repo)
+        root = ct._effective_repo_root(self.config, repo)
         from hephaestus.automation.arming_state import LearningJournalStore
         from hephaestus.automation.plan_review_session import PlanReviewSessionStore
         from hephaestus.automation.source_worktree import SourceWorkspaceManager
@@ -80,12 +79,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return root / "build" / ".automation-state"
 
         github_factory = self._github_factory
-        ctx = StageContext(
+        ctx = stages_mod.StageContext(
             config=self.config,
             org=self.config.org,
             dry_run=self.config.dry_run,
             github=(github_factory(repo, root) if github_factory is not None else self.github),
-            paths=_Paths(
+            paths=ct._Paths(
                 repo_root=root,
                 worktree=root,
                 projects_dir=Path(self.config.projects_dir),
@@ -95,7 +94,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     else None
                 ),
             ),
-            now_fn=time.monotonic,
+            now_fn=self._monotonic,
             budget_fn=self._budget_for,
             event_fn=self._record_stage_event,
             learning_journal=LearningJournalStore(
@@ -111,8 +110,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._ctx_cache[repo] = ctx
         return ctx
 
-    def _ctx_for(self, item: WorkItem) -> StageContext:
-        """Return the (cached, per-repo) StageContext for *item*."""
+    def _ctx_for(self, item: ct.WorkItem) -> stages_mod.StageContext:
+        """Return the (cached, per-repo) ct.StageContext for *item*."""
         return self._ctx_for_repo(item.repo)
 
     def _budget_for(self, name: str) -> int:
@@ -120,27 +119,27 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         override = self.config.budget_overrides.get(name)
         if override is not None:
             return override
-        return _budget_lookup(name)
+        return ct._budget_lookup(name)
 
     def _record_stage_event(self, event: StageEvent) -> None:
         """Validate and persist a closed-schema event emitted by a stage."""
         event_name, fields = encode_stage_event(event)
         self._record_event(event_name, fields)
 
-    def _record_event(self, event: str, *fields: Any) -> None:
+    def _record_event(self, event: str, *fields: ct.Any) -> None:
         """Append an event to memory and, when configured, to JSONL on disk."""
-        _observability.record_event(self, event, *fields, now_fn=time.time, logger=logger)
+        _observability.record_event(self, event, *fields, now_fn=self._wall_time, logger=logger)
 
-    def _observability_snapshot(self) -> dict[str, Any]:
+    def _observability_snapshot(self) -> dict[str, ct.Any]:
         """Read the coordinator lifecycle values that observability exposes."""
         return _observability.observability_snapshot(self, logger=logger)
 
-    def _health_snapshot(self) -> dict[str, Any]:
+    def _health_snapshot(self) -> dict[str, ct.Any]:
         """Return the local server's JSON readiness response without external I/O."""
         return _observability.health_snapshot(
             self,
             logger=logger,
-            stalled_ticks_threshold=_compat("_STALL_TICKS_BEFORE_FORCE"),
+            stalled_ticks_threshold=self._stall_ticks_before_force,
         )
 
     def _emit_observability_tick(self) -> None:
@@ -241,7 +240,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             )
 
     @staticmethod
-    def _emit_lane_gauges(registry: Any, snapshot: dict[str, Any]) -> None:
+    def _emit_lane_gauges(registry: ct.Any, snapshot: dict[str, ct.Any]) -> None:
         """Update the two fixed-cardinality auxiliary-lane gauges."""
         queue_gauge = registry.gauge(
             "hephaestus_pipeline_lane_queue_depth",
@@ -265,7 +264,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def run(self) -> int:
         """Run the pipeline to quiescence (or interrupt) and return the exit code."""
-        started = time.monotonic()
+        started = self._monotonic()
         if self._install_signals:
             self._install_signal_handlers()
         try:
@@ -319,12 +318,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._shutdown_pool()
             self._finalize_resumable()
             exit_code = self._exit_code()
-            stats = RunStats(
+            stats = summary_mod.RunStats(
                 exit_code=exit_code,
                 loops_run=self._loops_run,
                 agent_job_count=self._agent_job_count,
                 agent_job_time_s=self._agent_job_time_s,
-                wall_s=time.monotonic() - started,
+                wall_s=self._monotonic() - started,
                 auxiliary_job_count=self._auxiliary_job_count,
                 auxiliary_job_time_s=self._auxiliary_job_time_s,
                 auxiliary_job_failure_count=self._auxiliary_job_failure_count,
@@ -343,7 +342,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                         "wall_s": stats.wall_s,
                     },
                 )
-                print_summary(
+                summary_mod.print_summary(
                     summary_items,
                     stats,
                     preserved,
@@ -358,19 +357,19 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     self._metrics_server.stop()
         return exit_code
 
-    def _effective_items(self) -> list[WorkItem]:
+    def _effective_items(self) -> list[ct.WorkItem]:
         """Return latest logical items, collapsing superseded re-seed attempts."""
-        return latest_logical_items(self.items)
+        return summary_mod.latest_logical_items(self.items)
 
-    def _active_preserved_worktrees(self) -> list[PreservedWorktree]:
+    def _active_preserved_worktrees(self) -> list[work_item_mod.PreservedWorktree]:
         """Return extant failed-item worktrees for the latest logical items."""
         failed_items = {
             (item.repo, item.issue or item.pr or 0)
             for item in self._effective_items()
             if item.result is not None and not item.result.passed
         }
-        active: list[PreservedWorktree] = []
-        seen: set[PreservedWorktree] = set()
+        active: list[work_item_mod.PreservedWorktree] = []
+        seen: set[work_item_mod.PreservedWorktree] = set()
         for repo, issue_or_pr, path in self.preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or (repo, issue_or_pr) not in failed_items or not Path(path).exists():
@@ -379,10 +378,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             active.append(entry)
         return active
 
-    def _active_recovery_worktrees(self) -> list[PreservedWorktree]:
+    def _active_recovery_worktrees(self) -> list[work_item_mod.PreservedWorktree]:
         """Return extant receipt-backed detached-review recovery worktrees."""
-        active: list[PreservedWorktree] = []
-        seen: set[PreservedWorktree] = set()
+        active: list[work_item_mod.PreservedWorktree] = []
+        seen: set[work_item_mod.PreservedWorktree] = set()
         for repo, issue_or_pr, path in self.recovery_preserved:
             entry = (repo, issue_or_pr, path)
             if entry in seen or not Path(path).exists():
@@ -425,7 +424,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             and not self._repo_issue_sources
         )
 
-    def _record_terminal_result(self, item: WorkItem) -> None:
+    def _record_terminal_result(self, item: ct.WorkItem) -> None:
         """Aggregate one completed/resumable item and trim detailed retention.
 
         The local result collections are an operator convenience, not recovery
@@ -468,12 +467,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         if len(self.recovery_preserved) > retained:
             del self.recovery_preserved[:-retained]
 
-    def _claim_item(self, stage_name: StageName, *, index: int = 0) -> WorkItem | None:
+    def _claim_item(self, stage_name: ct.StageName, *, index: int = 0) -> ct.WorkItem | None:
         """Claim one ready item while retaining its source-stage capacity."""
         lease = self.queues[stage_name].claim_at(index)
         if lease is None:
             return None
-        item = cast(WorkItem, lease.item)
+        item = cast(ct.WorkItem, lease.item)
         item_id = id(item)
         if item_id in self._leases:  # pragma: no cover - internal invariant
             lease.restore()
@@ -481,7 +480,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._leases[item_id] = lease
         return item
 
-    def _restore_source_lease(self, item: WorkItem) -> bool:
+    def _restore_source_lease(self, item: ct.WorkItem) -> bool:
         """Return an active item lease to its source queue without a transition."""
         self._pending_handoffs.pop(id(item), None)
         lease = self._leases.pop(id(item), None)
@@ -490,7 +489,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         lease.restore()
         return True
 
-    def _release_source_lease(self, item: WorkItem) -> bool:
+    def _release_source_lease(self, item: ct.WorkItem) -> bool:
         """Release an active lease when work leaves every stage queue.
 
         Timers and terminal sink completion are neither source restores nor
@@ -507,11 +506,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _activate_handoff(
         self,
-        item: WorkItem,
-        target: StageName,
+        item: ct.WorkItem,
+        target: ct.StageName,
         *,
         enter: bool,
-        result: ItemResult | None,
+        result: ct.ItemResult | None,
     ) -> None:
         """Publish a route only after its destination accepted the item."""
         source = item.stage
@@ -535,11 +534,11 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _handoff_item(
         self,
-        item: WorkItem,
-        target: StageName,
+        item: ct.WorkItem,
+        target: ct.StageName,
         *,
         enter: bool,
-        result: ItemResult | None = None,
+        result: ct.ItemResult | None = None,
     ) -> bool:
         """Route an item destination-first, retaining a full-target intent.
 
@@ -582,7 +581,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._progress = True
             return True
 
-        pending = _PendingHandoff(item=item, target=target, enter=enter, result=result)
+        pending = ct._PendingHandoff(item=item, target=target, enter=enter, result=result)
         existing = self._pending_handoffs.setdefault(id(item), pending)
         if existing != pending:  # pragma: no cover - no item can route twice while leased
             raise RuntimeError(f"conflicting pending handoff for {self._item_key(item)}")
@@ -630,7 +629,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         return (
             self.shutdown.is_set()
             and self._grace_deadline is not None
-            and time.monotonic() >= self._grace_deadline
+            and self._monotonic() >= self._grace_deadline
         )
 
     def _idle_wait(self) -> None:
@@ -646,12 +645,12 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._stalled_ticks = 0
         elif not self.in_flight and not self.auxiliary_in_flight and not self.timers:
             self._stalled_ticks += 1
-            if self._stalled_ticks >= _compat("_STALL_TICKS_BEFORE_FORCE"):
+            if self._stalled_ticks >= self._stall_ticks_before_force:
                 self._force_run_one()
                 return
-        timeout = _compat("_IDLE_POLL_S")
+        timeout = self._idle_poll_s
         if self.timers:
-            timeout = min(timeout, max(0.01, self.timers[0][0] - time.monotonic()))
+            timeout = min(timeout, max(0.01, self.timers[0][0] - self._monotonic()))
         self._wait_for_completion(timeout=timeout)
 
     def _force_run_one(self) -> None:
@@ -660,7 +659,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             "force-run requires no in-flight work"
         )
         self._stalled_ticks = 0
-        for stage_name in _DRAIN_ORDER:
+        for stage_name in ct._DRAIN_ORDER:
             q = self.queues[stage_name]
             if len(q):
                 item = self._claim_item(stage_name)
@@ -676,13 +675,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._run_item(item)
                 return
 
-    def _timer_park(self, item: WorkItem, delay_s: float) -> None:
+    def _timer_park(self, item: ct.WorkItem, delay_s: float) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
         # A timer is outside every stage queue.  Release a normal drain's
         # source lease before parking so its capacity is not stranded while
         # preserving the timer's single owner for the work item.
         self._release_source_lease(item)
-        wake = time.monotonic() + max(0.0, delay_s)
+        wake = self._monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
         self._seq += 1
         item.add_history_event(item.stage, item.state, note=f"timer-parked {delay_s:.1f}s")
@@ -695,7 +694,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         expired entry whose stage is at capacity remains at the heap head for a
         later tick; it is ordinary bounded backpressure, not a pipeline fault.
         """
-        now = time.monotonic()
+        now = self._monotonic()
         while self.timers and self.timers[0][0] <= now:
             _, _, item = self.timers[0]
             if not self._push_item(item, item.stage, enter=False, defer_if_full=True):
@@ -703,7 +702,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             heapq.heappop(self.timers)
             self._progress = True
 
-    def _park_resumable(self, item: WorkItem) -> None:
+    def _park_resumable(self, item: ct.WorkItem) -> None:
         """Park *item* as RESUMABLE at its current stage (interrupt semantics).
 
         Never FAILED: durable writes precede queue pushes, so a restart's
@@ -712,7 +711,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """
         self._record_resumable_recovery_worktrees(item)
         self._release_source_lease(item)
-        item.result = ItemResult(
+        item.result = ct.ItemResult(
             passed=False,
             reason=f"resumable at {item.stage.value}",
             final_stage=item.stage,
@@ -726,7 +725,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             item.stage.value,
         )
 
-    def _record_resumable_recovery_worktrees(self, item: WorkItem) -> None:
+    def _record_resumable_recovery_worktrees(self, item: ct.WorkItem) -> None:
         """Retain receipt-backed recovery paths when shutdown skips FinishedStage.
 
         A worker writes a remote-drift receipt before returning the result that
@@ -750,7 +749,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         try:
             worktrees = list_direct_review_recovery_paths(
-                repo_root=_effective_repo_root(self.config, item.repo),
+                repo_root=ct._effective_repo_root(self.config, item.repo),
                 issue=item.issue,
                 pr=item.pr,
             )
@@ -767,9 +766,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self.recovery_preserved.append(entry)
 
     @staticmethod
-    def _job_result_event_fields(result: JobResult) -> dict[str, Any]:
+    def _job_result_event_fields(result: JobResult) -> dict[str, ct.Any]:
         """Return bounded, output-free job result fields for durable event logs."""
-        fields: dict[str, Any] = {
+        fields: dict[str, ct.Any] = {
             "ok": result.ok,
             "interrupted": result.interrupted,
             "error": CoordinatorRuntime._job_result_error_class(result),
@@ -836,10 +835,10 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         # lease.  Retry it before ordinary draining, then again after each
         # stage: draining a target can open exactly the slot it needs.
         self._drain_pending_handoffs()
-        for stage_name in _DRAIN_ORDER:
+        for stage_name in ct._DRAIN_ORDER:
             if self.shutdown.is_set():
                 return
-            if stage_name is StageName.IMPLEMENTATION:
+            if stage_name is ct.StageName.IMPLEMENTATION:
                 self._drain_implementation()
                 self._drain_pending_handoffs()
                 continue
@@ -857,8 +856,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._run_item(item)
             self._drain_pending_handoffs()
 
-    def _run_item(self, item: WorkItem) -> None:
-        """Drive one item: on_enter, then step until JobRequest or outcome.
+    def _run_item(self, item: ct.WorkItem) -> None:
+        """Drive one item: on_enter, then step until ct.JobRequest or outcome.
 
         Per-item try/except — a poisoned item routes to finished(fail) and
         never kills the loop.
@@ -872,15 +871,15 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 if outcome is not None:
                     self._route(item, outcome)
                     return
-            for _ in range(_MAX_STEPS_PER_TICK):
+            for _ in range(ct._MAX_STEPS_PER_TICK):
                 result = self._step_with_watchdog(stage, item, ctx)
-                if isinstance(result, Continue):
+                if isinstance(result, ct.Continue):
                     item.state = result.next_state
                     item.add_history_event(item.stage, item.state)
                     if (
-                        item.kind is ItemKind.REPO
+                        item.kind is work_item_mod.ItemKind.REPO
                         and item.state == "SOURCE"
-                        and isinstance(item.payload.get("_repo_issue_source"), RepoIssueSource)
+                        and isinstance(item.payload.get("_repo_issue_source"), ct.RepoIssueSource)
                     ):
                         source = item.payload["_repo_issue_source"]
                         # Setup work has completed. Move only its bounded
@@ -894,17 +893,18 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                             # violates that invariant: a bounded timer owns
                             # the item until a cursor slot becomes free.
                             logger.debug("repo:%s: waiting for a source-registry slot", item.repo)
-                            self._timer_park(item, _SOURCE_REGISTRY_RETRY_DELAY_S)
+                            self._timer_park(item, ct._SOURCE_REGISTRY_RETRY_DELAY_S)
                         return
                     continue
-                if isinstance(result, JobRequest):
+                if isinstance(result, ct.JobRequest):
                     if self.config.dry_run:
                         descr = getattr(result.job, "descr", "") or type(result.job).__name__
                         logger.info(
                             "[dry-run] would submit %s: %s", type(result.job).__name__, descr
                         )
                         self._route(
-                            item, StageOutcome(Disposition.ADVANCE, f"[dry-run] would {descr}")
+                            item,
+                            ct.StageOutcome(Disposition.ADVANCE, f"[dry-run] would {descr}"),
                         )
                         return
                     self._submit(item, result)
@@ -912,7 +912,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 self._route(item, result)
                 return
             raise RuntimeError(
-                f"stage {item.stage.value} exceeded {_MAX_STEPS_PER_TICK} steps in one tick"
+                f"stage {item.stage.value} exceeded {ct._MAX_STEPS_PER_TICK} steps in one tick"
             )
         except Exception as exc:
             logger.exception(
@@ -923,27 +923,27 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._finish(item, passed=False, reason=f"poisoned: {exc}")
 
     def _step_with_watchdog(
-        self, stage: Stage, item: WorkItem, ctx: StageContext
-    ) -> StageStepResult:
+        self, stage: stages_mod.Stage, item: ct.WorkItem, ctx: stages_mod.StageContext
+    ) -> ct.StageStepResult:
         """Run one stage.step, warning when it breaches the <~60s contract."""
-        t0 = time.monotonic()
+        t0 = self._monotonic()
         result = stage.step(item, ctx)
-        elapsed = time.monotonic() - t0
-        if elapsed > _compat("_STEP_WATCHDOG_S"):
+        elapsed = self._monotonic() - t0
+        if elapsed > self._step_watchdog_s:
             logger.warning(
                 "stage.step stalled: %s %s took %.1fs (contract: <%.0fs)",
                 item.stage.value,
                 self._item_key(item),
                 elapsed,
-                _compat("_STEP_WATCHDOG_S"),
+                self._step_watchdog_s,
             )
         return result
 
     def _route(  # noqa: C901 - disposition table includes an auxiliary detour
-        self, item: WorkItem, outcome: StageOutcome
+        self, item: ct.WorkItem, outcome: ct.StageOutcome
     ) -> None:
-        """Apply the Disposition -> action table (plan #1817)."""
-        if item.stage is StageName.REPO and item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+        """Apply the Disposition-to-action table (plan #1817)."""
+        if item.stage is ct.StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._route_direct_scope_bootstrap(item, outcome)
             return
         route = self._routes.get(item.stage)
@@ -965,7 +965,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         disposition = outcome.disposition
 
-        if item.stage is StageName.FINISHED:
+        if item.stage is ct.StageName.FINISHED:
             # Sink outcomes are terminal: the result is already recorded.
             self._record_event("done", self._item_key(item), outcome.note)
             self._record_terminal_result(item)
@@ -975,21 +975,21 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
         if disposition is Disposition.ADVANCE:
             self._seed_products(item)
-            if item.stage is StageName.PLAN_REVIEW and item.learning_intents:
+            if item.stage is ct.StageName.PLAN_REVIEW and item.learning_intents:
                 # Preserve the scope-trimmed primary destination before the
                 # auxiliary detour. A planner-only run must return to its sink
                 # instead of escaping into implementation.
                 item.learning_resume_stage = route.next
                 self._persist_learning_intents(item)
-                target = StageName.LEARNING
+                target = ct.StageName.LEARNING
             else:
                 target = route.next
-            if target is StageName.FINISHED:
+            if target is ct.StageName.FINISHED:
                 reason = str(item.payload.pop("_learning_primary_reason", ""))
                 if item.post_processing is not None:
                     self._handoff_item(
                         item,
-                        StageName.FINISHED,
+                        ct.StageName.FINISHED,
                         enter=True,
                         result=item.post_processing.result,
                     )
@@ -1011,7 +1011,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._finish(item, passed=False, reason=f"skip: {outcome.note}")
             return
         if disposition is Disposition.EJECT:
-            item.result = ItemResult(
+            item.result = ct.ItemResult(
                 passed=True,
                 reason=f"ejected: {outcome.note}",
                 final_stage=item.stage,
@@ -1025,13 +1025,13 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         if disposition is Disposition.FINISH_PASS:
             self._seed_products(item)
-            if item.stage is StageName.MERGE_WAIT and item.learning_intents:
+            if item.stage is ct.StageName.MERGE_WAIT and item.learning_intents:
                 primary_reason = outcome.note or "merged"
                 item.payload["_learning_primary_reason"] = primary_reason
-                terminal_result = ItemResult(
+                terminal_result = ct.ItemResult(
                     passed=True,
                     reason=primary_reason,
-                    final_stage=StageName.MERGE_WAIT,
+                    final_stage=ct.StageName.MERGE_WAIT,
                 )
                 try:
                     item.compact_for_post_processing(terminal_result)
@@ -1048,14 +1048,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     item.learning_intents.clear()
                     self._handoff_item(
                         item,
-                        StageName.FINISHED,
+                        ct.StageName.FINISHED,
                         enter=True,
                         result=terminal_result,
                     )
                     return
                 self._handoff_item(
                     item,
-                    StageName.LEARNING,
+                    ct.StageName.LEARNING,
                     enter=True,
                     result=terminal_result,
                 )
@@ -1065,7 +1065,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         # FINISH_FAIL (exhaustive over Disposition)
         self._finish(item, passed=False, reason=outcome.note or "fail")
 
-    def _route_direct_scope_bootstrap(self, item: WorkItem, outcome: StageOutcome) -> None:
+    def _route_direct_scope_bootstrap(self, item: ct.WorkItem, outcome: ct.StageOutcome) -> None:
         """Activate direct cursors only after their checkout proof succeeds.
 
         A partial pipeline scope deliberately omits ``REPO`` from its route
@@ -1086,8 +1086,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             )
             return
 
-        base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
-        if not is_full_commit_sha(base_sha):
+        base_sha = item.payload.get(repo_stage_mod.DIRECT_SCOPE_BASE_SHA_KEY)
+        if not repo_stage_mod.is_full_commit_sha(base_sha):
             if not self.config.dry_run:
                 self._direct_scope_bootstrap_pending = False
                 self._finish(
@@ -1157,7 +1157,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._drain_direct_pr_source()
         self._drain_direct_issue_source()
 
-    def _route_retry(self, item: WorkItem, outcome: StageOutcome) -> None:
+    def _route_retry(self, item: ct.WorkItem, outcome: ct.StageOutcome) -> None:
         """Apply the RETRY row: heap-park on a recorded delay, else next tick.
 
         RETRY timer contract (base.py): the stage records its backoff in
@@ -1179,7 +1179,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _register_pipeline_writer_worktree(
         self,
-        item: WorkItem,
+        item: ct.WorkItem,
         job: object,
         result: JobResult,
     ) -> None:
@@ -1199,7 +1199,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             or (not result.ok and not materialized)
         ):
             return
-        if item.stage is not StageName.IMPLEMENTATION or not item.branch or not item.worktree:
+        if item.stage is not ct.StageName.IMPLEMENTATION or not item.branch or not item.worktree:
             return
         expected_branch = job.kwargs.get("branch_name")
         if expected_branch != item.branch or bool(job.kwargs.get("isolated", False)):
@@ -1216,8 +1216,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._pipeline_writer_worktrees[key] = item
 
     def _branch_worktree_owner_status(
-        self, item: WorkItem, branch: str, owner_path: str
-    ) -> BranchWorktreeOwnerStatus:
+        self, item: ct.WorkItem, branch: str, owner_path: str
+    ) -> stage_base_mod.BranchWorktreeOwnerStatus:
         """Classify a branch holder as verified, pending, or unverified.
 
         A Git holder result by itself is not evidence of pipeline ownership.
@@ -1236,7 +1236,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             owner is not None
             and owner is not item
             and owner.result is None
-            and owner.stage is not StageName.FINISHED
+            and owner.stage is not ct.StageName.FINISHED
             and owner.branch == branch
             and owner.worktree
             and Path(owner.worktree).resolve() == Path(owner_path).resolve()
@@ -1248,7 +1248,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 candidate is not item
                 and candidate.repo == item.repo
                 and candidate.branch == branch
-                and candidate.stage is StageName.IMPLEMENTATION
+                and candidate.stage is ct.StageName.IMPLEMENTATION
                 and isinstance(job, GitJob)
                 and job.op == "create_worktree"
                 and job.kwargs.get("branch_name") == branch
@@ -1257,7 +1257,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                 return "pending"
         return "unverified"
 
-    def _route_fail_back(self, item: WorkItem, outcome: StageOutcome, route: Route) -> None:
+    def _route_fail_back(self, item: ct.WorkItem, outcome: ct.StageOutcome, route: Route) -> None:
         """Apply the FAIL_BACK row: reason-keyed regression, globally capped.
 
         Dry-run mutators never write the gate labels the earlier stage would
@@ -1271,29 +1271,31 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             return
         fail_backs = int(item.payload.get("_fail_backs", 0)) + 1
         item.payload["_fail_backs"] = fail_backs
-        if fail_backs > _FAIL_BACK_CAP:
+        if fail_backs > ct._FAIL_BACK_CAP:
             self._finish(
                 item,
                 passed=False,
-                reason=f"fail_back safety cap ({_FAIL_BACK_CAP}) exceeded: {outcome.note}",
+                reason=f"fail_back safety cap ({ct._FAIL_BACK_CAP}) exceeded: {outcome.note}",
             )
             return
-        target = route.fail_routes.get(outcome.note, route.fail_routes.get("*", StageName.FINISHED))
-        if target is StageName.FINISHED:
+        target = route.fail_routes.get(
+            outcome.note, route.fail_routes.get("*", ct.StageName.FINISHED)
+        )
+        if target is ct.StageName.FINISHED:
             self._finish(item, passed=False, reason=outcome.note or "fail_back")
         else:
             self._handoff_item(item, target, enter=True)
 
-    def _finish(self, item: WorkItem, *, passed: bool, reason: str) -> None:
+    def _finish(self, item: ct.WorkItem, *, passed: bool, reason: str) -> None:
         """Set the item's result and hand it to the finished sink."""
         writer_key = (item.repo, item.branch)
         if self._pipeline_writer_worktrees.get(writer_key) is item:
             self._pipeline_writer_worktrees.pop(writer_key, None)
-        if item.stage is StageName.REPO and item.payload.get(DIRECT_SCOPE_BOOTSTRAP_KEY, False):
+        if item.stage is ct.StageName.REPO and item.payload.get(_DIRECT_SCOPE_BOOTSTRAP_KEY, False):
             self._direct_scope_bootstrap_pending = False
-        if item.stage is StageName.FINISHED:
+        if item.stage is ct.StageName.FINISHED:
             # Poisoned inside the sink: record directly, never re-queue.
-            item.result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
+            item.result = ct.ItemResult(passed=passed, reason=reason, final_stage=item.stage)
             if not item.payload.get("_recorded", False):
                 self.ledger.append(item.result)
                 item.payload["_recorded"] = True
@@ -1301,8 +1303,8 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
             self._release_source_lease(item)
             self._release_work_permit(item)
             return
-        result = ItemResult(passed=passed, reason=reason, final_stage=item.stage)
-        self._handoff_item(item, StageName.FINISHED, enter=True, result=result)
+        result = ct.ItemResult(passed=passed, reason=reason, final_stage=item.stage)
+        self._handoff_item(item, ct.StageName.FINISHED, enter=True, result=result)
 
     def _install_signal_handlers(self) -> None:
         """SIGINT/SIGTERM/SIGHUP -> one shutdown Event (first graceful, second immediate)."""
@@ -1317,7 +1319,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
                     shutdown_signal_message(signum, self.config.grace_s, immediate=False)
                 )
                 self.shutdown.set()
-                self._grace_deadline = time.monotonic() + self.config.grace_s
+                self._grace_deadline = self._monotonic() + self.config.grace_s
                 self._wake_completion_wait()
 
         sigs = [signal.SIGINT, signal.SIGTERM]
@@ -1380,9 +1382,9 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         """Mark every still-live item RESUMABLE at its stage (never FAILED)."""
         if not self.shutdown.is_set() and not self._fatal:
             return
-        leftovers: list[WorkItem] = [item for _, _, item in self.timers]
+        leftovers: list[ct.WorkItem] = [item for _, _, item in self.timers]
         for stage_name, q in self.queues.items():
-            if stage_name is StageName.FINISHED:
+            if stage_name is ct.StageName.FINISHED:
                 continue
             leftovers.extend(q.snapshot())
         leftovers.extend(self.in_flight.values())

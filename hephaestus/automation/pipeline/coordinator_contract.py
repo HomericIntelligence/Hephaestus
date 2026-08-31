@@ -11,20 +11,9 @@ if TYPE_CHECKING:
 
     from . import admission as _admission
     from .coordinator_types import (
-        CompletionQueue,
         ItemResult,
-        JobHandle,
         PipelineConfig,
-        PreservedWorktree,
         RepoIssueSource,
-        Route,
-        Stage,
-        StageContext,
-        StageGitHub,
-        StageName,
-        StageQueue,
-        StageQueueLease,
-        TerminalSummary,
         WorkItem,
         _ActiveRepoIssueSource,
         _DirectIssueSource,
@@ -32,6 +21,12 @@ if TYPE_CHECKING:
         _PendingHandoff,
         _RepoEntrySource,
     )
+    from .jobs import JobHandle
+    from .queues import CompletionQueue, StageQueue, StageQueueLease
+    from .routing import Route, StageName
+    from .stages import Stage, StageContext, StageGitHub
+    from .summary import TerminalSummary
+    from .work_item import PreservedWorktree
 
     class _CoordinatorHost(Protocol):
         """State and cross-collaborator methods supplied by ``Coordinator``."""
@@ -41,6 +36,14 @@ if TYPE_CHECKING:
         _github_factory: Callable[[str, Path], StageGitHub] | None
         shutdown: Event
         _force_shutdown: Event
+        _monotonic: Callable[[], float]
+        _wall_time: Callable[[], float]
+        shutdown_event: Event
+        force_shutdown_event: Event
+        _idle_poll_s: float
+        _stall_ticks_before_force: int
+        _step_watchdog_s: float
+        _file_overlap_warning_threshold: int
         completion_q: CompletionQueue
         pool: Any
         queues: dict[StageName, StageQueue]

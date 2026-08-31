@@ -14,6 +14,7 @@ row from docs/architecture.md §7.
 from __future__ import annotations
 
 import signal as signal_mod
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -173,6 +174,7 @@ def _coordinator(
     seed: list[Any] | None = None,
     grace_s: float = 30.0,
     install_signals: bool = False,
+    coordinator_kwargs: dict[str, Any] | None = None,
 ) -> Coordinator:
     config = PipelineConfig(
         org="org",
@@ -182,8 +184,13 @@ def _coordinator(
         grace_s=grace_s,
     )
     monkeypatch.setattr(seeding_mod, "seed_from_cli", lambda r, i, p: list(seed or []))
+    coordinator_kwargs = coordinator_kwargs or {}
     coordinator = Coordinator(
-        config, github=FakeStageGitHub(), pool=FakeWorkerPool(), install_signals=install_signals
+        config,
+        github=FakeStageGitHub(),
+        pool=FakeWorkerPool(),
+        install_signals=install_signals,
+        **coordinator_kwargs,
     )
     coordinator._rate_budget_ok = lambda: (True, 0.0)  # type: ignore[method-assign]
     return coordinator
@@ -240,8 +247,19 @@ class TestInterruptSemantics:
         """Immediate shutdown cancels the pool and parks in-flight items."""
         seed = [SeedEntry(kind="issue", identifier=3, stage=StageName.IMPLEMENTATION, reason="r")]
         _capture_signal_handlers(monkeypatch)
-        coordinator = _coordinator(tmp_path, monkeypatch, seed=seed, install_signals=True)
-        pool = SecondSignalPool(shutdown=coordinator.shutdown)
+        shutdown_event = threading.Event()
+        force_shutdown_event = threading.Event()
+        coordinator = _coordinator(
+            tmp_path,
+            monkeypatch,
+            seed=seed,
+            install_signals=True,
+            coordinator_kwargs={
+                "shutdown_event": shutdown_event,
+                "force_shutdown_event": force_shutdown_event,
+            },
+        )
+        pool = SecondSignalPool(shutdown=shutdown_event)
         coordinator.pool = pool
         coordinator.completion_q = pool.completion_q
         stage = JobRequestingStage()
@@ -250,8 +268,13 @@ class TestInterruptSemantics:
         exit_code = coordinator.run()
 
         assert exit_code == 130
+        assert coordinator.shutdown is shutdown_event
+        assert coordinator.shutdown_event is shutdown_event
+        assert coordinator._force_shutdown is force_shutdown_event
+        assert coordinator.force_shutdown_event is force_shutdown_event
         assert coordinator.shutdown.is_set()
         assert len(pool.submitted) == 1
+        assert pool.shutdown_event is shutdown_event
         assert pool.shutdown_event.is_set()
         assert stage.job_done_calls == 0
         assert coordinator.ledger == []
@@ -289,7 +312,32 @@ class TestInterruptSemantics:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """First signal = graceful (grace deadline); second = immediate."""
-        coordinator = _coordinator(tmp_path, monkeypatch, grace_s=17.0)
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 100.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        shutdown_event = threading.Event()
+        force_shutdown_event = threading.Event()
+        clock = Clock()
+        coordinator = _coordinator(
+            tmp_path,
+            monkeypatch,
+            grace_s=17.0,
+            coordinator_kwargs={
+                "monotonic": clock.monotonic,
+                "wall_time": lambda: clock.now,
+                "shutdown_event": shutdown_event,
+                "force_shutdown_event": force_shutdown_event,
+            },
+        )
+        assert coordinator.shutdown is shutdown_event
+        assert coordinator.shutdown_event is shutdown_event
+        assert coordinator._force_shutdown is force_shutdown_event
+        assert coordinator.force_shutdown_event is force_shutdown_event
         coordinator._install_signal_handlers()
         import signal as signal_mod
 
@@ -299,6 +347,7 @@ class TestInterruptSemantics:
         handler(signal_mod.SIGTERM, None)
         assert coordinator.shutdown.is_set()
         assert coordinator._grace_deadline is not None
+        assert coordinator._grace_deadline == pytest.approx(clock.now + 17.0)
         assert coordinator._immediate is False
         assert coordinator._completion_wakeup.is_set()
         assert coordinator.completion_q.empty()

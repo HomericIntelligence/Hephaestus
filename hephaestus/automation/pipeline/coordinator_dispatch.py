@@ -1,17 +1,10 @@
-import sys
-from typing import Any
+import logging
+
+import hephaestus.automation.pipeline.admission as _admission
+import hephaestus.automation.pipeline.coordinator_types as ct
+from hephaestus.automation.models import IssueInfo
 
 from .coordinator_contract import _CoordinatorHost
-from .coordinator_types import *
-
-# This collaborator consumes the façade's shared type namespace by design.
-# ruff: noqa: F403, F405
-
-
-def _compat(name: str) -> Any:
-    """Resolve mutable coordinator constants from the façade at call time."""
-    return getattr(sys.modules["hephaestus.automation.pipeline.coordinator"], name)
-
 
 logger = logging.getLogger("hephaestus.automation.pipeline.coordinator")
 
@@ -39,7 +32,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         old code (and the pre-#2057 assert) keyed on issue number alone and
         would have silently dropped one or crashed (#2057).
         """
-        q = self.queues[StageName.IMPLEMENTATION]
+        q = self.queues[ct.StageName.IMPLEMENTATION]
         if not len(q):
             return
         # Derive topology from a bounded snapshot, then lease only selected
@@ -72,15 +65,15 @@ class ImplementationDispatcher(_CoordinatorHost):
             # A plan comment can change between admission and submission, but
             # it must not change the reservation that made this item eligible.
             if (claims := submission_claims.get(id(item))) is not None:
-                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(claims)
-            item.payload.pop(_FILE_OVERLAP_DEFERRALS_KEY, None)
-            item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
-            self._record_event("drain", StageName.IMPLEMENTATION.value, self._item_key(item))
+                item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(claims)
+            item.payload.pop(ct._FILE_OVERLAP_DEFERRALS_KEY, None)
+            item.payload.pop(ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
+            self._record_event("drain", ct.StageName.IMPLEMENTATION.value, self._item_key(item))
             self._run_item(item)
 
     def _select_implementation_dispatch(
-        self, items: list[WorkItem]
-    ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
+        self, items: list[ct.WorkItem]
+    ) -> tuple[list[ct.WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
         """Order queued work and reserve immutable snapshots for this drain.
 
         Normal items keep their dependency-safe topological order. Ambiguous
@@ -103,7 +96,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         # still enforcing every in-queue dependency edge.
         infos.sort(
             key=lambda info: int(
-                issue_items[info.number].payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)
+                issue_items[info.number].payload.get(ct._FILE_OVERLAP_DEFERRALS_KEY, 0)
             ),
             reverse=True,
         )
@@ -121,33 +114,30 @@ class ImplementationDispatcher(_CoordinatorHost):
         """Return whether this run needs parallel file-overlap reservations."""
         return self.config.serialize_file_overlap and self.config.max_workers > 1
 
-    @staticmethod
-    def _record_file_overlap_deferral(item: WorkItem, identity: str) -> None:
+    def _record_file_overlap_deferral(self, item: ct.WorkItem, identity: str) -> None:
         """Age a deferred implementation item and report persistent contention."""
-        deferrals = int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0)) + 1
-        item.payload[_FILE_OVERLAP_DEFERRALS_KEY] = deferrals
+        deferrals = int(item.payload.get(ct._FILE_OVERLAP_DEFERRALS_KEY, 0)) + 1
+        item.payload[ct._FILE_OVERLAP_DEFERRALS_KEY] = deferrals
         log_deferral = (
-            logger.warning
-            if deferrals > _compat("_FILE_OVERLAP_WARNING_THRESHOLD")
-            else logger.info
+            logger.warning if deferrals > self._file_overlap_warning_threshold else logger.info
         )
         log_deferral(
             "implementation %s deferred (file overlap); deferrals=%s threshold=%s",
             identity,
             deferrals,
-            _compat("_FILE_OVERLAP_WARNING_THRESHOLD"),
+            self._file_overlap_warning_threshold,
         )
 
     @staticmethod
-    def _file_overlap_deferral_age(item: WorkItem) -> int:
+    def _file_overlap_deferral_age(item: ct.WorkItem) -> int:
         """Return an item's current overlap-deferral age for stable priority."""
-        return int(item.payload.get(_FILE_OVERLAP_DEFERRALS_KEY, 0))
+        return int(item.payload.get(ct._FILE_OVERLAP_DEFERRALS_KEY, 0))
 
     def _merge_implementation_admission_priority(
         self,
-        normal_items: list[WorkItem],
-        ambiguous_items: list[WorkItem],
-    ) -> list[tuple[WorkItem, str]]:
+        normal_items: list[ct.WorkItem],
+        ambiguous_items: list[ct.WorkItem],
+    ) -> list[tuple[ct.WorkItem, str]]:
         """Merge normal and ambiguous candidates without reversing dependencies.
 
         ``normal_items`` is already dependency-safe, so its relative order is
@@ -163,7 +153,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         )
         normal_index = 0
         ambiguous_index = 0
-        candidates: list[tuple[WorkItem, str]] = []
+        candidates: list[tuple[ct.WorkItem, str]] = []
         while normal_index < len(normal_items) or ambiguous_index < len(ambiguous_by_age):
             if ambiguous_index >= len(ambiguous_by_age):
                 item = normal_items[normal_index]
@@ -189,10 +179,10 @@ class ImplementationDispatcher(_CoordinatorHost):
 
     def _select_file_overlap_implementation_items(
         self,
-        candidates: list[tuple[WorkItem, str]],
-    ) -> tuple[list[WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
+        candidates: list[tuple[ct.WorkItem, str]],
+    ) -> tuple[list[ct.WorkItem], dict[int, set[_admission.PlanFileClaim]]]:
         """Apply one repo-scoped overlap safety rule to every candidate class."""
-        dispatch: list[WorkItem] = []
+        dispatch: list[ct.WorkItem] = []
         snapshots: dict[int, set[_admission.PlanFileClaim]] = {}
         selected_claims: set[_admission.PlanFileClaim] = set()
         for item, identity in candidates:
@@ -204,19 +194,19 @@ class ImplementationDispatcher(_CoordinatorHost):
             # another active item may independently own the same path.
             claimed = self._active_implementation_file_claims(exclude_item=item)
             claimed.update(selected_claims)
-            blocked_claims = item.payload.get(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
+            blocked_claims = item.payload.get(ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY)
             if blocked_claims is not None and set(blocked_claims) == claimed:
                 # The same active reservation still blocks this item. Polling
                 # must remain quiet until that reservation changes.
                 continue
             repo = (self.config.org, item.repo)
-            payload_claims = item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
+            payload_claims = item.payload.get(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
             if payload_claims is None:
                 planned = _admission._fetch_planned_files(item.issue, repo=repo)
                 item_claims = {(repo, path) for path in planned} if planned else set()
                 # Freeze the plan on first admission attempt, including while
                 # blocked, so coordinator polling never repeats GitHub reads.
-                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+                item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
             else:
                 item_claims = set(payload_claims)
             # A PR may return from review before a coordinator-wide claim
@@ -228,12 +218,12 @@ class ImplementationDispatcher(_CoordinatorHost):
                 for changed_path in changed_paths:
                     if isinstance(changed_path, str) and changed_path:
                         item_claims.add((repo, changed_path))
-                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+                item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
             if item_claims and (item_claims & claimed):
                 self._record_file_overlap_deferral(item, identity)
-                item.payload[_FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)
+                item.payload[ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY] = set(claimed)
                 continue
-            item.payload.pop(_FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
+            item.payload.pop(ct._FILE_OVERLAP_BLOCKED_CLAIMS_KEY, None)
             # Keep the host-owned reservation in sync with the selected
             # snapshot.  A returning PR already has its planned claims in
             # this map; without updating it here, its verified review paths
@@ -247,10 +237,10 @@ class ImplementationDispatcher(_CoordinatorHost):
         return dispatch, snapshots
 
     @staticmethod
-    def _implementation_duplicates(items: list[WorkItem]) -> list[WorkItem]:
+    def _implementation_duplicates(items: list[ct.WorkItem]) -> list[ct.WorkItem]:
         """Return non-first queued duplicates keyed by ``(repo, issue)`` (#2057)."""
         seen: set[tuple[str, int]] = set()
-        duplicates: list[WorkItem] = []
+        duplicates: list[ct.WorkItem] = []
         for item in items:
             if item.issue is None:
                 continue
@@ -262,7 +252,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         return duplicates
 
     def _active_implementation_file_claims(
-        self, *, exclude_item: WorkItem | None = None
+        self, *, exclude_item: ct.WorkItem | None = None
     ) -> set[_admission.PlanFileClaim]:
         """Return active claims, optionally excluding one candidate's ownership."""
         claims: set[_admission.PlanFileClaim] = set()
@@ -276,9 +266,9 @@ class ImplementationDispatcher(_CoordinatorHost):
         for item in self.items:
             if item is exclude_item:
                 continue
-            if item.stage not in _REALIZED_DIFF_CLAIM_STAGES:
+            if item.stage not in ct._REALIZED_DIFF_CLAIM_STAGES:
                 continue
-            item_claims = set(item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, ()))
+            item_claims = set(item.payload.get(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, ()))
             changed_paths = item.payload.get("review_changed_paths")
             if isinstance(changed_paths, list):
                 repo = (self.config.org, item.repo)
@@ -286,22 +276,24 @@ class ImplementationDispatcher(_CoordinatorHost):
                     if isinstance(changed_path, str) and changed_path:
                         item_claims.add((repo, changed_path))
             if item_claims:
-                item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
+                item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(item_claims)
                 self._implementation_file_claims[id(item)] = set(item_claims)
                 claims.update(item_claims)
         return claims
 
-    def _capture_implementation_file_claims(self, item: WorkItem) -> set[_admission.PlanFileClaim]:
+    def _capture_implementation_file_claims(
+        self, item: ct.WorkItem
+    ) -> set[_admission.PlanFileClaim]:
         """Return the immutable claims reserved for an implementation sub-job.
 
         The parallel admission gate places its exact selection snapshot in the
-        host-owned payload. It stays with the WorkItem for every sub-job in
+        host-owned payload. It stays with the ct.WorkItem for every sub-job in
         the implementation stage. Serial and overlap-opt-out modes do not
         fetch or reserve claims because admission intentionally skips overlap
         serialization in those configurations.
         """
         if (
-            item.stage is not StageName.IMPLEMENTATION
+            item.stage is not ct.StageName.IMPLEMENTATION
             or item.issue is None
             or not self._overlap_serialization_enabled()
         ):
@@ -309,27 +301,29 @@ class ImplementationDispatcher(_CoordinatorHost):
         item_id = id(item)
         selected = self._implementation_file_claims.get(item_id)
         if selected is None:
-            payload_claims = item.payload.get(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
+            payload_claims = item.payload.get(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD)
             if payload_claims is None:
                 repo = (self.config.org, item.repo)
                 planned = _admission._fetch_planned_files(item.issue, repo=repo)
                 payload_claims = {(repo, path) for path in planned} if planned else set()
             selected = set(payload_claims)
             self._implementation_file_claims[item_id] = selected
-            item.payload[_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(selected)
+            item.payload[ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD] = set(selected)
         return set(selected)
 
-    def _clear_implementation_file_claims_on_exit(self, item: WorkItem, target: StageName) -> None:
+    def _clear_implementation_file_claims_on_exit(
+        self, item: ct.WorkItem, target: ct.StageName
+    ) -> None:
         """Drop reservations only after the active PR lifecycle really exits."""
-        if item.stage in _FILE_CLAIM_STAGES and target not in _FILE_CLAIM_STAGES:
+        if item.stage in ct._FILE_CLAIM_STAGES and target not in ct._FILE_CLAIM_STAGES:
             self._implementation_file_claims.pop(id(item), None)
-            item.payload.pop(_IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, None)
+            item.payload.pop(ct._IMPLEMENTATION_FILE_CLAIMS_PAYLOAD, None)
 
-    def _claim_selected_implementation_item(self, item: WorkItem) -> bool:
+    def _claim_selected_implementation_item(self, item: ct.WorkItem) -> bool:
         """Claim *item* at its current position, preserving FIFO retry order."""
-        for index, queued in enumerate(self.queues[StageName.IMPLEMENTATION].snapshot()):
+        for index, queued in enumerate(self.queues[ct.StageName.IMPLEMENTATION].snapshot()):
             if queued is item:
-                claimed = self._claim_item(StageName.IMPLEMENTATION, index=index)
+                claimed = self._claim_item(ct.StageName.IMPLEMENTATION, index=index)
                 if claimed is not item:  # pragma: no cover - coordinator-thread invariant
                     raise RuntimeError("implementation queue selected a different item")
                 return True
@@ -337,8 +331,8 @@ class ImplementationDispatcher(_CoordinatorHost):
 
     @staticmethod
     def _index_issue_items(
-        items: list[WorkItem],
-    ) -> tuple[dict[int, WorkItem], dict[int, list[WorkItem]]]:
+        items: list[ct.WorkItem],
+    ) -> tuple[dict[int, ct.WorkItem], dict[int, list[ct.WorkItem]]]:
         """Index issue items by number for number-keyed topo/overlap dispatch.
 
         Returns ``(issue_items, ambiguous)``. Dispatch is driven by ordered issue
@@ -351,8 +345,8 @@ class ImplementationDispatcher(_CoordinatorHost):
         correct — neither is a duplicate (#2057). ``issue is None`` items are
         skipped (dispatched elsewhere / re-queued).
         """
-        issue_items: dict[int, WorkItem] = {}
-        ambiguous: dict[int, list[WorkItem]] = {}
+        issue_items: dict[int, ct.WorkItem] = {}
+        ambiguous: dict[int, list[ct.WorkItem]] = {}
         for it in items:
             if it.issue is None:
                 continue
@@ -364,12 +358,12 @@ class ImplementationDispatcher(_CoordinatorHost):
                 issue_items[it.issue] = it
         return issue_items, ambiguous
 
-    def _admit(self, item: WorkItem) -> bool:
+    def _admit(self, item: ct.WorkItem) -> bool:
         """Admission control: per-repo in-flight cap (O(1) Counter lookup)."""
         if getattr(self, "_auxiliary_pool_separate", False) and self._is_auxiliary_stage(
             item.stage
         ):
             return len(self.auxiliary_in_flight) < self.config.learning_workers
-        return len(self.in_flight) < _work_window(self.config) and self.inflight_per_repo[
+        return len(self.in_flight) < ct._work_window(self.config) and self.inflight_per_repo[
             item.repo
         ] < max(1, self.config.max_workers)

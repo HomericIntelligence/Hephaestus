@@ -164,6 +164,14 @@ def test_required_and_precommit_zizmor_configuration_is_aligned() -> None:
     assert hook["pass_filenames"] is False
 
 
+def test_required_zizmor_job_allows_the_standard_security_budget() -> None:
+    """Keep image build plus the offline audit inside the job time budget."""
+    config = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/_required.yml").read_text(encoding="utf-8")
+    )
+    assert config["jobs"]["security-workflow-scan"]["timeout-minutes"] >= 15
+
+
 def test_scheduled_zizmor_preserves_online_mode_and_target_parity() -> None:
     """The weekly scan keeps online audits and covers both definition roots."""
     scheduled = _workflow_zizmor_run(
