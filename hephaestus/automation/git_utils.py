@@ -401,6 +401,8 @@ def push_head_to_branch(
     *,
     source_sha: str | None = None,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
 
@@ -411,17 +413,21 @@ def push_head_to_branch(
     overwrite a PR head that changed after its reviewed-head proof.
     """
     source_ref = source_sha or "HEAD"
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f"{source_ref}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
         logger.info("Published detached HEAD to origin/%s", branch_name)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -432,9 +438,16 @@ def push_head_to_branch(
         # only the safe ownership distinction needed by the pipeline.
         try:
             observed = run(
-                ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+                [
+                    "git",
+                    *remote_config,
+                    "ls-remote",
+                    "--refs",
+                    "origin",
+                    f"refs/heads/{branch_name}",
+                ],
                 cwd=worktree_path,
-                **_timeout_kw(timeout),
+                **run_kwargs,
             ).stdout.split()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as probe_exc:
             raise DetachedHeadPushRemoteProbeError(
@@ -718,6 +731,8 @@ def sync_worktree_to_remote_branch(
     remote: str = "origin",
     pr_number: int | None = None,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    fetch_config: tuple[str, ...] = (),
 ) -> None:
     """Reset ``cwd`` to ``<remote>/<branch>`` so the agent starts from the PR head.
 
@@ -747,6 +762,8 @@ def sync_worktree_to_remote_branch(
         pr_number: Optional PR number used to fall back to GitHub's pull ref
             when the head branch is not available on ``remote``.
         timeout: Optional timeout in seconds for each git command.
+        env: Optional controlled environment for the fetch and reset commands.
+        fetch_config: Trusted Git configuration arguments used only for fetches.
 
     Raises:
         subprocess.CalledProcessError: If either git command fails. Callers
@@ -756,11 +773,20 @@ def sync_worktree_to_remote_branch(
     """
     logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
     tracking_ref = f"refs/remotes/{remote}/{branch}"
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         run(
-            ["git", "fetch", remote, f"+refs/heads/{branch}:{tracking_ref}"],
+            [
+                "git",
+                *fetch_config,
+                "fetch",
+                remote,
+                f"+refs/heads/{branch}:{tracking_ref}",
+            ],
             cwd=cwd,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as error:
         if pr_number is None or not _is_missing_remote_ref_error(error):
@@ -773,10 +799,10 @@ def sync_worktree_to_remote_branch(
             cwd,
             pull_ref,
         )
-        run(["git", "fetch", remote, pull_ref], cwd=cwd, **_timeout_kw(timeout))
-        run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=cwd, **_timeout_kw(timeout))
+        run(["git", *fetch_config, "fetch", remote, pull_ref], cwd=cwd, **run_kwargs)
+        run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=cwd, **run_kwargs)
         return
-    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **_timeout_kw(timeout))
+    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **run_kwargs)
 
 
 def _is_missing_remote_ref_error(error: subprocess.CalledProcessError) -> bool:
@@ -898,6 +924,9 @@ def rebase_worktree_onto(
     remote: str = "origin",
     preserve_conflicts: bool = False,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    fetch_env: dict[str, str] | None = None,
+    fetch_config: tuple[str, ...] = (),
 ) -> bool:
     """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
 
@@ -930,6 +959,9 @@ def rebase_worktree_onto(
         preserve_conflicts: Leave a conflicted rebase paused for a later
             host-owned continuation instead of aborting it.
         timeout: Optional timeout in seconds for each git command.
+        env: Optional controlled environment for the rebase commands.
+        fetch_env: Optional controlled environment for the remote fetch.
+        fetch_config: Trusted Git configuration arguments for the remote fetch.
 
     Returns:
         ``True`` if the rebase applied cleanly. ``False`` if the rebase hit
@@ -943,17 +975,23 @@ def rebase_worktree_onto(
 
     """
     base_ref = f"{remote}/{base_branch}"
-    run(["git", "fetch", remote, base_branch], cwd=cwd, **_timeout_kw(timeout))
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
+    fetch_kwargs = _timeout_kw(timeout)
+    if fetch_env is not None:
+        fetch_kwargs["env"] = fetch_env
+    run(["git", *fetch_config, "fetch", remote, base_branch], cwd=cwd, **fetch_kwargs)
     _remove_untracked_files_tracked_by_ref(cwd, base_ref, timeout=timeout)
     try:
-        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **_timeout_kw(timeout))
+        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **run_kwargs)
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:
         if not preserve_conflicts:
             # ``check=False`` because an abort error must not mask the original
             # conflict signal.
-            run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
+            run(["git", "rebase", "--abort"], cwd=cwd, check=False, **run_kwargs)
         logger.info(
             "Rebase of worktree at %s onto %s/%s hit conflicts; %s",
             cwd,

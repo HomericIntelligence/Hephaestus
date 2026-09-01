@@ -2593,7 +2593,10 @@ class TestGitOps:
             timeout=60,
         )
         mock_clean.assert_called_once_with(tmp_path / "wt", timeout=60)
-        mock_sync.assert_called_once_with(tmp_path / "wt", "7-existing", pr_number=70, timeout=60)
+        mock_sync.assert_called_once()
+        assert mock_sync.call_args.args == (tmp_path / "wt", "7-existing")
+        assert mock_sync.call_args.kwargs["pr_number"] == 70
+        assert mock_sync.call_args.kwargs["timeout"] == 60
         assert result.ok is True
         assert result.value == {
             "path": str(tmp_path / "wt"),
@@ -2680,7 +2683,10 @@ class TestGitOps:
             isolated=True,
             timeout=60,
         )
-        mock_sync.assert_called_once_with(review_path, "70-existing", pr_number=70, timeout=60)
+        mock_sync.assert_called_once()
+        assert mock_sync.call_args.args == (review_path, "70-existing")
+        assert mock_sync.call_args.kwargs["pr_number"] == 70
+        assert mock_sync.call_args.kwargs["timeout"] == 60
         assert result.ok is True
 
     def test_create_isolated_worktree_does_not_infer_recovery_from_occupancy(
@@ -2783,7 +2789,67 @@ class TestGitOps:
 
         assert result.ok is True
         assert result.value == {"ready": False, "reason": "head_drift"}
-        mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+        mock_sync.assert_called_once()
+        assert mock_sync.call_args.args == (tmp_path, "70-existing")
+        assert mock_sync.call_args.kwargs["pr_number"] == 70
+        assert mock_sync.call_args.kwargs["timeout"] == 60
+
+    def test_verify_pr_review_checkout_syncs_with_trusted_gh_credential_helper(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A direct PR review authenticates its remote fetch without global Git config."""
+        job = GitJob(
+            repo="test/repo",
+            op="verify_pr_review_checkout",
+            timeout_s=60,
+            kwargs={
+                "worktree_path": str(tmp_path),
+                "branch": "70-existing",
+                "expected_head_sha": "a" * 40,
+                "expected_base_sha": "b" * 40,
+                "base_branch": "main",
+                "pr_number": 70,
+            },
+        )
+        controlled_env = {"GIT_TERMINAL_PROMPT": "0"}
+        with (
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+            patch(f"{_WP}._controlled_git_env", return_value=controlled_env),
+            patch(f"{_WP}._trusted_gh_executable", return_value="/opt/homebrew/bin/gh"),
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as mock_sync,
+            patch(f"{_WP}.git_utils.run", return_value=MagicMock(stdout="b" * 40 + "\n")),
+        ):
+            pool.submit(job, StageName.PR_REVIEW)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {"ready": False, "reason": "head_drift"}
+        mock_sync.assert_called_once_with(
+            tmp_path,
+            "70-existing",
+            remote="origin",
+            pr_number=70,
+            timeout=60,
+            env=controlled_env,
+            fetch_config=(
+                "-c",
+                (
+                    f"core.sshCommand={_executable_path('ssh', path=os.defpath)} "
+                    f"-F {os.devnull} -o BatchMode=yes -o StrictHostKeyChecking=yes"
+                ),
+                "-c",
+                "credential.helper=",
+                "-c",
+                "credential.helper=!/opt/homebrew/bin/gh auth git-credential",
+                "-c",
+                "core.askPass=",
+                "-c",
+                "http.sslVerify=true",
+            ),
+        )
 
     def test_verify_pr_review_checkout_uses_original_branch_point_when_base_advances(
         self,
@@ -2805,9 +2871,12 @@ class TestGitOps:
                 "pr_number": 70,
             },
         )
+        controlled_env = {"GIT_TERMINAL_PROMPT": "0"}
         with (
             patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch"),
+            patch(f"{_WP}._controlled_git_env", return_value=controlled_env),
+            patch(f"{_WP}._trusted_gh_executable", return_value="/opt/homebrew/bin/gh"),
             patch(
                 f"{_WP}.git_utils.run",
                 side_effect=[
@@ -2817,7 +2886,7 @@ class TestGitOps:
                     MagicMock(stdout="checkout diff for stale base"),
                     MagicMock(stdout="stale.py\0"),
                 ],
-            ),
+            ) as mock_run,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -2830,6 +2899,27 @@ class TestGitOps:
             "diff": "checkout diff for stale base",
             "changed_paths": ["stale.py"],
         }
+        assert mock_run.call_args_list[1].args[0] == [
+            "git",
+            "-c",
+            (
+                f"core.sshCommand={_executable_path('ssh', path=os.defpath)} "
+                f"-F {os.devnull} -o BatchMode=yes -o StrictHostKeyChecking=yes"
+            ),
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!/opt/homebrew/bin/gh auth git-credential",
+            "-c",
+            "core.askPass=",
+            "-c",
+            "http.sslVerify=true",
+            "fetch",
+            "origin",
+            "--",
+            "main",
+        ]
+        assert mock_run.call_args_list[1].kwargs["env"] == controlled_env
 
     def test_verify_pr_review_checkout_returns_diff_bound_to_verified_head(
         self,
@@ -2876,7 +2966,10 @@ class TestGitOps:
             "diff": "checkout diff for A",
             "changed_paths": ["old.py", "new.py"],
         }
-        mock_sync.assert_called_once_with(tmp_path, "70-existing", pr_number=70, timeout=60)
+        mock_sync.assert_called_once()
+        assert mock_sync.call_args.args == (tmp_path, "70-existing")
+        assert mock_sync.call_args.kwargs["pr_number"] == 70
+        assert mock_sync.call_args.kwargs["timeout"] == 60
         assert mock_run.call_args_list[2].args[0] == [
             "git",
             "merge-base",
@@ -3425,10 +3518,24 @@ class TestGitOps:
             timeout_s=60,
             kwargs={"cwd": Path("/tmp/wt"), "base_branch": "main"},
         )
-        with patch(
-            "hephaestus.automation.git_utils.rebase_worktree_onto",
-            return_value=rebase_clean,
-        ) as mock_rebase:
+        with (
+            patch(
+                "hephaestus.automation.git_utils.rebase_worktree_onto",
+                return_value=rebase_clean,
+            ) as mock_rebase,
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(
+                    {"GIT_TERMINAL_PROMPT": "0"},
+                    ("-c", "credential.helper=!trusted-gh auth git-credential"),
+                ),
+            ),
+            patch(
+                f"{_WP}._controlled_git_signing_env",
+                return_value={"GIT_CONFIG_KEY_0": "user.signingkey"},
+            ),
+        ):
             pool.submit(job, StageName.MERGE_WAIT)
             _, result = completion_q.get(timeout=10)
 
@@ -3437,10 +3544,58 @@ class TestGitOps:
             base_branch="main",
             preserve_conflicts=False,
             timeout=60,
+            env={"GIT_CONFIG_KEY_0": "user.signingkey"},
+            fetch_env={"GIT_TERMINAL_PROMPT": "0"},
+            fetch_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
         )
         assert result.ok is rebase_clean
         assert result.value is rebase_clean
         assert result.error == expected_error
+
+    def test_remote_git_configuration_preserves_hooks_and_isolates_ssh(
+        self,
+        pool: WorkerPool,
+    ) -> None:
+        """Authenticated remote Git keeps hooks active and pins the SSH client."""
+        with (
+            patch(f"{_WP}._controlled_git_env", return_value={"GIT_TERMINAL_PROMPT": "0"}),
+            patch(f"{_WP}._trusted_gh_executable", return_value="/opt/homebrew/bin/gh"),
+            patch(f"{_WP}._trusted_executable", return_value="/usr/bin/ssh"),
+        ):
+            env, remote_config = pool._authenticated_remote_git_configuration()
+
+        assert env == {"GIT_TERMINAL_PROMPT": "0"}
+        assert "core.hooksPath=/dev/null" not in remote_config
+        assert (
+            "core.sshCommand=/usr/bin/ssh -F /dev/null "
+            "-o BatchMode=yes -o StrictHostKeyChecking=yes"
+        ) in remote_config
+        assert "credential.helper=!/opt/homebrew/bin/gh auth git-credential" in remote_config
+
+    def test_rebase_fails_closed_without_authenticated_remote_helper(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A remote rebase stops before Git runs when the GitHub helper is absent."""
+        job = GitJob(
+            repo="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={"cwd": tmp_path, "base_branch": "main"},
+        )
+        with (
+            patch(f"{_WP}._trusted_gh_executable", return_value=None),
+            patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
+        ):
+            pool.submit(job, StageName.MERGE_WAIT)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "required GitHub executable is unavailable"
+        assert result.value == {"failure_kind": "remote_authentication"}
+        rebase.assert_not_called()
 
     def test_writer_publish_rebase_conflict_returns_actionable_reason(
         self,
@@ -4107,6 +4262,14 @@ class TestGitOps:
             patch.object(pool, "_read_remote_branch_head", return_value="a" * 40),
             patch.object(pool, "_conflict_receipt", return_value=receipt),
             patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(
+                    {"GIT_TERMINAL_PROMPT": "0"},
+                    ("-c", "credential.helper=!trusted-gh auth git-credential"),
+                ),
+            ),
             patch.object(pool, "_read_publish_head", return_value="d" * 40),
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
             patch(f"{_WP}.git_utils.run") as run,
@@ -4133,6 +4296,8 @@ class TestGitOps:
             tmp_path,
             source_sha="d" * 40,
             timeout=60,
+            env={"GIT_TERMINAL_PROMPT": "0"},
+            remote_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
         )
 
     @pytest.mark.usefixtures("require_git_path_format")
@@ -4415,6 +4580,14 @@ class TestGitOps:
             },
         )
         with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(
+                    {"GIT_TERMINAL_PROMPT": "0"},
+                    ("-c", "credential.helper=!trusted-gh auth git-credential"),
+                ),
+            ),
             patch(f"{_WP}.git_utils.run") as run,
             patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
@@ -4438,11 +4611,20 @@ class TestGitOps:
             "head_sha": head,
         }
         assert [call.args[0] for call in run.call_args_list] == [
-            ["git", "fetch", "origin", "main"],
+            [
+                "git",
+                "-c",
+                "credential.helper=!trusted-gh auth git-credential",
+                "fetch",
+                "origin",
+                "main",
+            ],
             ["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
             ["git", "rev-parse", "HEAD"],
             [
                 "git",
+                "-c",
+                "credential.helper=!trusted-gh auth git-credential",
                 "ls-remote",
                 "--refs",
                 "origin",
@@ -4451,6 +4633,7 @@ class TestGitOps:
         ]
         rebase.assert_not_called()
         push.assert_not_called()
+        assert run.call_args_list[-1].kwargs["env"] == {"GIT_TERMINAL_PROMPT": "0"}
 
     def test_writer_rebase_rejects_noop_when_remote_branch_moves(
         self,
@@ -4476,6 +4659,14 @@ class TestGitOps:
             },
         )
         with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(
+                    {"GIT_TERMINAL_PROMPT": "0"},
+                    ("-c", "credential.helper=!trusted-gh auth git-credential"),
+                ),
+            ),
             patch(f"{_WP}.git_utils.run") as run,
             patch(f"{_WP}.git_utils.rebase_worktree_onto") as rebase,
             patch(f"{_WP}.git_utils.push_head_to_branch") as push,
@@ -4495,9 +4686,18 @@ class TestGitOps:
         assert result.ok is False
         assert result.error == "remote writer head changed during rebase preparation"
         assert run.call_args_list[-1] == call(
-            ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch}"],
+            [
+                "git",
+                "-c",
+                "credential.helper=!trusted-gh auth git-credential",
+                "ls-remote",
+                "--refs",
+                "origin",
+                f"refs/heads/{branch}",
+            ],
             cwd=tmp_path,
             timeout=60,
+            env={"GIT_TERMINAL_PROMPT": "0"},
         )
         rebase.assert_not_called()
         push.assert_not_called()
@@ -4545,13 +4745,11 @@ class TestGitOps:
             "head_sha": synced_head,
         }
         clean.assert_called_once_with(tmp_path, timeout=60)
-        sync.assert_called_once_with(
-            tmp_path,
-            "7-auto-impl",
-            remote="origin",
-            pr_number=70,
-            timeout=60,
-        )
+        sync.assert_called_once()
+        assert sync.call_args.args == (tmp_path, "7-auto-impl")
+        assert sync.call_args.kwargs["remote"] == "origin"
+        assert sync.call_args.kwargs["pr_number"] == 70
+        assert sync.call_args.kwargs["timeout"] == 60
         run.assert_not_called()
         rebase.assert_not_called()
         push.assert_not_called()
