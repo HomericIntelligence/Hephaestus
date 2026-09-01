@@ -68,7 +68,7 @@ def macos_sandbox_profile(
             *(f'  (subpath "{_sandbox_string(path)}")' for path in read_roots),
             *(f'  (subpath "{_sandbox_string(path)}")' for path in write_roots),
             f'  (literal "{_sandbox_string(executable)}")',
-            *(f'  (subpath "{_sandbox_string(path)}")' for path in _SYSTEM_READ_ROOTS),
+            *(f'  (subpath "{_sandbox_string(path.resolve())}")' for path in _SYSTEM_READ_ROOTS),
             ")",
             *(
                 f'(allow file-read-metadata (path-ancestors "{_sandbox_string(path)}"))'

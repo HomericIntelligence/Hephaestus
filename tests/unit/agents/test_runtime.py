@@ -283,9 +283,10 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/usr/bin/codex"),
         patch(
             "hephaestus.agents.runtime.macos_isolated_command",
-            side_effect=lambda argv, **_: argv,
+            side_effect=lambda argv, **_kwargs: list(argv),
         ),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
@@ -1032,9 +1033,10 @@ def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/usr/bin/codex"),
         patch(
             "hephaestus.agents.runtime.macos_isolated_command",
-            side_effect=lambda argv, **_: argv,
+            side_effect=lambda argv, **_kwargs: list(argv),
         ),
         patch.dict("os.environ", {"CODEX_THREAD_ID": "parent-thread"}, clear=False),
         patch("subprocess.Popen", side_effect=fake_popen),
@@ -1112,6 +1114,7 @@ def test_isolated_codex_session_applies_host_read_boundary(tmp_path: Path) -> No
     with (
         patch("hephaestus.agents.runtime.macos_isolated_command", side_effect=fake_boundary),
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("hephaestus.agents.runtime.shutil.which", return_value="/usr/bin/codex"),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
         agent_runtime.run_codex_session(

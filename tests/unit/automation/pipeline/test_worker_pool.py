@@ -2175,6 +2175,10 @@ class TestAgentErrorHandling:
                 return_value=[],
             ),
             patch(
+                "hephaestus.agents.runtime.shutil.which",
+                return_value="/usr/bin/codex",
+            ),
+            patch(
                 "hephaestus.agents.runtime._codex_automation_profile",
                 return_value=nullcontext({"CODEX_HOME": str(tmp_path), "PATH": os.environ["PATH"]}),
             ),

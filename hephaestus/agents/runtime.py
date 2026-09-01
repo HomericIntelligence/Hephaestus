@@ -33,6 +33,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.macos_sandbox import ProcessIsolationError, macos_isolated_command
 from hephaestus.agents.model_selection import (
     IFM_MODELS,
     MODEL_REASONING_EFFORTS,
@@ -40,7 +41,6 @@ from hephaestus.agents.model_selection import (
     AgentModelSelection,
     parse_model_selection,
 )
-from hephaestus.agents.macos_sandbox import ProcessIsolationError, macos_isolated_command
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     package_tree_digest as package_tree_digest,
@@ -2093,7 +2093,11 @@ def _run_codex_command(
                 executable = shutil.which(cmd[0], path=env.get("PATH"))
                 if executable is None:
                     raise AgentExecutionError("Codex automation executable is unavailable")
-                cmd[0] = str(Path(executable).resolve(strict=True))
+                # ``macos_isolated_command`` performs the authoritative
+                # regular-file and symlink check immediately before launch.
+                # Keep this normalization lexical so a test seam can replace
+                # that host boundary without requiring a real Codex binary.
+                cmd[0] = str(Path(executable).resolve())
                 try:
                     cmd = macos_isolated_command(
                         cmd,
