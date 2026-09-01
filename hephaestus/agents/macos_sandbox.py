@@ -40,12 +40,14 @@ def _sandbox_string(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _profile(
+def macos_sandbox_profile(
     *,
     read_roots: Sequence[Path],
     write_roots: Sequence[Path],
     executable: Path,
     allow_network: bool,
+    metadata_roots: Sequence[Path] = (),
+    ipc_posix_sem_prefix: str | None = None,
 ) -> str:
     """Build a deny-by-default Seatbelt profile for fixed canonical roots."""
     roots = tuple(dict.fromkeys((*read_roots, *write_roots)))
@@ -56,6 +58,11 @@ def _profile(
             '(import "system.sb")',
             "(allow process*)",
             "(allow signal (target same-sandbox))",
+            *(
+                (f'(allow ipc-posix-sem (ipc-posix-name-prefix "{ipc_posix_sem_prefix}"))',)
+                if ipc_posix_sem_prefix is not None
+                else ()
+            ),
             "(allow file-read*",
             *(f'  (subpath "{_sandbox_string(path)}")' for path in read_roots),
             *(f'  (subpath "{_sandbox_string(path)}")' for path in write_roots),
@@ -64,7 +71,7 @@ def _profile(
             ")",
             *(
                 f'(allow file-read-metadata (path-ancestors "{_sandbox_string(path)}"))'
-                for path in (*roots, executable)
+                for path in (*roots, *metadata_roots, executable)
             ),
             *(f'(allow file-write* (subpath "{_sandbox_string(path)}"))' for path in write_roots),
             "(allow network*)" if allow_network else "(deny network*)",
@@ -104,7 +111,7 @@ def macos_isolated_command(
         raise ProcessIsolationError("process isolation requires an exact regular executable")
     profile_path = profile_directory / "codex-automation.sb"
     profile_path.write_text(
-        _profile(
+        macos_sandbox_profile(
             read_roots=canonical_read,
             write_roots=canonical_write,
             executable=executable.resolve(strict=True),
@@ -116,4 +123,4 @@ def macos_isolated_command(
     return [str(sandbox_exec), "-f", str(profile_path), *argv]
 
 
-__all__ = ["ProcessIsolationError", "macos_isolated_command"]
+__all__ = ["ProcessIsolationError", "macos_isolated_command", "macos_sandbox_profile"]

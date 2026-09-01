@@ -93,3 +93,19 @@ def test_macos_isolated_command_rejects_overlapping_roots(
 def test_sandbox_string_escapes_profile_literals() -> None:
     """Seatbelt literals cannot be broken by a quoted path component."""
     assert macos_sandbox._sandbox_string(Path('/tmp/a"b\\c')) == '/tmp/a\\"b\\\\c'
+
+
+def test_shared_profile_accepts_explicit_metadata_and_ipc_rules(tmp_path: Path) -> None:
+    """Other library consumers can reuse one restrictive profile constructor."""
+    profile = macos_sandbox.macos_sandbox_profile(
+        read_roots=(tmp_path / "source",),
+        write_roots=(tmp_path / "scratch",),
+        executable=Path("/usr/bin/true"),
+        allow_network=False,
+        metadata_roots=(Path("/tmp"),),
+        ipc_posix_sem_prefix="/mp-",
+    )
+
+    assert '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))' in profile
+    assert '(path-ancestors "/tmp")' in profile
+    assert "(deny network*)" in profile
