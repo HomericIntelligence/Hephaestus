@@ -2411,6 +2411,7 @@ class TestGitOps:
             timeout=60,
             env=ANY,
             remote_config=ANY,
+            revalidate_remote=ANY,
         )
 
     def test_direct_worktree_rollback_failure_preserves_reservation_receipt(
@@ -3777,6 +3778,7 @@ class TestGitOps:
             timeout=60,
             env=fresh_env,
             remote_config=fresh_config,
+            revalidate_remote=ANY,
         )
 
     def test_remote_head_probe_binds_expected_repository(
@@ -4467,6 +4469,7 @@ class TestGitOps:
             timeout=60,
             env={"GIT_TERMINAL_PROMPT": "0"},
             remote_config=("-c", "credential.helper=!trusted-gh auth git-credential"),
+            revalidate_remote=ANY,
         )
 
     @pytest.mark.usefixtures("require_git_path_format")
@@ -4981,6 +4984,7 @@ class TestGitOps:
             timeout=60,
             env=ANY,
             remote_config=ANY,
+            revalidate_remote=ANY,
         )
         assert result.ok is True
 
@@ -5064,6 +5068,7 @@ class TestGitOps:
             timeout=60,
             env=ANY,
             remote_config=ANY,
+            revalidate_remote=ANY,
         )
 
     def test_release_branch_reservation_accepts_sha256_object_id(
@@ -5095,6 +5100,7 @@ class TestGitOps:
             timeout=60,
             env=ANY,
             remote_config=ANY,
+            revalidate_remote=ANY,
         )
 
     def test_commit_push_extracts_explicit_keys(
@@ -5361,6 +5367,7 @@ class TestGitOps:
             timeout=60,
             env=ANY,
             remote_config=ANY,
+            revalidate_remote=ANY,
         )
         read_head.assert_called_once_with(tmp_path, timeout=60)
         normal_push.assert_not_called()

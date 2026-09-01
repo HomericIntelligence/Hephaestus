@@ -468,6 +468,25 @@ class TestDirectScopeBranchReservation:
         with pytest.raises(RuntimeError, match="reservation remains unchanged"):
             delete_reserved_branch_if_unchanged("2452-auto-impl", pin, tmp_path)
 
+    def test_release_revalidates_destination_before_failure_probe(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A hook-controlled origin change stops the release failure probe."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
+        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+
+        with pytest.raises(RuntimeError, match="origin changed"):
+            delete_reserved_branch_if_unchanged(
+                "2452-auto-impl",
+                pin,
+                tmp_path,
+                revalidate_remote=revalidate_remote,
+            )
+
+        revalidate_remote.assert_called_once_with()
+        assert git_utils_mocks.run.call_count == 1
+
     def test_local_release_uses_exact_old_value_compare_and_delete(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -591,6 +610,24 @@ class TestPushDetachedHead:
             ],
         ]
         assert all(call.kwargs["env"] == env for call in git_utils_mocks.run.call_args_list)
+
+    def test_failed_push_revalidates_destination_before_remote_probe(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A hook-controlled origin change stops the publication probe."""
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
+        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+
+        with pytest.raises(RuntimeError, match="origin changed"):
+            push_head_to_branch(
+                "123-auto-impl",
+                "a" * 40,
+                tmp_path,
+                revalidate_remote=revalidate_remote,
+            )
+
+        revalidate_remote.assert_called_once_with()
+        assert git_utils_mocks.run.call_count == 1
 
     def test_reports_a_detached_push_when_the_remote_head_advanced(
         self, git_utils_mocks: Any, tmp_path: Path
@@ -901,6 +938,28 @@ class TestPushCurrentBranchWithLeaseOnDivergence:
             "origin",
             "HEAD:511-impl",
         ]
+
+    def test_divergence_revalidates_destination_before_fetch_and_retry(
+        self, git_utils_mocks: Any
+    ) -> None:
+        """A hook-controlled origin change stops divergence recovery."""
+        worktree = Path("/tmp/worktree-xyz")
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            stderr="non-fast-forward\n",
+        )
+        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+
+        with pytest.raises(RuntimeError, match="origin changed"):
+            push_current_branch_with_lease_on_divergence(
+                worktree,
+                branch="511-impl",
+                revalidate_remote=revalidate_remote,
+            )
+
+        revalidate_remote.assert_called_once_with()
+        assert git_utils_mocks.run.call_count == 1
 
     def test_fetch_first_also_triggers_lease(self, git_utils_mocks: Any) -> None:
         """'fetch first' rejection text triggers the same retry path."""

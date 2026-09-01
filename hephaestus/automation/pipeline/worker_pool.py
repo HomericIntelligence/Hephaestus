@@ -2573,16 +2573,17 @@ class WorkerPool:
 
         elif job.op == "push":
             cwd = Path(str(job.kwargs.get("cwd") or ""))
-            remote_env, remote_config = self._authenticated_remote_git_configuration(
-                cwd=cwd,
-                expected_repo=job.repo,
-                timeout=job.timeout_s,
+
+            revalidate_remote = self._authenticated_remote_revalidator(
+                cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
             )
+            remote_env, remote_config = revalidate_remote()
             git_utils.push_current_branch_with_lease_on_divergence(
                 **job.kwargs,
                 timeout=job.timeout_s,
                 env=remote_env,
                 remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
             )
             return JobResult(ok=True)
 
@@ -2593,16 +2594,17 @@ class WorkerPool:
             from .git_cleanup import run_cleanup_job
 
             repo_root = Path(str(job.kwargs.get("repo_root") or ""))
-            remote_env, remote_config = self._authenticated_remote_git_configuration(
-                cwd=repo_root,
-                expected_repo=job.repo,
-                timeout=job.timeout_s,
+
+            revalidate_remote = self._authenticated_remote_revalidator(
+                cwd=repo_root, expected_repo=job.repo, timeout=job.timeout_s
             )
+            remote_env, remote_config = revalidate_remote()
             return run_cleanup_job(
                 job,
                 worktree_manager_type=WorktreeManager,
                 remote_env=remote_env,
                 remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
             )
 
         elif job.op == "clone":
@@ -2678,11 +2680,11 @@ class WorkerPool:
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
         pr_number = kwargs.pop("pr_number", None)
         cwd = Path(str(kwargs.get("cwd") or ""))
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=cwd,
-            expected_repo=job.repo,
-            timeout=job.timeout_s,
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
         )
+        remote_env, remote_config = revalidate_remote()
         if publish_rebased_head:
             if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
                 return JobResult(ok=False, error="writer rebase publish arguments invalid")
@@ -2772,6 +2774,7 @@ class WorkerPool:
             timeout=job.timeout_s,
             env=remote_env,
             remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         return JobResult(
             ok=True,
@@ -2872,6 +2875,24 @@ class WorkerPool:
                     f"checkout has unexpected origin; expected origin {expected_repo}"
                 )
         return env, remote_config
+
+    def _authenticated_remote_revalidator(
+        self,
+        *,
+        cwd: Path,
+        expected_repo: str,
+        timeout: int,
+    ) -> Callable[[], tuple[dict[str, str], tuple[str, ...]]]:
+        """Return a callback that validates a Git remote again before reuse."""
+
+        def revalidate() -> tuple[dict[str, str], tuple[str, ...]]:
+            return self._authenticated_remote_git_configuration(
+                cwd=cwd,
+                expected_repo=expected_repo,
+                timeout=timeout,
+            )
+
+        return revalidate
 
     def _sync_worktree_to_remote_branch(
         self,
@@ -3098,11 +3119,11 @@ class WorkerPool:
             return source_sha
         if source_sha == expected_remote_sha:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=cwd,
-            expected_repo=job.repo,
-            timeout=job.timeout_s,
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
         )
+        remote_env, remote_config = revalidate_remote()
         git_utils.push_head_to_branch(
             branch,
             expected_remote_sha,
@@ -3111,6 +3132,7 @@ class WorkerPool:
             timeout=job.timeout_s,
             env=remote_env,
             remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         return JobResult(
             ok=True,
@@ -3696,11 +3718,11 @@ class WorkerPool:
         """Conditionally release a direct reservation, or no-op for normal worktrees."""
         if base_sha is None:
             return True
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=repo_root,
-            expected_repo=expected_repo,
-            timeout=timeout_s,
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=repo_root, expected_repo=expected_repo, timeout=timeout_s
         )
+        remote_env, remote_config = revalidate_remote()
         return git_utils.delete_reserved_branch_if_unchanged(
             branch_name,
             base_sha,
@@ -3708,6 +3730,7 @@ class WorkerPool:
             timeout=timeout_s,
             env=remote_env,
             remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
 
     def _rollback_direct_scope_reservation(
@@ -4167,11 +4190,11 @@ class WorkerPool:
         source_sha = self._read_publish_head(worktree_path, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=worktree_path,
-            expected_repo=job.repo,
-            timeout=job.timeout_s,
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=worktree_path, expected_repo=job.repo, timeout=job.timeout_s
         )
+        remote_env, remote_config = revalidate_remote()
         if isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
@@ -4307,11 +4330,11 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot verify direct scope branch ancestry")
         if ahead.stdout.strip() != "0":
             return True
-        remote_env, remote_config = self._authenticated_remote_git_configuration(
-            cwd=worktree_path,
-            expected_repo=job.repo,
-            timeout=job.timeout_s,
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=worktree_path, expected_repo=job.repo, timeout=job.timeout_s
         )
+        remote_env, remote_config = revalidate_remote()
         released = git_utils.delete_reserved_branch_if_unchanged(
             branch,
             expected_remote_sha,
@@ -4319,6 +4342,7 @@ class WorkerPool:
             timeout=job.timeout_s,
             env=remote_env,
             remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         if not released:
             return JobResult(

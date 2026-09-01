@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,7 @@ def run_cleanup_job(
     worktree_manager_type: Any = WorktreeManager,
     remote_env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> JobResult:
     """Run one validated worktree or reservation cleanup operation."""
     if job.op == "release_branch_reservation":
@@ -109,6 +111,7 @@ def run_cleanup_job(
             timeout=job.timeout_s,
             env=remote_env,
             remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         return JobResult(ok=True, value=released)
 

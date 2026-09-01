@@ -376,6 +376,7 @@ def delete_reserved_branch_if_unchanged(
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> bool:
     """Delete an unused direct-scope reservation only while it remains ours.
 
@@ -392,6 +393,8 @@ def delete_reserved_branch_if_unchanged(
         timeout: Optional timeout in seconds for each remote command.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
+        revalidate_remote: Optional provider that revalidates the destination
+            after a failed hook-capable push and before the remote probe.
 
     """
     try:
@@ -412,6 +415,10 @@ def delete_reserved_branch_if_unchanged(
         )
         return True
     except subprocess.CalledProcessError as exc:
+        if revalidate_remote is not None:
+            env, remote_config = revalidate_remote()
+            run_kwargs = _timeout_kw(timeout)
+            run_kwargs["env"] = env
         try:
             observed = run(
                 [
@@ -486,6 +493,7 @@ def push_head_to_branch(
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
 
@@ -519,6 +527,10 @@ def push_head_to_branch(
         # git's stderr: hook output is untrusted diagnostic content and may
         # contain repository data.  A fresh authoritative ref read classifies
         # only the safe ownership distinction needed by the pipeline.
+        if revalidate_remote is not None:
+            env, remote_config = revalidate_remote()
+            run_kwargs = _timeout_kw(timeout)
+            run_kwargs["env"] = env
         try:
             observed = run(
                 [
@@ -723,6 +735,7 @@ def push_current_branch_with_lease_on_divergence(
     timeout: int | None = None,
     env: dict[str, str] | None = None,
     remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
 
@@ -754,6 +767,8 @@ def push_current_branch_with_lease_on_divergence(
         timeout: Optional timeout in seconds for each git command.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
+        revalidate_remote: Optional provider that revalidates the destination
+            after a failed hook-capable push and before recovery commands.
 
     Returns:
         The successful push's ``CompletedProcess``.
@@ -783,6 +798,10 @@ def push_current_branch_with_lease_on_divergence(
     except subprocess.CalledProcessError as exc:
         if not _is_push_rejected_diverged(exc):
             raise
+        if revalidate_remote is not None:
+            env, remote_config = revalidate_remote()
+            run_kwargs = _timeout_kw(timeout)
+            run_kwargs["env"] = env
         # Resolve the branch name lazily — most callers know it, but we don't
         # want to require it on every caller.
         if branch is None:
