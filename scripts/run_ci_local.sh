@@ -243,6 +243,19 @@ is_immutable_image_id() {
 build_ci_image() {
     local build_context
     local image_id_file
+    local target_arch
+
+    # BuildKit injects TARGETARCH automatically, but Docker's legacy builder
+    # does not. Pass the normalized local architecture explicitly so the
+    # pinned uv, gh, and just artifacts are selected on either builder.
+    case "$(uname -m)" in
+        x86_64|amd64) target_arch="amd64" ;;
+        aarch64|arm64) target_arch="arm64" ;;
+        *)
+            log_error "Unsupported local CI build architecture: $(uname -m)"
+            exit 1
+            ;;
+    esac
 
     # Build from the exact publishable candidate bytes. The alternate index
     # excludes ignored local files without mutating the implementer's index.
@@ -269,6 +282,7 @@ build_ci_image() {
     (
         cd "${build_context}"
         "${CONTAINER_ENGINE}" build \
+            --build-arg "TARGETARCH=${target_arch}" \
             --iidfile "${image_id_file}" \
             -f ci/Containerfile \
             -t "${CI_RUN_IMAGE}" \

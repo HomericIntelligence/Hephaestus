@@ -155,6 +155,7 @@ def _run_runner(
     external_git_common_dir: Path | None = None,
     repo_root: Path = REPO_ROOT,
     color_environment: dict[str, str] | None = None,
+    machine_architecture: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the real wrapper with a deterministic successful or failing engine."""
     engine_path, log = _fake_engine(
@@ -183,6 +184,19 @@ def _run_runner(
             encoding="utf-8",
         )
         fake_id.chmod(0o755)
+    if machine_architecture is not None:
+        uname = tmp_path / "uname"
+        uname.write_text(
+            (
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                f'[[ "$1" == "-m" ]] && printf "%s\\n" "{machine_architecture}" && exit 0\n'
+                'printf "unsupported uname argument: %s\\n" "$1" >&2\n'
+                "exit 2\n"
+            ),
+            encoding="utf-8",
+        )
+        uname.chmod(0o755)
     environment = os.environ | {
         "CONTAINER_ENGINE": engine_name,
         "FAKE_ENGINE_LOG": str(log),
@@ -429,7 +443,8 @@ def test_missing_ci_image_is_built_automatically(tmp_path: Path) -> None:
     result, log = _run_runner(tmp_path, "unit", image_exists=False)
 
     assert result.returncode == 0, result.stderr
-    assert "build --iidfile" in log
+    assert "build --build-arg TARGETARCH=" in log
+    assert "--iidfile" in log
     assert "-t hephaestus-ci:run-" in log
     assert "-t hephaestus-ci:local ." in log
     assert FAKE_IMAGE_ID in log
@@ -445,11 +460,32 @@ def test_queue_mode_rebuilds_an_existing_ci_image(tmp_path: Path) -> None:
     result, log = _run_runner(tmp_path, "unit", rebuild_image=True)
 
     assert result.returncode == 0, result.stderr
-    assert "build --iidfile" in log
+    assert "build --build-arg TARGETARCH=" in log
+    assert "--iidfile" in log
     assert "-t hephaestus-ci:run-" in log
     assert "-t hephaestus-ci:local ." in log
     assert FAKE_IMAGE_ID in log
     assert "uv run pytest tests/unit" in log
+
+
+@pytest.mark.usefixtures("require_git_path_format")
+@pytest.mark.parametrize(
+    ("machine_architecture", "target_arch"),
+    [("x86_64", "amd64"), ("aarch64", "arm64")],
+)
+def test_ci_rebuild_passes_normalized_target_architecture(
+    tmp_path: Path, machine_architecture: str, target_arch: str
+) -> None:
+    """Legacy Docker builds receive the architecture BuildKit normally injects."""
+    result, log = _run_runner(
+        tmp_path,
+        "unit",
+        rebuild_image=True,
+        machine_architecture=machine_architecture,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"--build-arg TARGETARCH={target_arch}" in log
 
 
 def test_podman_bare_image_id_is_accepted_as_immutable(tmp_path: Path) -> None:
