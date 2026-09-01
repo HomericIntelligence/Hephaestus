@@ -19,7 +19,12 @@ class PrReviewAudit:
         )
         audit = item.payload.get("review_audit")
         head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
-        if not isinstance(audit, ReviewAudit) or not audit.valid or audit.findings:
+        if (
+            not isinstance(audit, ReviewAudit)
+            or not audit.valid
+            or audit.verdict != "GO"
+            or audit.findings
+        ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         if not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
@@ -49,6 +54,7 @@ class PrReviewAudit:
         if (
             not isinstance(audit, ReviewAudit)
             or not audit.valid
+            or audit.verdict != "GO"
             or not is_full_commit_sha(head_sha)
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
@@ -78,6 +84,7 @@ class PrReviewAudit:
         if (
             not isinstance(audit, ReviewAudit)
             or not audit.valid
+            or audit.verdict != "GO"
             or not is_full_commit_sha(head_sha)
         ):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")

@@ -24,6 +24,7 @@ _JSON_BLOCK_RE = re.compile(
     re.DOTALL | re.MULTILINE | re.IGNORECASE,
 )
 _VALID_GRADES = frozenset("ABCDEF")
+_VALID_VERDICTS = frozenset({"GO", "NOGO", "BLOCKED"})
 _VALID_SEVERITIES = frozenset({"critical", "major", "minor", "nitpick"})
 _RESERVED_AUTHORITY_CLAIM_RE = re.compile(
     r"\b(?:verdict|decision|approval|rejection)\s*:\s*[^\r\n]*"
@@ -48,6 +49,7 @@ class ReviewAudit:
     findings: tuple[dict[str, object], ...]
     raw_feedback: str
     valid: bool
+    verdict: str | None = None
 
 
 def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
@@ -64,12 +66,25 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
         return _invalid_audit(raw_feedback)
 
     grade = payload.get("grade")
+    raw_verdict = payload.get("verdict")
     summary = payload.get("summary")
     comments = payload.get("comments")
     if not isinstance(grade, str) or grade.strip().upper() not in _VALID_GRADES:
         return _invalid_audit(raw_feedback)
     if not isinstance(summary, str) or not isinstance(comments, list):
         return _invalid_audit(raw_feedback)
+
+    # Verdicts are a forward-compatible authorization extension.  Older
+    # structural audits remain useful evidence for remediation, but the
+    # implementation-GO boundary independently requires ``verdict == "GO"``.
+    # An absent or malformed value is therefore represented as ``None`` and
+    # fails closed at that boundary without breaking the rest of the review
+    # state machine.
+    verdict = (
+        raw_verdict.strip().upper()
+        if isinstance(raw_verdict, str) and raw_verdict.strip().upper() in _VALID_VERDICTS
+        else None
+    )
 
     findings: list[dict[str, object]] = []
     for comment in comments:
@@ -80,6 +95,7 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
 
     return ReviewAudit(
         grade=grade.strip().upper(),
+        verdict=verdict,
         summary=_sanitize_summary(summary),
         findings=tuple(findings),
         raw_feedback=raw_feedback,
@@ -220,6 +236,7 @@ def _invalid_audit(raw_feedback: str) -> ReviewAudit:
     """Build a fail-closed audit result."""
     return ReviewAudit(
         grade=None,
+        verdict=None,
         summary=_INVALID_SUMMARY,
         findings=(),
         raw_feedback=raw_feedback,
@@ -230,13 +247,13 @@ def _invalid_audit(raw_feedback: str) -> ReviewAudit:
 def render_review_audit(audit: ReviewAudit) -> str:
     """Render the bounded informational PR comment for a review audit.
 
-    The implementation-state label is intentionally not represented as a
-    decision field in this comment. Callers must obtain authorization from a
-    fresh, confirmed GitHub label transition instead.
+    The reviewer verdict is audit evidence. Callers must also obtain a fresh,
+    confirmed GitHub label transition.
     """
     summary = _sanitize_summary(audit.summary)
     return (
         "## Automated PR review\n\n"
+        f"Reviewer verdict: {audit.verdict or 'invalid'}\n\n"
         f"Total grade: {audit.grade or 'ungraded'}\n\n"
         f"Review summary: {summary}\n\n"
         "Eligibility is represented only by the live GitHub implementation-state label; "
@@ -248,6 +265,8 @@ def render_implementation_go_audit(
     audit: ReviewAudit, *, pr_number: int, head_sha: str
 ) -> tuple[str, str]:
     """Render one public, idempotent audit comment for an approved PR head."""
+    if not audit.valid or audit.verdict != "GO" or audit.findings:
+        raise ValueError("implementation-go audit must have a clean GO verdict")
     if pr_number <= 0:
         raise ValueError("pr_number must be positive")
     if _FULL_COMMIT_SHA_RE.fullmatch(head_sha) is None:

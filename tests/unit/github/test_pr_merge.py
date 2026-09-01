@@ -789,6 +789,7 @@ class TestMain:
         monkeypatch.setattr(pr_merge_module, "run_git_cmd", MagicMock())
         monkeypatch.setattr(pr_merge_module, "try_push_head_branch", MagicMock())
         monkeypatch.setattr(pr_merge_module, "detect_repo_from_remote", lambda: "owner/repo")
+        monkeypatch.setattr(pr_merge_module.logger.logger, "propagate", True)
         monkeypatch.setattr("sys.argv", ["prog"])
 
         assert pr_merge_module.main() == 1
@@ -818,6 +819,7 @@ class TestMain:
         _mock_git,
         mock_push,
         caplog: pytest.LogCaptureFixture,
+        monkeypatch,
     ) -> None:
         """An error querying current checks blocks the merge."""
         mock_gh_call.side_effect = [
@@ -839,6 +841,7 @@ class TestMain:
             "hephaestus.github.pr_merge.detect_repo_from_remote",
             return_value="owner/repo",
         ):
+            monkeypatch.setattr(pr_merge_module.logger.logger, "propagate", True)
             with patch("sys.argv", ["prog"]):
                 assert pr_merge_module.main() == 1
 

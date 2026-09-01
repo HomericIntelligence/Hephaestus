@@ -1204,6 +1204,7 @@ class PrReviewJobs(_PrReviewHost):
                 findings=(),
                 raw_feedback="",
                 valid=True,
+                verdict="GO",
             )
         return Continue(next_state=ADDRESS_WAIT if remediation else EVAL)
 

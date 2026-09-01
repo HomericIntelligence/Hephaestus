@@ -2,6 +2,8 @@
 # ruff: noqa: F403
 import typing as _typing
 
+from hephaestus.automation.review_audit import ReviewAudit
+
 from .pr_review_audit import PrReviewAudit
 from .pr_review_gate import PrReviewGate
 from .pr_review_jobs import PrReviewJobs
@@ -79,7 +81,18 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
             logger.warning("pr_review:%d: no PR on item; failing back", item.issue)
             return self._fail_back_agent_error(item)
         if item.state == ENTER and item.payload.get("pending_implementation_go_audit"):
-            return Continue(next_state=GO_AUDIT_RECEIPT)
+            audit = item.payload["pending_implementation_go_audit"]
+            if (
+                isinstance(audit, ReviewAudit)
+                and audit.valid
+                and audit.verdict == "GO"
+                and not audit.findings
+            ):
+                return Continue(next_state=GO_AUDIT_RECEIPT)
+            item.payload.pop("pending_implementation_go_audit", None)
+            item.payload.pop("pending_implementation_go_audit_head", None)
+            item.payload.pop("pending_implementation_go_label_confirmed", None)
+            return Continue(next_state="REVIEW_WAIT")
         if (
             item.state == "ENTER"
             and not item.worktree

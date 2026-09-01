@@ -3400,7 +3400,7 @@ class TestMutatorMapping:
     ) -> None:
         """Recovery receipts are deleted only after an owned public audit readback."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
@@ -3426,7 +3426,7 @@ class TestMutatorMapping:
     ) -> None:
         """A stale or failed public write never deletes the replay artifact."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
             f"pr=5:head={head}:batch={'b' * 32} -->\n<!-- {{}} -->"
@@ -3450,7 +3450,7 @@ class TestMutatorMapping:
     ) -> None:
         """An ambiguous committed POST converges to one audit before cleanup."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
@@ -3490,7 +3490,7 @@ class TestMutatorMapping:
     ) -> None:
         """A committed PATCH with a lost response retries one durable comment ID."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         _pending_marker, pending_body = render_pending_implementation_go_audit(5, head, audit)
         handoff = (
@@ -3530,7 +3530,7 @@ class TestMutatorMapping:
     ) -> None:
         """A crash after receipt promotion still resumes required journal cleanup."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
