@@ -41,7 +41,7 @@ from hephaestus.agents.model_selection import (
 )
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
-    package_tree_digest,
+    package_tree_digest as package_tree_digest,
     preflight_pi_environment,
     prove_athena_skill_command,
 )
