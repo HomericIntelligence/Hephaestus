@@ -1370,11 +1370,7 @@ class ImplementationStage(Stage):
             kwargs["git_metadata_receipt"] = item.payload.get("git_metadata_receipt")
             planned_claims = item.payload.get("_implementation_file_claims")
             if planned_claims is None:
-                planned = _fetch_planned_files(item.issue or issue, repo=(ctx.org, item.repo))
-                planned_claims = (
-                    {((ctx.org, item.repo), path) for path in planned} if planned else set()
-                )
-                item.payload["_implementation_file_claims"] = planned_claims
+                return StageOutcome(Disposition.FINISH_FAIL, "approved_plan_claims_unavailable")
             allowed_paths = tuple(
                 sorted(
                     claim[1]
