@@ -66,6 +66,15 @@ def test_implementation_prompt_round_trips_host_inputs() -> None:
     assert "/tmp/wt" in rendered
 
 
+def test_implementation_prompt_fences_the_canonical_plan_without_timeline_fetch() -> None:
+    """The writer receives one host-supplied plan, not an issue-comment capability."""
+    plan = "## Files to Modify\n- `hephaestus/automation/guard.py`"
+    rendered = prompts.get_implementation_prompt(issue_number=42, approved_plan=plan)
+
+    _assert_fenced(rendered, {"CANONICAL_APPROVED_PLAN": plan})
+    assert "gh issue view" not in rendered
+
+
 def test_pr_review_prompt_example_is_accepted_by_review_parser() -> None:
     """The implementation-loop JSON example satisfies its production parser."""
     rendered = prompts.get_impl_loop_review_prompt(

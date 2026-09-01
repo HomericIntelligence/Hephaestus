@@ -372,8 +372,9 @@ def build_implementation_prompt(
         issue_body=issue_body,
         branch_name=branch_name,
         worktree_path=worktree_path,
+        approved_plan=approved_plan,
     )
-    if not advise_findings and not rebase_conflict and not approved_plan:
+    if not advise_findings and not rebase_conflict:
         return prompt
     blocks: list[str] = [prompt]
     if advise_findings:
@@ -382,8 +383,6 @@ def build_implementation_prompt(
                 "implementation/advise_append.j2", advise_findings=advise_findings
             )
         )
-    if approved_plan:
-        blocks.append("\n\n## Canonical approved plan\n\n" + approved_plan)
     if rebase_conflict:
         blocks.append(
             PromptCatalog.current().render(
@@ -429,14 +428,13 @@ def build_test_fix_prompt(
         issue_body=issue_body,
         branch_name=branch_name,
         worktree_path=worktree_path,
+        approved_plan=approved_plan,
     )
     feedback = get_impl_resume_feedback_prompt(
         issue_number=issue_number,
         prev_iteration=prev_iteration,
         review_feedback=review_feedback,
     )
-    if approved_plan:
-        prompt += "\n\n## Canonical approved plan\n\n" + approved_plan
     return prompt + feedback
 
 

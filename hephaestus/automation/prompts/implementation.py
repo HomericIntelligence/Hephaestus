@@ -29,6 +29,7 @@ def get_implementation_prompt(
     issue_body: str = "",
     branch_name: str = "",
     worktree_path: str = "",
+    approved_plan: str = "",
     repo_root: str | None = None,
 ) -> str:
     """Get the implementation prompt for an issue.
@@ -56,6 +57,9 @@ def get_implementation_prompt(
         issue_body_block=fenced.fence("ISSUE_BODY", issue_body),
         branch_name=branch_name,
         worktree_path=safe_worktree_path,
+        approved_plan_block=fenced.fence(
+            "CANONICAL_APPROVED_PLAN", approved_plan or "_(unavailable)_"
+        ),
         untrusted_notice=fenced.untrusted_notice,
         terse_output_directive=get_terse_output_directive(),
     )
