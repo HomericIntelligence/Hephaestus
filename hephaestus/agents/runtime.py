@@ -56,6 +56,7 @@ from hephaestus.agents.process_isolation import ProcessIsolationError, macos_iso
 from hephaestus.config.child_environments import (
     build_claude_child_env,
     build_codex_child_env,
+    build_isolated_codex_child_env,
     build_pi_child_env,
     read_approved_parent_env,
 )
@@ -329,25 +330,7 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
                 )
             ),
         )
-        base_env = build_codex_child_env(codex_home=profile)
-        env: dict[str, str] = {
-            name: base_env[name]
-            for name in ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
-            if name in base_env
-        }
-        env.update(
-            {
-                "CODEX_HOME": str(profile),
-                "HOME": str(profile),
-                "TMPDIR": str(profile_tmp),
-                "TMP": str(profile_tmp),
-                "TEMP": str(profile_tmp),
-                "XDG_CONFIG_HOME": str(profile_xdg_config),
-                "XDG_CACHE_HOME": str(profile_xdg_cache),
-                "XDG_DATA_HOME": str(profile_xdg_data),
-            }
-        )
-        yield env
+        yield build_isolated_codex_child_env(profile=profile)
 
 
 @dataclass(frozen=True)

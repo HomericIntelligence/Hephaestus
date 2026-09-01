@@ -74,6 +74,40 @@ def test_pi_builder_uses_only_explicit_directory_and_temporary_paths(
     assert environment["PI_SKIP_VERSION_CHECK"] == "1"
 
 
+def test_isolated_codex_builder_replaces_all_ambient_state_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """Automation Codex state never inherits an operator-owned root."""
+    for name in (
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        monkeypatch.setenv(name, f"/poison/{name.lower()}")
+
+    profile = tmp_path / "job-profile"
+    environment = child_environments.build_isolated_codex_child_env(profile=profile)
+
+    assert environment["HOME"] == str(profile)
+    assert environment["CODEX_HOME"] == str(profile)
+    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {
+        str(profile / "tmp")
+    }
+    assert environment["XDG_CONFIG_HOME"] == str(profile / "xdg" / "config")
+    assert environment["XDG_CACHE_HOME"] == str(profile / "xdg" / "cache")
+    assert environment["XDG_DATA_HOME"] == str(profile / "xdg" / "data")
+    assert not {"USERPROFILE", "APPDATA", "LOCALAPPDATA"} & environment.keys()
+
+
 def test_auth_and_signing_bridges_are_boundary_specific(
     monkeypatch: pytest.MonkeyPatch,
     platform_env: dict[str, str],
