@@ -2248,9 +2248,7 @@ class WorkerPool:
                     job.execution_request is not None
                     and job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
                     and job.resume_binding is None
-                    and not (
-                        job.resume_session_id and allows_unbound_session_resume(agent)
-                    )
+                    and not (job.resume_session_id and allows_unbound_session_resume(agent))
                 ):
                     raise AgentExecutionError(
                         "required agent session has no verified resume binding"
@@ -4908,13 +4906,18 @@ class WorkerPool:
             )
             if hooks_path.returncode == 0 and hooks_path.stdout.strip():
                 return JobResult(ok=False, error="publication Git hooksPath is not allowed")
-            origin = git_utils.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=worktree_path,
-                capture_output=True,
-                timeout=job.timeout_s,
-                env=_controlled_git_env(),
-            ).stdout.strip().rstrip("/").removesuffix(".git")
+            origin = (
+                git_utils.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                    env=_controlled_git_env(),
+                )
+                .stdout.strip()
+                .rstrip("/")
+                .removesuffix(".git")
+            )
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return JobResult(ok=False, error="cannot validate publication Git metadata")
         expected_origins = {
