@@ -57,12 +57,7 @@ def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     """Give mocked Codex processes the same minimal profile source as production."""
     source_home = tmp_path / "codex-home"
     artifact = (
-        source_home
-        / "plugins"
-        / "cache"
-        / "athena"
-        / "athena"
-        / agent_runtime.CODEX_ATHENA_VERSION
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
     )
     artifact.mkdir(parents=True)
     (artifact / ".codex-marketplace-install.json").write_text(
@@ -1140,12 +1135,7 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
     """The isolated profile retains auth plus the explicitly admitted Athena plugin."""
     source_home = tmp_path / "source-codex-home"
     plugin_cache = (
-        source_home
-        / "plugins"
-        / "cache"
-        / "athena"
-        / "athena"
-        / agent_runtime.CODEX_ATHENA_VERSION
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
     )
     plugin_cache.mkdir(parents=True)
     (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
@@ -1188,9 +1178,7 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
             / "athena"
             / agent_runtime.CODEX_ATHENA_VERSION
             / "marker.txt"
-        ).read_text(
-            encoding="utf-8"
-        ) == "athena\n"
+        ).read_text(encoding="utf-8") == "athena\n"
         config = (profile / "config.toml").read_text(encoding="utf-8")
         assert '[plugins."athena@athena"]' in config
         assert "enabled = true" in config
@@ -1205,12 +1193,7 @@ def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
     """The admitted plugin copy must not follow a nested external link."""
     source_home = tmp_path / "source-codex-home"
     plugin_cache = (
-        source_home
-        / "plugins"
-        / "cache"
-        / "athena"
-        / "athena"
-        / agent_runtime.CODEX_ATHENA_VERSION
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
     )
     plugin_cache.mkdir(parents=True)
     (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")

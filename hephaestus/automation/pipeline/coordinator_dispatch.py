@@ -296,10 +296,7 @@ class ImplementationDispatcher(_CoordinatorHost):
         the implementation stage, including serial and overlap-opt-out modes.
         Those modes skip overlap arbitration, not immutable plan admission.
         """
-        if (
-            item.stage is not ct.StageName.IMPLEMENTATION
-            or item.issue is None
-        ):
+        if item.stage is not ct.StageName.IMPLEMENTATION or item.issue is None:
             return set()
         item_id = id(item)
         selected = self._implementation_file_claims.get(item_id)

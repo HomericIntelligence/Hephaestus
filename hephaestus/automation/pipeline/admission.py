@@ -57,9 +57,7 @@ LOG = logging.getLogger(__name__)
 # `hephaestus/automation/pipeline/stages/pr_review.py` or `pyproject.toml`.
 # This is both the overlap reservation and the immutable publication manifest,
 # so a valid top-level plan path must not be dropped.
-_PLAN_FILE_RE = re.compile(
-    r"`([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9_]+)`"
-)
+_PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9_]+)`")
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
 
 # A source path only conflicts with work in the same repository.  The

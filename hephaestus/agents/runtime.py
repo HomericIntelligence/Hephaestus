@@ -272,9 +272,7 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
             profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION,
             ignore=shutil.ignore_patterns(".git"),
         )
-        destination_artifact = (
-            profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
-        )
+        destination_artifact = profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
         if package_tree_digest(destination_artifact) != source_digest:
             raise AgentExecutionError("Codex automation Athena artifact copy digest mismatch")
         write_secure(
