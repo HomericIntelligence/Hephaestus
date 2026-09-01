@@ -9,7 +9,7 @@ Provides helpers for:
 
 import logging
 import subprocess
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,10 @@ class DirectBranchReservationCollisionError(RuntimeError):
         super().__init__(f"Direct-scope branch {branch_name} already exists")
 
 
+class SigningEnvironmentUnavailableError(RuntimeError):
+    """A required controlled signing environment could not be obtained."""
+
+
 def _timeout_kw(timeout: int | None) -> dict[str, Any]:
     """Return a ``run`` kwargs fragment only when a timeout was provided."""
     return {} if timeout is None else {"timeout": timeout}
@@ -109,6 +113,7 @@ def commit_if_changes(
     allowed_paths: Collection[str] | None = None,
     timeout: int | None = None,
     git_message_timeout: int = 1200,
+    signing_env_factory: Callable[[], dict[str, str]] | None = None,
 ) -> bool:
     """Commit pending changes in *worktree_path* if the worktree is dirty.
 
@@ -122,6 +127,8 @@ def commit_if_changes(
         allowed_paths: Optional exact path allowlist forwarded to the commit
             helper. When set, only those porcelain paths may be staged.
         timeout: Optional timeout in seconds for local git commands.
+        signing_env_factory: Optional lazy provider for the controlled Git
+            signing environment. It is invoked only after a dirty check.
 
     Returns:
         True if a commit was created, otherwise False.
@@ -149,6 +156,8 @@ def commit_if_changes(
         if timeout is not None:
             commit_kwargs["git_timeout"] = timeout
         commit_kwargs["git_message_timeout"] = git_message_timeout
+        if signing_env_factory is not None:
+            commit_kwargs["signing_env"] = signing_env_factory()
         commit_changes(
             issue_number,
             worktree_path,
@@ -157,28 +166,42 @@ def commit_if_changes(
         )
         logger.info(committed_log_message, issue_number)
         return True
+    except SigningEnvironmentUnavailableError:
+        raise
     except RuntimeError as e:
         logger.warning("Commit skipped for issue #%s: %s", issue_number, e)
         return False
 
 
-def push_branch(branch_name: str, worktree_path: Path, *, timeout: int | None = None) -> None:
+def push_branch(
+    branch_name: str,
+    worktree_path: Path,
+    *,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+) -> None:
     """Push *branch_name* to ``origin``.
 
     Args:
         branch_name: Branch name to push.
         worktree_path: Path to the git worktree.
         timeout: Optional timeout in seconds for the push.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
 
     Raises:
         RuntimeError: If the push fails.
 
     """
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
-            ["git", "push", "origin", branch_name],
+            ["git", *remote_config, "push", "origin", branch_name],
             cwd=worktree_path,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
         logger.info("Pushed branch %s to origin", branch_name)
     except subprocess.CalledProcessError as e:
@@ -191,6 +214,8 @@ def reserve_remote_branch_if_absent(
     repo_root: Path,
     *,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> None:
     """Atomically create ``origin/<branch_name>`` at ``base_sha`` only when absent.
 
@@ -206,11 +231,24 @@ def reserve_remote_branch_if_absent(
     later implementation push does not use this exception and remains subject
     to every configured hook.  Git pre-commit hooks are unaffected because
     this function creates no commit.
+
+    Args:
+        branch_name: Branch name to reserve.
+        base_sha: Exact commit to publish as the initial branch value.
+        repo_root: Repository that owns the remote.
+        timeout: Optional timeout in seconds for each remote command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
+
     """
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 "--no-verify",
                 f"--force-with-lease=refs/heads/{branch_name}:",
@@ -218,10 +256,16 @@ def reserve_remote_branch_if_absent(
                 f"{base_sha}:refs/heads/{branch_name}",
             ],
             cwd=repo_root,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
-        if _remote_branch_exists(branch_name, repo_root, timeout=timeout):
+        if _remote_branch_exists(
+            branch_name,
+            repo_root,
+            timeout=timeout,
+            env=env,
+            remote_config=remote_config,
+        ):
             raise DirectBranchReservationCollisionError(branch_name) from exc
         raise RuntimeError(f"Failed to reserve direct-scope branch {branch_name}: {exc}") from exc
 
@@ -231,6 +275,8 @@ def _remote_branch_exists(
     repo_root: Path,
     *,
     timeout: int | None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> bool:
     """Return whether a remote probe conclusively found ``branch_name``.
 
@@ -241,12 +287,23 @@ def _remote_branch_exists(
     """
     expected_ref = f"refs/heads/{branch_name}"
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         probe = run(
-            ["git", "ls-remote", "--exit-code", "--heads", "origin", expected_ref],
+            [
+                "git",
+                *remote_config,
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                expected_ref,
+            ],
             cwd=repo_root,
             check=False,
             log_errors=False,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -263,12 +320,23 @@ def push_branch_if_remote_matches(
     worktree_path: Path,
     *,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> None:
     """Push only an expected fast-forward of a direct-scope reservation.
 
     The ancestry check prevents a locally rewritten branch from becoming a
     forced update.  The explicit server-side lease then rejects any human or
     competing writer that changed the reservation after admission.
+
+    Args:
+        branch_name: Branch name to publish.
+        expected_remote_sha: Exact remote value required by the lease.
+        worktree_path: Worktree that contains the new commit.
+        timeout: Optional timeout in seconds for each command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
+
     """
     ancestry = run(
         ["git", "merge-base", "--is-ancestor", expected_remote_sha, "HEAD"],
@@ -281,16 +349,20 @@ def push_branch_if_remote_matches(
             f"Direct-scope branch {branch_name} is not a fast-forward of its reservation"
         )
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f"HEAD:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"Failed to publish direct-scope branch {branch_name}: {exc}") from exc
@@ -302,6 +374,9 @@ def delete_reserved_branch_if_unchanged(
     repo_root: Path,
     *,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> bool:
     """Delete an unused direct-scope reservation only while it remains ours.
 
@@ -310,26 +385,52 @@ def delete_reserved_branch_if_unchanged(
     confirms that the remote no longer points to our expected SHA.  Transport
     and authentication failures raise so callers can retry rather than
     mistaking an unreachable reservation for a safe ownership loss.
+
+    Args:
+        branch_name: Reserved branch to delete.
+        expected_remote_sha: Exact remote value required by the lease.
+        repo_root: Repository that owns the remote.
+        timeout: Optional timeout in seconds for each remote command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
+        revalidate_remote: Optional provider that revalidates the destination
+            after a failed hook-capable push and before the remote probe.
+
     """
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f":refs/heads/{branch_name}",
             ],
             cwd=repo_root,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
         return True
     except subprocess.CalledProcessError as exc:
+        if revalidate_remote is not None:
+            env, remote_config = revalidate_remote()
+            run_kwargs = _timeout_kw(timeout)
+            run_kwargs["env"] = env
         try:
             observed = run(
-                ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+                [
+                    "git",
+                    *remote_config,
+                    "ls-remote",
+                    "--refs",
+                    "origin",
+                    f"refs/heads/{branch_name}",
+                ],
                 cwd=repo_root,
-                **_timeout_kw(timeout),
+                **run_kwargs,
             ).stdout.split()
         except subprocess.CalledProcessError as probe_exc:
             raise RuntimeError(
@@ -390,6 +491,9 @@ def push_head_to_branch(
     *,
     source_sha: str | None = None,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> None:
     """Publish detached ``HEAD`` to ``origin/<branch_name>`` safely.
 
@@ -400,17 +504,21 @@ def push_head_to_branch(
     overwrite a PR head that changed after its reviewed-head proof.
     """
     source_ref = source_sha or "HEAD"
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f"{source_ref}:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
         logger.info("Published detached HEAD to origin/%s", branch_name)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -419,11 +527,22 @@ def push_head_to_branch(
         # git's stderr: hook output is untrusted diagnostic content and may
         # contain repository data.  A fresh authoritative ref read classifies
         # only the safe ownership distinction needed by the pipeline.
+        if revalidate_remote is not None:
+            env, remote_config = revalidate_remote()
+            run_kwargs = _timeout_kw(timeout)
+            run_kwargs["env"] = env
         try:
             observed = run(
-                ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+                [
+                    "git",
+                    *remote_config,
+                    "ls-remote",
+                    "--refs",
+                    "origin",
+                    f"refs/heads/{branch_name}",
+                ],
                 cwd=worktree_path,
-                **_timeout_kw(timeout),
+                **run_kwargs,
             ).stdout.split()
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as probe_exc:
             raise DetachedHeadPushRemoteProbeError(
@@ -614,6 +733,9 @@ def push_current_branch_with_lease_on_divergence(
     remote: str = "origin",
     push_ref: str = "HEAD",
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+    revalidate_remote: Callable[[], tuple[dict[str, str], tuple[str, ...]]] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
 
@@ -643,6 +765,10 @@ def push_current_branch_with_lease_on_divergence(
             the push to land on the named remote branch regardless of local
             branch state.
         timeout: Optional timeout in seconds for each git command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
+        revalidate_remote: Optional provider that revalidates the destination
+            after a failed hook-capable push and before recovery commands.
 
     Returns:
         The successful push's ``CompletedProcess``.
@@ -654,20 +780,28 @@ def push_current_branch_with_lease_on_divergence(
             failure.
 
     """
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         return run(
             [
                 "git",
+                *remote_config,
                 "push",
                 remote,
                 push_ref,
             ],
             cwd=cwd,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
         if not _is_push_rejected_diverged(exc):
             raise
+        if revalidate_remote is not None:
+            env, remote_config = revalidate_remote()
+            run_kwargs = _timeout_kw(timeout)
+            run_kwargs["env"] = env
         # Resolve the branch name lazily — most callers know it, but we don't
         # want to require it on every caller.
         if branch is None:
@@ -680,7 +814,11 @@ def push_current_branch_with_lease_on_divergence(
         # Fetch the canonical tip so the lease check has something current to
         # compare against. If this fetch fails, raise — we cannot safely
         # lease-push without an up-to-date remote-tracking ref.
-        run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
+        run(
+            ["git", *remote_config, "fetch", remote, branch],
+            cwd=cwd,
+            **run_kwargs,
+        )
         # The lease retry preserves any explicit ``push_ref`` the caller passed
         # so HEAD lands on the right *remote* branch even if the local HEAD has
         # drifted (#832). The default ``"HEAD"`` is rewritten to
@@ -690,13 +828,14 @@ def push_current_branch_with_lease_on_divergence(
         return run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease={branch}",
                 remote,
                 lease_push_ref,
             ],
             cwd=cwd,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
 
 
@@ -707,6 +846,8 @@ def sync_worktree_to_remote_branch(
     remote: str = "origin",
     pr_number: int | None = None,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    fetch_config: tuple[str, ...] = (),
 ) -> None:
     """Reset ``cwd`` to ``<remote>/<branch>`` so the agent starts from the PR head.
 
@@ -736,6 +877,8 @@ def sync_worktree_to_remote_branch(
         pr_number: Optional PR number used to fall back to GitHub's pull ref
             when the head branch is not available on ``remote``.
         timeout: Optional timeout in seconds for each git command.
+        env: Optional controlled environment for the fetch and reset commands.
+        fetch_config: Trusted Git configuration arguments used only for fetches.
 
     Raises:
         subprocess.CalledProcessError: If either git command fails. Callers
@@ -745,11 +888,20 @@ def sync_worktree_to_remote_branch(
     """
     logger.info("Syncing worktree at %s to %s/%s before agent run", cwd, remote, branch)
     tracking_ref = f"refs/remotes/{remote}/{branch}"
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         run(
-            ["git", "fetch", remote, f"+refs/heads/{branch}:{tracking_ref}"],
+            [
+                "git",
+                *fetch_config,
+                "fetch",
+                remote,
+                f"+refs/heads/{branch}:{tracking_ref}",
+            ],
             cwd=cwd,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as error:
         if pr_number is None or not _is_missing_remote_ref_error(error):
@@ -762,10 +914,10 @@ def sync_worktree_to_remote_branch(
             cwd,
             pull_ref,
         )
-        run(["git", "fetch", remote, pull_ref], cwd=cwd, **_timeout_kw(timeout))
-        run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=cwd, **_timeout_kw(timeout))
+        run(["git", *fetch_config, "fetch", remote, pull_ref], cwd=cwd, **run_kwargs)
+        run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=cwd, **run_kwargs)
         return
-    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **_timeout_kw(timeout))
+    run(["git", "reset", "--hard", f"{remote}/{branch}"], cwd=cwd, **run_kwargs)
 
 
 def _is_missing_remote_ref_error(error: subprocess.CalledProcessError) -> bool:
@@ -887,6 +1039,9 @@ def rebase_worktree_onto(
     remote: str = "origin",
     preserve_conflicts: bool = False,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    fetch_env: dict[str, str] | None = None,
+    fetch_config: tuple[str, ...] = (),
 ) -> bool:
     """Mechanically rebase the worktree at ``cwd`` onto ``<remote>/<base_branch>``.
 
@@ -919,6 +1074,9 @@ def rebase_worktree_onto(
         preserve_conflicts: Leave a conflicted rebase paused for a later
             host-owned continuation instead of aborting it.
         timeout: Optional timeout in seconds for each git command.
+        env: Optional controlled environment for the rebase commands.
+        fetch_env: Optional controlled environment for the remote fetch.
+        fetch_config: Trusted Git configuration arguments for the remote fetch.
 
     Returns:
         ``True`` if the rebase applied cleanly. ``False`` if the rebase hit
@@ -932,17 +1090,23 @@ def rebase_worktree_onto(
 
     """
     base_ref = f"{remote}/{base_branch}"
-    run(["git", "fetch", remote, base_branch], cwd=cwd, **_timeout_kw(timeout))
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
+    fetch_kwargs = _timeout_kw(timeout)
+    if fetch_env is not None:
+        fetch_kwargs["env"] = fetch_env
+    run(["git", *fetch_config, "fetch", remote, base_branch], cwd=cwd, **fetch_kwargs)
     _remove_untracked_files_tracked_by_ref(cwd, base_ref, timeout=timeout)
     try:
-        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **_timeout_kw(timeout))
+        run(_commit_policy_rebase_command(base_ref), cwd=cwd, **run_kwargs)
         logger.info("Rebased worktree at %s onto %s/%s cleanly", cwd, remote, base_branch)
         return True
     except subprocess.CalledProcessError:
         if not preserve_conflicts:
             # ``check=False`` because an abort error must not mask the original
             # conflict signal.
-            run(["git", "rebase", "--abort"], cwd=cwd, check=False, **_timeout_kw(timeout))
+            run(["git", "rebase", "--abort"], cwd=cwd, check=False, **run_kwargs)
         logger.info(
             "Rebase of worktree at %s onto %s/%s hit conflicts; %s",
             cwd,

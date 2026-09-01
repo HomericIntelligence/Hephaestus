@@ -860,8 +860,17 @@ def _commit_with_signature(
     commit_message: str,
     worktree_path: Path,
     git_timeout: int | None,
+    signing_env: dict[str, str] | None = None,
 ) -> None:
     """Create the repository-policy signed and DCO-signed commit."""
+    if signing_env is not None:
+        run(
+            ["git", "commit", "-S", "-s", "-m", commit_message],
+            cwd=worktree_path,
+            env=signing_env,
+            **_git_timeout_kw(git_timeout),
+        )
+        return
     run(
         ["git", "commit", "-S", "-s", "-m", commit_message],
         cwd=worktree_path,
@@ -876,6 +885,7 @@ def commit_changes(
     git_message_timeout: int = DEFAULT_GIT_MESSAGE_AGENT_TIMEOUT,
     allowed_paths: Collection[str] | None = None,
     git_timeout: int | None = None,
+    signing_env: dict[str, str] | None = None,
     agent_model: str | None = None,
 ) -> None:
     """Commit changes in worktree, filtering out secret files.
@@ -893,6 +903,7 @@ def commit_changes(
         allowed_paths: Optional exact set of porcelain paths allowed to be
             staged. Secret filtering still applies.
         git_timeout: Optional timeout in seconds for each local git command.
+        signing_env: Optional validated Git environment for commit signing.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
@@ -931,7 +942,7 @@ def commit_changes(
     # may have set, so the commit inherits the operator's verifiable identity (#2110).
     _clear_local_committer_identity(worktree_path, git_timeout)
 
-    _commit_with_signature(commit_message, worktree_path, git_timeout)
+    _commit_with_signature(commit_message, worktree_path, git_timeout, signing_env)
 
 
 def ensure_pr_created(

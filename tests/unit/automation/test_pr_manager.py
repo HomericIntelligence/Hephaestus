@@ -317,11 +317,19 @@ class TestCommitChanges:
             patch.object(pr_manager, "fetch_issue_info", return_value=issue),
             patch.object(pr_manager, "_invoke_git_message_agent", return_value="not json"),
         ):
-            pr_manager.commit_changes(3, Path("/tmp/wt"))
+            pr_manager.commit_changes(
+                3,
+                Path("/tmp/wt"),
+                signing_env={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "gpg.format"},
+            )
 
         commit_cmd = run_mock.call_args_list[-1].args[0]
         assert commit_cmd[:4] == ["git", "commit", "-S", "-s"]
         assert "-m" in commit_cmd
+        assert run_mock.call_args_list[-1].kwargs["env"] == {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "gpg.format",
+        }
 
     def test_commit_changes_threads_git_timeout(self) -> None:
         porcelain = _porcelain(" M src/foo.py")

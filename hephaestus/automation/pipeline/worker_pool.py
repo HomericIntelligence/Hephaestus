@@ -30,7 +30,7 @@ from contextlib import ExitStack, contextmanager
 from contextvars import copy_context
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TypeGuard, cast
+from typing import Any, TypeGuard, cast
 
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
@@ -248,6 +248,14 @@ def _agent_exception_result(exc: Exception) -> JobResult:
 
 class _HostVerificationBoundaryError(RuntimeError):
     """Raised when a host verification cannot keep PR code contained."""
+
+
+class _RebaseSigningEnvironmentError(RuntimeError):
+    """Raised when a policy rebase cannot obtain the validated signing bridge."""
+
+
+class _RemoteGitAuthenticationError(RuntimeError):
+    """Raised when a remote Git operation cannot use trusted authentication."""
 
 
 def _sandbox_string(path: Path) -> str:
@@ -1281,8 +1289,19 @@ def _controlled_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str] | 
             value={"failure_kind": "signing_configuration"},
             error="host signing configuration unavailable",
         )
+    signing_program = _trusted_executable("ssh-keygen", path=os.defpath)
+    if signing_program is None:
+        return JobResult(
+            ok=False,
+            value={"failure_kind": "signing_configuration"},
+            error="trusted SSH signing executable unavailable",
+        )
     env = _controlled_git_env()
-    injected = {**signing, "commit.gpgsign": "true"}
+    injected = {
+        **signing,
+        "commit.gpgsign": "true",
+        "gpg.ssh.program": signing_program,
+    }
     env["GIT_CONFIG_COUNT"] = str(len(injected))
     for index, (key, value) in enumerate(injected.items()):
         env[f"GIT_CONFIG_KEY_{index}"] = key
@@ -1290,10 +1309,48 @@ def _controlled_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str] | 
     return env
 
 
+def _required_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str]:
+    """Return the validated signing environment or surface a typed Git-job error."""
+    env = _controlled_git_signing_env(cwd, timeout=timeout)
+    if isinstance(env, JobResult):
+        raise _RebaseSigningEnvironmentError(env.error or "host signing configuration unavailable")
+    return env
+
+
 def _trusted_executable(name: str, *, path: str | None = None) -> str | None:
     """Resolve a command to an absolute path before entering a controlled env."""
     executable = shutil.which(name, path=path)
     return str(Path(executable).resolve()) if executable is not None else None
+
+
+def _trusted_remote_git_config(gh_command: str) -> tuple[str, ...] | None:
+    """Return isolated GitHub HTTPS and SSH transport configuration."""
+    ssh_command = _trusted_executable("ssh", path=os.defpath)
+    if ssh_command is None:
+        return None
+    ssh_config = " ".join(
+        (
+            shlex.quote(ssh_command),
+            "-F",
+            shlex.quote(os.devnull),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+        )
+    )
+    return (
+        "-c",
+        f"core.sshCommand={ssh_config}",
+        "-c",
+        "credential.helper=",
+        "-c",
+        f"credential.helper=!{shlex.quote(gh_command)} auth git-credential",
+        "-c",
+        "core.askPass=",
+        "-c",
+        "http.sslVerify=true",
+    )
 
 
 def _trusted_uv_executable() -> str | None:
@@ -1395,6 +1452,8 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
         if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
             "proxy",
             "proxyauthmethod",
+            "pushurl",
+            "receivepack",
             "uploadpack",
         }:
             return key
@@ -1486,6 +1545,29 @@ class _GitLockTimeoutError(TimeoutError):
 
 class _GitLockInterruptedError(RuntimeError):
     """Raised when shutdown interrupts a Git job while it waits for the repo lock."""
+
+
+def _git_lock_failure_result(exc: _GitLockTimeoutError | _GitLockInterruptedError) -> JobResult:
+    """Map a typed Git-lock failure to the corresponding bounded job result."""
+    if isinstance(exc, _GitLockTimeoutError):
+        return JobResult(ok=False, error="lock_timeout")
+    return JobResult(
+        ok=False,
+        interrupted=True,
+        error="interrupted_waiting_for_git_lock",
+    )
+
+
+def _git_environment_failure_result(
+    exc: _RebaseSigningEnvironmentError | _RemoteGitAuthenticationError,
+) -> JobResult:
+    """Map a controlled Git environment failure to a typed job result."""
+    failure_kind = (
+        "signing_configuration"
+        if isinstance(exc, _RebaseSigningEnvironmentError)
+        else "remote_authentication"
+    )
+    return JobResult(ok=False, error=str(exc), value={"failure_kind": failure_kind})
 
 
 @contextmanager
@@ -2393,14 +2475,10 @@ class WorkerPool:
                 ),
             ):
                 return self._dispatch_git_op(job)
-        except _GitLockTimeoutError:
-            return JobResult(ok=False, error="lock_timeout")
-        except _GitLockInterruptedError:
-            return JobResult(
-                ok=False,
-                interrupted=True,
-                error="interrupted_waiting_for_git_lock",
-            )
+        except (_GitLockTimeoutError, _GitLockInterruptedError) as exc:
+            return _git_lock_failure_result(exc)
+        except (_RebaseSigningEnvironmentError, _RemoteGitAuthenticationError) as exc:
+            return _git_environment_failure_result(exc)
         except BranchWorktreeOwnedError as exc:
             return JobResult(
                 ok=False,
@@ -2494,9 +2572,18 @@ class WorkerPool:
             return self._git_continue_rebase(job)
 
         elif job.op == "push":
+            cwd = Path(str(job.kwargs.get("cwd") or ""))
+
+            revalidate_remote = self._authenticated_remote_revalidator(
+                cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate_remote()
             git_utils.push_current_branch_with_lease_on_divergence(
                 **job.kwargs,
                 timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
             )
             return JobResult(ok=True)
 
@@ -2506,7 +2593,19 @@ class WorkerPool:
         elif job.op == "release_branch_reservation":
             from .git_cleanup import run_cleanup_job
 
-            return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
+            repo_root = Path(str(job.kwargs.get("repo_root") or ""))
+
+            revalidate_remote = self._authenticated_remote_revalidator(
+                cwd=repo_root, expected_repo=job.repo, timeout=job.timeout_s
+            )
+            remote_env, remote_config = revalidate_remote()
+            return run_cleanup_job(
+                job,
+                worktree_manager_type=WorktreeManager,
+                remote_env=remote_env,
+                remote_config=remote_config,
+                revalidate_remote=revalidate_remote,
+            )
 
         elif job.op == "clone":
             # gh repo clone <repo> <dest>
@@ -2581,6 +2680,11 @@ class WorkerPool:
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
         pr_number = kwargs.pop("pr_number", None)
         cwd = Path(str(kwargs.get("cwd") or ""))
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
+        )
+        remote_env, remote_config = revalidate_remote()
         if publish_rebased_head:
             if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
                 return JobResult(ok=False, error="writer rebase publish arguments invalid")
@@ -2592,6 +2696,7 @@ class WorkerPool:
                 enabled=sync_to_expected_remote_head,
                 branch=branch,
                 remote=remote,
+                expected_repo=job.repo,
                 pr_number=pr_number,
                 expected_remote_sha=expected_remote_sha,
                 timeout=job.timeout_s,
@@ -2599,9 +2704,10 @@ class WorkerPool:
             if synced is not None:
                 return synced
             git_utils.run(
-                ["git", "fetch", remote, base_branch],
+                ["git", *remote_config, "fetch", remote, base_branch],
                 cwd=cwd,
                 timeout=job.timeout_s,
+                env=remote_env,
             )
             ancestry = git_utils.run(
                 ["git", "merge-base", "--is-ancestor", base_ref, "HEAD"],
@@ -2614,15 +2720,20 @@ class WorkerPool:
                     cwd,
                     remote=remote,
                     branch=branch,
+                    expected_repo=job.repo,
                     expected_remote_sha=expected_remote_sha,
                     timeout=job.timeout_s,
                 )
             if ancestry.returncode != 1:
                 return JobResult(ok=False, error="cannot determine writer base ancestry")
+        signing_env = _required_git_signing_env(cwd, timeout=job.timeout_s)
         result = git_utils.rebase_worktree_onto(
             **kwargs,
             preserve_conflicts=publish_rebased_head,
             timeout=job.timeout_s,
+            env=signing_env,
+            fetch_env=remote_env,
+            fetch_config=remote_config,
         )
         if not result:
             if not publish_rebased_head:
@@ -2650,12 +2761,20 @@ class WorkerPool:
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=cwd,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         git_utils.push_head_to_branch(
             branch,
             expected_remote_sha,
             cwd,
             source_sha=source_sha,
             timeout=job.timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         return JobResult(
             ok=True,
@@ -2669,6 +2788,7 @@ class WorkerPool:
         enabled: bool,
         branch: str,
         remote: str,
+        expected_repo: str,
         pr_number: object,
         expected_remote_sha: str,
         timeout: int,
@@ -2690,10 +2810,11 @@ class WorkerPool:
                 )
             except ValueError:
                 sync_pr_number = None
-            git_utils.sync_worktree_to_remote_branch(
+            self._sync_worktree_to_remote_branch(
                 cwd,
                 branch,
                 remote=remote,
+                expected_repo=expected_repo,
                 pr_number=sync_pr_number,
                 timeout=timeout,
             )
@@ -2718,6 +2839,86 @@ class WorkerPool:
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return JobResult(ok=False, error=f"restored writer remote sync failed: {exc}")
         return None
+
+    def _authenticated_remote_git_configuration(
+        self,
+        *,
+        cwd: Path | None = None,
+        expected_repo: str | None = None,
+        timeout: int = 60,
+    ) -> tuple[dict[str, str], tuple[str, ...]]:
+        """Return the controlled environment and trusted GitHub transport config."""
+        gh_command = _trusted_gh_executable(self._gh_extra_path_root)
+        if gh_command is None:
+            raise _RemoteGitAuthenticationError("required GitHub executable is unavailable")
+        remote_config = _trusted_remote_git_config(gh_command)
+        if remote_config is None:
+            raise _RemoteGitAuthenticationError("required SSH executable is unavailable")
+        env = _controlled_git_env()
+        if cwd is not None and expected_repo is not None and (cwd / ".git").exists():
+            if preflight_error := _checkout_preflight_error(cwd, timeout):
+                raise _RemoteGitAuthenticationError(preflight_error)
+            origin = git_utils.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+            ).stdout.strip()
+            normalized_origin = origin.rstrip("/").removesuffix(".git")
+            expected_origins = {
+                f"https://github.com/{expected_repo}",
+                f"ssh://git@github.com/{expected_repo}",
+                f"git@github.com:{expected_repo}",
+            }
+            if normalized_origin not in expected_origins:
+                raise _RemoteGitAuthenticationError(
+                    f"checkout has unexpected origin; expected origin {expected_repo}"
+                )
+        return env, remote_config
+
+    def _authenticated_remote_revalidator(
+        self,
+        *,
+        cwd: Path,
+        expected_repo: str,
+        timeout: int,
+    ) -> Callable[[], tuple[dict[str, str], tuple[str, ...]]]:
+        """Return a callback that validates a Git remote again before reuse."""
+
+        def revalidate() -> tuple[dict[str, str], tuple[str, ...]]:
+            return self._authenticated_remote_git_configuration(
+                cwd=cwd,
+                expected_repo=expected_repo,
+                timeout=timeout,
+            )
+
+        return revalidate
+
+    def _sync_worktree_to_remote_branch(
+        self,
+        cwd: Path,
+        branch: str,
+        *,
+        remote: str = "origin",
+        expected_repo: str,
+        pr_number: int | None = None,
+        timeout: int | None = None,
+    ) -> None:
+        """Synchronize a PR checkout with the trusted GitHub credential helper."""
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=cwd,
+            expected_repo=expected_repo,
+            timeout=timeout or 60,
+        )
+        git_utils.sync_worktree_to_remote_branch(
+            cwd,
+            branch,
+            remote=remote,
+            pr_number=pr_number,
+            timeout=timeout,
+            env=remote_env,
+            fetch_config=remote_config,
+        )
 
     def _conflict_receipt(
         self,
@@ -2867,7 +3068,11 @@ class WorkerPool:
             paused_head_sha,
         ) = parsed
         remote_head = self._read_remote_branch_head(
-            cwd, remote=remote, branch=branch, timeout=job.timeout_s
+            cwd,
+            remote=remote,
+            branch=branch,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
         )
         if isinstance(remote_head, JobResult):
             return remote_head
@@ -2914,12 +3119,20 @@ class WorkerPool:
             return source_sha
         if source_sha == expected_remote_sha:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
+        )
+        remote_env, remote_config = revalidate_remote()
         git_utils.push_head_to_branch(
             branch,
             expected_remote_sha,
             cwd,
             source_sha=source_sha,
             timeout=job.timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         return JobResult(
             ok=True,
@@ -3330,34 +3543,14 @@ class WorkerPool:
     ) -> JobResult:
         """Fetch and fast-forward a validated checkout while its metadata is locked."""
         hooks_disabled = f"core.hooksPath={os.devnull}"
-        ssh_command = _trusted_executable("ssh", path=os.defpath)
-        if ssh_command is None:
+        remote_config = _trusted_remote_git_config(gh_command)
+        if remote_config is None:
             return JobResult(ok=False, error="required fetch executable is unavailable")
-        ssh_config = " ".join(
-            (
-                shlex.quote(ssh_command),
-                "-F",
-                shlex.quote(os.devnull),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=yes",
-            )
-        )
-        fetch_config = [
+        fetch_config = (
             "-c",
             hooks_disabled,
-            "-c",
-            f"core.sshCommand={ssh_config}",
-            "-c",
-            "credential.helper=",
-            "-c",
-            f"credential.helper=!{shlex.quote(gh_command)} auth git-credential",
-            "-c",
-            "core.askPass=",
-            "-c",
-            "http.sslVerify=true",
-        ]
+            *remote_config,
+        )
         git_utils.run(
             [
                 "git",
@@ -3461,6 +3654,7 @@ class WorkerPool:
                 kwargs=kwargs,
                 sync_to_remote=sync_to_remote,
                 repo_root=repo_root,
+                expected_repo=job.repo,
                 timeout_s=job.timeout_s,
             )
         except git_utils.DirectBranchReservationCollisionError as exc:
@@ -3496,6 +3690,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
+                    expected_repo=job.repo,
                     timeout_s=job.timeout_s,
                     error=f"worktree creation failed: {exc}",
                 )
@@ -3511,20 +3706,31 @@ class WorkerPool:
             timeout_s=job.timeout_s,
         )
 
-    @staticmethod
     def _release_direct_scope_reservation(
+        self,
         branch_name: str,
         base_sha: str | None,
         repo_root: Path,
         *,
+        expected_repo: str,
         timeout_s: int,
     ) -> bool:
         """Conditionally release a direct reservation, or no-op for normal worktrees."""
-        return base_sha is None or git_utils.delete_reserved_branch_if_unchanged(
+        if base_sha is None:
+            return True
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=repo_root, expected_repo=expected_repo, timeout=timeout_s
+        )
+        remote_env, remote_config = revalidate_remote()
+        return git_utils.delete_reserved_branch_if_unchanged(
             branch_name,
             base_sha,
             repo_root,
             timeout=timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
 
     def _rollback_direct_scope_reservation(
@@ -3533,13 +3739,18 @@ class WorkerPool:
         branch_name: str,
         base_sha: str,
         repo_root: Path,
+        expected_repo: str,
         timeout_s: int,
         error: str,
     ) -> JobResult:
         """Release an early reservation or preserve its receipt for Finished."""
         try:
             released = self._release_direct_scope_reservation(
-                branch_name, base_sha, repo_root, timeout_s=timeout_s
+                branch_name,
+                base_sha,
+                repo_root,
+                expected_repo=expected_repo,
+                timeout_s=timeout_s,
             )
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             return JobResult(
@@ -3573,6 +3784,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
+                    expected_repo=repo,
                     timeout_s=timeout_s,
                     error="worktree manager returned no worktree",
                 )
@@ -3589,6 +3801,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
+                    expected_repo=repo,
                     timeout_s=timeout_s,
                     error=error,
                 )
@@ -3635,9 +3848,10 @@ class WorkerPool:
                 status = status_result.stdout or ""
                 diff = diff_result.stdout or ""
             elif branch_name:
-                git_utils.sync_worktree_to_remote_branch(
+                self._sync_worktree_to_remote_branch(
                     worktree_path,
                     branch_name,
+                    expected_repo=repo,
                     pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
                     timeout=timeout_s,
                 )
@@ -3655,12 +3869,13 @@ class WorkerPool:
         }
         return JobResult(ok=True, value=value)
 
-    @staticmethod
     def _prepare_direct_scope_worktree(
+        self,
         *,
         kwargs: dict[str, object],
         sync_to_remote: bool,
         repo_root: Path,
+        expected_repo: str,
         timeout_s: int,
     ) -> tuple[str | None, str] | JobResult:
         """Validate and atomically reserve a direct-scope implementation branch."""
@@ -3679,16 +3894,22 @@ class WorkerPool:
             return JobResult(ok=False, error="direct scope checkout pin mismatch")
         if not branch_name:
             return JobResult(ok=False, error="direct scope branch name is missing")
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=repo_root,
+            expected_repo=expected_repo,
+            timeout=timeout_s,
+        )
         git_utils.reserve_remote_branch_if_absent(
             branch_name,
             base_sha,
             repo_root,
             timeout=timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
         )
         return base_sha, branch_name
 
-    @staticmethod
-    def _git_verify_pr_review_checkout(job: GitJob) -> JobResult:
+    def _git_verify_pr_review_checkout(self, job: GitJob) -> JobResult:
         """Synchronize a clean review checkout and bind it to one PR head.
 
         The review snapshot comes from GitHub before this job.  A remote move
@@ -3715,9 +3936,10 @@ class WorkerPool:
             )
         if not git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s):
             return JobResult(ok=True, value={"ready": False, "reason": "dirty"})
-        git_utils.sync_worktree_to_remote_branch(
+        self._sync_worktree_to_remote_branch(
             worktree,
             branch,
+            expected_repo=job.repo,
             pr_number=int(pr_number) if pr_number is not None else None,
             timeout=job.timeout_s,
         )
@@ -3731,10 +3953,16 @@ class WorkerPool:
         # Build the prompt diff from the checkout only after it is proven to
         # be the head captured above.  ``gh pr diff`` is mutable and cannot
         # distinguish an A -> B -> A head race from a stable A snapshot.
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=worktree,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         git_utils.run(
-            ["git", "fetch", "origin", "--", base_branch],
+            ["git", *remote_config, "fetch", "origin", "--", base_branch],
             cwd=worktree,
             timeout=job.timeout_s,
+            env=remote_env,
         )
         # The reviewer is bound to the branch point of the captured PR pair,
         # not to the base branch's current HEAD. Fetching only makes the
@@ -3825,21 +4053,15 @@ class WorkerPool:
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
-        if agent_model is None:
-            changed = git_utils.commit_if_changes(
-                *commit_args,
-                allowed_paths=allowed_paths,
-                timeout=job.timeout_s,
-                git_message_timeout=git_message_timeout,
-            )
-        else:
-            changed = git_utils.commit_if_changes(
-                *commit_args,
-                allowed_paths=allowed_paths,
-                timeout=job.timeout_s,
-                agent_model=str(agent_model),
-                git_message_timeout=git_message_timeout,
-            )
+        changed = self._commit_if_changes_with_controlled_signing(
+            job,
+            commit_args,
+            allowed_paths,
+            agent_model,
+            git_message_timeout,
+        )
+        if isinstance(changed, JobResult):
+            return changed
         branch = str(job.kwargs.get("branch") or "")
         if not changed:
             publish_state = self._commit_push_requires_publish(
@@ -3869,6 +4091,39 @@ class WorkerPool:
         if scope_retraction is not None:
             return scope_retraction
         return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    @staticmethod
+    def _commit_if_changes_with_controlled_signing(
+        job: GitJob,
+        commit_args: tuple[int, Path, str],
+        allowed_paths: Collection[str] | None,
+        agent_model: object,
+        git_message_timeout: int,
+    ) -> bool | JobResult:
+        """Commit only dirty worktrees with the validated host signing identity."""
+
+        def signing_env_factory() -> dict[str, str]:
+            signing_env = _controlled_git_signing_env(commit_args[1], timeout=job.timeout_s)
+            if isinstance(signing_env, JobResult):
+                raise git_utils.SigningEnvironmentUnavailableError(signing_env.error)
+            return signing_env
+
+        commit_kwargs: dict[str, Any] = {
+            "allowed_paths": allowed_paths,
+            "timeout": job.timeout_s,
+            "git_message_timeout": git_message_timeout,
+            "signing_env_factory": signing_env_factory,
+        }
+        if agent_model is not None:
+            commit_kwargs["agent_model"] = str(agent_model)
+        try:
+            return git_utils.commit_if_changes(*commit_args, **commit_kwargs)
+        except git_utils.SigningEnvironmentUnavailableError as exc:
+            return JobResult(
+                ok=False,
+                value={"failure_kind": "signing_configuration"},
+                error=str(exc),
+            )
 
     @staticmethod
     def _verify_scope_retraction(job: GitJob, worktree_path: Path) -> JobResult | None:
@@ -3935,15 +4190,28 @@ class WorkerPool:
         source_sha = self._read_publish_head(worktree_path, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=worktree_path, expected_repo=job.repo, timeout=job.timeout_s
+        )
+        remote_env, remote_config = revalidate_remote()
         if isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
                 expected_remote_sha,
                 worktree_path,
                 timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
             )
         else:
-            git_utils.push_branch(branch, worktree_path, timeout=job.timeout_s)
+            git_utils.push_branch(
+                branch,
+                worktree_path,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+            )
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     @staticmethod
@@ -3962,21 +4230,28 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot bind implementation publish head")
         return head
 
-    @staticmethod
     def _read_remote_branch_head(
+        self,
         worktree_path: Path,
         *,
         remote: str,
         branch: str,
+        expected_repo: str,
         timeout: int,
     ) -> str | JobResult:
         """Read one exact remote branch head without updating local refs."""
         expected_ref = f"refs/heads/{branch}"
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=worktree_path,
+            expected_repo=expected_repo,
+            timeout=timeout,
+        )
         try:
             fields = git_utils.run(
-                ["git", "ls-remote", "--refs", remote, expected_ref],
+                ["git", *remote_config, "ls-remote", "--refs", remote, expected_ref],
                 cwd=worktree_path,
                 timeout=timeout,
+                env=remote_env,
             ).stdout.split()
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return JobResult(ok=False, error="cannot verify remote writer head")
@@ -3990,6 +4265,7 @@ class WorkerPool:
         *,
         remote: str,
         branch: str,
+        expected_repo: str,
         expected_remote_sha: str,
         timeout: int,
     ) -> JobResult:
@@ -4006,6 +4282,7 @@ class WorkerPool:
             worktree_path,
             remote=remote,
             branch=branch,
+            expected_repo=expected_repo,
             timeout=timeout,
         )
         if isinstance(remote_head, JobResult):
@@ -4024,9 +4301,8 @@ class WorkerPool:
             },
         )
 
-    @staticmethod
     def _commit_push_requires_publish(
-        *, job: GitJob, branch: str, worktree_path: Path
+        self, *, job: GitJob, branch: str, worktree_path: Path
     ) -> bool | JobResult:
         """Return whether a clean worktree still needs coordinator-owned publication."""
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
@@ -4054,11 +4330,19 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot verify direct scope branch ancestry")
         if ahead.stdout.strip() != "0":
             return True
+
+        revalidate_remote = self._authenticated_remote_revalidator(
+            cwd=worktree_path, expected_repo=job.repo, timeout=job.timeout_s
+        )
+        remote_env, remote_config = revalidate_remote()
         released = git_utils.delete_reserved_branch_if_unchanged(
             branch,
             expected_remote_sha,
             worktree_path,
             timeout=job.timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
+            revalidate_remote=revalidate_remote,
         )
         if not released:
             return JobResult(

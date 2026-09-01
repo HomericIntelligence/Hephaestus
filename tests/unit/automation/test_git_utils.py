@@ -225,6 +225,56 @@ assert calls == [((123, Path("/tmp/worktree"), "codex"), {
         mock_commit.assert_not_called()
 
     @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_clean_tree_does_not_request_signing_environment(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A no-op commit-push does not require an operator signing key."""
+        signing_factory = Mock(side_effect=AssertionError("must not be called"))
+        git_utils_mocks.run.return_value = Mock(stdout="")
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "claude",
+                signing_env_factory=signing_factory,
+            )
+            is False
+        )
+
+        signing_factory.assert_not_called()
+        mock_commit.assert_not_called()
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
+    def test_dirty_tree_resolves_signing_environment_before_commit(
+        self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A dirty tree obtains the controlled environment before it can commit."""
+        signing_env = {"GIT_CONFIG_COUNT": "1"}
+        signing_factory = Mock(return_value=signing_env)
+        git_utils_mocks.run.return_value = Mock(stdout=" M fixed.py\\n")
+
+        assert (
+            commit_if_changes(
+                123,
+                tmp_path,
+                "claude",
+                signing_env_factory=signing_factory,
+            )
+            is True
+        )
+
+        signing_factory.assert_called_once_with()
+        mock_commit.assert_called_once_with(
+            123,
+            tmp_path,
+            "claude",
+            allowed_paths=None,
+            git_message_timeout=1200,
+            signing_env=signing_env,
+        )
+
+    @patch("hephaestus.automation.pr_manager.commit_changes")
     def test_commit_runtime_error_returns_false(
         self, mock_commit: Any, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -418,6 +468,25 @@ class TestDirectScopeBranchReservation:
         with pytest.raises(RuntimeError, match="reservation remains unchanged"):
             delete_reserved_branch_if_unchanged("2452-auto-impl", pin, tmp_path)
 
+    def test_release_revalidates_destination_before_failure_probe(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A hook-controlled origin change stops the release failure probe."""
+        pin = "a" * 40
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
+        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+
+        with pytest.raises(RuntimeError, match="origin changed"):
+            delete_reserved_branch_if_unchanged(
+                "2452-auto-impl",
+                pin,
+                tmp_path,
+                revalidate_remote=revalidate_remote,
+            )
+
+        revalidate_remote.assert_called_once_with()
+        assert git_utils_mocks.run.call_count == 1
+
     def test_local_release_uses_exact_old_value_compare_and_delete(
         self, git_utils_mocks: Any, tmp_path: Path
     ) -> None:
@@ -500,6 +569,65 @@ class TestPushDetachedHead:
         assert git_utils_mocks.run.call_args.args[0][-1] == (
             f"{source_sha}:refs/heads/123-auto-impl"
         )
+
+    def test_push_and_probe_use_supplied_authenticated_transport(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """The lease push and its authoritative remote probe share trusted transport."""
+        expected_head = "a" * 40
+        env = {"GIT_TERMINAL_PROMPT": "0"}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+        git_utils_mocks.run.side_effect = [
+            subprocess.CalledProcessError(128, ["git", "push"]),
+            Mock(stdout=f"{expected_head}\trefs/heads/123-auto-impl\n"),
+        ]
+
+        with pytest.raises(DetachedHeadPushRemoteHeadUnchangedError):
+            push_head_to_branch(
+                "123-auto-impl",
+                expected_head,
+                tmp_path,
+                env=env,
+                remote_config=remote_config,
+            )
+
+        assert [call.args[0] for call in git_utils_mocks.run.call_args_list] == [
+            [
+                "git",
+                *remote_config,
+                "push",
+                f"--force-with-lease=refs/heads/123-auto-impl:{expected_head}",
+                "origin",
+                "HEAD:refs/heads/123-auto-impl",
+            ],
+            [
+                "git",
+                *remote_config,
+                "ls-remote",
+                "--refs",
+                "origin",
+                "refs/heads/123-auto-impl",
+            ],
+        ]
+        assert all(call.kwargs["env"] == env for call in git_utils_mocks.run.call_args_list)
+
+    def test_failed_push_revalidates_destination_before_remote_probe(
+        self, git_utils_mocks: Any, tmp_path: Path
+    ) -> None:
+        """A hook-controlled origin change stops the publication probe."""
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(1, ["git", "push"])
+        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+
+        with pytest.raises(RuntimeError, match="origin changed"):
+            push_head_to_branch(
+                "123-auto-impl",
+                "a" * 40,
+                tmp_path,
+                revalidate_remote=revalidate_remote,
+            )
+
+        revalidate_remote.assert_called_once_with()
+        assert git_utils_mocks.run.call_count == 1
 
     def test_reports_a_detached_push_when_the_remote_head_advanced(
         self, git_utils_mocks: Any, tmp_path: Path
@@ -811,6 +939,28 @@ class TestPushCurrentBranchWithLeaseOnDivergence:
             "HEAD:511-impl",
         ]
 
+    def test_divergence_revalidates_destination_before_fetch_and_retry(
+        self, git_utils_mocks: Any
+    ) -> None:
+        """A hook-controlled origin change stops divergence recovery."""
+        worktree = Path("/tmp/worktree-xyz")
+        git_utils_mocks.run.side_effect = subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "HEAD"],
+            stderr="non-fast-forward\n",
+        )
+        revalidate_remote = Mock(side_effect=RuntimeError("origin changed"))
+
+        with pytest.raises(RuntimeError, match="origin changed"):
+            push_current_branch_with_lease_on_divergence(
+                worktree,
+                branch="511-impl",
+                revalidate_remote=revalidate_remote,
+            )
+
+        revalidate_remote.assert_called_once_with()
+        assert git_utils_mocks.run.call_count == 1
+
     def test_fetch_first_also_triggers_lease(self, git_utils_mocks: Any) -> None:
         """'fetch first' rejection text triggers the same retry path."""
         worktree = Path("/tmp/worktree-xyz")
@@ -977,6 +1127,38 @@ class TestSyncWorktreeToRemoteBranch:
         assert reset_args[0] == ["git", "reset", "--hard", "origin/5450-auto-impl"]
         assert reset_kwargs["cwd"] == worktree
 
+    def test_uses_supplied_authenticated_fetch_configuration(self, git_utils_mocks: Any) -> None:
+        """A caller can authenticate a PR-head fetch without global Git configuration."""
+        git_utils_mocks.run.return_value = Mock(returncode=0)
+        worktree = Path("/tmp/worktree-xyz")
+        controlled_env = {"GIT_TERMINAL_PROMPT": "0"}
+        fetch_config = (
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.helper=!trusted-gh auth git-credential",
+        )
+
+        sync_worktree_to_remote_branch(
+            worktree,
+            "5450-auto-impl",
+            env=controlled_env,
+            fetch_config=fetch_config,
+        )
+
+        fetch_args, fetch_kwargs = git_utils_mocks.run.call_args_list[0]
+        assert fetch_args[0] == [
+            "git",
+            *fetch_config,
+            "fetch",
+            "origin",
+            "+refs/heads/5450-auto-impl:refs/remotes/origin/5450-auto-impl",
+        ]
+        assert fetch_kwargs["env"] == controlled_env
+        reset_args, reset_kwargs = git_utils_mocks.run.call_args_list[1]
+        assert reset_args[0] == ["git", "reset", "--hard", "origin/5450-auto-impl"]
+        assert reset_kwargs["env"] == controlled_env
+
     def test_fetch_failure_propagates(self, git_utils_mocks: Any) -> None:
         """If fetch fails, raise — we cannot safely reset to a stale ref."""
         fetch_err = subprocess.CalledProcessError(
@@ -1079,6 +1261,32 @@ class TestRebaseWorktreeOnto:
             "git commit --amend --no-edit -S -s --allow-empty",
         ]
         assert rebase_kwargs["cwd"] == worktree
+
+    def test_rebase_uses_supplied_authenticated_fetch_configuration(
+        self, git_utils_mocks: Any
+    ) -> None:
+        """Forward the trusted credentials only through the remote fetch configuration."""
+        git_utils_mocks.run.return_value = Mock(returncode=0, stdout="")
+        worktree = Path("/tmp/worktree-xyz")
+        signing_env = {"GIT_CONFIG_KEY_0": "user.signingkey"}
+        fetch_env = {"GIT_TERMINAL_PROMPT": "0"}
+        fetch_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+
+        assert (
+            rebase_worktree_onto(
+                worktree,
+                "main",
+                env=signing_env,
+                fetch_env=fetch_env,
+                fetch_config=fetch_config,
+            )
+            is True
+        )
+
+        fetch_args, fetch_kwargs = git_utils_mocks.run.call_args_list[0]
+        assert fetch_args[0] == ["git", *fetch_config, "fetch", "origin", "main"]
+        assert fetch_kwargs["env"] == fetch_env
+        assert git_utils_mocks.run.call_args_list[2].kwargs["env"] == signing_env
 
     def test_clean_rebase_resigns_and_signs_off_replayed_commits(
         self, git_utils_mocks: Any
