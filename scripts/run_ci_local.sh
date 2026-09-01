@@ -201,21 +201,32 @@ detect_engine() {
     if [ -n "${CONTAINER_ENGINE:-}" ]; then
         if ! command -v "${CONTAINER_ENGINE}" &> /dev/null; then
             log_error "CONTAINER_ENGINE=${CONTAINER_ENGINE} not found in PATH"
+            log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
+            exit 1
+        fi
+        if ! "${CONTAINER_ENGINE}" info >/dev/null 2>&1; then
+            log_error "CONTAINER_ENGINE=${CONTAINER_ENGINE} is unavailable. Start its service."
+            log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
             exit 1
         fi
         log_info "Container engine: ${CONTAINER_ENGINE} (from env)"
         return
     fi
 
-    if command -v podman &> /dev/null; then
+    if command -v podman &> /dev/null && podman info >/dev/null 2>&1; then
         CONTAINER_ENGINE="podman"
         log_info "Container engine: podman (rootless)"
-    elif command -v docker &> /dev/null; then
+    elif command -v docker &> /dev/null && docker info >/dev/null 2>&1; then
         CONTAINER_ENGINE="docker"
         log_info "Container engine: docker"
+    elif command -v podman &> /dev/null || command -v docker &> /dev/null; then
+        log_error "A container engine is installed but unavailable. Start its service."
+        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
+        exit 1
     else
         log_error "No container engine found. Install podman (recommended) or docker."
         log_error "  Podman: https://podman.io/getting-started/installation"
+        log_error "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable"
         exit 1
     fi
     export CONTAINER_ENGINE

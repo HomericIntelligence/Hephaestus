@@ -2261,6 +2261,31 @@ class TestTestsAndFix:
         assert isinstance(result, Continue)
         assert result.next_state == "TESTFIX_WAIT"
 
+    def test_runner_failure_ends_without_testfix(self, make_ctx: Any, make_work_item: Any) -> None:
+        """A marked host runner failure fails closed without an agent repair attempt."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="TEST_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                value=1,
+                stderr_tail="HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable",
+                error="rc=1",
+            ),
+            ctx,
+        )
+        item.state = "COMMIT_PUSH_WAIT"
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.FINISH_FAIL
+        assert result.note == "pre_pr_runner_unavailable"
+        assert "tests_failed" not in item.payload
+        assert "container-engine-unavailable" in item.payload["pre_pr_runner_error"]
+
     def test_green_tests_clear_failure_state(self, make_ctx: Any, make_work_item: Any) -> None:
         """A green run clears any prior failure payload."""
         stage = ImplementationStage()

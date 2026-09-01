@@ -21,6 +21,7 @@ def _fake_engine(
     tmp_path: Path,
     *,
     failing_command: str = "",
+    info_fails: bool = False,
     license_violation: bool = False,
     image_exists: bool = True,
     image_id: str = FAKE_IMAGE_ID,
@@ -32,6 +33,7 @@ def _fake_engine(
     failure_clause = (
         f'  [[ "$*" == *{failing_command!r}* ]] && exit 37\n' if failing_command else ""
     )
+    info_failure_clause = 'if [[ "$1" == "info" ]]; then exit 1; fi\n' if info_fails else ""
     license_violation_clause = (
         '  [[ "$FAKE_LICENSE_VIOLATION" == "1" && "$*" == *'
         '"env GITHUB_EVENT_NAME=pull_request uv run python '
@@ -43,7 +45,8 @@ def _fake_engine(
         (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            'if [[ "$1" == "image" && "$2" == "exists" ]]; then '
+            + info_failure_clause
+            + 'if [[ "$1" == "image" && "$2" == "exists" ]]; then '
             f"exit {0 if image_exists else 1}; fi\n"
             'if [[ "$1" == "image" && "$2" == "inspect" ]]; then '
             f'printf "%s\\n" "{image_id}"; exit 0; fi\n'
@@ -142,6 +145,7 @@ def _run_runner(
     *,
     engine_name: str = "podman",
     failing_command: str = "",
+    info_fails: bool = False,
     license_violation: bool = False,
     host_uid: int | None = None,
     host_gid: int | None = None,
@@ -156,6 +160,7 @@ def _run_runner(
     engine_path, log = _fake_engine(
         tmp_path,
         failing_command=failing_command,
+        info_fails=info_fails,
         license_violation=license_violation,
         image_exists=image_exists,
         image_id=image_id,
@@ -200,6 +205,14 @@ def _run_runner(
         check=False,
     )
     return result, log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+def test_unavailable_selected_engine_emits_runner_failure_marker(tmp_path: Path) -> None:
+    """The wrapper makes a selected-but-unavailable engine distinguishable from checks."""
+    result, _ = _run_runner(tmp_path, "lint", info_fails=True)
+
+    assert result.returncode != 0
+    assert "HEPHAESTUS_CI_RUNNER_FAILURE: container-engine-unavailable" in result.stderr
 
 
 def _candidate_repo(tmp_path: Path) -> Path:
