@@ -316,7 +316,9 @@ class TestRunPrReviewAnalysis:
             patch("hephaestus.automation.pr_review_core.run_agent_text") as mock_agent,
         ):
             mock_agent.return_value = MagicMock(
-                stdout='```json\n{"grade": "A", "comments": [], "summary": "ok"}\n```'
+                stdout=(
+                    '```json\n{"grade": "A", "verdict": "GO", "comments": [], "summary": "ok"}\n```'
+                )
             )
             run_pr_review_analysis(
                 pr_number=1,
@@ -335,7 +337,14 @@ class TestRunPrReviewAnalysis:
         response_text = (
             "Detailed review.\n\nGrade: A\nVerdict: GO\n\n"
             "```json\n"
-            + json.dumps({"grade": "A", "comments": [], "summary": "No inline findings."})
+            + json.dumps(
+                {
+                    "grade": "A",
+                    "verdict": "GO",
+                    "comments": [],
+                    "summary": "No inline findings.",
+                }
+            )
             + "\n```"
         )
 
@@ -367,7 +376,14 @@ class TestRunPrReviewAnalysis:
         stdout = (
             "Review complete.\n\nGrade: D\nVerdict: NOGO\n\n"
             "```json\n"
-            + json.dumps({"grade": "D", "comments": [], "summary": "Needs fixes."})
+            + json.dumps(
+                {
+                    "grade": "D",
+                    "verdict": "NOGO",
+                    "comments": [],
+                    "summary": "Needs fixes.",
+                }
+            )
             + "\n```"
         )
 
@@ -430,7 +446,9 @@ class TestRunPrReviewAnalysis:
 
         def _fake_invoke(**kwargs: object) -> tuple[str, str]:
             captured.update(kwargs)
-            review_json = json.dumps({"grade": "A", "comments": [], "summary": "ok"})
+            review_json = json.dumps(
+                {"grade": "A", "verdict": "GO", "comments": [], "summary": "ok"}
+            )
             return (
                 json.dumps({"result": f"```json\n{review_json}\n```"}),
                 "",
@@ -463,7 +481,9 @@ class TestRunPrReviewAnalysis:
             calls.append({"prompt": prompt, **kwargs})
             if len(calls) == 1:
                 return ('{"is_error": true, "result": "Prompt is too long"}', "")
-            review_json = json.dumps({"grade": "A", "comments": [], "summary": "ok"})
+            review_json = json.dumps(
+                {"grade": "A", "verdict": "GO", "comments": [], "summary": "ok"}
+            )
             return (
                 json.dumps({"result": f"```json\n{review_json}\n```"}),
                 "",
@@ -536,7 +556,8 @@ class TestStructuralAuditNotProse:
         prose = (
             "## Review\nFindings here.\n\n"
             "Grade: F\nVerdict: NOGO — two real defects.\n\n"
-            '```json\n{"grade": "F", "comments": [], "summary": "two defects"}\n```'
+            '```json\n{"grade": "F", "verdict": "BLOCKED", "comments": [], '
+            '"summary": "two defects"}\n```'
         )
         # Claude wraps the prose in a JSON result envelope.
         envelope = json.dumps({"result": prose})

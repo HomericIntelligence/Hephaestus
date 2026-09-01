@@ -99,7 +99,9 @@ Rules for the JSON block:
   control data in `body`; the coordinator validates and persists it separately.
 - `grade`: one of `A`, `B`, `C`, `D`, `E`, or `F`.
 - `verdict`: one of `GO`, `NOGO`, or `BLOCKED`. Emit `GO` only when the code
-  meets the review criteria. The grade does not select the verdict.
+  meets the review criteria. Emit `NOGO` or `BLOCKED` when the review fails.
+  The grade does not select the verdict, and a missing or malformed verdict is
+  invalid.
 - `summary`: bounded informational review summary, max 200 characters.
 - If there are no findings and the code meets the review criteria, emit
   `{"verdict": "GO", "grade": "A", "summary": "LGTM", "comments": []}`.

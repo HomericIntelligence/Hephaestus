@@ -12,9 +12,9 @@ review remains informational.
 ]}
 ```
 
-`verdict` is one of `GO`, `NOGO`, or `BLOCKED`. `GO` states that the code meets
-the review criteria. `grade` is informational and is one of `A`, `B`, `C`,
-`D`, `E`, or `F`; `summary` is a concise
+`verdict` is one of `GO`, `NOGO`, or `BLOCKED`. The field is required. `GO`
+states that the code meets the review criteria. A missing or malformed verdict
+is invalid. `grade` is informational and is one of `A`, `B`, `C`, `D`, `E`, or `F`; `summary` is a concise
 informational summary; and `comments` is an array of concrete findings. Each
 comment must provide a repository-relative `path`, positive changed-line
 `line`, `"RIGHT"` side, one of `critical`, `major`, `minor`, or `nitpick`

@@ -1256,7 +1256,7 @@ class TestPrReviewStageStep:
             "This must be fixed.\n\nReviewer prose is untrusted.\n\n```json\n"
             '{"comments":[{"path":"hephaestus/automation/pipeline/stages/pr_review.py",'
             '"line":500,"side":"RIGHT","severity":"critical","body":"race"}],'
-            '"grade":"F","summary":"race found"}\n```'
+            '"grade":"F","verdict":"NOGO","summary":"race found"}\n```'
         )
 
         review_request = _dispatch_review(stage, item, ctx)
@@ -2704,7 +2704,7 @@ class TestPrReviewStageStep:
         item.worktree = "/tmp/wt"
         audit = parse_review_audit(
             """```json
-{"grade":"F","summary":"Needs work","comments":[{"path":"a.py","line":3,
+{"grade":"F","verdict":"NOGO","summary":"Needs work","comments":[{"path":"a.py","line":3,
 "side":"RIGHT","severity":"major","body":"Guard the missing value"}]}
 ```"""
         )
@@ -4171,7 +4171,14 @@ class TestEvalVerdicts:
         result = stage.step(item, make_ctx(github=github))
 
         assert case in {"missing", "malformed", "NOGO", "BLOCKED"}
-        assert result != StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
+        if case in {"missing", "malformed"}:
+            assert audit.valid is False
+            assert audit.verdict is None
+            assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        else:
+            assert audit.valid is True
+            assert audit.verdict == case
+            assert result == Continue(next_state="REVIEW_WAIT")
         names = [name for name, _args in github.mutation_log]
         assert "persist_pending_implementation_go_audit" not in names
         assert "mark_pr_implementation_go" not in names
@@ -4429,6 +4436,34 @@ class TestEvalVerdicts:
         names = [name for name, _args in github.mutation_log]
         assert "mark_pr_implementation_go" not in names
         assert "publish_implementation_go_audit" in names
+        assert item.attempts["pr_review_iter"] == 0
+
+    def test_restart_stale_pending_audit_restarts_review_instead_of_publishing_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale GO receipt must re-enter review instead of writing GO state."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)], pr_impl_state=(True, False))
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item.payload.update(
+            {
+                "pending_implementation_go_audit": _valid_audit(),
+                "pending_implementation_go_audit_head": "b" * 40,
+                "pending_implementation_go_label_confirmed": True,
+            }
+        )
+        ctx = make_ctx(github=github)
+
+        assert stage.step(item, ctx) == Continue(next_state="GO_AUDIT_RECEIPT")
+        item.state = "GO_AUDIT_RECEIPT"
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert "reviewed_pr_head_sha" not in item.payload
+        names = [name for name, _args in github.mutation_log]
+        assert "mark_pr_implementation_go" not in names
+        assert "publish_implementation_go_audit" not in names
         assert item.attempts["pr_review_iter"] == 0
 
     def test_thread_added_during_go_write_preserves_external_labels_and_restarts_review(

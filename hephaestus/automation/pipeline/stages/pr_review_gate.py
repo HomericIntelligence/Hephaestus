@@ -219,7 +219,7 @@ class PrReviewGate(_PrReviewHost):
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
         if not open_thread_count:
-            if audit.verdict != "GO":
+            if not audit.valid or audit.verdict != "GO":
                 return self._handle_non_go(
                     item,
                     ctx,

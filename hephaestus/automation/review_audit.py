@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
+from typing import Literal, cast
 
 from hephaestus.automation.pipeline.scope_retraction import (
     SCOPE_RETRACTION_MARKER_PREFIX,
@@ -39,6 +40,8 @@ MAX_RAW_FEEDBACK_CHARS = 4000
 _INVALID_SUMMARY = "No structured reviewer summary was provided."
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
+ReviewVerdict = Literal["GO", "NOGO", "BLOCKED"]
+
 
 @dataclass(frozen=True)
 class ReviewAudit:
@@ -49,7 +52,7 @@ class ReviewAudit:
     findings: tuple[dict[str, object], ...]
     raw_feedback: str
     valid: bool
-    verdict: str | None = None
+    verdict: ReviewVerdict | None = None
 
 
 def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
@@ -74,17 +77,14 @@ def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
     if not isinstance(summary, str) or not isinstance(comments, list):
         return _invalid_audit(raw_feedback)
 
-    # Verdicts are a forward-compatible authorization extension.  Older
-    # structural audits remain useful evidence for remediation, but the
-    # implementation-GO boundary independently requires ``verdict == "GO"``.
-    # An absent or malformed value is therefore represented as ``None`` and
-    # fails closed at that boundary without breaking the rest of the review
-    # state machine.
-    verdict = (
-        raw_verdict.strip().upper()
-        if isinstance(raw_verdict, str) and raw_verdict.strip().upper() in _VALID_VERDICTS
-        else None
-    )
+    # The implementation-GO boundary requires an explicit reviewer verdict.
+    # Missing, malformed, or unsupported values invalidate the whole audit so
+    # the gate can fail closed instead of inferring from the grade or summary.
+    if not isinstance(raw_verdict, str):
+        return _invalid_audit(raw_feedback)
+    verdict = cast(ReviewVerdict, raw_verdict.strip().upper())
+    if verdict not in _VALID_VERDICTS:
+        return _invalid_audit(raw_feedback)
 
     findings: list[dict[str, object]] = []
     for comment in comments:

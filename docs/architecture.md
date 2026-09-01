@@ -1137,9 +1137,9 @@ Architectural contract:
   produces `state:implementation-no-go` and is handed to implementation
   before another broad review. A fresh broad audit of a thread-free PR, or a
   fresh comment-validation pass that resolves every current thread, may produce
-  `state:implementation-go` only when its typed reviewer verdict is `GO`. A
-  missing, malformed, `NOGO`, or `BLOCKED` verdict fails closed. The letter
-  grade is audit metadata only.
+  `state:implementation-go` only when its typed reviewer verdict is `GO`. The
+  parser treats a missing, malformed, `NOGO`, or `BLOCKED` verdict as a failed
+  closed audit before any label write. The letter grade is audit metadata only.
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
