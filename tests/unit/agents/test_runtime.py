@@ -283,15 +283,19 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch(
+            "hephaestus.agents.runtime.macos_isolated_command",
+            side_effect=lambda argv, **_: argv,
+        ),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
         result = agent_runtime.run_codex_session(
             "prompt",
             cwd=tmp_path,
-                timeout=30,
-                sandbox="workspace-write",
-                isolate_automation_profile=True,
-            )
+            timeout=30,
+            sandbox="workspace-write",
+            isolate_automation_profile=True,
+        )
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
@@ -1028,6 +1032,10 @@ def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> 
     with (
         patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
         patch("hephaestus.agents.runtime._codex_extra_writable_dirs", return_value=[]),
+        patch(
+            "hephaestus.agents.runtime.macos_isolated_command",
+            side_effect=lambda argv, **_: argv,
+        ),
         patch.dict("os.environ", {"CODEX_THREAD_ID": "parent-thread"}, clear=False),
         patch("subprocess.Popen", side_effect=fake_popen),
     ):
@@ -1068,6 +1076,52 @@ def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path
     assert "--add-dir" in cmd
     add_dir_index = cmd.index("--add-dir")
     assert cmd[add_dir_index + 1] == str(git_common_dir)
+
+
+def test_codex_automation_command_uses_no_legacy_sandbox_or_git_metadata(
+    tmp_path: Path,
+) -> None:
+    """The isolated profile is the sole Codex command sandbox authority."""
+    worktree = tmp_path / "repo" / "build" / ".worktrees" / "issue-1"
+    worktree.mkdir(parents=True)
+
+    with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
+        cmd = agent_runtime._codex_base_cmd(
+            cwd=worktree,
+            sandbox="workspace-write",
+            automation_profile=True,
+        )
+
+    assert "--sandbox" not in cmd
+    assert "--add-dir" not in cmd
+
+
+def test_isolated_codex_session_applies_host_read_boundary(tmp_path: Path) -> None:
+    """A new automation session must enter the host boundary before execution."""
+    captured: dict[str, Any] = {}
+
+    def fake_boundary(argv: list[str], **kwargs: object) -> list[str]:
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return argv
+
+    def fake_popen(cmd: list[str], **kwargs: Any) -> _FakeCodexPopen:
+        stdout = '{"type":"session_meta","payload":{"id":"session-123"}}\n'
+        return _FakeCodexPopen(cmd, proc_stdout=stdout, final_message="done", **kwargs)
+
+    with (
+        patch("hephaestus.agents.runtime.macos_isolated_command", side_effect=fake_boundary),
+        patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]),
+        patch("subprocess.Popen", side_effect=fake_popen),
+    ):
+        agent_runtime.run_codex_session(
+            "prompt", cwd=tmp_path, timeout=30, isolate_automation_profile=True
+        )
+
+    assert captured["read_roots"][0] == tmp_path
+    assert captured["write_roots"][0] == tmp_path
+    assert captured["allow_network"] is True
+    assert Path(captured["argv"][0]).is_absolute()
 
 
 def test_codex_base_cmd_does_not_add_git_common_dir_for_read_only(
@@ -1184,6 +1238,10 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
         config = (profile / "config.toml").read_text(encoding="utf-8")
         assert '[plugins."athena@athena"]' in config
         assert "enabled = true" in config
+        assert 'default_permissions = "hephaestus-automation"' in config
+        assert 'extends = ":workspace"' in config
+        assert "enabled = false" in config
+        assert f'"{profile / "auth.json"}" = "deny"' in config
         assert not (profile / "plugins" / "cache" / "unrelated").exists()
         assert not (profile / "sessions" / "podman-task.jsonl").exists()
         assert "[interactive]" not in config
@@ -1211,6 +1269,19 @@ def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
     with pytest.raises(agent_runtime.AgentExecutionError, match="rejects symlinks"):
         with agent_runtime._codex_automation_profile():
             pass
+
+
+def test_athena_artifact_digest_ignores_generated_bytecode(tmp_path: Path) -> None:
+    """Machine-local bytecode must not change the admitted plugin source digest."""
+    artifact = tmp_path / "athena"
+    artifact.mkdir()
+    (artifact / "skill.md").write_text("skill\n", encoding="utf-8")
+    expected = agent_runtime._athena_artifact_digest(artifact)
+    bytecode = artifact / "__pycache__"
+    bytecode.mkdir()
+    (bytecode / "skill.cpython-313.pyc").write_bytes(b"generated")
+
+    assert agent_runtime._athena_artifact_digest(artifact) == expected
 
 
 def test_codex_automation_profile_rejects_non_object_artifact_metadata(
@@ -1276,6 +1347,16 @@ def test_resume_agent_session_rejects_unbound_codex_session(tmp_path: Path) -> N
             cwd=tmp_path,
             timeout=30,
         )
+
+
+def test_agent_dispatch_isolates_new_codex_sessions_by_default(tmp_path: Path) -> None:
+    """Codex dispatch must not depend on a caller opting into isolation."""
+    expected = agent_runtime.AgentRunResult(stdout="done", stderr="", session_id="session-123")
+    with patch("hephaestus.agents.runtime.run_codex_session", return_value=expected) as runner:
+        result = agent_runtime.run_agent_session("codex", "prompt", cwd=tmp_path, timeout=30)
+
+    assert result is expected
+    assert runner.call_args.kwargs["isolate_automation_profile"] is True
 
 
 def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_path: Path) -> None:

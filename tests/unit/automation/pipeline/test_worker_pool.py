@@ -2124,6 +2124,7 @@ class TestAgentErrorHandling:
     def test_codex_skills_budget_notice_does_not_open_agent_breaker(
         self,
         pool: WorkerPool,
+        tmp_path: Path,
     ) -> None:
         """An informational Codex notice remains successful across the worker boundary."""
         job = _agent_job(agent="codex")
@@ -2175,7 +2176,11 @@ class TestAgentErrorHandling:
             ),
             patch(
                 "hephaestus.agents.runtime._codex_automation_profile",
-                return_value=nullcontext({}),
+                return_value=nullcontext({"CODEX_HOME": str(tmp_path), "PATH": os.environ["PATH"]}),
+            ),
+            patch(
+                "hephaestus.agents.runtime.macos_isolated_command",
+                side_effect=lambda argv, **_kwargs: list(argv),
             ),
             patch(
                 "hephaestus.agents.runtime.subprocess.Popen",
@@ -9604,7 +9609,11 @@ class TestShutdownReapsSubprocess:
             patch("hephaestus.agents.runtime._codex_base_cmd", return_value=sleeper),
             patch(
                 "hephaestus.agents.runtime._codex_automation_profile",
-                return_value=nullcontext({}),
+                return_value=nullcontext({"CODEX_HOME": str(tmp_path), "PATH": os.defpath}),
+            ),
+            patch(
+                "hephaestus.agents.runtime.macos_isolated_command",
+                side_effect=lambda argv, **_kwargs: list(argv),
             ),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
