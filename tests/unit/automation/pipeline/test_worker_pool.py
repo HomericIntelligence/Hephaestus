@@ -3611,6 +3611,44 @@ class TestGitOps:
                 timeout=60,
             )
 
+    def test_worktree_sync_binds_authentication_to_expected_repository(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """Remote synchronization validates its destination before the fetch."""
+        remote_env = {"GIT_TERMINAL_PROMPT": "0"}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ) as authentication,
+            patch(f"{_WP}.git_utils.sync_worktree_to_remote_branch") as sync,
+        ):
+            pool._sync_worktree_to_remote_branch(
+                tmp_path,
+                "topic",
+                expected_repo="owner/name",
+                timeout=45,
+            )
+
+        authentication.assert_called_once_with(
+            cwd=tmp_path,
+            expected_repo="owner/name",
+            timeout=45,
+        )
+        sync.assert_called_once_with(
+            tmp_path,
+            "topic",
+            remote="origin",
+            pr_number=None,
+            timeout=45,
+            env=remote_env,
+            fetch_config=remote_config,
+        )
+
     def test_rebase_fails_closed_without_authenticated_remote_helper(
         self,
         pool: WorkerPool,
@@ -5225,7 +5263,14 @@ class TestGitOps:
 
         assert result.ok is True
         assert result.value == {"pushed": False, "head_sha": pin}
-        release.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
+        release.assert_called_once_with(
+            "5-auto",
+            pin,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
         read_head.assert_called_once_with(tmp_path, timeout=60)
         normal_push.assert_not_called()
 

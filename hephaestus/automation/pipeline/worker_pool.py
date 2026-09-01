@@ -2694,6 +2694,7 @@ class WorkerPool:
                 enabled=sync_to_expected_remote_head,
                 branch=branch,
                 remote=remote,
+                expected_repo=job.repo,
                 pr_number=pr_number,
                 expected_remote_sha=expected_remote_sha,
                 timeout=job.timeout_s,
@@ -2778,6 +2779,7 @@ class WorkerPool:
         enabled: bool,
         branch: str,
         remote: str,
+        expected_repo: str,
         pr_number: object,
         expected_remote_sha: str,
         timeout: int,
@@ -2803,6 +2805,7 @@ class WorkerPool:
                 cwd,
                 branch,
                 remote=remote,
+                expected_repo=expected_repo,
                 pr_number=sync_pr_number,
                 timeout=timeout,
             )
@@ -2870,11 +2873,16 @@ class WorkerPool:
         branch: str,
         *,
         remote: str = "origin",
+        expected_repo: str,
         pr_number: int | None = None,
         timeout: int | None = None,
     ) -> None:
         """Synchronize a PR checkout with the trusted GitHub credential helper."""
-        remote_env, remote_config = self._authenticated_remote_git_configuration()
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=cwd,
+            expected_repo=expected_repo,
+            timeout=timeout or 60,
+        )
         git_utils.sync_worktree_to_remote_branch(
             cwd,
             branch,
@@ -3810,6 +3818,7 @@ class WorkerPool:
                 self._sync_worktree_to_remote_branch(
                     worktree_path,
                     branch_name,
+                    expected_repo=repo,
                     pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
                     timeout=timeout_s,
                 )
@@ -3897,6 +3906,7 @@ class WorkerPool:
         self._sync_worktree_to_remote_branch(
             worktree,
             branch,
+            expected_repo=job.repo,
             pr_number=int(pr_number) if pr_number is not None else None,
             timeout=job.timeout_s,
         )
@@ -3910,7 +3920,11 @@ class WorkerPool:
         # Build the prompt diff from the checkout only after it is proven to
         # be the head captured above.  ``gh pr diff`` is mutable and cannot
         # distinguish an A -> B -> A head race from a stable A snapshot.
-        remote_env, remote_config = self._authenticated_remote_git_configuration()
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=worktree,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         git_utils.run(
             ["git", *remote_config, "fetch", "origin", "--", base_branch],
             cwd=worktree,
@@ -4247,9 +4261,8 @@ class WorkerPool:
             },
         )
 
-    @staticmethod
     def _commit_push_requires_publish(
-        *, job: GitJob, branch: str, worktree_path: Path
+        self, *, job: GitJob, branch: str, worktree_path: Path
     ) -> bool | JobResult:
         """Return whether a clean worktree still needs coordinator-owned publication."""
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
@@ -4277,11 +4290,18 @@ class WorkerPool:
             return JobResult(ok=False, error="cannot verify direct scope branch ancestry")
         if ahead.stdout.strip() != "0":
             return True
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=worktree_path,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         released = git_utils.delete_reserved_branch_if_unchanged(
             branch,
             expected_remote_sha,
             worktree_path,
             timeout=job.timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
         )
         if not released:
             return JobResult(

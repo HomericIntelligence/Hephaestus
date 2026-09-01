@@ -239,6 +239,7 @@ def reserve_remote_branch_if_absent(
         timeout: Optional timeout in seconds for each remote command.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
+
     """
     try:
         run_kwargs = _timeout_kw(timeout)
@@ -335,6 +336,7 @@ def push_branch_if_remote_matches(
         timeout: Optional timeout in seconds for each command.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
+
     """
     ancestry = run(
         ["git", "merge-base", "--is-ancestor", expected_remote_sha, "HEAD"],
@@ -390,6 +392,7 @@ def delete_reserved_branch_if_unchanged(
         timeout: Optional timeout in seconds for each remote command.
         env: Optional controlled environment for remote authentication.
         remote_config: Trusted command-scope Git transport configuration.
+
     """
     try:
         run_kwargs = _timeout_kw(timeout)
