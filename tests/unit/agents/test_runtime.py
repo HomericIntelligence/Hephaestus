@@ -61,6 +61,7 @@ def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         / "plugins"
         / "cache"
         / "athena"
+        / "athena"
         / agent_runtime.CODEX_ATHENA_VERSION
     )
     artifact.mkdir(parents=True)
@@ -1133,6 +1134,7 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
         / "plugins"
         / "cache"
         / "athena"
+        / "athena"
         / agent_runtime.CODEX_ATHENA_VERSION
     )
     plugin_cache.mkdir(parents=True)
@@ -1168,6 +1170,7 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
             / "plugins"
             / "cache"
             / "athena"
+            / "athena"
             / agent_runtime.CODEX_ATHENA_VERSION
             / "marker.txt"
         ).read_text(
@@ -1190,6 +1193,7 @@ def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
         source_home
         / "plugins"
         / "cache"
+        / "athena"
         / "athena"
         / agent_runtime.CODEX_ATHENA_VERSION
     )
