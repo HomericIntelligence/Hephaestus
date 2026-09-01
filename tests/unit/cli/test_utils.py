@@ -4,6 +4,8 @@
 import argparse
 import json
 import logging
+import sys
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -200,6 +202,53 @@ class TestCreateValidationParser:
 
 class TestConfigureCliLogging:
     """Tests for configure_cli_logging."""
+
+    @pytest.mark.parametrize("log_format", ["text", "json"])
+    def test_verbose_uses_shared_dependency_log_policy(
+        self,
+        log_format: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verbose CLI logs keep product debug and hide dependency parser traces."""
+        root = logging.getLogger()
+        markdown_logger = logging.getLogger("markdown_it")
+        markdown_rule_logger = logging.getLogger("markdown_it.rules_block.list")
+        hephaestus_logger = logging.getLogger("hephaestus.cli.issue_2889")
+        saved_root_handlers = list(root.handlers)
+        saved_root_level = root.level
+        saved_markdown_level = markdown_logger.level
+        saved_rule_level = markdown_rule_logger.level
+        saved_hephaestus_level = hephaestus_logger.level
+        output = StringIO()
+
+        root.handlers.clear()
+        markdown_logger.setLevel(logging.NOTSET)
+        markdown_rule_logger.setLevel(logging.NOTSET)
+        hephaestus_logger.setLevel(logging.NOTSET)
+        monkeypatch.setattr(sys, "stderr", output)
+        try:
+            configure_cli_logging(verbose=True, log_format=log_format)
+            hephaestus_logger.debug("cli diagnostic")
+            markdown_rule_logger.debug("cli parser trace")
+            markdown_rule_logger.warning("cli parser warning")
+            markdown_rule_logger.error("cli parser error")
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved_root_handlers)
+            root.setLevel(saved_root_level)
+            markdown_logger.setLevel(saved_markdown_level)
+            markdown_rule_logger.setLevel(saved_rule_level)
+            hephaestus_logger.setLevel(saved_hephaestus_level)
+
+        messages = (
+            [json.loads(line)["message"] for line in output.getvalue().splitlines()]
+            if log_format == "json"
+            else output.getvalue()
+        )
+        assert "cli diagnostic" in messages
+        assert "cli parser trace" not in messages
+        assert "cli parser warning" in messages
+        assert "cli parser error" in messages
 
     def test_default_uses_info_level(self) -> None:
         """Without verbose, setup_logging is called at INFO level."""

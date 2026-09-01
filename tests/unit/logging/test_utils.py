@@ -418,6 +418,85 @@ class TestContextLogger:
 class TestSetupLogging:
     """Tests for setup_logging function."""
 
+    @pytest.mark.parametrize("json_format", [False, True])
+    def test_debug_keeps_hephaestus_records_and_caps_markdown_it(
+        self,
+        json_format: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verbose setup keeps product diagnostics and hides parser-rule traces."""
+        root = logging.getLogger()
+        markdown_logger = logging.getLogger("markdown_it")
+        markdown_rule_logger = logging.getLogger("markdown_it.rules_block.hr")
+        hephaestus_logger = logging.getLogger("hephaestus.issue_2889")
+        saved_root_handlers = list(root.handlers)
+        saved_root_level = root.level
+        saved_markdown_level = markdown_logger.level
+        saved_rule_level = markdown_rule_logger.level
+        saved_hephaestus_level = hephaestus_logger.level
+        output = StringIO()
+
+        root.handlers.clear()
+        markdown_logger.setLevel(logging.NOTSET)
+        markdown_rule_logger.setLevel(logging.NOTSET)
+        hephaestus_logger.setLevel(logging.NOTSET)
+        monkeypatch.setattr(sys, "stdout", output)
+        try:
+            setup_logging(level=logging.DEBUG, json_format=json_format)
+            hephaestus_logger.debug("hephaestus diagnostic")
+            markdown_rule_logger.debug("parser trace")
+            markdown_rule_logger.warning("parser warning")
+            markdown_rule_logger.error("parser error")
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved_root_handlers)
+            root.setLevel(saved_root_level)
+            markdown_logger.setLevel(saved_markdown_level)
+            markdown_rule_logger.setLevel(saved_rule_level)
+            hephaestus_logger.setLevel(saved_hephaestus_level)
+
+        messages = (
+            [json.loads(line)["message"] for line in output.getvalue().splitlines()]
+            if json_format
+            else output.getvalue()
+        )
+        assert "hephaestus diagnostic" in messages
+        assert "parser trace" not in messages
+        assert "parser warning" in messages
+        assert "parser error" in messages
+
+    def test_dependency_policy_does_not_weaken_global_level(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A strict global level also applies to configured dependencies."""
+        root = logging.getLogger()
+        markdown_logger = logging.getLogger("markdown_it")
+        markdown_rule_logger = logging.getLogger("markdown_it.rules_block.hr")
+        saved_root_handlers = list(root.handlers)
+        saved_root_level = root.level
+        saved_markdown_level = markdown_logger.level
+        saved_rule_level = markdown_rule_logger.level
+        output = StringIO()
+
+        root.handlers.clear()
+        markdown_logger.setLevel(logging.NOTSET)
+        markdown_rule_logger.setLevel(logging.NOTSET)
+        monkeypatch.setattr(sys, "stdout", output)
+        try:
+            setup_logging(level=logging.ERROR)
+            markdown_rule_logger.warning("parser warning")
+            markdown_rule_logger.error("parser error")
+        finally:
+            root.handlers.clear()
+            root.handlers.extend(saved_root_handlers)
+            root.setLevel(saved_root_level)
+            markdown_logger.setLevel(saved_markdown_level)
+            markdown_rule_logger.setLevel(saved_rule_level)
+
+        assert "parser warning" not in output.getvalue()
+        assert "parser error" in output.getvalue()
+
     def test_runs_without_error(self) -> None:
         """setup_logging runs without raising."""
         root = logging.getLogger()

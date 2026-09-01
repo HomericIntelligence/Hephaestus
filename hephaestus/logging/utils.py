@@ -29,6 +29,9 @@ from hephaestus.logging.formatters import JsonFormatter
 # Module-level lock protects the check-then-add TOCTOU in get_logger()
 _handler_setup_lock = threading.Lock()
 
+# Keep high-volume dependency traces out of Hephaestus verbose output.
+_MINIMUM_DEPENDENCY_LOG_LEVELS = {"markdown_it": logging.WARNING}
+
 # Context variable for correlation ID propagation to subprocesses (thread- and async-safe)
 _correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "correlation_id", default=None
@@ -210,7 +213,11 @@ def setup_logging(
     datefmt: str | None = None,
     primary_stream: Literal["stdout", "stderr"] = "stdout",
 ) -> None:
-    """Set up global logging configuration.
+    """Set up global logging and apply default dependency log levels.
+
+    In verbose mode, dependency warnings and errors remain visible. High-volume
+    dependency debug records do not hide Hephaestus diagnostics. Stricter
+    global levels remain effective.
 
     Args:
         level: Default logging level
@@ -227,6 +234,8 @@ def setup_logging(
 
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
+    for logger_name, minimum_level in _MINIMUM_DEPENDENCY_LOG_LEVELS.items():
+        logging.getLogger(logger_name).setLevel(max(level, minimum_level))
 
     formatter: logging.Formatter
     if json_format:
