@@ -3722,6 +3722,97 @@ class TestGitOps:
         assert result.value == receipt.return_value
         assert result.error == "mechanical rebase hit conflicts; resolution required"
 
+    def test_clean_rebase_revalidates_destination_after_commit_hooks(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A successful rebase gets a fresh destination proof before publication."""
+        job = GitJob(
+            repo="owner/name",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": tmp_path,
+                "base_branch": "main",
+                "publish_rebased_head": True,
+                "branch": "7-auto-impl",
+                "expected_remote_sha": "a" * 40,
+            },
+        )
+        first_env = {"AUTH": "before-hooks"}
+        fresh_env = {"AUTH": "after-hooks"}
+        first_config = ("-c", "credential.helper=!first")
+        fresh_config = ("-c", "credential.helper=!fresh")
+
+        def fake_run(argv: list[str], **_kwargs: object) -> MagicMock:
+            if argv[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return MagicMock(returncode=1)
+            return MagicMock(returncode=0, stdout="")
+
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                side_effect=((first_env, first_config), (fresh_env, fresh_config)),
+            ) as authentication,
+            patch(f"{_WP}._controlled_git_signing_env", return_value={}),
+            patch(f"{_WP}.git_utils.run", side_effect=fake_run),
+            patch(f"{_WP}.git_utils.rebase_worktree_onto", return_value=True),
+            patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+        ):
+            result = pool._git_rebase(job)
+
+        assert result.ok is True
+        assert authentication.call_args_list == [
+            call(cwd=tmp_path, expected_repo="owner/name", timeout=60),
+            call(cwd=tmp_path, expected_repo="owner/name", timeout=60),
+        ]
+        push.assert_called_once_with(
+            "7-auto-impl",
+            "a" * 40,
+            tmp_path,
+            source_sha="b" * 40,
+            timeout=60,
+            env=fresh_env,
+            remote_config=fresh_config,
+        )
+
+    def test_remote_head_probe_binds_expected_repository(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A post-agent remote probe validates its checkout destination."""
+        remote_env = {"GIT_TERMINAL_PROMPT": "0"}
+        remote_config = ("-c", "credential.helper=!trusted")
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ) as authentication,
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=MagicMock(stdout=f"{'a' * 40} refs/heads/topic\n"),
+            ),
+        ):
+            result = pool._read_remote_branch_head(
+                tmp_path,
+                remote="origin",
+                branch="topic",
+                expected_repo="owner/name",
+                timeout=60,
+            )
+
+        assert result == "a" * 40
+        authentication.assert_called_once_with(
+            cwd=tmp_path,
+            expected_repo="owner/name",
+            timeout=60,
+        )
+
     def test_conflict_receipt_binds_index_head_base_and_remote_head(
         self, pool: WorkerPool, tmp_path: Path
     ) -> None:

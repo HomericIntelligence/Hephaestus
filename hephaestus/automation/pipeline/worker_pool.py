@@ -2718,6 +2718,7 @@ class WorkerPool:
                     cwd,
                     remote=remote,
                     branch=branch,
+                    expected_repo=job.repo,
                     expected_remote_sha=expected_remote_sha,
                     timeout=job.timeout_s,
                 )
@@ -2758,6 +2759,11 @@ class WorkerPool:
         source_sha = self._read_publish_head(cwd, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=cwd,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         git_utils.push_head_to_branch(
             branch,
             expected_remote_sha,
@@ -3041,7 +3047,11 @@ class WorkerPool:
             paused_head_sha,
         ) = parsed
         remote_head = self._read_remote_branch_head(
-            cwd, remote=remote, branch=branch, timeout=job.timeout_s
+            cwd,
+            remote=remote,
+            branch=branch,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
         )
         if isinstance(remote_head, JobResult):
             return remote_head
@@ -4203,11 +4213,16 @@ class WorkerPool:
         *,
         remote: str,
         branch: str,
+        expected_repo: str,
         timeout: int,
     ) -> str | JobResult:
         """Read one exact remote branch head without updating local refs."""
         expected_ref = f"refs/heads/{branch}"
-        remote_env, remote_config = self._authenticated_remote_git_configuration()
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=worktree_path,
+            expected_repo=expected_repo,
+            timeout=timeout,
+        )
         try:
             fields = git_utils.run(
                 ["git", *remote_config, "ls-remote", "--refs", remote, expected_ref],
@@ -4227,6 +4242,7 @@ class WorkerPool:
         *,
         remote: str,
         branch: str,
+        expected_repo: str,
         expected_remote_sha: str,
         timeout: int,
     ) -> JobResult:
@@ -4243,6 +4259,7 @@ class WorkerPool:
             worktree_path,
             remote=remote,
             branch=branch,
+            expected_repo=expected_repo,
             timeout=timeout,
         )
         if isinstance(remote_head, JobResult):
