@@ -1772,10 +1772,10 @@ def _codex_base_cmd(
         ]
     )
     cmd.extend(_codex_model_args(model, use_default=resume_id is None))
-    # The child receives a temporary CODEX_HOME with only its authentication
-    # bridge and the admitted Athena plugin.  Ignore ambient execpolicy files
-    # as well; repository instructions remain part of the worktree context.
-    cmd.append("--ignore-rules")
+    if automation_profile:
+        # The isolated profile owns the automation policy.  Ordinary callers
+        # retain their operator-provided execpolicy rules.
+        cmd.append("--ignore-rules")
     if resume_id is not None:
         # ``codex exec resume`` does not accept the new-session --sandbox or
         # --ask-for-approval flags.  Its generic config overrides are the
@@ -3073,7 +3073,7 @@ def run_agent_session(
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     pi_dir: Path | None = None,
-    isolate_codex_automation_profile: bool = True,
+    isolate_codex_automation_profile: bool = False,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     pi_thinking = ""

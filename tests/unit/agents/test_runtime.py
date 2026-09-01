@@ -1172,20 +1172,22 @@ def test_codex_base_cmd_resume_without_model_preserves_session_model() -> None:
         "exec",
         "resume",
         "session-123",
-        "--ignore-rules",
         "-c",
         'approval_policy="never"',
         "--json",
     ]
 
 
-def test_codex_base_cmd_uses_an_isolated_codex_profile_for_new_sessions(tmp_path: Path) -> None:
-    """Automation jobs must not load unrelated interactive Codex configuration."""
+def test_codex_base_cmd_limits_ignored_rules_to_automation_profiles(tmp_path: Path) -> None:
+    """Legacy callers retain rules while isolated automation owns its policy."""
     with patch("hephaestus.agents.runtime.codex_approval_args", return_value=[]):
-        cmd = agent_runtime._codex_base_cmd(cwd=tmp_path, sandbox="read-only")
+        legacy = agent_runtime._codex_base_cmd(cwd=tmp_path, sandbox="read-only")
+        isolated = agent_runtime._codex_base_cmd(
+            cwd=tmp_path, sandbox="read-only", automation_profile=True
+        )
 
-    assert "--ignore-user-config" not in cmd
-    assert "--ignore-rules" in cmd
+    assert "--ignore-rules" not in legacy
+    assert "--ignore-rules" in isolated
 
 
 def test_codex_automation_profile_admits_only_auth_and_athena(
@@ -1352,14 +1354,14 @@ def test_resume_agent_session_rejects_unbound_codex_session(tmp_path: Path) -> N
         )
 
 
-def test_agent_dispatch_isolates_new_codex_sessions_by_default(tmp_path: Path) -> None:
-    """Codex dispatch must not depend on a caller opting into isolation."""
+def test_agent_dispatch_leaves_isolation_to_the_implementation_boundary(tmp_path: Path) -> None:
+    """Neutral direct-session callers retain their existing platform behavior."""
     expected = agent_runtime.AgentRunResult(stdout="done", stderr="", session_id="session-123")
     with patch("hephaestus.agents.runtime.run_codex_session", return_value=expected) as runner:
         result = agent_runtime.run_agent_session("codex", "prompt", cwd=tmp_path, timeout=30)
 
     assert result is expected
-    assert runner.call_args.kwargs["isolate_automation_profile"] is True
+    assert runner.call_args.kwargs["isolate_automation_profile"] is False
 
 
 def test_resume_codex_session_applies_the_requested_sandbox_and_approval(tmp_path: Path) -> None:

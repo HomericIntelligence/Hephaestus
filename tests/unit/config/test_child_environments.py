@@ -99,9 +99,7 @@ def test_isolated_codex_builder_replaces_all_ambient_state_roots(
 
     assert environment["HOME"] == str(profile)
     assert environment["CODEX_HOME"] == str(profile)
-    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {
-        str(profile / "tmp")
-    }
+    assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {str(profile / "tmp")}
     assert environment["XDG_CONFIG_HOME"] == str(profile / "xdg" / "config")
     assert environment["XDG_CACHE_HOME"] == str(profile / "xdg" / "cache")
     assert environment["XDG_DATA_HOME"] == str(profile / "xdg" / "data")
