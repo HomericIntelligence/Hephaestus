@@ -2125,6 +2125,7 @@ class TestTestsAndFix:
             "all",
             "--rebuild",
         )
+        assert result.job.timeout_s == 7200
         assert item.payload["test_command"] == "bash scripts/run_ci_local.sh all --rebuild"
 
     def test_hephaestus_required_checks_cannot_be_replaced_by_generic_override(
@@ -2155,6 +2156,23 @@ class TestTestsAndFix:
             "all",
             "--rebuild",
         )
+
+    def test_hephaestus_required_checks_honor_explicit_timeout_override(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """An operator-provided timeout takes precedence over the required-suite default."""
+        stage = ImplementationStage()
+        ctx = make_ctx(
+            org="HomericIntelligence",
+            config_overrides={"pre_pr_test_timeout": 9000},
+        )
+        item = make_work_item(issue=1, repo="Hephaestus", state="TEST_WAIT")
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, BuildTestJob)
+        assert result.job.timeout_s == 9000
 
     def test_same_named_repo_in_another_org_preserves_configurable_gate(
         self, make_ctx: Any, make_work_item: Any
