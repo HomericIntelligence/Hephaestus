@@ -40,6 +40,7 @@ from hephaestus.agents.execution_policy import (
     SessionLifecycle,
     resolve_policy,
 )
+from hephaestus.agents.macos_sandbox import macos_sandbox_profile
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -695,65 +696,17 @@ def _host_verification_profile(
     executable: Path,
 ) -> str:
     """Build the macOS profile; only the declared scratch tree is writable."""
-    allowed_roots = (
-        Path("/bin"),
-        Path("/sbin"),
-        Path("/usr"),
-        Path("/System"),
-        Path("/opt/homebrew"),
-        Path("/usr/local"),
-    )
     canonical_tmp = Path(os.path.sep) / "tmp"
-    return "\n".join(
-        (
-            "(version 1)",
-            "(deny default)",
-            # ``system.sb`` supplies the macOS runtime IPC, loader, and
-            # device-read allowances needed even by /usr/bin/true. It does
-            # not grant user-workspace writes; this profile still grants
-            # writes only to the disposable scratch directory below.
-            '(import "system.sb")',
-            "(allow process*)",
-            # Every process in this one-off sandbox instance belongs to the
-            # verifier command. Permit process-group cleanup across descendants
-            # without granting signals to unrelated host processes.
-            "(allow signal (target same-sandbox))",
-            # Python multiprocessing names its spawned semaphores ``/mp-``.
-            # Limit cross-process synchronization to that private namespace.
-            '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))',
-            "(allow file-read*",
-            f'  (subpath "{_sandbox_string(source)}")',
-            f'  (subpath "{_sandbox_string(scratch)}")',
-            f'  (subpath "{_sandbox_string(runtime_environment)}")',
-            f'  (subpath "{_sandbox_string(git_metadata)}")',
-            f'  (subpath "{_sandbox_string(pi_smoke_logs)}")',
-            f'  (literal "{_sandbox_string(executable)}")',
-            *(f'  (subpath "{_sandbox_string(root)}")' for root in allowed_roots),
-            ")",
-            # ``getcwd`` and dynamic-loader path checks need metadata on the
-            # ancestors of the explicitly allowed paths, not read access to
-            # their contents. Without these, macOS reports a nonexistent CWD.
-            *(
-                f'(allow file-read-metadata (path-ancestors "{_sandbox_string(path)}"))'
-                for path in (
-                    source,
-                    scratch,
-                    runtime_environment,
-                    git_metadata,
-                    pi_smoke_logs,
-                    executable,
-                )
-            ),
-            # Tests and validation helpers commonly use the stable ``/tmp``
-            # spelling for inert fixture paths.  macOS resolves that symlink
-            # through ``/private/tmp`` before a mocked boundary can observe
-            # it, so permit metadata for the directory itself without
-            # granting reads of its contents.
-            f'(allow file-read-metadata (literal "{_sandbox_string(canonical_tmp)}"))',
-            f'(allow file-write* (subpath "{_sandbox_string(scratch)}"))',
-            f'(allow file-write* (subpath "{_sandbox_string(pi_smoke_logs)}"))',
-            "(deny network*)",
-        )
+    return macos_sandbox_profile(
+        read_roots=tuple(
+            path.resolve()
+            for path in (source, scratch, runtime_environment, git_metadata, pi_smoke_logs)
+        ),
+        write_roots=(scratch.resolve(), pi_smoke_logs.resolve()),
+        executable=executable.resolve(),
+        allow_network=False,
+        literal_metadata_roots=(canonical_tmp.resolve(),),
+        ipc_posix_sem_prefix="/mp-",
     )
 
 

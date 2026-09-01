@@ -47,6 +47,7 @@ def macos_sandbox_profile(
     executable: Path,
     allow_network: bool,
     metadata_roots: Sequence[Path] = (),
+    literal_metadata_roots: Sequence[Path] = (),
     ipc_posix_sem_prefix: str | None = None,
 ) -> str:
     """Build a deny-by-default Seatbelt profile for fixed canonical roots."""
@@ -72,6 +73,10 @@ def macos_sandbox_profile(
             *(
                 f'(allow file-read-metadata (path-ancestors "{_sandbox_string(path)}"))'
                 for path in (*roots, *metadata_roots, executable)
+            ),
+            *(
+                f'(allow file-read-metadata (literal "{_sandbox_string(path)}"))'
+                for path in literal_metadata_roots
             ),
             *(f'(allow file-write* (subpath "{_sandbox_string(path)}"))' for path in write_roots),
             "(allow network*)" if allow_network else "(deny network*)",
