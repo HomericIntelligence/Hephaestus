@@ -505,10 +505,10 @@ class TestPrReviewStageOnEnter:
         assert item.payload["remediation_thread_snapshots"][0]["id"] == "live-thread-1001-0"
         assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
-    def test_on_enter_reaudits_when_every_open_thread_predates_the_live_head(
+    def test_on_enter_routes_threads_that_predate_the_live_head_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A new head is reviewed before stale findings can trigger another writer turn."""
+        """Stale findings get one bounded remediation route, not another broad audit."""
 
         class StaleThreadGitHub(FakeStageGitHub):
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
@@ -537,11 +537,13 @@ class TestPrReviewStageOnEnter:
         github = StaleThreadGitHub(pr_head_branch="1-auto-impl-direct-" + "b" * 32)
         item = make_work_item(issue=1, pr=1001, kind=ItemKind.PR, state="ENTER")
 
-        assert stage.on_enter(item, make_ctx(github=github)) is None
+        assert stage.on_enter(item, make_ctx(github=github)) == StageOutcome(
+            Disposition.FAIL_BACK, "implementation_remediation"
+        )
         assert item.payload["existing_pr"] is True
-        assert "implementation_remediation" not in item.payload
-        assert "reviewed_pr_head_sha" not in item.payload
-        assert github.mutation_log == []
+        assert item.payload["implementation_remediation"] is True
+        assert item.payload["remediation_threads"][0]["thread_id"] == "stale-thread"
+        assert ("mark_pr_implementation_no_go", (1001,)) in github.mutation_log
 
     def test_on_enter_routes_fully_replied_threads_to_comment_validation(
         self, make_ctx: Any, make_work_item: Any
@@ -617,10 +619,10 @@ class TestPrReviewStageOnEnter:
         assert result == Continue(next_state="ADDRESS_WAIT")
         assert item.payload["remediation_threads"][0]["thread_id"] == "live-thread-1001-0"
 
-    def test_checkout_reaudits_threads_from_an_older_review_head(
+    def test_checkout_routes_threads_from_an_older_review_head_to_remediation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """A detached checkout sends stale findings to the fresh reviewer."""
+        """A detached checkout routes stale findings to bounded remediation."""
 
         class StaleThreadGitHub(FakeStageGitHub):
             def list_unresolved_review_threads(self, pr_number: int) -> list[dict[str, Any]]:
@@ -656,8 +658,8 @@ class TestPrReviewStageOnEnter:
 
         result = stage.step(item, make_ctx(github=StaleThreadGitHub()))
 
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, AgentJob)
+        assert result == Continue(next_state="ADDRESS_WAIT")
+        assert item.payload["remediation_threads"][0]["thread_id"] == "stale-thread"
 
     def test_checkout_rejects_empty_diff_before_review_or_go(
         self, make_ctx: Any, make_work_item: Any

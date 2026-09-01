@@ -97,15 +97,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.branch = branch
         item.payload["existing_pr"] = True
 
-        reviewed_head = str(item.payload.get("reviewed_pr_head_sha") or "")
-        if is_full_commit_sha(reviewed_head) and _threads_predate_reviewed_head(
-            live_threads, reviewed_head
-        ):
-            # A later implementation may already address older findings.
-            item.payload.pop("reviewed_pr_head_sha", None)
-            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
-            return None
-
         if all(bool(snapshot.get("implementation_reply_submitted")) for snapshot in snapshots):
             item.payload[_COMMENT_VALIDATION_ONLY] = True
             return None
@@ -450,9 +441,6 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
             empty_diff = empty_diff_outcome(item)
             if empty_diff:
                 return self._cleanup_review_worktree_then(item, empty_diff)
-            return self._submit_review_job(item, ctx)
-        if _threads_predate_reviewed_head(live_threads, reviewed_head):
-            item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
             return self._submit_review_job(item, ctx)
         snapshots = _validation_thread_snapshots(live_threads, receipts)
         remediation_threads = _normalize_remediation_threads(live_threads)
