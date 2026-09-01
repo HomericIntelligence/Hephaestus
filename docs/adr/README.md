@@ -48,4 +48,4 @@ numbered, and listed here.
 | [0033](0033-graphql-response-error-contract.md) | GraphQL response-error and mutation-proof contract | Accepted |
 | [0034](0034-event-aware-required-check-results.md) | Event-aware required-check results | Accepted |
 | [0035](0035-provider-aware-ifm-model-selection.md) | Provider-aware IFM model selection | Accepted |
-| [0036](0036-codex-implementation-process-isolation.md) | Codex implementation process isolation | Accepted |
+| [0036](0036-codex-implementation-process-boundary.md) | Codex implementation process boundary | Accepted |

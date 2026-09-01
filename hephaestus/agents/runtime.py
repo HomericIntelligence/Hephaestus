@@ -40,6 +40,7 @@ from hephaestus.agents.model_selection import (
     AgentModelSelection,
     parse_model_selection,
 )
+from hephaestus.agents.macos_sandbox import ProcessIsolationError, macos_isolated_command
 from hephaestus.agents.pi_plugins import (
     PiPreflightResult,
     package_tree_digest as package_tree_digest,
@@ -52,7 +53,6 @@ from hephaestus.agents.pi_session import (
     create_pi_binding,
     validate_pi_binding,
 )
-from hephaestus.agents.process_isolation import ProcessIsolationError, macos_isolated_command
 from hephaestus.config.child_environments import (
     build_claude_child_env,
     build_codex_child_env,

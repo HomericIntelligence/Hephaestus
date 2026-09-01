@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hephaestus.agents import process_isolation
+from hephaestus.agents import macos_sandbox
 
 
 def _executable(path: Path) -> Path:
@@ -25,13 +25,13 @@ def test_macos_isolated_command_writes_a_deny_by_default_profile(
     worktree.mkdir()
     profile.mkdir()
     executable = _executable(tmp_path / "codex")
-    monkeypatch.setattr("hephaestus.agents.process_isolation.sys.platform", "darwin")
-    monkeypatch.setattr(process_isolation, "_SYSTEM_READ_ROOTS", ())
-    monkeypatch.setattr(process_isolation, "_sandbox_string", lambda path: str(path))
+    monkeypatch.setattr("hephaestus.agents.macos_sandbox.sys.platform", "darwin")
+    monkeypatch.setattr(macos_sandbox, "_SYSTEM_READ_ROOTS", ())
+    monkeypatch.setattr(macos_sandbox, "_sandbox_string", lambda path: str(path))
     monkeypatch.setattr("pathlib.Path.is_file", lambda path: True)
-    monkeypatch.setattr("hephaestus.agents.process_isolation.os.access", lambda *_args: True)
+    monkeypatch.setattr("hephaestus.agents.macos_sandbox.os.access", lambda *_args: True)
 
-    command = process_isolation.macos_isolated_command(
+    command = macos_sandbox.macos_isolated_command(
         [str(executable), "exec"],
         read_roots=(worktree, profile),
         write_roots=(worktree, profile),
@@ -51,12 +51,12 @@ def test_macos_isolated_command_fails_closed_without_supported_host(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """An unavailable host boundary must prevent provider startup."""
-    monkeypatch.setattr("hephaestus.agents.process_isolation.sys.platform", "linux")
+    monkeypatch.setattr("hephaestus.agents.macos_sandbox.sys.platform", "linux")
     root = tmp_path / "root"
     root.mkdir()
 
-    with pytest.raises(process_isolation.ProcessIsolationError, match="unavailable"):
-        process_isolation.macos_isolated_command(
+    with pytest.raises(macos_sandbox.ProcessIsolationError, match="unavailable"):
+        macos_sandbox.macos_isolated_command(
             ["/usr/bin/true"],
             read_roots=(root,),
             write_roots=(root,),
@@ -76,12 +76,12 @@ def test_macos_isolated_command_rejects_overlapping_roots(
     nested.mkdir()
     profile.mkdir()
     executable = _executable(tmp_path / "codex")
-    monkeypatch.setattr("hephaestus.agents.process_isolation.sys.platform", "darwin")
+    monkeypatch.setattr("hephaestus.agents.macos_sandbox.sys.platform", "darwin")
     monkeypatch.setattr("pathlib.Path.is_file", lambda path: True)
-    monkeypatch.setattr("hephaestus.agents.process_isolation.os.access", lambda *_args: True)
+    monkeypatch.setattr("hephaestus.agents.macos_sandbox.os.access", lambda *_args: True)
 
-    with pytest.raises(process_isolation.ProcessIsolationError, match="overlapping"):
-        process_isolation.macos_isolated_command(
+    with pytest.raises(macos_sandbox.ProcessIsolationError, match="overlapping"):
+        macos_sandbox.macos_isolated_command(
             [str(executable)],
             read_roots=(root, nested),
             write_roots=(profile,),
@@ -92,4 +92,4 @@ def test_macos_isolated_command_rejects_overlapping_roots(
 
 def test_sandbox_string_escapes_profile_literals() -> None:
     """Seatbelt literals cannot be broken by a quoted path component."""
-    assert process_isolation._sandbox_string(Path('/tmp/a"b\\c')) == '/tmp/a\\"b\\\\c'
+    assert macos_sandbox._sandbox_string(Path('/tmp/a"b\\c')) == '/tmp/a\\"b\\\\c'

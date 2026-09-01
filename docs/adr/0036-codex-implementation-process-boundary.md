@@ -1,4 +1,4 @@
-# ADR-0036: Codex implementation process isolation
+# ADR-0036: Codex implementation process boundary
 
 - Status: Accepted
 - Date: 2026-08-31
