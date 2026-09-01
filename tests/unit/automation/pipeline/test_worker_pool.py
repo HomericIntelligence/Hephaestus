@@ -2173,6 +2173,10 @@ class TestAgentErrorHandling:
                 return_value=[],
             ),
             patch(
+                "hephaestus.agents.runtime._codex_automation_profile",
+                return_value=nullcontext({}),
+            ),
+            patch(
                 "hephaestus.agents.runtime.subprocess.Popen",
                 side_effect=fake_popen,
             ),
@@ -9560,6 +9564,10 @@ class TestShutdownReapsSubprocess:
         with (
             patch(f"{_WP}.resolve_agent", return_value="codex"),
             patch("hephaestus.agents.runtime._codex_base_cmd", return_value=sleeper),
+            patch(
+                "hephaestus.agents.runtime._codex_automation_profile",
+                return_value=nullcontext({}),
+            ),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             deadline = time.monotonic() + 10
