@@ -116,6 +116,11 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
         item.payload["remediation_threads"] = remediation_threads
+        item.payload["trusted_remediation_thread_ids"] = [
+            str(thread["thread_id"])
+            for thread in remediation_threads
+            if isinstance(thread.get("thread_id"), str) and thread["thread_id"]
+        ]
         item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
         no_go_outcome = PrReviewStage._write_no_go(item, ctx)
@@ -460,6 +465,11 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload.pop(_COMMENT_VALIDATION_ONLY, None)
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
         item.payload["remediation_threads"] = remediation_threads
+        item.payload["trusted_remediation_thread_ids"] = [
+            str(thread["thread_id"])
+            for thread in remediation_threads
+            if isinstance(thread.get("thread_id"), str) and thread["thread_id"]
+        ]
         item.payload["remediation_thread_snapshots"] = [dict(thread) for thread in live_threads]
         item.payload["unresolved_threads_before_address"] = len(remediation_threads)
         return Continue(next_state=ADDRESS_WAIT)

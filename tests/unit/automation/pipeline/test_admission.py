@@ -75,6 +75,25 @@ class TestParsePlannedFiles:
         body = "# Implementation Plan\n\n## Files to Modify\n\n- `pyproject.toml`\n"
         assert _parse_planned_files(body) == {"pyproject.toml"}
 
+    def test_parse_planned_files_accepts_valid_non_extension_paths(self) -> None:
+        """Dotfiles, extensionless paths, and spaces remain valid plan claims."""
+        body = (
+            "# Implementation Plan\n\n## Files to Modify\n\n"
+            "- `.github/workflows/ci.yml`\n"
+            "- `.pre-commit-config.yaml`\n"
+            "- `Dockerfile`\n"
+            "- `Makefile`\n"
+            "- `docs/file with spaces.md`\n"
+            "- `../outside.py`\n"
+        )
+        assert _parse_planned_files(body) == {
+            ".github/workflows/ci.yml",
+            ".pre-commit-config.yaml",
+            "Dockerfile",
+            "Makefile",
+            "docs/file with spaces.md",
+        }
+
     def test_parse_planned_files_case_insensitive_heading(self) -> None:
         """## Files to Modify/Create headings are case-insensitive."""
         body = "# Implementation Plan\n\n## FILES TO MODIFY\n\n- `hephaestus/automation/test.py`\n"

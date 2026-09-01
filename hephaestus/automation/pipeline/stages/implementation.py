@@ -1339,6 +1339,7 @@ class ImplementationStage(Stage):
         if ctx.config.pi_dir is not None:
             kwargs["pi_dir"] = ctx.config.pi_dir
         if requires_plan_scope_guard(agent):
+            kwargs["expected_repo"] = f"{ctx.org}/{item.repo}"
             planned_claims = item.payload.get("_implementation_file_claims")
             if planned_claims is None:
                 planned = _fetch_planned_files(item.issue or issue, repo=(ctx.org, item.repo))

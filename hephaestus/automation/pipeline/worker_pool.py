@@ -2248,6 +2248,9 @@ class WorkerPool:
                     job.execution_request is not None
                     and job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
                     and job.resume_binding is None
+                    and not (
+                        job.resume_session_id and allows_unbound_session_resume(agent)
+                    )
                 ):
                     raise AgentExecutionError(
                         "required agent session has no verified resume binding"
@@ -4790,6 +4793,9 @@ class WorkerPool:
         )
         if allowed_scope is not None:
             return allowed_scope
+        metadata_scope = self._verify_publish_git_metadata(job, Path(worktree_path))
+        if metadata_scope is not None:
+            return metadata_scope
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed = self._commit_if_changes_with_controlled_signing(
@@ -4866,6 +4872,62 @@ class WorkerPool:
                 value={"failure_kind": "signing_configuration"},
                 error=str(exc),
             )
+
+    @staticmethod
+    def _verify_publish_git_metadata(job: GitJob, worktree_path: Path) -> JobResult | None:
+        """Fail closed if agent-writable common Git metadata redirects publication.
+
+        Codex implementation worktrees need their shared Git metadata directory
+        for normal commits.  Immediately before a host commit or push, resolve
+        that directory through Git and re-check the two execution-affecting
+        controls an agent could otherwise alter: hooksPath and origin.
+        """
+        if job.kwargs.get("allowed_paths") is None:
+            return None
+        expected_repo = job.kwargs.get("expected_repo")
+        if not isinstance(expected_repo, str) or not expected_repo:
+            return JobResult(ok=False, error="publication Git metadata authority is unavailable")
+        try:
+            common = git_utils.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            ).stdout.strip()
+            common_dir = Path(common).resolve(strict=True)
+            if not common_dir.is_dir():
+                raise OSError("common Git metadata is not a directory")
+            hooks_path = git_utils.run(
+                ["git", "config", "--local", "--get", "core.hooksPath"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            if hooks_path.returncode == 0 and hooks_path.stdout.strip():
+                return JobResult(ok=False, error="publication Git hooksPath is not allowed")
+            origin = git_utils.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            ).stdout.strip().rstrip("/").removesuffix(".git")
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot validate publication Git metadata")
+        expected_origins = {
+            f"https://github.com/{expected_repo}",
+            f"ssh://git@github.com/{expected_repo}",
+            f"git@github.com:{expected_repo}",
+        }
+        if origin not in expected_origins:
+            return JobResult(
+                ok=False,
+                error="publication origin does not match approved repository",
+            )
+        return None
 
     @staticmethod
     def _verify_allowed_edit_scope(

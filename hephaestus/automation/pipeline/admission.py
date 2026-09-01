@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from hephaestus.automation.comment_identity import has_marker_alias
@@ -57,7 +58,7 @@ LOG = logging.getLogger(__name__)
 # `hephaestus/automation/pipeline/stages/pr_review.py` or `pyproject.toml`.
 # This is both the overlap reservation and the immutable publication manifest,
 # so a valid top-level plan path must not be dropped.
-_PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)*\.[A-Za-z0-9_]+)`")
+_PLAN_FILE_RE = re.compile(r"`([^`\x00]+)`")
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
 
 # A source path only conflicts with work in the same repository.  The
@@ -92,8 +93,19 @@ def _parse_planned_files(plan_body: str) -> set[str]:
         if line.startswith("## "):
             in_section = False
         if in_section:
-            files.update(_PLAN_FILE_RE.findall(line))
+            files.update(path for path in _PLAN_FILE_RE.findall(line) if _is_safe_plan_path(path))
     return files
+
+
+def _is_safe_plan_path(path: str) -> bool:
+    """Return whether a plan path is a non-traversing repository-relative path."""
+    normalized = path.strip()
+    if not normalized or normalized != path or "\\" in path:
+        return False
+    candidate = PurePosixPath(path)
+    return not candidate.is_absolute() and all(
+        part not in {"", ".", ".."} for part in candidate.parts
+    )
 
 
 def _fetch_planned_files(issue: int, repo: tuple[str, str] | None = None) -> set[str] | None:

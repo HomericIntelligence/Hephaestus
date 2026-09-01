@@ -7334,6 +7334,7 @@ class TestGitOps:
                 "branch": "2472-auto-impl",
                 "agent": "codex",
                 "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+                "expected_repo": "test/repo",
                 "expected_remote_sha": pin,
                 "scope_history_base_sha": pin,
             },
@@ -7348,6 +7349,9 @@ class TestGitOps:
                     subprocess.CompletedProcess(
                         [], 0, stdout="hephaestus/automation/claude_invoke.py\0"
                     ),
+                    subprocess.CompletedProcess([], 0, stdout=f"{tmp_path}\n"),
+                    subprocess.CompletedProcess([], 1, stdout=""),
+                    subprocess.CompletedProcess([], 0, stdout="https://github.com/test/repo.git\n"),
                 ],
             ),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
