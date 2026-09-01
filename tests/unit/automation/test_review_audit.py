@@ -46,6 +46,18 @@ def test_parse_review_audit_rejects_missing_or_malformed_verdict() -> None:
     assert malformed.verdict is None
 
 
+def test_parse_review_audit_rejects_auth_unavailable_grade_without_verdict() -> None:
+    """An infrastructure failure audit still fails closed without GO."""
+    audit = parse_review_audit(
+        '{"grade":"F","summary":"Review blocked: GitHub authentication is unavailable.",'
+        '"comments":[]}'
+    )
+
+    assert audit.valid is False
+    assert audit.grade is None
+    assert audit.verdict is None
+
+
 def test_parse_review_audit_accepts_claude_result_envelope() -> None:
     """Claude's outer result envelope cannot alter the structural contract."""
     audit = parse_review_audit(

@@ -55,6 +55,16 @@ class ReviewAudit:
     verdict: ReviewVerdict | None = None
 
 
+def is_clean_go_review(audit: object | None) -> bool:
+    """Return whether one parsed audit can authorize implementation GO."""
+    return (
+        isinstance(audit, ReviewAudit)
+        and audit.valid
+        and audit.verdict == "GO"
+        and not audit.findings
+    )
+
+
 def parse_review_audit(response: str | Mapping[str, object]) -> ReviewAudit:
     """Parse one strict structural review response.
 
@@ -265,7 +275,7 @@ def render_implementation_go_audit(
     audit: ReviewAudit, *, pr_number: int, head_sha: str
 ) -> tuple[str, str]:
     """Render one public, idempotent audit comment for an approved PR head."""
-    if not audit.valid or audit.verdict != "GO" or audit.findings:
+    if not is_clean_go_review(audit):
         raise ValueError("implementation-go audit must have a clean GO verdict")
     if pr_number <= 0:
         raise ValueError("pr_number must be positive")

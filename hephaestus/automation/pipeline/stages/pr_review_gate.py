@@ -1,5 +1,7 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.review_audit import is_clean_go_review
+
 from .pr_review_threads import *
 
 
@@ -219,7 +221,7 @@ class PrReviewGate(_PrReviewHost):
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
         if not open_thread_count:
-            if not audit.valid or audit.verdict != "GO":
+            if not is_clean_go_review(audit):
                 return self._handle_non_go(
                     item,
                     ctx,

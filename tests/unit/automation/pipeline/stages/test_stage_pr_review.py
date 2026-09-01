@@ -5295,6 +5295,27 @@ class TestEvalErrorNoBurn:
         assert item.attempts["pr_review_iter"] == 0
         assert item.payload["review_error_retries"] == 1
 
+    def test_auth_unavailable_audit_retries_without_burning(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed GitHub-auth audit still fails closed without a GO write."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, pr=1001, state="EVAL")
+        item.payload["review_audit"] = parse_review_audit(
+            '{"grade":"F","summary":"Review blocked: GitHub authentication is unavailable.",'
+            '"comments":[]}'
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.mutation_log == []
+        assert item.attempts["pr_review_iter"] == 0
+        assert item.payload["review_error_retries"] == 1
+
     def test_error_retry_cap_fails_back_to_implementation(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:

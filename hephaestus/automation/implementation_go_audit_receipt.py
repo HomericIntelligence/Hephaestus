@@ -10,6 +10,7 @@ from hephaestus.automation.review_audit import (
     MAX_RAW_FEEDBACK_CHARS,
     MAX_REVIEW_SUMMARY_CHARS,
     ReviewAudit,
+    is_clean_go_review,
 )
 
 IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX = "<!-- hephaestus-implementation-go-audit-pending:"
@@ -49,7 +50,7 @@ def render_pending_implementation_go_audit(
         is None
     ):
         raise ValueError("pending implementation-go audit identity is invalid")
-    if not audit.valid or audit.verdict != "GO" or audit.grade is None or audit.findings:
+    if not is_clean_go_review(audit) or audit.grade is None:
         raise ValueError("pending implementation-go audit must have a clean GO verdict")
     marker = f"<!-- hephaestus-implementation-go-audit-pending:pr={pr_number}:head={head_sha} -->"
     payload = json.dumps(

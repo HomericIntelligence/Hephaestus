@@ -2,6 +2,8 @@
 
 # This mixin consumes the shared PR-review stage namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.review_audit import is_clean_go_review
+
 from .pr_review_threads import *
 
 
@@ -19,12 +21,7 @@ class PrReviewAudit:
         )
         audit = item.payload.get("review_audit")
         head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
-        if (
-            not isinstance(audit, ReviewAudit)
-            or not audit.valid
-            or audit.verdict != "GO"
-            or audit.findings
-        ):
+        if not is_clean_go_review(audit):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         if not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
@@ -51,12 +48,7 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
-        if (
-            not isinstance(audit, ReviewAudit)
-            or not audit.valid
-            or audit.verdict != "GO"
-            or not is_full_commit_sha(head_sha)
-        ):
+        if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
             ctx.github.persist_pending_implementation_go_audit(item.pr, head_sha, audit)
@@ -81,12 +73,7 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
-        if (
-            not isinstance(audit, ReviewAudit)
-            or not audit.valid
-            or audit.verdict != "GO"
-            or not is_full_commit_sha(head_sha)
-        ):
+        if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
             ctx.github.publish_implementation_go_audit(item.pr, head_sha, audit)

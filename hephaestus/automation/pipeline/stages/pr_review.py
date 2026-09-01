@@ -2,7 +2,7 @@
 # ruff: noqa: F403
 import typing as _typing
 
-from hephaestus.automation.review_audit import ReviewAudit
+from hephaestus.automation.review_audit import is_clean_go_review
 
 from .pr_review_audit import PrReviewAudit
 from .pr_review_gate import PrReviewGate
@@ -82,12 +82,7 @@ class PrReviewStage(PrReviewJobs, PrReviewAudit, PrReviewGate):
             return self._fail_back_agent_error(item)
         if item.state == ENTER and item.payload.get("pending_implementation_go_audit"):
             audit = item.payload["pending_implementation_go_audit"]
-            if (
-                isinstance(audit, ReviewAudit)
-                and audit.valid
-                and audit.verdict == "GO"
-                and not audit.findings
-            ):
+            if is_clean_go_review(audit):
                 return Continue(next_state=GO_AUDIT_RECEIPT)
             item.payload.pop("pending_implementation_go_audit", None)
             item.payload.pop("pending_implementation_go_audit_head", None)
