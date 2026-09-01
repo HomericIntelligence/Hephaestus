@@ -4321,17 +4321,29 @@ class WorkerPool:
             )
         if not dirty and not sync_to_remote and base_sha is None:
             if source_lane == "impl":
+                metadata_receipt = self._trusted_git_metadata_receipt(
+                    worktree_path, timeout_s=timeout_s
+                )
+                if isinstance(metadata_receipt, JobResult):
+                    return metadata_receipt
                 return JobResult(
                     ok=True,
                     value={
                         "path": str(worktree_path),
                         "impl_source_revision": binding.revision,
+                        **metadata_receipt,
                     },
                 )
             return JobResult(ok=True, value=str(worktree_path))
         value: dict[str, object] = {"path": str(worktree_path)}
         if source_lane == "impl" and not dirty:
+            metadata_receipt = self._trusted_git_metadata_receipt(
+                worktree_path, timeout_s=timeout_s
+            )
+            if isinstance(metadata_receipt, JobResult):
+                return metadata_receipt
             value["impl_source_revision"] = binding.revision
+            value.update(metadata_receipt)
         if dirty or sync_to_remote:
             value.update(dirty=dirty, status=status, diff=diff)
         if dirty:
@@ -4362,6 +4374,46 @@ class WorkerPool:
                 "base_sha": base_sha,
             }
         return JobResult(ok=True, value=value)
+
+    @staticmethod
+    def _trusted_git_metadata_receipt(
+        worktree_path: Path, *, timeout_s: int
+    ) -> dict[str, str] | JobResult:
+        """Digest Git controls that an implementation agent could replace."""
+        try:
+            common = git_utils.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=worktree_path,
+                capture_output=True,
+                timeout=timeout_s,
+                env=_controlled_git_env(),
+            ).stdout.strip()
+            common_dir = Path(common).resolve(strict=True)
+            if not common_dir.is_dir():
+                raise OSError("common Git metadata is not a directory")
+            digest = hashlib.sha256()
+            for candidate in (common_dir / "config", common_dir / "config.worktree"):
+                if candidate.exists() or candidate.is_symlink():
+                    digest.update(candidate.relative_to(common_dir).as_posix().encode())
+                    digest.update(b"\0")
+                    digest.update(candidate.read_bytes())
+                    digest.update(b"\0")
+            hooks = common_dir / "hooks"
+            if hooks.exists():
+                for candidate in sorted(hooks.rglob("*")):
+                    if candidate.is_dir():
+                        continue
+                    digest.update(candidate.relative_to(common_dir).as_posix().encode())
+                    digest.update(b"\0")
+                    if candidate.is_symlink():
+                        digest.update(b"symlink\0")
+                        digest.update(os.readlink(candidate).encode())
+                    else:
+                        digest.update(candidate.read_bytes())
+                    digest.update(b"\0")
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return JobResult(ok=False, error="cannot receipt publication Git metadata")
+        return {"git_metadata_receipt": digest.hexdigest()}
 
     @staticmethod
     def _prepare_direct_scope_worktree(
@@ -4883,8 +4935,21 @@ class WorkerPool:
         if job.kwargs.get("allowed_paths") is None:
             return None
         expected_repo = job.kwargs.get("expected_repo")
-        if not isinstance(expected_repo, str) or not expected_repo:
+        expected_receipt = job.kwargs.get("git_metadata_receipt")
+        if (
+            not isinstance(expected_repo, str)
+            or not expected_repo
+            or not isinstance(expected_receipt, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_receipt)
+        ):
             return JobResult(ok=False, error="publication Git metadata authority is unavailable")
+        actual_receipt = WorkerPool._trusted_git_metadata_receipt(
+            worktree_path, timeout_s=job.timeout_s
+        )
+        if isinstance(actual_receipt, JobResult):
+            return actual_receipt
+        if actual_receipt["git_metadata_receipt"] != expected_receipt:
+            return JobResult(ok=False, error="publication Git metadata changed after agent run")
         try:
             common = git_utils.run(
                 ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -4906,6 +4971,26 @@ class WorkerPool:
             )
             if hooks_path.returncode == 0 and hooks_path.stdout.strip():
                 return JobResult(ok=False, error="publication Git hooksPath is not allowed")
+            push_url = git_utils.run(
+                ["git", "config", "--get-all", "remote.origin.pushurl"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            rewrites = git_utils.run(
+                ["git", "config", "--get-regexp", r"^url\..*\.insteadOf$"],
+                cwd=worktree_path,
+                capture_output=True,
+                check=False,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            )
+            if push_url.returncode == 0 and push_url.stdout.strip():
+                return JobResult(ok=False, error="publication Git pushurl is not allowed")
+            if rewrites.returncode == 0 and rewrites.stdout.strip():
+                return JobResult(ok=False, error="publication Git URL rewrites are not allowed")
             origin = (
                 git_utils.run(
                     ["git", "remote", "get-url", "origin"],

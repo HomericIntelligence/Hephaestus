@@ -1211,6 +1211,29 @@ def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
             pass
 
 
+def test_codex_automation_profile_rejects_non_object_artifact_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Malformed-but-valid JSON must fail through the controlled runtime error."""
+    source_home = tmp_path / "source-codex-home"
+    plugin_cache = (
+        source_home / "plugins" / "cache" / "athena" / "athena" / agent_runtime.CODEX_ATHENA_VERSION
+    )
+    plugin_cache.mkdir(parents=True)
+    (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
+    (plugin_cache / ".codex-marketplace-install.json").write_text("[]", encoding="utf-8")
+    (plugin_cache / "package.json").write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(
+        agent_runtime,
+        "_codex_child_env",
+        lambda: {"PATH": os.defpath, "CODEX_HOME": str(source_home)},
+    )
+
+    with pytest.raises(agent_runtime.AgentExecutionError, match="must be JSON objects"):
+        with agent_runtime._codex_automation_profile():
+            pass
+
+
 def test_resume_codex_session_uses_exec_resume(tmp_path: Path) -> None:
     """Codex feedback loops must resume the captured non-interactive session."""
     captured_cmd: list[str] = []

@@ -246,6 +246,8 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
         package = json.loads((athena_cache_source / "package.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AgentExecutionError("Codex automation requires Athena artifact metadata") from exc
+    if not isinstance(install, dict) or not isinstance(package, dict):
+        raise AgentExecutionError("Codex automation Athena artifact metadata must be JSON objects")
     if (
         install.get("revision") != CODEX_ATHENA_MARKETPLACE_REF
         or package.get("version") != CODEX_ATHENA_VERSION
@@ -399,7 +401,7 @@ def agent_compaction_resume(
             "execution_request": request,
             "resume_binding": session_binding,
         }
-    if not session_id:
+    if not session_id or not allows_unbound_session_resume(agent):
         return None
     return session_id, {}
 

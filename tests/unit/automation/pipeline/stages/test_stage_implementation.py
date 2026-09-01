@@ -73,13 +73,13 @@ _DIRTY_CONTENT_SNAPSHOT = {
 }
 
 
-def test_remediation_scope_requires_loop_owned_thread_receipt(make_work_item: Any) -> None:
-    """A foreign thread cannot extend the host commit allowlist."""
+def test_remediation_scope_cannot_extend_the_canonical_plan(make_work_item: Any) -> None:
+    """A review thread cannot extend the host commit allowlist."""
     item = make_work_item(issue=1)
     item.payload.update(
         implementation_remediation=True,
         remediation_threads=[{"thread_id": "foreign", "path": "outside.py"}],
-        trusted_remediation_thread_ids=[],
+        trusted_remediation_thread_ids=["foreign"],
     )
 
     assert implementation_module._allowed_remediation_paths(item, ("planned.py",)) is None
@@ -3748,10 +3748,10 @@ class TestCommitPushAndPrCreate:
             "tests/unit/automation/test_claude_invoke.py",
         )
 
-    def test_commit_push_allows_an_anchored_ordinary_review_remediation_path(
+    def test_commit_push_rejects_an_ordinary_review_remediation_outside_the_plan(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An accepted review finding may add its anchored path to the host allowlist."""
+        """An accepted review finding cannot expand the canonical plan allowlist."""
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence", config_overrides={"agent": "codex"})
         item = make_work_item(issue=2472, repo="Hephaestus", pr=1001, state="COMMIT_PUSH_WAIT")
@@ -3780,12 +3780,8 @@ class TestCommitPushAndPrCreate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, JobRequest)
-        assert isinstance(result.job, GitJob)
-        assert result.job.kwargs["allowed_paths"] == (
-            "hephaestus/automation/claude_invoke.py",
-            "hephaestus/config/guard.py",
-        )
+        assert isinstance(result, StageOutcome)
+        assert result.note == "remediation_path_invalid"
 
     def test_commit_push_uses_configured_codex_implementer_model(
         self, make_ctx: Any, make_work_item: Any

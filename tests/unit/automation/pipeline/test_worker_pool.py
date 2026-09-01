@@ -7335,6 +7335,7 @@ class TestGitOps:
                 "agent": "codex",
                 "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
                 "expected_repo": "test/repo",
+                "git_metadata_receipt": "b" * 64,
                 "expected_remote_sha": pin,
                 "scope_history_base_sha": pin,
             },
@@ -7351,12 +7352,19 @@ class TestGitOps:
                     ),
                     subprocess.CompletedProcess([], 0, stdout=f"{tmp_path}\n"),
                     subprocess.CompletedProcess([], 1, stdout=""),
+                    subprocess.CompletedProcess([], 1, stdout=""),
+                    subprocess.CompletedProcess([], 1, stdout=""),
                     subprocess.CompletedProcess([], 0, stdout="https://github.com/test/repo.git\n"),
                 ],
             ),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
             patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
             patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(
+                WorkerPool,
+                "_trusted_git_metadata_receipt",
+                return_value={"git_metadata_receipt": "b" * 64},
+            ),
         ):
             pool.submit(job, StageName.IMPLEMENTATION)
             _, result = completion_q.get(timeout=10)
@@ -7407,6 +7415,29 @@ class TestGitOps:
         assert result.ok is False
         assert result.value == {"failure_kind": "signing_configuration"}
         assert result.error == "host signing configuration unavailable"
+
+    def test_publish_rejects_git_metadata_changed_after_agent_run(self, tmp_path: Path) -> None:
+        """A Codex job cannot alter common Git controls before host publication."""
+        job = GitJob(
+            repo="test/repo",
+            op="commit_push",
+            timeout_s=60,
+            kwargs={
+                "allowed_paths": ("hephaestus/automation/guard.py",),
+                "expected_repo": "test/repo",
+                "git_metadata_receipt": "a" * 64,
+            },
+        )
+
+        with patch.object(
+            WorkerPool,
+            "_trusted_git_metadata_receipt",
+            return_value={"git_metadata_receipt": "b" * 64},
+        ):
+            result = WorkerPool._verify_publish_git_metadata(job, tmp_path)
+
+        assert result is not None
+        assert result.error == "publication Git metadata changed after agent run"
 
     def test_commit_push_rejects_incomplete_scope_retraction_before_publish(
         self,

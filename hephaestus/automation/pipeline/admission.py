@@ -58,7 +58,9 @@ LOG = logging.getLogger(__name__)
 # `hephaestus/automation/pipeline/stages/pr_review.py` or `pyproject.toml`.
 # This is both the overlap reservation and the immutable publication manifest,
 # so a valid top-level plan path must not be dropped.
-_PLAN_FILE_RE = re.compile(r"`([^`\x00]+)`")
+_PLAN_FILE_ENTRY_RE = re.compile(
+    r"^\s*(?:[-*+]\s+|#{3,}\s+)`([^`\x00]+)`(?:\s*(?:[-—:].*)?)?$"
+)
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
 
 # A source path only conflicts with work in the same repository.  The
@@ -72,8 +74,9 @@ def _parse_planned_files(plan_body: str) -> set[str]:
 
     Scans the ``## Files to Modify`` and ``## Files to Create`` sections of an
     ``# Implementation Plan`` comment (either or both may be present) and
-    collects every backticked in-tree path until the next top-level ``## ``
-    heading. Empty set when neither section exists.
+    collects only declared list entries or file subheadings until the next
+    top-level ``## `` heading.  Incidental backticks in explanatory prose are
+    not authority to modify a file. Empty set when neither section exists.
 
     Args:
         plan_body: The full body of the plan comment.
@@ -93,7 +96,9 @@ def _parse_planned_files(plan_body: str) -> set[str]:
         if line.startswith("## "):
             in_section = False
         if in_section:
-            files.update(path for path in _PLAN_FILE_RE.findall(line) if _is_safe_plan_path(path))
+            match = _PLAN_FILE_ENTRY_RE.match(line)
+            if match and _is_safe_plan_path(match.group(1)):
+                files.add(match.group(1))
     return files
 
 

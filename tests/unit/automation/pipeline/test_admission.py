@@ -99,6 +99,15 @@ class TestParsePlannedFiles:
         body = "# Implementation Plan\n\n## FILES TO MODIFY\n\n- `hephaestus/automation/test.py`\n"
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
 
+    def test_parse_planned_files_rejects_paths_mentioned_only_in_prose(self) -> None:
+        """Explanatory backticks must not expand the implementation manifest."""
+        body = (
+            "# Implementation Plan\n\n## Files to Modify\n\n"
+            "- `hephaestus/automation/test.py` — update the parser.\n"
+            "Explain why `hephaestus/automation/private.py` is out of scope.\n"
+        )
+        assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
+
 
 class TestCoordinatorCapOwnership:
     """Traceability guard for the deferred per-repo cap."""

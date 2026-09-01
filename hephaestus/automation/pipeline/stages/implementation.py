@@ -421,25 +421,21 @@ def _allowed_remediation_paths(
     item: WorkItem,
     allowed_paths: tuple[str, ...],
 ) -> tuple[str, ...] | None:
-    """Extend a plan allowlist with the validated anchors of accepted review findings."""
+    """Validate review remediations remain inside the canonical plan scope."""
     if not item.payload.get("implementation_remediation"):
         return allowed_paths
     remediation_threads = item.payload.get("remediation_threads")
-    trusted_thread_ids = item.payload.get("trusted_remediation_thread_ids")
-    if not isinstance(remediation_threads, list) or not isinstance(trusted_thread_ids, list):
+    if not isinstance(remediation_threads, list):
         return None
-    trusted_ids = {value for value in trusted_thread_ids if isinstance(value, str) and value}
-    remediation_paths: set[str] = set()
     for thread in remediation_threads:
-        if not isinstance(thread, dict) or thread.get("thread_id") not in trusted_ids:
+        if not isinstance(thread, dict) or not isinstance(thread.get("thread_id"), str):
             return None
         path = thread.get("path")
-        if not is_safe_scope_retraction_path(path):
+        if not is_safe_scope_retraction_path(path) or path not in allowed_paths:
             return None
-        remediation_paths.add(path)
-    if not remediation_paths:
+    if not remediation_threads:
         return None
-    return tuple(sorted(set(allowed_paths) | remediation_paths))
+    return allowed_paths
 
 
 class ImplementationStage(Stage):
@@ -1340,6 +1336,7 @@ class ImplementationStage(Stage):
             kwargs["pi_dir"] = ctx.config.pi_dir
         if requires_plan_scope_guard(agent):
             kwargs["expected_repo"] = f"{ctx.org}/{item.repo}"
+            kwargs["git_metadata_receipt"] = item.payload.get("git_metadata_receipt")
             planned_claims = item.payload.get("_implementation_file_claims")
             if planned_claims is None:
                 planned = _fetch_planned_files(item.issue or issue, repo=(ctx.org, item.repo))
@@ -2153,6 +2150,9 @@ class ImplementationStage(Stage):
             elif is_full_commit_sha(value.get("head_sha")):
                 head_sha = cast(str, value["head_sha"])
                 item.payload["_impl_source_revision"] = head_sha
+            receipt = value.get("git_metadata_receipt")
+            if isinstance(receipt, str):
+                item.payload["git_metadata_receipt"] = receipt
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
