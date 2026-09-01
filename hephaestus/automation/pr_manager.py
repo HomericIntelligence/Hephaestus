@@ -903,6 +903,7 @@ def commit_changes(
         allowed_paths: Optional exact set of porcelain paths allowed to be
             staged. Secret filtering still applies.
         git_timeout: Optional timeout in seconds for each local git command.
+        signing_env: Optional validated Git environment for commit signing.
 
     Raises:
         RuntimeError: If there are no changes, or all changes are secret files.
