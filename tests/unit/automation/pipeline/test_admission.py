@@ -108,6 +108,18 @@ class TestParsePlannedFiles:
         )
         assert _parse_planned_files(body) == {"hephaestus/automation/test.py"}
 
+    def test_parse_planned_files_rejects_globs_and_pathspec_magic(self) -> None:
+        """A plan file claim must name one literal repository path."""
+        body = (
+            "# Implementation Plan\n\n## Files to Modify\n\n"
+            "- `hephaestus/**/*.py`\n"
+            "- `tests/unit/test_?.py`\n"
+            "- `:(glob)hephaestus/*.py`\n"
+            "- `hephaestus/[ab].py`\n"
+            "- `hephaestus/allowed.py`\n"
+        )
+        assert _parse_planned_files(body) == {"hephaestus/allowed.py"}
+
 
 class TestCoordinatorCapOwnership:
     """Traceability guard for the deferred per-repo cap."""

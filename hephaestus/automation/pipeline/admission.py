@@ -103,7 +103,13 @@ def _parse_planned_files(plan_body: str) -> set[str]:
 def _is_safe_plan_path(path: str) -> bool:
     """Return whether a plan path is a non-traversing repository-relative path."""
     normalized = path.strip()
-    if not normalized or normalized != path or "\\" in path:
+    if (
+        not normalized
+        or normalized != path
+        or "\\" in path
+        or path.startswith(":")
+        or any(character in path for character in "*?[]")
+    ):
         return False
     candidate = PurePosixPath(path)
     return not candidate.is_absolute() and all(
