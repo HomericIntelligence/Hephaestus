@@ -1987,6 +1987,7 @@ def run_codex_session(
     approval: str = "never",
     process_tracker: ProcessTracker | None = None,
     _final_message_grace_seconds: float | None = None,
+    isolate_automation_profile: bool = False,
 ) -> AgentRunResult:
     """Run a new persisted Codex exec session and capture its UUID."""
     cmd = _codex_base_cmd(cwd=cwd, model=model, sandbox=sandbox, approval=approval)
@@ -1997,6 +1998,7 @@ def run_codex_session(
         timeout=timeout,
         process_tracker=process_tracker,
         final_message_grace_seconds=_final_message_grace_seconds,
+        isolate_automation_profile=isolate_automation_profile,
     )
 
 
@@ -2037,11 +2039,17 @@ def _run_codex_command(
     timeout: int,
     process_tracker: ProcessTracker | None = None,
     final_message_grace_seconds: float | None = None,
+    isolate_automation_profile: bool = False,
 ) -> AgentRunResult:
     """Execute Codex with JSON events and return final text plus session id."""
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt") as output_file:
         cmd.extend(["--output-last-message", output_file.name, "-"])
-        with _codex_automation_profile() as env:
+        profile = (
+            _codex_automation_profile()
+            if isolate_automation_profile
+            else contextlib.nullcontext(_codex_child_env())
+        )
+        with profile as env:
             for key in CODEX_PARENT_CONTEXT_ENV_VARS:
                 env.pop(key, None)
             try:
@@ -3007,6 +3015,7 @@ def run_agent_session(
     resume_binding: AgentSessionBinding | None = None,
     disable_pi_automation: bool = False,
     pi_dir: Path | None = None,
+    isolate_codex_automation_profile: bool = False,
 ) -> AgentRunResult:
     """Run a direct-runner agent session and return output plus session id."""
     pi_thinking = ""
@@ -3039,6 +3048,7 @@ def run_agent_session(
             sandbox=sandbox,
             approval=approval,
             process_tracker=process_tracker,
+            isolate_automation_profile=isolate_codex_automation_profile,
         )
     if is_opencode(agent):
         return run_opencode_session(

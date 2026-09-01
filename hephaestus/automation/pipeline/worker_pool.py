@@ -2299,6 +2299,7 @@ class WorkerPool:
                         resume_binding=job.resume_binding,
                         disable_pi_automation=job.disable_pi_automation,
                         pi_dir=job.pi_dir,
+                        isolate_codex_automation_profile=True,
                     )
                 # A resumed command may not repeat the session-start event;
                 # retain the known id in that case.
@@ -4835,17 +4836,9 @@ class WorkerPool:
             str(job.kwargs.get("agent", "claude")),
         )
         allowed_paths = cast(Collection[str] | None, job.kwargs.get("allowed_paths"))
-        allowed_scope = self._verify_allowed_edit_scope(
-            Path(worktree_path),
-            allowed_paths=allowed_paths,
-            history_base_sha=job.kwargs.get("scope_history_base_sha"),
-            timeout=job.timeout_s,
-        )
-        if allowed_scope is not None:
-            return allowed_scope
-        metadata_scope = self._verify_publish_git_metadata(job, Path(worktree_path))
-        if metadata_scope is not None:
-            return metadata_scope
+        boundary = self._validate_publish_boundary(job, Path(worktree_path), allowed_paths)
+        if boundary is not None:
+            return boundary
         agent_model = job.kwargs.get("agent_model")
         git_message_timeout = int(job.kwargs.get("git_message_timeout", 1200))
         changed = self._commit_if_changes_with_controlled_signing(
@@ -4885,7 +4878,24 @@ class WorkerPool:
         scope_retraction = self._verify_scope_retraction(job, Path(worktree_path))
         if scope_retraction is not None:
             return scope_retraction
+        boundary = self._validate_publish_boundary(job, Path(worktree_path), allowed_paths)
+        if boundary is not None:
+            return boundary
         return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    def _validate_publish_boundary(
+        self, job: GitJob, worktree_path: Path, allowed_paths: Collection[str] | None
+    ) -> JobResult | None:
+        """Validate agent-writable Git controls before every host publication action."""
+        metadata_scope = self._verify_publish_git_metadata(job, worktree_path)
+        if metadata_scope is not None:
+            return metadata_scope
+        return self._verify_allowed_edit_scope(
+            worktree_path,
+            allowed_paths=allowed_paths,
+            history_base_sha=job.kwargs.get("scope_history_base_sha"),
+            timeout=job.timeout_s,
+        )
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(

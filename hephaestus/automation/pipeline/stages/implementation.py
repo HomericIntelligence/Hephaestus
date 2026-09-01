@@ -338,6 +338,7 @@ def build_implementation_prompt(
     branch_name: str = "",
     worktree_path: str = "",
     advise_findings: str = "",
+    approved_plan: str = "",
     rebase_conflict: bool = False,
     rebase_conflict_paths: tuple[str, ...] = (),
 ) -> str:
@@ -372,7 +373,7 @@ def build_implementation_prompt(
         branch_name=branch_name,
         worktree_path=worktree_path,
     )
-    if not advise_findings and not rebase_conflict:
+    if not advise_findings and not rebase_conflict and not approved_plan:
         return prompt
     blocks: list[str] = [prompt]
     if advise_findings:
@@ -381,6 +382,8 @@ def build_implementation_prompt(
                 "implementation/advise_append.j2", advise_findings=advise_findings
             )
         )
+    if approved_plan:
+        blocks.append("\n\n## Canonical approved plan\n\n" + approved_plan)
     if rebase_conflict:
         blocks.append(
             PromptCatalog.current().render(
@@ -391,7 +394,17 @@ def build_implementation_prompt(
     return "".join(blocks)
 
 
-def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: str) -> str:
+def build_test_fix_prompt(
+    issue_number: int,
+    prev_iteration: int,
+    test_output: str,
+    *,
+    issue_title: str = "",
+    issue_body: str = "",
+    branch_name: str = "",
+    worktree_path: str = "",
+    approved_plan: str = "",
+) -> str:
     """Compose the resume prompt that feeds failing pre-PR test output back.
 
     Reuses :func:`get_impl_resume_feedback_prompt` verbatim (doc section 4
@@ -410,11 +423,21 @@ def build_test_fix_prompt(issue_number: int, prev_iteration: int, test_output: s
     review_feedback = PromptCatalog.current().render(
         "implementation/test_failure_review.j2", test_output=test_output
     )
-    return get_impl_resume_feedback_prompt(
+    prompt = get_implementation_prompt(
+        issue_number,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        branch_name=branch_name,
+        worktree_path=worktree_path,
+    )
+    feedback = get_impl_resume_feedback_prompt(
         issue_number=issue_number,
         prev_iteration=prev_iteration,
         review_feedback=review_feedback,
     )
+    if approved_plan:
+        prompt += "\n\n## Canonical approved plan\n\n" + approved_plan
+    return prompt + feedback
 
 
 def _allowed_remediation_paths(
@@ -425,17 +448,21 @@ def _allowed_remediation_paths(
     if not item.payload.get("implementation_remediation"):
         return allowed_paths
     remediation_threads = item.payload.get("remediation_threads")
-    if not isinstance(remediation_threads, list):
+    trusted_thread_ids = item.payload.get("trusted_remediation_thread_ids")
+    if not isinstance(remediation_threads, list) or not isinstance(trusted_thread_ids, list):
         return None
+    trusted_ids = {value for value in trusted_thread_ids if isinstance(value, str) and value}
+    remediation_paths: set[str] = set()
     for thread in remediation_threads:
-        if not isinstance(thread, dict) or not isinstance(thread.get("thread_id"), str):
+        if not isinstance(thread, dict) or thread.get("thread_id") not in trusted_ids:
             return None
         path = thread.get("path")
-        if not is_safe_scope_retraction_path(path) or path not in allowed_paths:
+        if not is_safe_scope_retraction_path(path):
             return None
+        remediation_paths.add(path)
     if not remediation_threads:
         return None
-    return allowed_paths
+    return tuple(sorted(set(allowed_paths) | remediation_paths))
 
 
 class ImplementationStage(Stage):
@@ -1149,6 +1176,7 @@ class ImplementationStage(Stage):
                 "branch_name": item.branch,
                 "worktree_path": item.worktree,
                 "advise_findings": item.payload.get("advise_findings", ""),
+                "approved_plan": item.payload.get("plan_text", ""),
                 "rebase_conflict": bool(item.payload.get("rebase_conflict")),
                 "rebase_conflict_paths": tuple(item.payload.get("rebase_conflict_paths") or ()),
             },
@@ -1310,6 +1338,11 @@ class ImplementationStage(Stage):
                 "issue_number": item.issue,
                 "prev_iteration": item.attempts.get("test_fix", 0),
                 "test_output": item.payload.get("test_output", ""),
+                "issue_title": item.payload.get("issue_title", ""),
+                "issue_body": item.payload.get("issue_body", ""),
+                "branch_name": item.branch,
+                "worktree_path": item.worktree,
+                "approved_plan": item.payload.get("plan_text", ""),
             },
             descr="test_fix",
         )

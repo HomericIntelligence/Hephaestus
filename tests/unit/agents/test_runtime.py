@@ -288,9 +288,10 @@ def test_run_codex_session_returns_session_id_and_last_message(tmp_path: Path) -
         result = agent_runtime.run_codex_session(
             "prompt",
             cwd=tmp_path,
-            timeout=30,
-            sandbox="workspace-write",
-        )
+                timeout=30,
+                sandbox="workspace-write",
+                isolate_automation_profile=True,
+            )
 
     assert result.session_id == "019e1e57-7652-7892-b1ca-c31c93d4b160"
     assert result.stdout == "final answer"
@@ -1035,6 +1036,7 @@ def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> 
             cwd=tmp_path,
             timeout=30,
             sandbox="workspace-write",
+            isolate_automation_profile=True,
         )
 
     assert "CODEX_THREAD_ID" not in captured_env

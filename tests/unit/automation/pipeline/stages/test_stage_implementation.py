@@ -73,8 +73,8 @@ _DIRTY_CONTENT_SNAPSHOT = {
 }
 
 
-def test_remediation_scope_cannot_extend_the_canonical_plan(make_work_item: Any) -> None:
-    """A review thread cannot extend the host commit allowlist."""
+def test_trusted_remediation_scope_extends_the_canonical_plan(make_work_item: Any) -> None:
+    """A host-trusted review thread may add its validated anchor to the allowlist."""
     item = make_work_item(issue=1)
     item.payload.update(
         implementation_remediation=True,
@@ -82,7 +82,10 @@ def test_remediation_scope_cannot_extend_the_canonical_plan(make_work_item: Any)
         trusted_remediation_thread_ids=["foreign"],
     )
 
-    assert implementation_module._allowed_remediation_paths(item, ("planned.py",)) is None
+    assert implementation_module._allowed_remediation_paths(item, ("planned.py",)) == (
+        "outside.py",
+        "planned.py",
+    )
 
 
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
@@ -178,6 +181,13 @@ class TestComposedPromptBuilders:
         assert "## Prior Learnings from Team Knowledge Base" in prompt
         assert prompt.endswith("Use the retry helper.")
 
+    def test_implementation_prompt_includes_the_canonical_approved_plan(self) -> None:
+        """The first writer turn receives the host-approved implementation contract."""
+        prompt = build_implementation_prompt(42, approved_plan="## Files to Modify\n- `guard.py`")
+
+        assert "## Canonical approved plan" in prompt
+        assert "- `guard.py`" in prompt
+
     def test_stage_contract_does_not_make_implementation_go_a_merge_boundary(self) -> None:
         """The module contract must describe the bootstrap containment semantics."""
         contract = implementation_module.__doc__ or ""
@@ -191,6 +201,23 @@ class TestComposedPromptBuilders:
 
         assert "FAILED tests/unit/test_x.py::test_y" in prompt
         assert "Address every concrete finding above" in prompt
+
+    def test_test_fix_prompt_restarts_with_full_implementation_context(self) -> None:
+        """A fresh Codex test-fix turn cannot rely on an unbound prior session."""
+        prompt = build_test_fix_prompt(
+            42,
+            0,
+            "FAILED test_x",
+            issue_title="Fix guard",
+            issue_body="Keep publication safe.",
+            branch_name="42-auto-impl",
+            worktree_path="/tmp/42",
+            approved_plan="## Files to Modify\n- `guard.py`",
+        )
+
+        assert "Fix guard" in prompt
+        assert "/tmp/42" in prompt
+        assert "## Canonical approved plan" in prompt
 
 
 class TestImplementationStageOnEnter:
@@ -3748,10 +3775,10 @@ class TestCommitPushAndPrCreate:
             "tests/unit/automation/test_claude_invoke.py",
         )
 
-    def test_commit_push_rejects_an_ordinary_review_remediation_outside_the_plan(
+    def test_commit_push_allows_a_trusted_review_remediation_outside_the_plan(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """An accepted review finding cannot expand the canonical plan allowlist."""
+        """A host-trusted review finding may extend the canonical plan allowlist."""
         stage = ImplementationStage()
         ctx = make_ctx(org="HomericIntelligence", config_overrides={"agent": "codex"})
         item = make_work_item(issue=2472, repo="Hephaestus", pr=1001, state="COMMIT_PUSH_WAIT")
@@ -3780,8 +3807,12 @@ class TestCommitPushAndPrCreate:
 
         result = stage.step(item, ctx)
 
-        assert isinstance(result, StageOutcome)
-        assert result.note == "remediation_path_invalid"
+        assert isinstance(result, JobRequest)
+        assert isinstance(result.job, GitJob)
+        assert result.job.kwargs["allowed_paths"] == (
+            "hephaestus/automation/claude_invoke.py",
+            "hephaestus/config/guard.py",
+        )
 
     def test_commit_push_uses_configured_codex_implementer_model(
         self, make_ctx: Any, make_work_item: Any

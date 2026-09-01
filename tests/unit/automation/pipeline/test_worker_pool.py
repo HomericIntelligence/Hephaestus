@@ -882,6 +882,7 @@ class TestWorkerPoolSubmitComplete:
             resume_binding=None,
             disable_pi_automation=False,
             pi_dir=None,
+            isolate_codex_automation_profile=True,
         )
         assert result.ok is True
         assert result.value == "codex output"
@@ -7307,6 +7308,7 @@ class TestGitOps:
             ),
             patch("hephaestus.automation.pr_manager.commit_changes") as commit,
             patch("hephaestus.automation.git_utils.push_branch") as push,
+            patch.object(pool, "_verify_publish_git_metadata", return_value=None),
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -7359,6 +7361,7 @@ class TestGitOps:
             ),
             patch("hephaestus.automation.git_utils.commit_if_changes", return_value=True),
             patch("hephaestus.automation.git_utils.push_branch_if_remote_matches") as push,
+            patch.object(pool, "_validate_publish_boundary", return_value=None),
             patch.object(pool, "_read_publish_head", return_value="b" * 40),
             patch.object(
                 WorkerPool,
