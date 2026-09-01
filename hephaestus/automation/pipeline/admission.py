@@ -54,14 +54,10 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 # Backticked repo-relative path inside a plan's Files sections, e.g.
-# `hephaestus/automation/pipeline/stages/pr_review.py`. Requires a slash so bare tokens
-# like `pyproject.toml` or symbol refs like `os.replace` are not treated as
-# in-tree paths (over-match → needless deferral; the slash requirement keeps
-# the key tight to actual source paths).
-# NOTE: Bare top-level file paths without a directory prefix (e.g., `errors.py`)
-# are intentionally NOT captured — overlap goes undetected and both plans dispatch
-# concurrently, falling back to pre-#1623 behavior (acceptable tradeoff for regex tightness).
-_PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)`")
+# `hephaestus/automation/pipeline/stages/pr_review.py` or `pyproject.toml`.
+# This is both the overlap reservation and the immutable publication manifest,
+# so a valid top-level plan path must not be dropped.
+_PLAN_FILE_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*(?:/[A-Za-z0-9_./-]+)*\.[A-Za-z0-9_]+)`")
 _PLAN_FILE_SECTION_RE = re.compile(r"^#{2,}\s+Files to (Modify|Create)\b", re.IGNORECASE)
 
 # A source path only conflicts with work in the same repository.  The

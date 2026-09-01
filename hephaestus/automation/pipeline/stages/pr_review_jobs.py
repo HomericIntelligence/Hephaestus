@@ -1188,6 +1188,7 @@ class PrReviewJobs(PrReviewScopeExpansionMixin, _PrReviewHost):
         item.payload["posted_thread_ids"] = [
             str(value["id"]) for value in posted if isinstance(value, dict) and "id" in value
         ]
+        item.payload["trusted_remediation_thread_ids"] = list(item.payload["posted_thread_ids"])
         item.payload["unresolved_threads"] = [dict(value) for value in unresolved]
         item.payload["remediation_threads"] = [dict(value) for value in remediation]
         item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]

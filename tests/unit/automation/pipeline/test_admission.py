@@ -70,10 +70,10 @@ class TestParsePlannedFiles:
         )
         assert _parse_planned_files(body) == {"hephaestus/automation/ci_driver.py"}
 
-    def test_parse_planned_files_bare_filenames_not_captured(self) -> None:
-        """Bare filenames without directory (e.g., `pyproject.toml`) are NOT captured."""
+    def test_parse_planned_files_captures_top_level_filenames(self) -> None:
+        """A canonical plan may authorize a top-level repository file."""
         body = "# Implementation Plan\n\n## Files to Modify\n\n- `pyproject.toml`\n"
-        assert _parse_planned_files(body) == set()
+        assert _parse_planned_files(body) == {"pyproject.toml"}
 
     def test_parse_planned_files_case_insensitive_heading(self) -> None:
         """## Files to Modify/Create headings are case-insensitive."""

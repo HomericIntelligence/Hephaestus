@@ -73,6 +73,18 @@ _DIRTY_CONTENT_SNAPSHOT = {
 }
 
 
+def test_remediation_scope_requires_loop_owned_thread_receipt(make_work_item: Any) -> None:
+    """A foreign thread cannot extend the host commit allowlist."""
+    item = make_work_item(issue=1)
+    item.payload.update(
+        implementation_remediation=True,
+        remediation_threads=[{"thread_id": "foreign", "path": "outside.py"}],
+        trusted_remediation_thread_ids=[],
+    )
+
+    assert implementation_module._allowed_remediation_paths(item, ("planned.py",)) is None
+
+
 def _drive(stage: Any, item: Any, ctx: Any, pool: FakeWorkerPool, max_steps: int = 60) -> Any:
     """Drive a stage through the canonical FakeWorkerPool until an outcome."""
     entry = stage.on_enter(item, ctx)
@@ -3756,6 +3768,7 @@ class TestCommitPushAndPrCreate:
                         "body": "Fix this behavior.",
                     }
                 ],
+                "trusted_remediation_thread_ids": ["thread-1"],
                 "_implementation_file_claims": {
                     (
                         ("HomericIntelligence", "Hephaestus"),

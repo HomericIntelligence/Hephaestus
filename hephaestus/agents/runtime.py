@@ -93,6 +93,7 @@ CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CODEX_ATHENA_MARKETPLACE_SOURCE = "https://github.com/HomericIntelligence/Athena.git"
 CODEX_ATHENA_MARKETPLACE_REF = "e75b4a139fa0687f5a834cbde1307d9817ea0eda"
 CODEX_ATHENA_VERSION = "0.5.1"
+CODEX_ATHENA_ARTIFACT_SHA256 = "2052f32d54a3eaf598b1e0aa2ccc56a2e5595d78719516a6bff990ec840be17c"
 CODEX_AUTH_FILENAME = "auth.json"
 CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena" / "athena"
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
@@ -251,6 +252,8 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
     ):
         raise AgentExecutionError("Codex automation Athena artifact is not the admitted revision")
     source_digest = package_tree_digest(athena_cache_source)
+    if source_digest != CODEX_ATHENA_ARTIFACT_SHA256:
+        raise AgentExecutionError("Codex automation Athena artifact content is not admitted")
 
     with tempfile.TemporaryDirectory(prefix="hephaestus-codex-") as temporary:
         profile = Path(temporary)

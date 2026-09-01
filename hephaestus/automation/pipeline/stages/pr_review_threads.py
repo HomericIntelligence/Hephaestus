@@ -326,6 +326,7 @@ _ROUND_PAYLOAD_KEYS = (
     "review_threads",
     "raw_review_threads",
     "posted_thread_ids",
+    "trusted_remediation_thread_ids",
     "remediation_threads",
     "remediation_thread_snapshots",
     "address_error",

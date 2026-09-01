@@ -425,11 +425,15 @@ def _allowed_remediation_paths(
     if not item.payload.get("implementation_remediation"):
         return allowed_paths
     remediation_threads = item.payload.get("remediation_threads")
-    if not isinstance(remediation_threads, list):
+    trusted_thread_ids = item.payload.get("trusted_remediation_thread_ids")
+    if not isinstance(remediation_threads, list) or not isinstance(trusted_thread_ids, list):
         return None
+    trusted_ids = {value for value in trusted_thread_ids if isinstance(value, str) and value}
     remediation_paths: set[str] = set()
     for thread in remediation_threads:
-        path = thread.get("path") if isinstance(thread, dict) else None
+        if not isinstance(thread, dict) or thread.get("thread_id") not in trusted_ids:
+            return None
+        path = thread.get("path")
         if not is_safe_scope_retraction_path(path):
             return None
         remediation_paths.add(path)
@@ -1299,7 +1303,11 @@ class ImplementationStage(Stage):
             execution_request=ExecutionRequest(
                 AgentRole.IMPLEMENTER,
                 AgentOperation.TEST_FIX,
-                SessionLifecycle.RESUME_REQUIRED,
+                (
+                    SessionLifecycle.RESUME_REQUIRED
+                    if AGENT_IMPLEMENTER in item.session_bindings
+                    else SessionLifecycle.START_NEW
+                ),
             ),
             resume_binding=item.session_bindings.get(AGENT_IMPLEMENTER),
             prompt_kwargs={

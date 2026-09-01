@@ -71,6 +71,11 @@ def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     (artifact / "package.json").write_text(
         json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}), encoding="utf-8"
     )
+    monkeypatch.setattr(
+        agent_runtime,
+        "CODEX_ATHENA_ARTIFACT_SHA256",
+        agent_runtime.package_tree_digest(artifact),
+    )
     (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
     monkeypatch.setattr(
         agent_runtime,
@@ -1038,7 +1043,12 @@ def test_run_codex_session_does_not_inherit_parent_thread_id(tmp_path: Path) -> 
         )
 
     assert "CODEX_THREAD_ID" not in captured_env
-    assert captured_env["CODEX_HOME"]
+    profile = Path(captured_env["CODEX_HOME"])
+    assert captured_env["HOME"] == str(profile)
+    assert captured_env["XDG_CONFIG_HOME"].startswith(f"{profile}/")
+    assert captured_env["XDG_CACHE_HOME"].startswith(f"{profile}/")
+    assert captured_env["XDG_DATA_HOME"].startswith(f"{profile}/")
+    assert captured_env["TMPDIR"].startswith(f"{profile}/")
 
 
 def test_codex_base_cmd_adds_git_common_dir_for_worktree_metadata(tmp_path: Path) -> None:
@@ -1146,6 +1156,11 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
     )
     (plugin_cache / "package.json").write_text(
         json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        agent_runtime,
+        "CODEX_ATHENA_ARTIFACT_SHA256",
+        agent_runtime.package_tree_digest(plugin_cache),
     )
     (source_home / "sessions" / "podman-task.jsonl").parent.mkdir(parents=True)
     (source_home / "sessions" / "podman-task.jsonl").write_text(
