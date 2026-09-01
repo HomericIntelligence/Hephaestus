@@ -242,11 +242,15 @@ def test_controlled_git_signing_env_reinjects_only_validated_identity(
     assert isinstance(env, dict)
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert env["GIT_CONFIG_COUNT"] == "5"
+    assert env["GIT_CONFIG_COUNT"] == "6"
     injected = {
-        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(5)
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(6)
     }
-    assert injected == {**signing, "commit.gpgsign": "true"}
+    assert injected == {
+        **signing,
+        "commit.gpgsign": "true",
+        "gpg.ssh.program": "/usr/bin/ssh-keygen",
+    }
 
 
 @pytest.mark.parametrize("value", ["~no_such_signing_user/key", "key\x00suffix"])
@@ -2346,7 +2350,14 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok is True
-        reserve.assert_called_once_with("7-auto", pinned_sha, tmp_path, timeout=60)
+        reserve.assert_called_once_with(
+            "7-auto",
+            pinned_sha,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
         assert result.value == {
             "path": str(tmp_path / "wt"),
             "direct_scope_reservation": {
@@ -2393,7 +2404,14 @@ class TestGitOps:
 
         assert result.ok is False
         assert result.error == "worktree manager returned no worktree"
-        release.assert_called_once_with("7-auto", pinned_sha, tmp_path, timeout=60)
+        release.assert_called_once_with(
+            "7-auto",
+            pinned_sha,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
 
     def test_direct_worktree_rollback_failure_preserves_reservation_receipt(
         self,
@@ -3572,6 +3590,27 @@ class TestGitOps:
         ) in remote_config
         assert "credential.helper=!/opt/homebrew/bin/gh auth git-credential" in remote_config
 
+    def test_remote_git_configuration_rejects_changed_origin_before_push(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A writer cannot redirect a host-authenticated remote mutation."""
+        (tmp_path / ".git").mkdir()
+        with (
+            patch(f"{_WP}._checkout_preflight_error", return_value=None),
+            patch(
+                f"{_WP}.git_utils.run",
+                return_value=MagicMock(stdout="https://github.com/attacker/target.git\n"),
+            ),
+            pytest.raises(RuntimeError, match="unexpected origin"),
+        ):
+            pool._authenticated_remote_git_configuration(
+                cwd=tmp_path,
+                expected_repo="owner/name",
+                timeout=60,
+            )
+
     def test_rebase_fails_closed_without_authenticated_remote_helper(
         self,
         pool: WorkerPool,
@@ -4479,7 +4518,14 @@ class TestGitOps:
             },
         )
 
-        with patch(f"{_WP}._read_host_git_signing_config", return_value=signing):
+        with (
+            patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(os.environ.copy(), ()),
+            ),
+        ):
             first = pool._git_rebase(rebase_job)
             assert first.ok is False
             assert first.error == "mechanical rebase hit conflicts; resolution required"
@@ -4800,7 +4846,13 @@ class TestGitOps:
             pool.submit(job, StageName.MERGE_WAIT)
             _, result = completion_q.get(timeout=10)
 
-        mock_push.assert_called_once_with(cwd=Path("/tmp/wt"), branch="7-auto", timeout=60)
+        mock_push.assert_called_once_with(
+            cwd=Path("/tmp/wt"),
+            branch="7-auto",
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
         assert result.ok is True
 
     @pytest.mark.parametrize(
@@ -4876,7 +4928,14 @@ class TestGitOps:
 
         assert result.ok is True
         assert result.value is False
-        release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
+        release.assert_called_once_with(
+            "7-auto",
+            pin,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
 
     def test_release_branch_reservation_accepts_sha256_object_id(
         self,
@@ -4900,7 +4959,14 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         assert result.ok
-        release.assert_called_once_with("7-auto", pin, tmp_path, timeout=60)
+        release.assert_called_once_with(
+            "7-auto",
+            pin,
+            tmp_path,
+            timeout=60,
+            env=ANY,
+            remote_config=ANY,
+        )
 
     def test_commit_push_extracts_explicit_keys(
         self,
@@ -4921,12 +4987,19 @@ class TestGitOps:
                 "agent_model": "sol:medium",
             },
         )
+        remote_env = {"GIT_CONFIG_GLOBAL": os.devnull}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
         with (
             patch(
                 "hephaestus.automation.git_utils.commit_if_changes", return_value=True
             ) as mock_commit,
             patch("hephaestus.automation.git_utils.push_branch") as mock_push,
             patch.object(pool, "_read_publish_head", return_value="b" * 40),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ) as authentication,
         ):
             pool.submit(job, StageName.PR_REVIEW)
             _, result = completion_q.get(timeout=10)
@@ -4941,7 +5014,18 @@ class TestGitOps:
             git_message_timeout=1200,
             signing_env_factory=mock_commit.call_args.kwargs["signing_env_factory"],
         )
-        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        authentication.assert_called_once_with(
+            cwd=tmp_path,
+            expected_repo="test/repo",
+            timeout=60,
+        )
+        mock_push.assert_called_once_with(
+            "5-auto",
+            tmp_path,
+            timeout=60,
+            env=remote_env,
+            remote_config=remote_config,
+        )
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
@@ -5101,7 +5185,9 @@ class TestGitOps:
 
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
-        strict_push.assert_called_once_with("5-auto", pin, tmp_path, timeout=60)
+        strict_push.assert_called_once_with(
+            "5-auto", pin, tmp_path, timeout=60, env=ANY, remote_config=ANY
+        )
         normal_push.assert_not_called()
 
     def test_direct_scope_no_commit_releases_unchanged_reservation(
@@ -5194,7 +5280,9 @@ class TestGitOps:
             _, result = completion_q.get(timeout=10)
 
         mock_ahead.assert_called_once_with("5-auto", tmp_path, timeout=60)
-        mock_push.assert_called_once_with("5-auto", tmp_path, timeout=60)
+        mock_push.assert_called_once_with(
+            "5-auto", tmp_path, timeout=60, env=ANY, remote_config=ANY
+        )
         assert result.ok is True
         assert result.value == {"pushed": True, "head_sha": "b" * 40}
 
@@ -5997,6 +6085,8 @@ class TestGitOps:
             "url.file:///unsafe/.insteadOf\nhttps://github.com/owner/name\0",
             "credential.https://github.com.helper\n!/unsafe/helper\0",
             "remote.origin.uploadpack\n/unsafe/upload-pack\0",
+            "remote.origin.pushurl\nhttps://github.com/attacker/target\0",
+            "remote.origin.receivepack\n/unsafe/receive-pack\0",
             "remote.origin.proxy\nhttp://unsafe-proxy\0",
             "remote.origin.proxyAuthMethod\nanyauth\0",
             "fetch.recurseSubmodules\ntrue\0",
@@ -6016,6 +6106,8 @@ class TestGitOps:
             "url-rewrite",
             "url-scoped-credential-helper",
             "remote-upload-pack",
+            "remote-push-url",
+            "remote-receive-pack",
             "remote-proxy",
             "remote-proxy-auth",
             "fetch-recurses-submodules",

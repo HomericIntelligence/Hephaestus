@@ -79,7 +79,13 @@ def _ownership_changed(
     return branch_changed or head_changed or detached_changed
 
 
-def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager) -> JobResult:
+def run_cleanup_job(
+    job: GitJob,
+    *,
+    worktree_manager_type: Any = WorktreeManager,
+    remote_env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+) -> JobResult:
     """Run one validated worktree or reservation cleanup operation."""
     if job.op == "release_branch_reservation":
         branch_name = str(job.kwargs.get("branch") or "")
@@ -101,6 +107,8 @@ def run_cleanup_job(job: GitJob, *, worktree_manager_type: Any = WorktreeManager
             base_sha,
             repo_root,
             timeout=job.timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
         )
         return JobResult(ok=True, value=released)
 

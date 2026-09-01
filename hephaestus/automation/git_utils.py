@@ -173,23 +173,35 @@ def commit_if_changes(
         return False
 
 
-def push_branch(branch_name: str, worktree_path: Path, *, timeout: int | None = None) -> None:
+def push_branch(
+    branch_name: str,
+    worktree_path: Path,
+    *,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
+) -> None:
     """Push *branch_name* to ``origin``.
 
     Args:
         branch_name: Branch name to push.
         worktree_path: Path to the git worktree.
         timeout: Optional timeout in seconds for the push.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
 
     Raises:
         RuntimeError: If the push fails.
 
     """
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
-            ["git", "push", "origin", branch_name],
+            ["git", *remote_config, "push", "origin", branch_name],
             cwd=worktree_path,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
         logger.info("Pushed branch %s to origin", branch_name)
     except subprocess.CalledProcessError as e:
@@ -202,6 +214,8 @@ def reserve_remote_branch_if_absent(
     repo_root: Path,
     *,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> None:
     """Atomically create ``origin/<branch_name>`` at ``base_sha`` only when absent.
 
@@ -217,11 +231,23 @@ def reserve_remote_branch_if_absent(
     later implementation push does not use this exception and remains subject
     to every configured hook.  Git pre-commit hooks are unaffected because
     this function creates no commit.
+
+    Args:
+        branch_name: Branch name to reserve.
+        base_sha: Exact commit to publish as the initial branch value.
+        repo_root: Repository that owns the remote.
+        timeout: Optional timeout in seconds for each remote command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
     """
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 "--no-verify",
                 f"--force-with-lease=refs/heads/{branch_name}:",
@@ -229,10 +255,16 @@ def reserve_remote_branch_if_absent(
                 f"{base_sha}:refs/heads/{branch_name}",
             ],
             cwd=repo_root,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
-        if _remote_branch_exists(branch_name, repo_root, timeout=timeout):
+        if _remote_branch_exists(
+            branch_name,
+            repo_root,
+            timeout=timeout,
+            env=env,
+            remote_config=remote_config,
+        ):
             raise DirectBranchReservationCollisionError(branch_name) from exc
         raise RuntimeError(f"Failed to reserve direct-scope branch {branch_name}: {exc}") from exc
 
@@ -242,6 +274,8 @@ def _remote_branch_exists(
     repo_root: Path,
     *,
     timeout: int | None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> bool:
     """Return whether a remote probe conclusively found ``branch_name``.
 
@@ -252,12 +286,23 @@ def _remote_branch_exists(
     """
     expected_ref = f"refs/heads/{branch_name}"
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         probe = run(
-            ["git", "ls-remote", "--exit-code", "--heads", "origin", expected_ref],
+            [
+                "git",
+                *remote_config,
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                "origin",
+                expected_ref,
+            ],
             cwd=repo_root,
             check=False,
             log_errors=False,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -274,12 +319,22 @@ def push_branch_if_remote_matches(
     worktree_path: Path,
     *,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> None:
     """Push only an expected fast-forward of a direct-scope reservation.
 
     The ancestry check prevents a locally rewritten branch from becoming a
     forced update.  The explicit server-side lease then rejects any human or
     competing writer that changed the reservation after admission.
+
+    Args:
+        branch_name: Branch name to publish.
+        expected_remote_sha: Exact remote value required by the lease.
+        worktree_path: Worktree that contains the new commit.
+        timeout: Optional timeout in seconds for each command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
     """
     ancestry = run(
         ["git", "merge-base", "--is-ancestor", expected_remote_sha, "HEAD"],
@@ -292,16 +347,20 @@ def push_branch_if_remote_matches(
             f"Direct-scope branch {branch_name} is not a fast-forward of its reservation"
         )
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f"HEAD:refs/heads/{branch_name}",
             ],
             cwd=worktree_path,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"Failed to publish direct-scope branch {branch_name}: {exc}") from exc
@@ -313,6 +372,8 @@ def delete_reserved_branch_if_unchanged(
     repo_root: Path,
     *,
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> bool:
     """Delete an unused direct-scope reservation only while it remains ours.
 
@@ -321,26 +382,45 @@ def delete_reserved_branch_if_unchanged(
     confirms that the remote no longer points to our expected SHA.  Transport
     and authentication failures raise so callers can retry rather than
     mistaking an unreachable reservation for a safe ownership loss.
+
+    Args:
+        branch_name: Reserved branch to delete.
+        expected_remote_sha: Exact remote value required by the lease.
+        repo_root: Repository that owns the remote.
+        timeout: Optional timeout in seconds for each remote command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
     """
     try:
+        run_kwargs = _timeout_kw(timeout)
+        if env is not None:
+            run_kwargs["env"] = env
         run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease=refs/heads/{branch_name}:{expected_remote_sha}",
                 "origin",
                 f":refs/heads/{branch_name}",
             ],
             cwd=repo_root,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
         return True
     except subprocess.CalledProcessError as exc:
         try:
             observed = run(
-                ["git", "ls-remote", "--refs", "origin", f"refs/heads/{branch_name}"],
+                [
+                    "git",
+                    *remote_config,
+                    "ls-remote",
+                    "--refs",
+                    "origin",
+                    f"refs/heads/{branch_name}",
+                ],
                 cwd=repo_root,
-                **_timeout_kw(timeout),
+                **run_kwargs,
             ).stdout.split()
         except subprocess.CalledProcessError as probe_exc:
             raise RuntimeError(
@@ -638,6 +718,8 @@ def push_current_branch_with_lease_on_divergence(
     remote: str = "origin",
     push_ref: str = "HEAD",
     timeout: int | None = None,
+    env: dict[str, str] | None = None,
+    remote_config: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Push ``HEAD`` to ``<remote>``; on divergence, fetch + force-with-lease retry.
 
@@ -667,6 +749,8 @@ def push_current_branch_with_lease_on_divergence(
             the push to land on the named remote branch regardless of local
             branch state.
         timeout: Optional timeout in seconds for each git command.
+        env: Optional controlled environment for remote authentication.
+        remote_config: Trusted command-scope Git transport configuration.
 
     Returns:
         The successful push's ``CompletedProcess``.
@@ -678,16 +762,20 @@ def push_current_branch_with_lease_on_divergence(
             failure.
 
     """
+    run_kwargs = _timeout_kw(timeout)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         return run(
             [
                 "git",
+                *remote_config,
                 "push",
                 remote,
                 push_ref,
             ],
             cwd=cwd,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
     except subprocess.CalledProcessError as exc:
         if not _is_push_rejected_diverged(exc):
@@ -704,7 +792,11 @@ def push_current_branch_with_lease_on_divergence(
         # Fetch the canonical tip so the lease check has something current to
         # compare against. If this fetch fails, raise — we cannot safely
         # lease-push without an up-to-date remote-tracking ref.
-        run(["git", "fetch", remote, branch], cwd=cwd, **_timeout_kw(timeout))
+        run(
+            ["git", *remote_config, "fetch", remote, branch],
+            cwd=cwd,
+            **run_kwargs,
+        )
         # The lease retry preserves any explicit ``push_ref`` the caller passed
         # so HEAD lands on the right *remote* branch even if the local HEAD has
         # drifted (#832). The default ``"HEAD"`` is rewritten to
@@ -714,13 +806,14 @@ def push_current_branch_with_lease_on_divergence(
         return run(
             [
                 "git",
+                *remote_config,
                 "push",
                 f"--force-with-lease={branch}",
                 remote,
                 lease_push_ref,
             ],
             cwd=cwd,
-            **_timeout_kw(timeout),
+            **run_kwargs,
         )
 
 

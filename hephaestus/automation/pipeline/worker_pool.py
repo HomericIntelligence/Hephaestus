@@ -1289,8 +1289,19 @@ def _controlled_git_signing_env(cwd: Path, *, timeout: int) -> dict[str, str] | 
             value={"failure_kind": "signing_configuration"},
             error="host signing configuration unavailable",
         )
+    signing_program = _trusted_executable("ssh-keygen", path=os.defpath)
+    if signing_program is None:
+        return JobResult(
+            ok=False,
+            value={"failure_kind": "signing_configuration"},
+            error="trusted SSH signing executable unavailable",
+        )
     env = _controlled_git_env()
-    injected = {**signing, "commit.gpgsign": "true"}
+    injected = {
+        **signing,
+        "commit.gpgsign": "true",
+        "gpg.ssh.program": signing_program,
+    }
     env["GIT_CONFIG_COUNT"] = str(len(injected))
     for index, (key, value) in enumerate(injected.items()):
         env[f"GIT_CONFIG_KEY_{index}"] = key
@@ -1441,6 +1452,8 @@ def _unsafe_local_git_config_key(config: str) -> str | None:
         if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
             "proxy",
             "proxyauthmethod",
+            "pushurl",
+            "receivepack",
             "uploadpack",
         }:
             return key
@@ -2559,9 +2572,17 @@ class WorkerPool:
             return self._git_continue_rebase(job)
 
         elif job.op == "push":
+            cwd = Path(str(job.kwargs.get("cwd") or ""))
+            remote_env, remote_config = self._authenticated_remote_git_configuration(
+                cwd=cwd,
+                expected_repo=job.repo,
+                timeout=job.timeout_s,
+            )
             git_utils.push_current_branch_with_lease_on_divergence(
                 **job.kwargs,
                 timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
             )
             return JobResult(ok=True)
 
@@ -2571,7 +2592,18 @@ class WorkerPool:
         elif job.op == "release_branch_reservation":
             from .git_cleanup import run_cleanup_job
 
-            return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
+            repo_root = Path(str(job.kwargs.get("repo_root") or ""))
+            remote_env, remote_config = self._authenticated_remote_git_configuration(
+                cwd=repo_root,
+                expected_repo=job.repo,
+                timeout=job.timeout_s,
+            )
+            return run_cleanup_job(
+                job,
+                worktree_manager_type=WorktreeManager,
+                remote_env=remote_env,
+                remote_config=remote_config,
+            )
 
         elif job.op == "clone":
             # gh repo clone <repo> <dest>
@@ -2646,7 +2678,11 @@ class WorkerPool:
         expected_remote_sha = kwargs.pop("expected_remote_sha", None)
         pr_number = kwargs.pop("pr_number", None)
         cwd = Path(str(kwargs.get("cwd") or ""))
-        remote_env, remote_config = self._authenticated_remote_git_configuration()
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=cwd,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         if publish_rebased_head:
             if not branch or not _is_full_commit_sha(expected_remote_sha) or not cwd.is_dir():
                 return JobResult(ok=False, error="writer rebase publish arguments invalid")
@@ -2792,7 +2828,13 @@ class WorkerPool:
             return JobResult(ok=False, error=f"restored writer remote sync failed: {exc}")
         return None
 
-    def _authenticated_remote_git_configuration(self) -> tuple[dict[str, str], tuple[str, ...]]:
+    def _authenticated_remote_git_configuration(
+        self,
+        *,
+        cwd: Path | None = None,
+        expected_repo: str | None = None,
+        timeout: int = 60,
+    ) -> tuple[dict[str, str], tuple[str, ...]]:
         """Return the controlled environment and trusted GitHub transport config."""
         gh_command = _trusted_gh_executable(self._gh_extra_path_root)
         if gh_command is None:
@@ -2800,7 +2842,27 @@ class WorkerPool:
         remote_config = _trusted_remote_git_config(gh_command)
         if remote_config is None:
             raise _RemoteGitAuthenticationError("required SSH executable is unavailable")
-        return _controlled_git_env(), remote_config
+        env = _controlled_git_env()
+        if cwd is not None and expected_repo is not None and (cwd / ".git").exists():
+            if preflight_error := _checkout_preflight_error(cwd, timeout):
+                raise _RemoteGitAuthenticationError(preflight_error)
+            origin = git_utils.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=cwd,
+                timeout=timeout,
+                env=env,
+            ).stdout.strip()
+            normalized_origin = origin.rstrip("/").removesuffix(".git")
+            expected_origins = {
+                f"https://github.com/{expected_repo}",
+                f"ssh://git@github.com/{expected_repo}",
+                f"git@github.com:{expected_repo}",
+            }
+            if normalized_origin not in expected_origins:
+                raise _RemoteGitAuthenticationError(
+                    f"checkout has unexpected origin; expected origin {expected_repo}"
+                )
+        return env, remote_config
 
     def _sync_worktree_to_remote_branch(
         self,
@@ -3018,7 +3080,11 @@ class WorkerPool:
             return source_sha
         if source_sha == expected_remote_sha:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
-        remote_env, remote_config = self._authenticated_remote_git_configuration()
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=cwd,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         git_utils.push_head_to_branch(
             branch,
             expected_remote_sha,
@@ -3548,6 +3614,7 @@ class WorkerPool:
                 kwargs=kwargs,
                 sync_to_remote=sync_to_remote,
                 repo_root=repo_root,
+                expected_repo=job.repo,
                 timeout_s=job.timeout_s,
             )
         except git_utils.DirectBranchReservationCollisionError as exc:
@@ -3583,6 +3650,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
+                    expected_repo=job.repo,
                     timeout_s=job.timeout_s,
                     error=f"worktree creation failed: {exc}",
                 )
@@ -3598,20 +3666,30 @@ class WorkerPool:
             timeout_s=job.timeout_s,
         )
 
-    @staticmethod
     def _release_direct_scope_reservation(
+        self,
         branch_name: str,
         base_sha: str | None,
         repo_root: Path,
         *,
+        expected_repo: str,
         timeout_s: int,
     ) -> bool:
         """Conditionally release a direct reservation, or no-op for normal worktrees."""
-        return base_sha is None or git_utils.delete_reserved_branch_if_unchanged(
+        if base_sha is None:
+            return True
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=repo_root,
+            expected_repo=expected_repo,
+            timeout=timeout_s,
+        )
+        return git_utils.delete_reserved_branch_if_unchanged(
             branch_name,
             base_sha,
             repo_root,
             timeout=timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
         )
 
     def _rollback_direct_scope_reservation(
@@ -3620,13 +3698,18 @@ class WorkerPool:
         branch_name: str,
         base_sha: str,
         repo_root: Path,
+        expected_repo: str,
         timeout_s: int,
         error: str,
     ) -> JobResult:
         """Release an early reservation or preserve its receipt for Finished."""
         try:
             released = self._release_direct_scope_reservation(
-                branch_name, base_sha, repo_root, timeout_s=timeout_s
+                branch_name,
+                base_sha,
+                repo_root,
+                expected_repo=expected_repo,
+                timeout_s=timeout_s,
             )
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             return JobResult(
@@ -3660,6 +3743,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
+                    expected_repo=repo,
                     timeout_s=timeout_s,
                     error="worktree manager returned no worktree",
                 )
@@ -3676,6 +3760,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
+                    expected_repo=repo,
                     timeout_s=timeout_s,
                     error=error,
                 )
@@ -3742,12 +3827,13 @@ class WorkerPool:
         }
         return JobResult(ok=True, value=value)
 
-    @staticmethod
     def _prepare_direct_scope_worktree(
+        self,
         *,
         kwargs: dict[str, object],
         sync_to_remote: bool,
         repo_root: Path,
+        expected_repo: str,
         timeout_s: int,
     ) -> tuple[str | None, str] | JobResult:
         """Validate and atomically reserve a direct-scope implementation branch."""
@@ -3766,11 +3852,18 @@ class WorkerPool:
             return JobResult(ok=False, error="direct scope checkout pin mismatch")
         if not branch_name:
             return JobResult(ok=False, error="direct scope branch name is missing")
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=repo_root,
+            expected_repo=expected_repo,
+            timeout=timeout_s,
+        )
         git_utils.reserve_remote_branch_if_absent(
             branch_name,
             base_sha,
             repo_root,
             timeout=timeout_s,
+            env=remote_env,
+            remote_config=remote_config,
         )
         return base_sha, branch_name
 
@@ -4050,15 +4143,28 @@ class WorkerPool:
         source_sha = self._read_publish_head(worktree_path, timeout=job.timeout_s)
         if isinstance(source_sha, JobResult):
             return source_sha
+        remote_env, remote_config = self._authenticated_remote_git_configuration(
+            cwd=worktree_path,
+            expected_repo=job.repo,
+            timeout=job.timeout_s,
+        )
         if isinstance(expected_remote_sha, str):
             git_utils.push_branch_if_remote_matches(
                 branch,
                 expected_remote_sha,
                 worktree_path,
                 timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
             )
         else:
-            git_utils.push_branch(branch, worktree_path, timeout=job.timeout_s)
+            git_utils.push_branch(
+                branch,
+                worktree_path,
+                timeout=job.timeout_s,
+                env=remote_env,
+                remote_config=remote_config,
+            )
         return JobResult(ok=True, value={"pushed": True, "head_sha": source_sha})
 
     @staticmethod
