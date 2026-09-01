@@ -35,7 +35,11 @@ from typing import Any, TypeGuard, cast
 import hephaestus.automation.claude_invoke as claude_invoke
 import hephaestus.automation.git_utils as git_utils
 import hephaestus.automation.subprocess_registry as subprocess_registry
-from hephaestus.agents.execution_policy import ExecutionPolicyError, resolve_policy
+from hephaestus.agents.execution_policy import (
+    ExecutionPolicyError,
+    SessionLifecycle,
+    resolve_policy,
+)
 from hephaestus.agents.pi_session import AgentSessionBinding, PiSessionBindingError
 from hephaestus.agents.runtime import (
     AgentExecutionError,
@@ -2240,6 +2244,14 @@ class WorkerPool:
                         ),
                     )
                     return stdout, claude_session_id, None, ()
+                if (
+                    job.execution_request is not None
+                    and job.execution_request.lifecycle is SessionLifecycle.RESUME_REQUIRED
+                    and job.resume_binding is None
+                ):
+                    raise AgentExecutionError(
+                        "required agent session has no verified resume binding"
+                    )
                 if job.resume_binding is not None:
                     agent_result = resume_agent_session(
                         agent=agent,
@@ -3871,6 +3883,7 @@ class WorkerPool:
         """Create a worktree and optionally sync an adopted PR branch."""
         kwargs = dict(job.kwargs)
         sync_to_remote = bool(kwargs.pop("sync_to_remote", False))
+        source_lane = str(kwargs.get("source_lane") or "")
         pr_number = kwargs.pop("pr_number", None)
         repo_root_kwarg = kwargs.pop("repo_root", None)
         repo_root = Path(repo_root_kwarg) if repo_root_kwarg else get_repo_root()
@@ -4349,6 +4362,7 @@ class WorkerPool:
             }
         return JobResult(ok=True, value=value)
 
+    @staticmethod
     def _prepare_direct_scope_worktree(
         self,
         *,
@@ -4771,7 +4785,7 @@ class WorkerPool:
         allowed_scope = self._verify_allowed_edit_scope(
             Path(worktree_path),
             allowed_paths=allowed_paths,
-            history_base_sha=job.kwargs.get("expected_remote_sha"),
+            history_base_sha=job.kwargs.get("scope_history_base_sha"),
             timeout=job.timeout_s,
         )
         if allowed_scope is not None:
@@ -4882,19 +4896,6 @@ class WorkerPool:
                     timeout=timeout,
                 )
                 changed.update(path for path in result.stdout.split("\0") if path)
-            if history_base_sha is None:
-                upstream = git_utils.run(
-                    ["git", "rev-parse", "--verify", "@{upstream}"],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    timeout=timeout,
-                ).stdout.strip()
-                history_base_sha = git_utils.run(
-                    ["git", "merge-base", "HEAD", upstream],
-                    cwd=worktree_path,
-                    capture_output=True,
-                    timeout=timeout,
-                ).stdout.strip()
             if not _is_full_commit_sha(history_base_sha):
                 return JobResult(ok=False, error="cannot validate implementation edit scope")
             history = git_utils.run(

@@ -1354,6 +1354,7 @@ class ImplementationStage(Stage):
             if remediation_allowed_paths is None:
                 return StageOutcome(Disposition.FINISH_FAIL, "remediation_path_invalid")
             kwargs["allowed_paths"] = remediation_allowed_paths
+            kwargs["scope_history_base_sha"] = item.payload.get("_impl_source_revision")
         publish_base_sha = item.payload.get("_impl_source_revision") or item.payload.get(
             "_synced_default_branch_sha"
         )
@@ -2140,6 +2141,9 @@ class ImplementationStage(Stage):
             source_revision = value.get("impl_source_revision")
             if is_full_commit_sha(source_revision):
                 item.payload["_impl_source_revision"] = source_revision
+            elif is_full_commit_sha(value.get("head_sha")):
+                head_sha = cast(str, value["head_sha"])
+                item.payload["_impl_source_revision"] = head_sha
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))

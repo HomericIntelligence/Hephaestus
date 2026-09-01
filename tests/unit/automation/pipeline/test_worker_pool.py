@@ -887,13 +887,21 @@ class TestWorkerPoolSubmitComplete:
         assert result.value == "codex output"
         assert result.session_id == "new-codex-session"
 
-    def test_codex_agent_job_starts_fresh_when_a_raw_session_is_saved(
+    def test_codex_required_resume_rejects_an_unbound_raw_session(
         self,
         pool: WorkerPool,
         completion_q: CompletionQueue,
     ) -> None:
-        """Codex never reuses an unbound session ID from an earlier turn."""
-        job = _agent_job(agent="codex", resume_session_id="saved-codex-session")
+        """A required Codex resume cannot silently discard its session context."""
+        job = _agent_job(
+            agent="codex",
+            resume_session_id="saved-codex-session",
+            execution_request=ExecutionRequest(
+                AgentRole.IMPLEMENTER,
+                AgentOperation.TEST_FIX,
+                SessionLifecycle.RESUME_REQUIRED,
+            ),
+        )
         session_result = MagicMock(stdout="continued", session_id="saved-codex-session")
 
         with (
@@ -905,23 +913,9 @@ class TestWorkerPoolSubmitComplete:
             _handle, result = completion_q.get(timeout=10)
 
         resume.assert_not_called()
-        run.assert_called_once_with(
-            agent="codex",
-            prompt="test prompt",
-            cwd=job.cwd,
-            timeout=job.timeout_s,
-            model=job.model,
-            sandbox="workspace-write",
-            approval="never",
-            process_tracker=subprocess_registry.track_process_group,
-            execution_request=None,
-            resume_binding=None,
-            disable_pi_automation=False,
-            pi_dir=None,
-        )
-        assert result.ok is True
-        assert result.value == "continued"
-        assert result.session_id == "saved-codex-session"
+        run.assert_not_called()
+        assert result.ok is False
+        assert result.error == "agent_error: required agent session has no verified resume binding"
 
     def test_pi_default_fails_before_worker_agent_admission(
         self,
@@ -7294,6 +7288,7 @@ class TestGitOps:
                 "branch": "2472-auto-impl",
                 "agent": "codex",
                 "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
+                "scope_history_base_sha": "a" * 40,
             },
         )
         with (
@@ -7303,8 +7298,6 @@ class TestGitOps:
                     subprocess.CompletedProcess([], 0, stdout=""),
                     subprocess.CompletedProcess([], 0, stdout=""),
                     subprocess.CompletedProcess([], 0, stdout=""),
-                    subprocess.CompletedProcess([], 0, stdout="origin/2472-auto-impl\n"),
-                    subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n"),
                     subprocess.CompletedProcess([], 0, stdout="scripts/run_ci_local.sh\0"),
                 ],
             ),
@@ -7338,6 +7331,7 @@ class TestGitOps:
                 "agent": "codex",
                 "allowed_paths": ("hephaestus/automation/claude_invoke.py",),
                 "expected_remote_sha": pin,
+                "scope_history_base_sha": pin,
             },
         )
         with (
