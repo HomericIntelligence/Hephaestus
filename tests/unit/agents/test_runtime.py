@@ -56,7 +56,20 @@ def private_pi_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 def codex_automation_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Give mocked Codex processes the same minimal profile source as production."""
     source_home = tmp_path / "codex-home"
-    (source_home / "plugins" / "cache" / "athena").mkdir(parents=True)
+    artifact = (
+        source_home
+        / "plugins"
+        / "cache"
+        / "athena"
+        / agent_runtime.CODEX_ATHENA_VERSION
+    )
+    artifact.mkdir(parents=True)
+    (artifact / ".codex-marketplace-install.json").write_text(
+        json.dumps({"revision": agent_runtime.CODEX_ATHENA_MARKETPLACE_REF}), encoding="utf-8"
+    )
+    (artifact / "package.json").write_text(
+        json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}), encoding="utf-8"
+    )
     (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
     monkeypatch.setattr(
         agent_runtime,
@@ -1115,10 +1128,29 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
 ) -> None:
     """The isolated profile retains auth plus the explicitly admitted Athena plugin."""
     source_home = tmp_path / "source-codex-home"
-    plugin_cache = source_home / "plugins" / "cache" / "athena"
+    plugin_cache = (
+        source_home
+        / "plugins"
+        / "cache"
+        / "athena"
+        / agent_runtime.CODEX_ATHENA_VERSION
+    )
     plugin_cache.mkdir(parents=True)
     (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
     (plugin_cache / "marker.txt").write_text("athena\n", encoding="utf-8")
+    (plugin_cache / ".codex-marketplace-install.json").write_text(
+        json.dumps({"revision": agent_runtime.CODEX_ATHENA_MARKETPLACE_REF}),
+        encoding="utf-8",
+    )
+    (plugin_cache / "package.json").write_text(
+        json.dumps({"version": agent_runtime.CODEX_ATHENA_VERSION}), encoding="utf-8"
+    )
+    (source_home / "sessions" / "podman-task.jsonl").parent.mkdir(parents=True)
+    (source_home / "sessions" / "podman-task.jsonl").write_text(
+        "unrelated Podman task context\n", encoding="utf-8"
+    )
+    (source_home / "config.toml").write_text("[interactive]\n", encoding="utf-8")
+    (source_home / "plugins" / "cache" / "unrelated").mkdir(parents=True)
     monkeypatch.setattr(
         agent_runtime,
         "_codex_child_env",
@@ -1131,13 +1163,22 @@ def test_codex_automation_profile_admits_only_auth_and_athena(
         assert environment["XDG_CONFIG_HOME"].startswith(f"{profile}/")
         assert environment["TMPDIR"].startswith(f"{profile}/")
         assert (profile / "auth.json").read_text(encoding="utf-8") == '{"auth": "test"}\n'
-        assert (profile / "plugins" / "cache" / "athena" / "marker.txt").read_text(
+        assert (
+            profile
+            / "plugins"
+            / "cache"
+            / "athena"
+            / agent_runtime.CODEX_ATHENA_VERSION
+            / "marker.txt"
+        ).read_text(
             encoding="utf-8"
         ) == "athena\n"
         config = (profile / "config.toml").read_text(encoding="utf-8")
         assert '[plugins."athena@athena"]' in config
         assert "enabled = true" in config
         assert not (profile / "plugins" / "cache" / "unrelated").exists()
+        assert not (profile / "sessions" / "podman-task.jsonl").exists()
+        assert "[interactive]" not in config
 
 
 def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
@@ -1145,7 +1186,13 @@ def test_codex_automation_profile_rejects_nested_athena_cache_symlink(
 ) -> None:
     """The admitted plugin copy must not follow a nested external link."""
     source_home = tmp_path / "source-codex-home"
-    plugin_cache = source_home / "plugins" / "cache" / "athena"
+    plugin_cache = (
+        source_home
+        / "plugins"
+        / "cache"
+        / "athena"
+        / agent_runtime.CODEX_ATHENA_VERSION
+    )
     plugin_cache.mkdir(parents=True)
     (source_home / "auth.json").write_text('{"auth": "test"}\n', encoding="utf-8")
     outside = tmp_path / "outside"

@@ -91,7 +91,8 @@ CODEX_DEFAULT_MODEL = CODEX_OPUS_MODEL
 CODEX_DEFAULT_REASONING_EFFORT = CODEX_OPUS_REASONING_EFFORT
 CODEX_PARENT_CONTEXT_ENV_VARS = ("CODEX_THREAD_ID",)
 CODEX_ATHENA_MARKETPLACE_SOURCE = "https://github.com/HomericIntelligence/Athena.git"
-CODEX_ATHENA_MARKETPLACE_REF = "main"
+CODEX_ATHENA_MARKETPLACE_REF = "e75b4a139fa0687f5a834cbde1307d9817ea0eda"
+CODEX_ATHENA_VERSION = "0.5.1"
 CODEX_AUTH_FILENAME = "auth.json"
 CODEX_ATHENA_CACHE_RELATIVE_PATH = Path("plugins") / "cache" / "athena"
 CLAUDE_READ_ONLY_TOOLS = "Read,Glob,Grep"
@@ -230,13 +231,26 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
     """
     source_home = Path(_codex_child_env()["CODEX_HOME"])
     auth_source = source_home / CODEX_AUTH_FILENAME
-    athena_cache_source = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH
+    athena_cache_source = source_home / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
     if not auth_source.is_file() or auth_source.is_symlink():
         raise AgentExecutionError("Codex automation requires a regular auth.json bridge")
     if not athena_cache_source.is_dir() or athena_cache_source.is_symlink():
         raise AgentExecutionError("Codex automation requires the admitted Athena plugin cache")
     if any(path.is_symlink() for path in athena_cache_source.rglob("*")):
         raise AgentExecutionError("Codex automation rejects symlinks in the Athena plugin cache")
+    try:
+        install = json.loads(
+            (athena_cache_source / ".codex-marketplace-install.json").read_text(encoding="utf-8")
+        )
+        package = json.loads((athena_cache_source / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AgentExecutionError("Codex automation requires Athena artifact metadata") from exc
+    if (
+        install.get("revision") != CODEX_ATHENA_MARKETPLACE_REF
+        or package.get("version") != CODEX_ATHENA_VERSION
+    ):
+        raise AgentExecutionError("Codex automation Athena artifact is not the admitted revision")
+    source_digest = package_tree_digest(athena_cache_source)
 
     with tempfile.TemporaryDirectory(prefix="hephaestus-codex-") as temporary:
         profile = Path(temporary)
@@ -252,9 +266,14 @@ def _codex_automation_profile() -> Iterator[dict[str, str]]:
         auth_destination.chmod(0o600)
         shutil.copytree(
             athena_cache_source,
-            profile / CODEX_ATHENA_CACHE_RELATIVE_PATH,
+            profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION,
             ignore=shutil.ignore_patterns(".git"),
         )
+        destination_artifact = (
+            profile / CODEX_ATHENA_CACHE_RELATIVE_PATH / CODEX_ATHENA_VERSION
+        )
+        if package_tree_digest(destination_artifact) != source_digest:
+            raise AgentExecutionError("Codex automation Athena artifact copy digest mismatch")
         write_secure(
             profile / "config.toml",
             "\n".join(
