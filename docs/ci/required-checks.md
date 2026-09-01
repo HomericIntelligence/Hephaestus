@@ -112,10 +112,21 @@ or incomplete source-PR evidence fails closed.
 
 ## Aggregate workflow coverage
 
-`required-checks-gate` depends on the code-validation jobs in
-`_required.yml`, passing only when each needed job succeeds or is skipped. It
-handles code events only; it must not gain label, review, or auto-merge event
-triggers. The automation loop handles review labels and merge-state actions.
+`required-checks-gate` depends on all code-validation jobs in `_required.yml`.
+Each dependency must succeed on pull-request and merge-group events. On a push,
+only `pr-policy` can skip because no pull request exists. A failed, cancelled,
+missing, unknown, or other skipped dependency fails the aggregate. The gate
+also rejects a result census that differs from its complete expected-job list.
+
+The unit guard requires exact equality between the workflow jobs, the
+aggregate `needs` list, and the runtime expected-job list. It also binds the
+single push-only skip to the `pr-policy` condition. When you add a job, update
+the aggregate dependency and expected-job lists together. Add a skip exception
+only when the job has an exact event condition and the unit guard enforces it.
+
+The workflow handles code events only. It must not gain label, review, or
+auto-merge event triggers. The automation loop handles review labels and
+merge-state actions.
 
 The gate fans in the `_required.yml` code-validation jobs: `lint`, `pr-policy`,
 `unit-tests`, `build`, the `security/*` scans (including `security/workflow-scan`,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -30,6 +32,11 @@ RULESET_REQUIRED_CONTEXTS = {
     "security/secrets-scan",
     "unit-tests",
 }
+EXPECTED_SKIP_POLICY = {
+    "pull_request": [],
+    "push": ["pr-policy"],
+    "merge_group": [],
+}
 
 
 def _load_workflow(path: Path) -> dict[str, Any]:
@@ -38,6 +45,63 @@ def _load_workflow(path: Path) -> dict[str, Any]:
         dict[str, Any],
         yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader),
     )
+
+
+def _green_required_needs() -> dict[str, dict[str, Any]]:
+    """Return one successful result for each aggregate dependency."""
+    jobs = _load_workflow(REQUIRED_WORKFLOW)["jobs"]
+    return {
+        job_id: {"result": "success", "outputs": {}}
+        for job_id in jobs["required-checks-gate"]["needs"]
+    }
+
+
+def _run_required_gate(
+    needs: dict[str, dict[str, Any]], *, event_name: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the aggregate's real verdict step with controlled job results."""
+    gate = _load_workflow(REQUIRED_WORKFLOW)["jobs"]["required-checks-gate"]
+    step = gate["steps"][0]
+    env = os.environ | {
+        "GITHUB_EVENT_NAME": event_name,
+        "RESULTS": json.dumps(needs),
+    }
+    env.update(
+        {name: str(value) for name, value in step.get("env", {}).items() if "${{" not in str(value)}
+    )
+    return subprocess.run(
+        ["bash", "-c", str(step["run"])],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _assert_required_gate_contract(workflow: dict[str, Any]) -> None:
+    """Check that the aggregate result policy matches the workflow job graph."""
+    jobs = workflow["jobs"]
+    gate = jobs["required-checks-gate"]
+    needs = gate["needs"]
+    step = gate["steps"][0]
+    expected_jobs = json.loads(step["env"]["EXPECTED_JOBS"])
+    allowed_skips = json.loads(step["env"]["ALLOWED_SKIPS"])
+
+    assert gate["if"] == "always()"
+    assert needs == expected_jobs
+    assert len(needs) == len(set(needs))
+    assert set(needs) == set(jobs) - {"required-checks-gate"}
+    assert allowed_skips == EXPECTED_SKIP_POLICY
+    assert set().union(*map(set, allowed_skips.values())) <= set(needs)
+
+    code_event_condition = "needs.changes-gate.outputs.code_event == 'true'"
+    assert jobs["changes-gate"].get("if") is None
+    assert 'echo "code_event=true"' in jobs["changes-gate"]["steps"][0]["run"]
+    assert jobs["pr-policy"]["if"] == (
+        "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
+    )
+    for job_id in set(needs) - {"changes-gate", "pr-policy"}:
+        assert jobs[job_id]["if"] == code_event_condition
 
 
 def test_every_required_context_workflow_runs_for_merge_groups() -> None:
@@ -67,6 +131,143 @@ def test_required_context_names_and_aggregate_membership_are_exact() -> None:
         for test_type in matrix["test-type"]
     }
     assert expanded == CLASSIC_REQUIRED_CONTEXTS - {"required-checks-gate"}
+
+
+def test_required_gate_policy_matches_the_complete_job_graph() -> None:
+    """The runtime census, skip policy, and conditional graph must stay aligned."""
+    _assert_required_gate_contract(_load_workflow(REQUIRED_WORKFLOW))
+
+
+def test_required_gate_rejects_unallowlisted_skipped_dependency() -> None:
+    """A dependency-induced skip cannot satisfy the required aggregate."""
+    needs = _green_required_needs()
+    needs["lint"]["result"] = "skipped"
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert "lint" in result.stdout
+
+
+@pytest.mark.parametrize("result_name", ["failure", "cancelled", "neutral", "timed_out"])
+def test_required_gate_rejects_every_non_success_result(result_name: str) -> None:
+    """Failure, cancellation, and unknown outcomes must fail closed."""
+    needs = _green_required_needs()
+    needs["lint"]["result"] = result_name
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert result_name in result.stdout
+
+
+@pytest.mark.parametrize("event_name", ["pull_request", "merge_group"])
+def test_required_gate_rejects_pr_policy_skip_outside_push(event_name: str) -> None:
+    """The one allowed skip must remain event-specific."""
+    needs = _green_required_needs()
+    needs["pr-policy"]["result"] = "skipped"
+
+    result = _run_required_gate(needs, event_name=event_name)
+
+    assert result.returncode != 0
+    assert "pr-policy" in result.stdout
+
+
+def test_required_gate_allows_pr_policy_skip_on_push() -> None:
+    """A main push has no pull request and can skip only ``pr-policy``."""
+    needs = _green_required_needs()
+    needs["pr-policy"]["result"] = "skipped"
+
+    result = _run_required_gate(needs, event_name="push")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_required_gate_rejects_missing_dependency_result() -> None:
+    """A missing dependency cannot disappear from the aggregate census."""
+    needs = _green_required_needs()
+    del needs["lint"]
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert "missing" in result.stdout
+    assert "lint" in result.stdout
+
+
+def test_required_gate_rejects_unknown_dependency() -> None:
+    """An unexpected result cannot expand the aggregate census."""
+    needs = _green_required_needs()
+    needs["unknown-job"] = {"result": "success", "outputs": {}}
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert "unexpected" in result.stdout
+    assert "unknown-job" in result.stdout
+
+
+def test_required_gate_rejects_missing_result_field() -> None:
+    """A malformed dependency object cannot become implicit success."""
+    needs = _green_required_needs()
+    needs["lint"] = {"outputs": {}}
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert "missing-or-invalid" in result.stdout
+
+
+def test_required_gate_rejects_dependency_skip_cascade() -> None:
+    """A failed condition source cannot make dependent skips acceptable."""
+    needs = _green_required_needs()
+    needs["changes-gate"]["result"] = "failure"
+    for job_id in needs.keys() - {"changes-gate", "pr-policy"}:
+        needs[job_id]["result"] = "skipped"
+
+    result = _run_required_gate(needs, event_name="pull_request")
+
+    assert result.returncode != 0
+    assert "changes-gate" in result.stdout
+    assert "lint" in result.stdout
+
+
+def test_required_gate_rejects_unsupported_event() -> None:
+    """A new trigger must define its skip policy before the gate accepts it."""
+    result = _run_required_gate(_green_required_needs(), event_name="workflow_dispatch")
+
+    assert result.returncode != 0
+    assert "unsupported event" in result.stdout
+
+
+def test_required_gate_guard_detects_aggregate_needs_drift() -> None:
+    """The structural guard must detect a dependency removed from ``needs``."""
+    workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
+    workflow["jobs"]["required-checks-gate"]["needs"].remove("lint")
+
+    with pytest.raises(AssertionError):
+        _assert_required_gate_contract(workflow)
+
+
+def test_required_gate_guard_detects_stale_skip_allowlist() -> None:
+    """The structural guard must reject a skip entry for a removed job."""
+    workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
+    gate = workflow["jobs"]["required-checks-gate"]
+    gate["steps"][0]["env"]["ALLOWED_SKIPS"] = json.dumps(
+        EXPECTED_SKIP_POLICY | {"push": ["pr-policy", "removed-job"]}
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_required_gate_contract(workflow)
+
+
+def test_required_gate_guard_detects_condition_bypass() -> None:
+    """A new conditional bypass must fail the structural contract."""
+    workflow = copy.deepcopy(_load_workflow(REQUIRED_WORKFLOW))
+    workflow["jobs"]["lint"]["if"] = "false"
+
+    with pytest.raises(AssertionError):
+        _assert_required_gate_contract(workflow)
 
 
 def _merge_group_policy_steps() -> tuple[dict[str, Any], dict[str, Any]]:
