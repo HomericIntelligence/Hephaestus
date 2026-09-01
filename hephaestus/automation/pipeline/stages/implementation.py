@@ -178,6 +178,7 @@ from .repo import (
 )
 
 logger = logging.getLogger(__name__)
+RUNNER_FAILURE_MARKER = "_".join(("HEPHAESTUS", "CI", "RUNNER", "FAILURE")) + ":"
 
 # In-memory mini-states (stage-local strings, never GitHub labels).
 ENTER = "ENTER"
@@ -1032,6 +1033,7 @@ class ImplementationStage(Stage):
         item.payload.pop("tests_failed", None)
         item.payload.pop("test_output", None)
         item.payload.pop("test_receipt", None)
+        item.payload.pop("pre_pr_runner_error", None)
         logger.info("implementation:%d: requesting pre-PR test job", issue)
         test_argv = (
             HEPHAESTUS_REQUIRED_CHECK_ARGV
@@ -1097,6 +1099,8 @@ class ImplementationStage(Stage):
     def _commit_push_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """COMMIT_PUSH_WAIT either re-enters test-fix or submits commit+push."""
         issue = _issue_number(item)
+        if item.payload.get("pre_pr_runner_error"):
+            return StageOutcome(Disposition.FINISH_FAIL, "pre_pr_runner_unavailable")
         if item.payload.get("tests_failed"):
             return Continue(next_state=TESTFIX_WAIT)
         logger.info("implementation:%d: requesting commit+push job", issue)
@@ -1799,10 +1803,14 @@ class ImplementationStage(Stage):
             if isinstance(command, str) and command:
                 item.payload["test_receipt"] = f"`{command}` — passed"
             return
-        item.payload["tests_failed"] = True
-        item.payload["test_output"] = "\n".join(
+        output = "\n".join(
             part for part in (result.stdout_tail, result.stderr_tail, result.error) if part
         )
+        if RUNNER_FAILURE_MARKER in output:
+            item.payload["pre_pr_runner_error"] = output
+            return
+        item.payload["tests_failed"] = True
+        item.payload["test_output"] = output
 
     @staticmethod
     def _skip_gate(issue: int, labels: list[str]) -> StageOutcome | None:
