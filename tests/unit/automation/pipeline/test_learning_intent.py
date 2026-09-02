@@ -69,6 +69,62 @@ def test_learning_intent_payload_round_trips_closed_schema(
 
 
 @pytest.mark.parametrize(
+    "intent",
+    [
+        work_item.LearningIntent.approved_plan(
+            repo="comet",
+            issue=813,
+            plan_revision=4,
+            plan_fingerprint="a" * 64,
+        ),
+        work_item.LearningIntent.post_merge(repo="comet", issue=813, pr=900),
+    ],
+)
+def test_learning_intent_qualifies_delivery_without_changing_durable_key(
+    intent: work_item.LearningIntent,
+) -> None:
+    """The host gets owner/name while the journal identity stays unchanged."""
+    original_key = intent.key
+
+    payload = intent.to_payload(owner="LLM360")
+    parsed = work_item.LearningIntent.from_payload(payload)
+
+    assert payload["repo"] == "LLM360/comet"
+    assert payload["identity_repo"] == "comet"
+    assert payload["intent_key"] == original_key
+    assert parsed.repo == "LLM360/comet"
+    assert parsed.key == original_key
+    assert parsed.journal_identity()["repo"] == "comet"
+
+
+def test_recovered_learning_intent_keeps_key_when_delivery_adds_owner() -> None:
+    """Restart recovery keeps the short key at the qualified host boundary."""
+    original = work_item.LearningIntent.post_merge(repo="comet", issue=813, pr=900)
+    record = {
+        "key": original.key,
+        "kind": original.kind.value,
+        **original.journal_identity(),
+    }
+
+    recovered = work_item.LearningIntent.from_journal(record)
+    payload = recovered.to_payload(owner="LLM360")
+
+    assert recovered.key == original.key
+    assert payload["intent_key"] == original.key
+    assert payload["repo"] == "LLM360/comet"
+    assert payload["identity_repo"] == "comet"
+
+
+@pytest.mark.parametrize("repo", ["Other/comet", "bad/name/extra", "bad name"])
+def test_learning_intent_rejects_foreign_or_malformed_delivery_repository(repo: str) -> None:
+    """The trusted boundary cannot send a foreign or malformed repository."""
+    intent = work_item.LearningIntent.post_merge(repo=repo, issue=813, pr=900)
+
+    with pytest.raises(ValueError, match="repository identity"):
+        intent.to_payload(owner="LLM360")
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {
