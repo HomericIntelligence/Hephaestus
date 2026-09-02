@@ -6,6 +6,7 @@ from typing import Any
 
 from hephaestus.automation.implementation_go_audit_receipt import (
     IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX,
+    LegacyPendingImplementationGoAuditError,
     PendingImplementationGoAudit,
     parse_pending_implementation_go_audit,
     parse_published_implementation_go_audit,
@@ -47,7 +48,29 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
             owned_bodies.append(body)
             if not body.startswith(IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX):
                 continue
-            receipt = parse_pending_implementation_go_audit(body)
+            try:
+                receipt = parse_pending_implementation_go_audit(body)
+            except LegacyPendingImplementationGoAuditError as error:
+                # Version 1 predates the typed verdict, so it cannot prove GO.
+                # Preserve it as an invalid sentinel so a stale GO label cannot
+                # route a restarted process to merge_wait.
+                if error.pr_number != pr_number:
+                    raise RuntimeError(
+                        "pending implementation-go audit receipt is invalid"
+                    ) from error
+                recovered = PendingImplementationGoAudit(
+                    pr_number=error.pr_number,
+                    head_sha=error.head_sha,
+                    audit=ReviewAudit(
+                        grade=None,
+                        summary="Legacy implementation-go audit requires a fresh review.",
+                        findings=(),
+                        raw_feedback="",
+                        valid=False,
+                        verdict=None,
+                    ),
+                )
+                continue
             if receipt is None or receipt.pr_number != pr_number:
                 raise RuntimeError("pending implementation-go audit receipt is invalid")
             recovered = receipt
@@ -79,7 +102,21 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
             body = str(comment.get("body", ""))
             if not body.startswith(IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX):
                 continue
-            receipt = parse_pending_implementation_go_audit(body)
+            try:
+                receipt = parse_pending_implementation_go_audit(body)
+            except LegacyPendingImplementationGoAuditError as error:
+                if error.pr_number != pr_number:
+                    raise RuntimeError(
+                        "pending implementation-go audit receipt is invalid"
+                    ) from error
+                if error.head_sha == head_sha:
+                    comment_id = comment.get("databaseId")
+                    if comment_id is None:
+                        raise RuntimeError(
+                            "pending implementation-go audit receipt has no database id"
+                        ) from error
+                    self._delete_issue_comment(int(comment_id))
+                continue
             if receipt is None or receipt.pr_number != pr_number:
                 raise RuntimeError("pending implementation-go audit receipt is invalid")
             if receipt.head_sha != head_sha:

@@ -38,6 +38,16 @@ class PendingImplementationGoAudit:
     audit: ReviewAudit
 
 
+class LegacyPendingImplementationGoAuditError(ValueError):
+    """A pre-verdict receipt that is inert and requires a fresh review."""
+
+    def __init__(self, pr_number: int, head_sha: str) -> None:
+        """Record the exact identity of the legacy receipt."""
+        super().__init__("pending implementation-go audit journal requires a fresh review")
+        self.pr_number = pr_number
+        self.head_sha = head_sha
+
+
 def render_pending_implementation_go_audit(
     pr_number: int, head_sha: str, audit: ReviewAudit
 ) -> tuple[str, str]:
@@ -81,10 +91,12 @@ def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoA
         payload = json.loads(payload_line.removeprefix("<!-- ").removesuffix(" -->"))
     except json.JSONDecodeError as error:
         raise ValueError("pending implementation-go audit journal is malformed") from error
-    if not isinstance(payload, dict) or payload.get("format") != 2:
-        raise ValueError("pending implementation-go audit journal format is invalid")
     pr_number = int(match.group("pr"))
     head_sha = match.group("head")
+    if isinstance(payload, dict) and payload.get("format") == 1:
+        raise LegacyPendingImplementationGoAuditError(pr_number, head_sha)
+    if not isinstance(payload, dict) or payload.get("format") != 2:
+        raise ValueError("pending implementation-go audit journal format is invalid")
     grade = payload.get("grade")
     verdict = payload.get("verdict")
     summary = payload.get("summary")

@@ -3554,6 +3554,59 @@ class TestMutatorMapping:
         assert receipt.audit.grade == "A"
         assert receipt.audit.summary == "Clean"
 
+    def test_legacy_pending_go_audit_is_inert_for_restart_recovery(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-verdict journal cannot authorize GO or prevent a fresh review."""
+        head = "a" * 40
+        marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=5:head={head} -->"
+        legacy_payload = json.dumps(
+            {
+                "format": 1,
+                "pr_number": 5,
+                "head_sha": head,
+                "grade": "A",
+                "summary": "Clean",
+                "raw_feedback": "",
+            }
+        )
+        legacy_body = f"{marker}\n<!-- {legacy_payload} -->"
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[{"body": legacy_body, "databaseId": 12, "viewerDidAuthor": True}]
+            ),
+        )
+
+        receipt = adapter.pending_implementation_go_audit(5)
+
+        assert receipt is not None
+        assert receipt.head_sha == head
+        assert receipt.audit.valid is False
+        assert receipt.audit.verdict is None
+
+    def test_typed_public_audit_cleanup_removes_matching_legacy_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A replacement typed audit may remove its same-head legacy journal."""
+        head = "a" * 40
+        marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=5:head={head} -->"
+        legacy_body = f"{marker}\n<!-- {{\"format\":1}} -->"
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[{"body": legacy_body, "databaseId": 12, "viewerDidAuthor": True}]
+            ),
+        )
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        adapter.clear_pending_implementation_go_audit(5, head)
+
+        delete.assert_called_once_with(12)
+
 
 def test_mark_go_uses_adapter_labels_and_readback(
     adapter: pg.PipelineGitHub,
