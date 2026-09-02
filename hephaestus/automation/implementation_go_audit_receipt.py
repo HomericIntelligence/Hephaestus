@@ -10,6 +10,7 @@ from hephaestus.automation.review_audit import (
     MAX_RAW_FEEDBACK_CHARS,
     MAX_REVIEW_SUMMARY_CHARS,
     ReviewAudit,
+    is_clean_go_review,
 )
 
 IMPLEMENTATION_GO_AUDIT_PENDING_PREFIX = "<!-- hephaestus-implementation-go-audit-pending:"
@@ -20,7 +21,8 @@ _PENDING_MARKER_RE = re.compile(
 _PUBLIC_AUDIT_RE = re.compile(
     r"<!-- hephaestus-implementation-go-audit:pr=(?P<pr>\d+):"
     r"head=(?P<head>[0-9a-f]{40}(?:[0-9a-f]{24})?) -->\n\n"
-    r"## Automated PR review\n\nTotal grade: (?P<grade>[A-F])\n\n"
+    r"## Automated PR review\n\nReviewer verdict: (?P<verdict>GO)\n\n"
+    r"Total grade: (?P<grade>[A-F])\n\n"
     r"Review summary: (?P<summary>[^\r\n]+)\n\n"
     r"Eligibility is represented only by the live GitHub implementation-state label; "
     r"this audit comment is informational\.\n\nReviewed head: `(?P=head)`\."
@@ -36,6 +38,16 @@ class PendingImplementationGoAudit:
     audit: ReviewAudit
 
 
+class LegacyPendingImplementationGoAuditError(ValueError):
+    """A pre-verdict receipt that is inert and requires a fresh review."""
+
+    def __init__(self, pr_number: int, head_sha: str) -> None:
+        """Record the exact identity of the legacy receipt."""
+        super().__init__("pending implementation-go audit journal requires a fresh review")
+        self.pr_number = pr_number
+        self.head_sha = head_sha
+
+
 def render_pending_implementation_go_audit(
     pr_number: int, head_sha: str, audit: ReviewAudit
 ) -> tuple[str, str]:
@@ -48,15 +60,16 @@ def render_pending_implementation_go_audit(
         is None
     ):
         raise ValueError("pending implementation-go audit identity is invalid")
-    if not audit.valid or audit.grade is None or audit.findings:
-        raise ValueError("pending implementation-go audit must be a valid clean audit")
+    if not is_clean_go_review(audit) or audit.grade is None:
+        raise ValueError("pending implementation-go audit must have a clean GO verdict")
     marker = f"<!-- hephaestus-implementation-go-audit-pending:pr={pr_number}:head={head_sha} -->"
     payload = json.dumps(
         {
-            "format": 1,
+            "format": 2,
             "pr_number": pr_number,
             "head_sha": head_sha,
             "grade": audit.grade,
+            "verdict": audit.verdict,
             "summary": audit.summary,
             "raw_feedback": audit.raw_feedback,
         },
@@ -78,17 +91,21 @@ def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoA
         payload = json.loads(payload_line.removeprefix("<!-- ").removesuffix(" -->"))
     except json.JSONDecodeError as error:
         raise ValueError("pending implementation-go audit journal is malformed") from error
-    if not isinstance(payload, dict) or payload.get("format") != 1:
-        raise ValueError("pending implementation-go audit journal format is invalid")
     pr_number = int(match.group("pr"))
     head_sha = match.group("head")
+    if isinstance(payload, dict) and payload.get("format") == 1:
+        raise LegacyPendingImplementationGoAuditError(pr_number, head_sha)
+    if not isinstance(payload, dict) or payload.get("format") != 2:
+        raise ValueError("pending implementation-go audit journal format is invalid")
     grade = payload.get("grade")
+    verdict = payload.get("verdict")
     summary = payload.get("summary")
     raw_feedback = payload.get("raw_feedback")
     if (
         payload.get("pr_number") != pr_number
         or payload.get("head_sha") != head_sha
         or grade not in tuple("ABCDEF")
+        or verdict != "GO"
         or not isinstance(summary, str)
         or not summary
         or len(summary) > MAX_REVIEW_SUMMARY_CHARS
@@ -105,6 +122,7 @@ def parse_pending_implementation_go_audit(body: str) -> PendingImplementationGoA
             findings=(),
             raw_feedback=raw_feedback,
             valid=True,
+            verdict="GO",
         ),
     )
 
@@ -123,5 +141,6 @@ def parse_published_implementation_go_audit(body: str) -> PendingImplementationG
             findings=(),
             raw_feedback="",
             valid=True,
+            verdict="GO",
         ),
     )

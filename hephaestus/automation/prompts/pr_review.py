@@ -90,8 +90,10 @@ def get_pr_review_analysis_prompt(
         nitpick_directive=nitpick_directive,
         terse_output_directive=get_terse_output_directive(
             terminal_output_contract=(
-                "End with exactly one fenced structural review-audit JSON object; "
-                "do not emit a Verdict line or any other decision token."
+                "End with exactly one fenced structural review-audit JSON object "
+                "that includes a typed verdict field (`GO`, `NOGO`, or `BLOCKED`); "
+                "missing or malformed verdicts are invalid. Do not emit a Verdict "
+                "line or any other textual decision token."
             )
         ),
     )

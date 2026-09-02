@@ -2,6 +2,8 @@
 
 # This mixin consumes the shared PR-review stage namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.review_audit import is_clean_go_review
+
 from .pr_review_threads import *
 
 
@@ -19,7 +21,7 @@ class PrReviewAudit:
         )
         audit = item.payload.get("review_audit")
         head_sha = str(item.payload.get("reviewed_pr_head_sha") or "")
-        if not isinstance(audit, ReviewAudit) or not audit.valid or audit.findings:
+        if not is_clean_go_review(audit):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         if not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
@@ -46,11 +48,7 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
-        if (
-            not isinstance(audit, ReviewAudit)
-            or not audit.valid
-            or not is_full_commit_sha(head_sha)
-        ):
+        if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
             ctx.github.persist_pending_implementation_go_audit(item.pr, head_sha, audit)
@@ -67,6 +65,13 @@ class PrReviewAudit:
         if isinstance(outcome, StageOutcome) and outcome.disposition is Disposition.ADVANCE:
             item.payload["implementation_go_audit_retries"] = 0
             return self._go_audit_publish(item, ctx)
+        if isinstance(outcome, Continue) and outcome.next_state == REVIEW_WAIT:
+            # The exact head changed after the receipt was persisted.  A new
+            # review must not inherit a receipt or label proof for the old
+            # head, while transport retries deliberately retain those facts.
+            item.payload.pop("pending_implementation_go_audit", None)
+            item.payload.pop("pending_implementation_go_audit_head", None)
+            item.payload.pop("pending_implementation_go_label_confirmed", None)
         return outcome  # type: ignore[no-any-return]
 
     def _go_audit_publish(self, item: WorkItem, ctx: StageContext) -> StepResult:
@@ -75,11 +80,7 @@ class PrReviewAudit:
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         audit = item.payload.get("pending_implementation_go_audit")
         head_sha = str(item.payload.get("pending_implementation_go_audit_head") or "")
-        if (
-            not isinstance(audit, ReviewAudit)
-            or not audit.valid
-            or not is_full_commit_sha(head_sha)
-        ):
+        if not is_clean_go_review(audit) or not is_full_commit_sha(head_sha):
             return StageOutcome(Disposition.FINISH_FAIL, "implementation_go_audit_invalid")
         try:
             ctx.github.publish_implementation_go_audit(item.pr, head_sha, audit)

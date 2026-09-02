@@ -7,14 +7,16 @@ implementation-state label after the PR exists; this pre-PR compatibility
 review remains informational.
 
 ```json
-{"grade": "A", "summary": "...", "comments": [
+{"verdict": "GO", "grade": "A", "summary": "...", "comments": [
   {"path": "...", "line": 1, "side": "RIGHT", "severity": "major", "body": "..."}
 ]}
 ```
 
-`grade` is one of `A`, `B`, `C`, `D`, `E`, or `F`; `summary` is a concise
+`verdict` is one of `GO`, `NOGO`, or `BLOCKED`. The field is required. `GO`
+states that the code meets the review criteria. A missing or malformed verdict
+is invalid. `grade` is informational and is one of `A`, `B`, `C`, `D`, `E`, or `F`; `summary` is a concise
 informational summary; and `comments` is an array of concrete findings. Each
 comment must provide a repository-relative `path`, positive changed-line
 `line`, `"RIGHT"` side, one of `critical`, `major`, `minor`, or `nitpick`
 severity, and actionable `body`. Emit an empty `comments` array only when no
-findings remain. Do not emit `Verdict:` or any other approval/rejection token.
+findings remain. Do not emit `Verdict:` or any other textual decision line.

@@ -1089,7 +1089,7 @@ flowchart LR
     Address --> Validate
     Validate -->|"resolved"| ThreadGate
     Validate -->|"needs work"| Address
-    Gate -->|"none"| Approve["state:implementation-go"]
+    Gate -->|"none and verdict GO"| Approve["state:implementation-go"]
     Approve --> MergeWait
 ```
 
@@ -1117,7 +1117,7 @@ stateDiagram-v2
     Post --> Implementation: any open review thread, after durable no-go and checkout cleanup
     Post --> Evaluate: no open review thread
     Evaluate --> Implementation: a late open thread, after durable no-go and checkout cleanup
-    Evaluate --> Approve: no unresolved findings; cleanup then implementation-go durable
+    Evaluate --> Approve: verdict GO and no unresolved findings; cleanup then implementation-go durable
     Approve --> MergeReady
     MergeReady --> [*]
     Implementation --> [*]
@@ -1137,7 +1137,9 @@ Architectural contract:
   produces `state:implementation-no-go` and is handed to implementation
   before another broad review. A fresh broad audit of a thread-free PR, or a
   fresh comment-validation pass that resolves every current thread, may produce
-  `state:implementation-go`.
+  `state:implementation-go` only when its typed reviewer verdict is `GO`. The
+  parser treats a missing, malformed, `NOGO`, or `BLOCKED` verdict as a failed
+  closed audit before any label write. The letter grade is audit metadata only.
 - The implementation agent replies to every fixed open thread but never resolves it.
 - The implementation stage rebases and lease-publishes the writer branch before
   review; a rebase is never performed by a reviewer checkout.
@@ -1192,6 +1194,9 @@ Architectural contract:
   is never accepted as evidence. The receipts are evidence only: they are
   cleared on a new head and cannot grant `state:implementation-go` without the
   relevant fresh audit or comment-validation and GitHub checks.
+- Pending and public audit recovery receipts include the typed `GO` verdict.
+  Recovery rejects a receipt that does not include this verdict. Thus, a stale
+  receipt cannot bypass the reviewer decision.
 - No queue stage arms, disables, adopts, or polls auto-merge.
 
 ### 5.6 Merge wait

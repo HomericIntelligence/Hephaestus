@@ -1,5 +1,7 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.review_audit import is_clean_go_review
+
 from .pr_review_threads import *
 
 
@@ -161,6 +163,11 @@ class PrReviewGate(_PrReviewHost):
             return self._handle_error_verdict(item, ReviewAudit(None, "", (), "", valid=False))
         if not audit.valid:
             return self._handle_error_verdict(item, audit)
+        if audit.verdict not in {"GO", "NOGO", "BLOCKED"}:
+            # The parser rejects this state, but the gate also validates an
+            # in-memory audit. A malformed payload is an agent failure, not
+            # a NOGO result that can burn the review budget or write a label.
+            return self._handle_error_verdict(item, audit)
         if not item.payload.get("reviewed_pr_head_sha"):
             # Addressing a finding or pushing a new commit clears the prior
             # head proof. A fresh negative transition may still be based on
@@ -206,8 +213,8 @@ class PrReviewGate(_PrReviewHost):
         item.payload["unresolved_threads"] = [dict(thread) for thread in live_threads]
         open_thread_count = len(live_threads)
 
-        # A valid structural audit is a real review result. Grade, summary,
-        # and supplemental feedback never select the implementation state.
+        # A clean implementation-state transition requires the reviewer's
+        # explicit GO verdict. The grade is audit metadata only.
         payload["review_error_retries"] = 0
         round_done = payload.get("pr_review_round", 0) + 1
         payload["pr_review_round"] = round_done
@@ -219,6 +226,18 @@ class PrReviewGate(_PrReviewHost):
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
         if not open_thread_count:
+            # A clean thread read cannot infer GO; the shared contract requires GO and no findings.
+            if not is_clean_go_review(audit):
+                return self._handle_non_go(
+                    item,
+                    ctx,
+                    audit,
+                    open_thread_count,
+                    open_thread_count,
+                    round_done,
+                    soft_cap,
+                    hard_cap,
+                )
             return self._handle_clean_go(item, ctx)  # type: ignore[attr-defined,no-any-return]
 
         return self._handle_non_go(
@@ -378,7 +397,9 @@ class PrReviewGate(_PrReviewHost):
             payload.pop("unaddressed_findings", None)
         return None
 
-    def _handle_error_verdict(self, item: WorkItem, verdict: Any) -> StepResult:
+    def _handle_error_verdict(
+        self, item: WorkItem, verdict: Any, *, reason: str | None = None
+    ) -> StepResult:
         """Handle a missing/ERROR verdict: bounded RETRY, then fail back.
 
         Reviewer-infrastructure failure: labels untouched, no round burned,
@@ -394,7 +415,9 @@ class PrReviewGate(_PrReviewHost):
 
         """
         payload = item.payload
-        reason = "no review audit found" if verdict is None else "review audit format failure"
+        reason = reason or (
+            "no review audit found" if verdict is None else "review audit format failure"
+        )
         retries = payload.get("review_error_retries", 0) + 1
         payload["review_error_retries"] = retries
         if retries > REVIEW_ERROR_RETRY_CAP:

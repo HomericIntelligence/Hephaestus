@@ -785,6 +785,54 @@ class TestSeedIssueFetchLayer:
         assert entry.pending_implementation_go_audit is not None
         assert entry.pending_implementation_go_label_confirmed is True
 
+    def test_legacy_go_audit_receipt_routes_stale_go_label_back_to_pr_review(self) -> None:
+        """An untyped receipt must never let a retained GO label reach merge wait."""
+
+        class RestartGitHub:
+            def gh_issue_json(self, issue_number: int) -> dict[str, Any]:
+                return {
+                    "number": issue_number,
+                    "title": "A task",
+                    "body": "",
+                    "state": "OPEN",
+                    "labels": [{"name": STATE_PLAN_GO}],
+                }
+
+            def find_pr_for_issue(self, issue_number: int) -> int:
+                del issue_number
+                return 44
+
+            def find_merged_pr_for_issue(self, issue_number: int) -> None:
+                del issue_number
+                return None
+
+            def pr_has_implementation_state_label(self, pr_number: int) -> tuple[bool, bool]:
+                del pr_number
+                return True, False
+
+            def pending_implementation_go_audit(
+                self, pr_number: int
+            ) -> PendingImplementationGoAudit:
+                return PendingImplementationGoAudit(
+                    pr_number=pr_number,
+                    head_sha="a" * 40,
+                    audit=ReviewAudit(
+                        grade=None,
+                        summary="Legacy receipt requires a fresh review.",
+                        findings=(),
+                        raw_feedback="",
+                        valid=False,
+                        verdict=None,
+                    ),
+                )
+
+        facts = seed_issue_from_github(102, RestartGitHub())
+        entry = seed_entry_from_facts(facts)
+
+        assert entry.stage is StageName.PR_REVIEW
+        assert entry.pending_implementation_go_audit is not None
+        assert entry.pending_implementation_go_audit.audit.valid is False
+
 
 class TestSeedIssueEpicDetection:
     """Epic detection uses state_labels.is_epic (labels + title markers, #1669)."""

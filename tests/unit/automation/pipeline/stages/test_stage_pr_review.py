@@ -12,7 +12,7 @@ from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -84,6 +84,7 @@ def _valid_audit() -> ReviewAudit:
     """Build a valid structured audit for stage fixtures."""
     return ReviewAudit(
         grade="A",
+        verdict="GO",
         summary="fixture audit",
         findings=(),
         raw_feedback="fixture review text",
@@ -95,6 +96,7 @@ def _invalid_audit() -> ReviewAudit:
     """Build a malformed structured audit for failure-path fixtures."""
     return ReviewAudit(
         grade=None,
+        verdict=None,
         summary="",
         findings=(),
         raw_feedback="fixture review text",
@@ -695,15 +697,9 @@ class TestPrReviewStageOnEnter:
 
         result = _complete_github_job(PrReviewStage(), item, ctx)
 
-        assert result == Continue(next_state="EVAL")
+        assert result == Continue(next_state="REVIEW_WAIT")
         assert 1001 not in github.reviews
-        assert item.payload["review_audit"] == ReviewAudit(
-            grade="A",
-            summary="Reviewer validated the implementation responses to all open threads.",
-            findings=(),
-            raw_feedback="",
-            valid=True,
-        )
+        assert "review_audit" not in item.payload
 
     def test_on_enter_double_call_rechecks_unarmed_state_without_mutation(
         self, make_ctx: Any, make_work_item: Any
@@ -1253,7 +1249,7 @@ class TestPrReviewStageStep:
             "This must be fixed.\n\nReviewer prose is untrusted.\n\n```json\n"
             '{"comments":[{"path":"hephaestus/automation/pipeline/stages/pr_review.py",'
             '"line":500,"side":"RIGHT","severity":"critical","body":"race"}],'
-            '"grade":"F","summary":"race found"}\n```'
+            '"grade":"F","verdict":"NOGO","summary":"race found"}\n```'
         )
 
         review_request = _dispatch_review(stage, item, ctx)
@@ -2701,7 +2697,7 @@ class TestPrReviewStageStep:
         item.worktree = "/tmp/wt"
         audit = parse_review_audit(
             """```json
-{"grade":"F","summary":"Needs work","comments":[{"path":"a.py","line":3,
+{"grade":"F","verdict":"NOGO","summary":"Needs work","comments":[{"path":"a.py","line":3,
 "side":"RIGHT","severity":"major","body":"Guard the missing value"}]}
 ```"""
         )
@@ -4104,17 +4100,18 @@ class TestEvalVerdicts:
         assert stage.on_enter(item, ctx) is None
         assert github.mutation_log == []
 
-    def test_clean_structural_audit_advances_with_untrusted_feedback(
+    def test_nogo_audit_cannot_advance_to_implementation_go(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
-        """Only valid structure plus fresh thread facts reaches the label boundary."""
+        """A non-GO verdict never grants the implementation-GO state."""
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         ctx = make_ctx(github=github)
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = ReviewAudit(
-            grade="F",
-            summary="Needs no actionable changes",
+            grade="A",
+            verdict="NOGO",
+            summary="Review blocked: GitHub authentication is unavailable.",
             findings=(),
             raw_feedback="External review prose is not an authorization signal.",
             valid=True,
@@ -4122,8 +4119,166 @@ class TestEvalVerdicts:
 
         result = stage.step(item, ctx)
 
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            pytest.param(None, id="missing"),
+            pytest.param(cast(Any, "MAYBE"), id="malformed"),
+        ],
+    )
+    def test_invalid_audit_object_retries_without_implementation_go_artifacts(
+        self, make_ctx: Any, make_work_item: Any, verdict: Any
+    ) -> None:
+        """An invalid in-memory verdict is a bounded reviewer failure."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = ReviewAudit(
+            grade="A",
+            verdict=verdict,
+            summary="Clean",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert github.mutation_log == []
+        assert github.pending_go_audits == {}
+        assert github.comments.get(1001, []) == []
+
+    @pytest.mark.parametrize(
+        ("response", "case"),
+        [
+            pytest.param(
+                '{"grade":"A","summary":"Authentication is unavailable","comments":[]}',
+                "missing",
+                id="missing-verdict",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"MAYBE","summary":"Unclear","comments":[]}',
+                "malformed",
+                id="malformed-verdict",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"NOGO","summary":"Needs work","comments":[]}',
+                "NOGO",
+                id="nogo",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"BLOCKED","summary":"Cannot review","comments":[]}',
+                "BLOCKED",
+                id="blocked",
+            ),
+        ],
+    )
+    def test_non_go_verdict_cannot_create_implementation_go_artifacts(
+        self,
+        make_ctx: Any,
+        make_work_item: Any,
+        response: str,
+        case: str,
+    ) -> None:
+        """Only a structured GO verdict can create implementation-GO artifacts."""
+        audit = parse_review_audit(response)
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = audit
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert case in {"missing", "malformed", "NOGO", "BLOCKED"}
+        if case in {"missing", "malformed"}:
+            assert audit.valid is False
+            assert audit.verdict is None
+            assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        else:
+            assert audit.valid is True
+            assert audit.verdict == case
+            assert result == Continue(next_state="REVIEW_WAIT")
+        names = [name for name, _args in github.mutation_log]
+        assert "persist_pending_implementation_go_audit" not in names
+        assert "mark_pr_implementation_go" not in names
+        assert "publish_implementation_go_audit" not in names
+        assert github.pending_go_audits == {}
+        assert github.comments.get(1001, []) == []
+
+    @pytest.mark.parametrize("grade", ["A", "F"])
+    def test_explicit_go_verdict_creates_implementation_go_artifacts(
+        self, make_ctx: Any, make_work_item: Any, grade: str
+    ) -> None:
+        """A valid GO verdict, not the grade, permits the normal GO transition."""
+        audit = parse_review_audit(
+            f'{{"grade":"{grade}","verdict":"GO","summary":"Clean","comments":[]}}'
+        )
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = audit
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert audit.valid is True
+        assert audit.verdict == "GO"
+        assert audit.grade == grade
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
-        assert ("mark_pr_implementation_go", (1001,)) in github.mutation_log
+        names = [name for name, _args in github.mutation_log]
+        assert "persist_pending_implementation_go_audit" in names
+        assert "mark_pr_implementation_go" in names
+        assert "publish_implementation_go_audit" in names
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param(
+                '{"grade":"A","verdict":"NOGO","summary":"Needs work","comments":[]}',
+                id="nogo",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"BLOCKED","summary":"Cannot review","comments":[]}',
+                id="blocked",
+            ),
+            pytest.param(
+                '{"grade":"A","summary":"Authentication is unavailable","comments":[]}',
+                id="missing",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"MAYBE","summary":"Unclear","comments":[]}',
+                id="malformed",
+            ),
+        ],
+    )
+    def test_stale_non_go_receipt_cannot_recover_implementation_go(
+        self, make_ctx: Any, make_work_item: Any, response: str
+    ) -> None:
+        """A non-GO or invalid receipt cannot bypass the verdict gate."""
+        stale_audit = parse_review_audit(response)
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)], pr_impl_state=(True, False))
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item.payload.update(
+            {
+                "pending_implementation_go_audit": stale_audit,
+                "pending_implementation_go_audit_head": "a" * 40,
+                "pending_implementation_go_label_confirmed": True,
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result != Continue(next_state="GO_AUDIT_RECEIPT")
+        names = [name for name, _args in github.mutation_log]
+        assert "persist_pending_implementation_go_audit" not in names
+        assert "mark_pr_implementation_go" not in names
+        assert "publish_implementation_go_audit" not in names
+        assert github.pending_go_audits == {}
+        assert github.comments.get(1001, []) == []
 
     def test_non_structured_audit_payload_cannot_authorize_clean_pr(
         self, make_ctx: Any, make_work_item: Any
@@ -4327,6 +4482,37 @@ class TestEvalVerdicts:
         names = [name for name, _args in github.mutation_log]
         assert "mark_pr_implementation_go" not in names
         assert "publish_implementation_go_audit" in names
+        assert item.attempts["pr_review_iter"] == 0
+
+    def test_restart_stale_pending_audit_restarts_review_instead_of_publishing_go(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stale GO receipt must re-enter review instead of writing GO state."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)], pr_impl_state=(True, False))
+        item = make_work_item(issue=1, pr=1001, state="ENTER")
+        item.payload.update(
+            {
+                "pending_implementation_go_audit": _valid_audit(),
+                "pending_implementation_go_audit_head": "b" * 40,
+                "pending_implementation_go_label_confirmed": True,
+            }
+        )
+        ctx = make_ctx(github=github)
+
+        assert stage.step(item, ctx) == Continue(next_state="GO_AUDIT_RECEIPT")
+        item.state = "GO_AUDIT_RECEIPT"
+
+        result = stage.step(item, ctx)
+
+        assert result == Continue(next_state="REVIEW_WAIT")
+        assert "reviewed_pr_head_sha" not in item.payload
+        assert "pending_implementation_go_audit" not in item.payload
+        assert "pending_implementation_go_audit_head" not in item.payload
+        assert "pending_implementation_go_label_confirmed" not in item.payload
+        names = [name for name, _args in github.mutation_log]
+        assert "mark_pr_implementation_go" not in names
+        assert "publish_implementation_go_audit" not in names
         assert item.attempts["pr_review_iter"] == 0
 
     def test_thread_added_during_go_write_preserves_external_labels_and_restarts_review(
@@ -4634,6 +4820,7 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = ReviewAudit(
             grade="F",
+            verdict="NOGO",
             summary="Material findings remain",
             findings=(),
             raw_feedback="",
@@ -5155,6 +5342,27 @@ class TestEvalErrorNoBurn:
 
         assert isinstance(result, StageOutcome)
         assert result.disposition == Disposition.RETRY
+        assert item.attempts["pr_review_iter"] == 0
+        assert item.payload["review_error_retries"] == 1
+
+    def test_auth_unavailable_audit_retries_without_burning(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed GitHub-auth audit still fails closed without a GO write."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub()
+        ctx = make_ctx(github=github)
+        item = make_work_item(issue=9, pr=1001, state="EVAL")
+        item.payload["review_audit"] = parse_review_audit(
+            '{"grade":"F","summary":"Review blocked: GitHub authentication is unavailable.",'
+            '"comments":[]}'
+        )
+
+        result = stage.step(item, ctx)
+
+        assert isinstance(result, StageOutcome)
+        assert result.disposition == Disposition.RETRY
+        assert github.mutation_log == []
         assert item.attempts["pr_review_iter"] == 0
         assert item.payload["review_error_retries"] == 1
 

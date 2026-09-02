@@ -3400,7 +3400,7 @@ class TestMutatorMapping:
     ) -> None:
         """Recovery receipts are deleted only after an owned public audit readback."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
@@ -3426,7 +3426,7 @@ class TestMutatorMapping:
     ) -> None:
         """A stale or failed public write never deletes the replay artifact."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
             f"pr=5:head={head}:batch={'b' * 32} -->\n<!-- {{}} -->"
@@ -3450,7 +3450,7 @@ class TestMutatorMapping:
     ) -> None:
         """An ambiguous committed POST converges to one audit before cleanup."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
@@ -3490,7 +3490,7 @@ class TestMutatorMapping:
     ) -> None:
         """A committed PATCH with a lost response retries one durable comment ID."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         _pending_marker, pending_body = render_pending_implementation_go_audit(5, head, audit)
         handoff = (
@@ -3530,7 +3530,7 @@ class TestMutatorMapping:
     ) -> None:
         """A crash after receipt promotion still resumes required journal cleanup."""
         head = "a" * 40
-        audit = ReviewAudit("A", "Clean", (), "", valid=True)
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
         _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
         handoff = (
             "<!-- hephaestus-implementation-reply-handoff:"
@@ -3553,6 +3553,78 @@ class TestMutatorMapping:
         assert receipt.head_sha == head
         assert receipt.audit.grade == "A"
         assert receipt.audit.summary == "Clean"
+
+    def test_go_audit_replaces_matching_legacy_public_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typed audit replaces one owned public receipt that predates verdicts."""
+        head = "a" * 40
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
+        _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
+        legacy_body = body.replace("Reviewer verdict: GO\n\n", "")
+        legacy = {"body": legacy_body, "databaseId": 12, "viewerDidAuthor": True}
+        public = {"body": body, "databaseId": 12, "viewerDidAuthor": True}
+        fetch = MagicMock(side_effect=[[legacy], [public], [public]])
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+
+        adapter.publish_implementation_go_audit(5, head, audit)
+
+        patch_comment.assert_called_once_with(12, body)
+
+    def test_legacy_pending_go_audit_is_inert_for_restart_recovery(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-verdict journal cannot authorize GO or prevent a fresh review."""
+        head = "a" * 40
+        marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=5:head={head} -->"
+        legacy_payload = json.dumps(
+            {
+                "format": 1,
+                "pr_number": 5,
+                "head_sha": head,
+                "grade": "A",
+                "summary": "Clean",
+                "raw_feedback": "",
+            }
+        )
+        legacy_body = f"{marker}\n<!-- {legacy_payload} -->"
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[{"body": legacy_body, "databaseId": 12, "viewerDidAuthor": True}]
+            ),
+        )
+
+        receipt = adapter.pending_implementation_go_audit(5)
+
+        assert receipt is not None
+        assert receipt.head_sha == head
+        assert receipt.audit.valid is False
+        assert receipt.audit.verdict is None
+
+    def test_typed_public_audit_cleanup_removes_matching_legacy_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A replacement typed audit may remove its same-head legacy journal."""
+        head = "a" * 40
+        marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=5:head={head} -->"
+        legacy_body = f'{marker}\n<!-- {{"format":1}} -->'
+        monkeypatch.setattr(
+            adapter,
+            "_repo_issue_comments",
+            MagicMock(
+                return_value=[{"body": legacy_body, "databaseId": 12, "viewerDidAuthor": True}]
+            ),
+        )
+        delete = MagicMock()
+        monkeypatch.setattr(adapter, "_delete_issue_comment", delete)
+
+        adapter.clear_pending_implementation_go_audit(5, head)
+
+        delete.assert_called_once_with(12)
 
 
 def test_mark_go_uses_adapter_labels_and_readback(
