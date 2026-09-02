@@ -162,7 +162,9 @@ class Coordinator(
             from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 
             athena_executor = (
-                MnemosyneSkillHost() if pipeline_requires_athena_executor(config) else None
+                MnemosyneSkillHost(gh_extra_path_root=config.gh_extra_path_root)
+                if pipeline_requires_athena_executor(config)
+                else None
             )
             pool = WorkerPool(
                 size=work_window,

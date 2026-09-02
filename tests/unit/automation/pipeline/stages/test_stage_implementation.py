@@ -1874,6 +1874,23 @@ class TestWorktreeAndAdvise:
         assert item.payload["athena_advise_receipt"] == {"binding": "ok"}
 
 
+def test_implementation_summary_retains_safe_athena_failure_class(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The terminal implementation reason keeps the safe host failure class."""
+    item = make_work_item(issue=2924, state="IMPLEMENT_WAIT")
+    item.payload["athena_advise_error"] = (
+        "remote_git_transport: fetch failed: remote Git transport unavailable"
+    )
+
+    result = ImplementationStage().step(item, make_ctx())
+
+    assert result == StageOutcome(
+        Disposition.FINISH_FAIL,
+        "athena_advise_failed:remote_git_transport",
+    )
+
+
 class TestImplementBudget:
     """IMPLEMENT_WAIT budget semantics: agent_error consumes the budget."""
 

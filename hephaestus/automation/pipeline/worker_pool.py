@@ -15,7 +15,6 @@ import logging
 import os
 import queue as queue_mod
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -75,10 +74,15 @@ from hephaestus.automation.pipeline.tool_scopes import (
     tool_scope_for,
 )
 from hephaestus.automation.prompts._review_rubric import plugin_skills_context
+from hephaestus.automation.remote_git import (
+    trusted_gh_executable as _shared_trusted_gh_executable,
+    trusted_remote_git_config as _shared_trusted_remote_git_config,
+)
 from hephaestus.automation.source_worktree import SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
+    RemoteGitRefreshError,
     WorktreeManager,
 )
 from hephaestus.config.child_environments import (
@@ -1325,32 +1329,7 @@ def _trusted_executable(name: str, *, path: str | None = None) -> str | None:
 
 def _trusted_remote_git_config(gh_command: str) -> tuple[str, ...] | None:
     """Return isolated GitHub HTTPS and SSH transport configuration."""
-    ssh_command = _trusted_executable("ssh", path=os.defpath)
-    if ssh_command is None:
-        return None
-    ssh_config = " ".join(
-        (
-            shlex.quote(ssh_command),
-            "-F",
-            shlex.quote(os.devnull),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-        )
-    )
-    return (
-        "-c",
-        f"core.sshCommand={ssh_config}",
-        "-c",
-        "credential.helper=",
-        "-c",
-        f"credential.helper=!{shlex.quote(gh_command)} auth git-credential",
-        "-c",
-        "core.askPass=",
-        "-c",
-        "http.sslVerify=true",
-    )
+    return _shared_trusted_remote_git_config(gh_command)
 
 
 def _trusted_uv_executable() -> str | None:
@@ -1407,26 +1386,11 @@ def _trusted_gh_executable(extra_path_root: Path | None = None) -> str | None:
     the loop CLI.  It contributes exactly ``<root>/bin/gh`` and rejects a
     candidate whose resolved path escapes that root.
     """
-    candidates: tuple[Path, ...] = _TRUSTED_GH_CANDIDATES
-    if extra_path_root is not None:
-        candidates = (*candidates, extra_path_root / "bin" / "gh")
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
-            continue
-        if not resolved.is_file() or not os.access(resolved, os.X_OK):
-            continue
-        if any(resolved.is_relative_to(root) for root in _TRUSTED_GH_ROOTS):
-            return str(resolved)
-        if extra_path_root is not None:
-            try:
-                resolved_root = extra_path_root.resolve(strict=True)
-            except OSError:
-                continue
-            if resolved.is_relative_to(resolved_root):
-                return str(resolved)
-    return None
+    return _shared_trusted_gh_executable(
+        extra_path_root,
+        system_candidates=_TRUSTED_GH_CANDIDATES,
+        system_roots=_TRUSTED_GH_ROOTS,
+    )
 
 
 def _unsafe_local_git_config_key(config: str) -> str | None:
@@ -3677,6 +3641,18 @@ class WorkerPool:
                 base_branch=base_sha,
                 repo_root=repo_root,
             )
+        elif bool(kwargs.get("refresh_base", False)):
+            remote_env, remote_config = self._authenticated_remote_git_configuration(
+                cwd=repo_root,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            manager = WorktreeManager(
+                base_dir=base_dir,
+                repo_root=repo_root,
+                remote_git_env=remote_env,
+                remote_git_config=remote_config,
+            )
         else:
             manager = WorktreeManager(base_dir=base_dir, repo_root=repo_root)
         if base_sha is not None:
@@ -3684,6 +3660,14 @@ class WorkerPool:
             kwargs["remote_branch_reserved"] = True
         try:
             created = manager.create_worktree(**kwargs, timeout=job.timeout_s)
+        except (RemoteGitRefreshError, subprocess.CalledProcessError):
+            if bool(kwargs.get("refresh_base", False)):
+                return JobResult(
+                    ok=False,
+                    error="worktree remote refresh failed",
+                    value={"failure_kind": "remote_git_transport"},
+                )
+            raise
         except Exception as exc:
             if base_sha is not None:
                 return self._rollback_direct_scope_reservation(

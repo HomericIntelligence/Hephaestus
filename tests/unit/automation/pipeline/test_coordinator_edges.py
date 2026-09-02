@@ -133,6 +133,10 @@ class TestWiring:
         """Pool size = parallel_repos x max_workers (epic contract)."""
         created: dict[str, Any] = {}
 
+        class SpyAthenaHost:
+            def __init__(self, *, gh_extra_path_root: Path | None = None) -> None:
+                created["athena_gh_extra_path_root"] = gh_extra_path_root
+
         class SpyPool:
             def __init__(
                 self,
@@ -156,6 +160,9 @@ class TestWiring:
                 created["evidence_receipt_dir"] = evidence_receipt_dir
 
         monkeypatch.setattr("hephaestus.automation.pipeline.worker_pool.WorkerPool", SpyPool)
+        monkeypatch.setattr(
+            "hephaestus.automation.mnemosyne_skill_host.MnemosyneSkillHost", SpyAthenaHost
+        )
         gh_root = tmp_path / "custom-gh"
         config = PipelineConfig(
             org="org",
@@ -173,6 +180,7 @@ class TestWiring:
         assert created["gh_extra_path_root"] == gh_root
         assert created["github_job_runner"] is not None
         assert created["athena_skill_executor"] is not None
+        assert created["athena_gh_extra_path_root"] == gh_root
         assert created["evidence_receipt_dir"] is None
 
     def test_run_pipeline_wires_accessor_and_runs(

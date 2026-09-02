@@ -3663,6 +3663,23 @@ class TestPlanningStageOnJobDone:
         assert "plan_text" not in item.payload
 
 
+def test_planning_summary_retains_safe_athena_failure_class(
+    make_ctx: Any, make_work_item: Any
+) -> None:
+    """The terminal planning reason keeps the safe host failure class."""
+    item = make_work_item(issue=2924, state="PLAN_WAIT")
+    item.payload["athena_advise_error"] = (
+        "remote_git_authentication: trusted GitHub executable missing"
+    )
+
+    result = PlanningStage().step(item, make_ctx())
+
+    assert result == StageOutcome(
+        Disposition.FINISH_FAIL,
+        "athena_advise_failed:remote_git_authentication",
+    )
+
+
 class TestPlanningFlowWithFakePool:
     """Drive the whole stage through the canonical FakeWorkerPool (m6)."""
 
