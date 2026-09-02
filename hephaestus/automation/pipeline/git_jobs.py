@@ -33,8 +33,16 @@ class GitJob:
     timeout_s: int
     kwargs: dict[str, Any] = field(default_factory=dict)
     descr: str = ""
+    # Pipeline scheduling uses a repository-local key.  Authenticated Git
+    # transport validates a separate canonical OWNER/REPOSITORY identity.
+    expected_repository: str | None = None
 
     def __post_init__(self) -> None:
         """Reject an operation outside the closed Git vocabulary."""
         if self.op not in GIT_OPS:
             raise ValueError(f"unknown git op {self.op!r}; expected one of {sorted(GIT_OPS)}")
+
+    @property
+    def transport_repository(self) -> str:
+        """Return the canonical identity required for authenticated Git transport."""
+        return self.expected_repository or self.repo

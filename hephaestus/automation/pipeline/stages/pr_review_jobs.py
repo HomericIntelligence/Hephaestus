@@ -232,6 +232,7 @@ class PrReviewJobs(_PrReviewHost):
             repo=item.repo,
             op="create_worktree",
             timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             kwargs=kwargs,
             descr="direct_pr_review_worktree",
         )
@@ -276,6 +277,7 @@ class PrReviewJobs(_PrReviewHost):
             repo=item.repo,
             op="verify_pr_review_checkout",
             timeout_s=stage_timeout(ctx, "diff_collect", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             kwargs={
                 "worktree_path": str(_worktree_path(item, ctx)),
                 "branch": item.branch,

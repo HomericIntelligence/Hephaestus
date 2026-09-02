@@ -522,6 +522,7 @@ class ImplementationStage(Stage):
             repo=item.repo,
             op="create_worktree",
             timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             kwargs=kwargs,
             descr="create_worktree",
         )
@@ -671,6 +672,7 @@ class ImplementationStage(Stage):
             repo=item.repo,
             op="rebase",
             timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             kwargs=kwargs,
             descr="rebase_writer_before_review",
         )
@@ -700,6 +702,7 @@ class ImplementationStage(Stage):
             repo=item.repo,
             op="continue_rebase",
             timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             kwargs={
                 "cwd": _worktree_path(item, ctx),
                 "base_sha": item.payload.get("rebase_base_sha"),
@@ -1141,6 +1144,7 @@ class ImplementationStage(Stage):
             repo=item.repo,
             op="commit_push",
             timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+            expected_repository=f"{ctx.org}/{item.repo}",
             kwargs=kwargs,
             descr="commit_push",
         )
