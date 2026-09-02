@@ -3611,7 +3611,7 @@ class TestMutatorMapping:
         """A replacement typed audit may remove its same-head legacy journal."""
         head = "a" * 40
         marker = f"<!-- hephaestus-implementation-go-audit-pending:pr=5:head={head} -->"
-        legacy_body = f"{marker}\n<!-- {{\"format\":1}} -->"
+        legacy_body = f'{marker}\n<!-- {{"format":1}} -->'
         monkeypatch.setattr(
             adapter,
             "_repo_issue_comments",
