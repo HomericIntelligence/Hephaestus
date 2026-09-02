@@ -136,6 +136,7 @@ from .base import (
     WorkItem,
     _require_issue_labels,
     agent_provider,
+    athena_advise_failure_reason,
     source_workspace_binding,
     stage_model,
     stage_timeout,
@@ -2078,7 +2079,10 @@ class PlanningStage(Stage):
 
         if item.state == "PLAN_WAIT":
             if item.payload.get("athena_advise_error"):
-                return StageOutcome(Disposition.FINISH_FAIL, "athena_advise_failed")
+                return StageOutcome(
+                    Disposition.FINISH_FAIL,
+                    athena_advise_failure_reason(item),
+                )
             logger.info("planning:%d: requesting plan job", item.issue)
             workspace = source_workspace_binding(item, ctx, SourceLane.IMPLEMENTATION)
             job = AgentJob(

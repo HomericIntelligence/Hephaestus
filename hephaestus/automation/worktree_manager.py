@@ -29,6 +29,7 @@ import logging
 import shutil
 import subprocess
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,10 @@ class WorktreeDirtyError(Exception):
         super().__init__(f"Worktree for issue #{issue_number} at {path} has uncommitted changes")
 
 
+class RemoteGitRefreshError(RuntimeError):
+    """Raised when the required remote base refresh does not complete."""
+
+
 BRANCH_WORKTREE_OWNED = "branch_worktree_owned"
 
 
@@ -113,6 +118,8 @@ class WorktreeManager:
         base_branch: str | None = None,
         repo_root: Path | None = None,
         trunk_githash: str | None = None,
+        remote_git_env: Mapping[str, str] | None = None,
+        remote_git_config: tuple[str, ...] = (),
     ) -> None:
         """Initialize worktree manager.
 
@@ -146,6 +153,8 @@ class WorktreeManager:
             "explicit" if base_branch is not None else "loop_trunk" if loop_trunk else None
         )
         self._base_branch_resolved: str | None = None
+        self._remote_git_env = dict(remote_git_env) if remote_git_env is not None else None
+        self._remote_git_config = remote_git_config
         self.worktrees: dict[int | str, Path] = {}
         self.preserved: list[tuple[int | str, Path]] = []
         self.lock = threading.Lock()
@@ -221,13 +230,16 @@ class WorktreeManager:
             self._base_branch_override = None
             self._base_branch_override_source = None
         with file_lock(self._git_metadata_lock_path()):
-            with contextlib.suppress(Exception):
+            try:
                 run(
-                    ["git", "fetch", "origin"],
+                    ["git", *self._remote_git_config, "fetch", "origin"],
                     cwd=self.repo_root,
                     capture_output=True,
+                    env=self._remote_git_env,
                     **_timeout_kw(timeout),
                 )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RemoteGitRefreshError("remote base refresh failed") from exc
             self._base_branch_resolved = None  # force re-detect on next access
             return self._resolve_base_branch(timeout=timeout)
 
@@ -438,7 +450,7 @@ class WorktreeManager:
                 logger.info("Created worktree for issue #%s at %s", issue_number, worktree_path)
                 return worktree_path
 
-            except BranchWorktreeOwnedError:
+            except (BranchWorktreeOwnedError, RemoteGitRefreshError):
                 raise
             except Exception as e:
                 raise RuntimeError(f"Failed to create worktree: {e}") from e

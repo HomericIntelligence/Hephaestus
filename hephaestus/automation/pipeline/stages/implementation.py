@@ -162,6 +162,7 @@ from .base import (
     _terminal_pr_outcome,
     _worktree_path,
     agent_provider,
+    athena_advise_failure_reason,
     source_workspace_binding,
     stage_model,
     stage_timeout,
@@ -788,7 +789,10 @@ class ImplementationStage(Stage):
         """IMPLEMENT_WAIT submits the implementation job when budget remains."""
         issue = _issue_number(item)
         if item.payload.get("athena_advise_error"):
-            return StageOutcome(Disposition.FINISH_FAIL, "athena_advise_failed")
+            return StageOutcome(
+                Disposition.FINISH_FAIL,
+                athena_advise_failure_reason(item),
+            )
         entry_outcome = self._implementation_agent_turn_entry_outcome(item, ctx, issue)
         if entry_outcome is not None:
             return entry_outcome

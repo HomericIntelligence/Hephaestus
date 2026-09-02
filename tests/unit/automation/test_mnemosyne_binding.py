@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import hephaestus.automation.mnemosyne_binding as mnemosyne_binding
 from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.mnemosyne_binding import (
     MnemosyneBindingError,
@@ -60,7 +61,7 @@ class FakeGit:
     ) -> subprocess.CompletedProcess[str]:
         del cwd, timeout_s
         self.calls.append(argv)
-        key = " ".join(argv)
+        key = " ".join(_git_command(argv))
         if key in self.overrides:
             return self.overrides[key]
         responses = {
@@ -76,6 +77,14 @@ class FakeGit:
             "rev-parse HEAD": _completed(stdout=f"{SHA}\n"),
         }
         return responses[key]
+
+
+def _git_command(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Remove command-scoped Git configuration from a recorded command."""
+    index = 0
+    while argv[index : index + 1] == ("-c",):
+        index += 2
+    return argv[index:]
 
 
 def _completed(
@@ -102,6 +111,7 @@ def test_binding_success_reports_target_revision_and_contract(tmp_path: Path) ->
         root=root,
         resolver=_target,
         git=FakeGit(),
+        remote_git_config=(),
     )
 
     receipt = service.bind(contract=_contract())
@@ -123,9 +133,10 @@ def test_binding_bootstraps_missing_checkout_then_binds_it(tmp_path: Path) -> No
             argv: tuple[str, ...],
             timeout_s: int,
         ) -> subprocess.CompletedProcess[str]:
-            if argv[0] == "clone":
+            command = _git_command(argv)
+            if command[0] == "clone":
                 assert cwd == root.parent
-                assert argv == (
+                assert command == (
                     "clone",
                     "--origin",
                     "origin",
@@ -140,13 +151,114 @@ def test_binding_bootstraps_missing_checkout_then_binds_it(tmp_path: Path) -> No
             return super().__call__(cwd, argv, timeout_s)
 
     git = CloningGit()
-    receipt = MnemosyneBindingService(root=root, resolver=_target, git=git).bind(
-        contract=_contract()
-    )
+    receipt = MnemosyneBindingService(
+        root=root, resolver=_target, git=git, remote_git_config=()
+    ).bind(contract=_contract())
 
     assert root.parent.is_dir()
     assert receipt.commit_sha == SHA
-    assert git.calls[0][0] == "clone"
+    assert _git_command(git.calls[0])[0] == "clone"
+
+
+def test_binding_authenticates_remote_fetch_with_trusted_github_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A remote fetch uses the trusted command-scoped GitHub credential helper."""
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit()
+    monkeypatch.setattr(
+        mnemosyne_binding,
+        "trusted_gh_executable",
+        lambda _extra_path_root=None: "/trusted/bin/gh",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mnemosyne_binding,
+        "trusted_remote_git_config",
+        lambda command: (
+            "-c",
+            "credential.helper=",
+            "-c",
+            f"credential.helper=!{command} auth git-credential",
+        ),
+        raising=False,
+    )
+
+    MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+
+    fetch = next(call for call in git.calls if _git_command(call) == ("fetch", "origin"))
+    assert fetch[:4] == (
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=!/trusted/bin/gh auth git-credential",
+    )
+
+
+def test_binding_stops_before_fetch_without_trusted_github_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A missing trusted helper stops the bind before remote Git runs."""
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit()
+    monkeypatch.setattr(
+        mnemosyne_binding,
+        "trusted_gh_executable",
+        lambda _extra_path_root=None: None,
+        raising=False,
+    )
+
+    with pytest.raises(MnemosyneBindingError) as exc_info:
+        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+
+    assert exc_info.value.failure_kind == "remote_git_authentication"
+    assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
+
+
+def test_binding_remote_fetch_failure_does_not_expose_transport_output(tmp_path: Path) -> None:
+    """A remote fetch failure reports a safe error without command output."""
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    sensitive_value = "transport-sensitive-value"
+    git = FakeGit(
+        **{
+            "fetch origin": _completed(
+                returncode=128, stderr=f"access denied for {sensitive_value}"
+            )
+        }
+    )
+
+    with pytest.raises(MnemosyneBindingError) as exc_info:
+        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
+            contract=_contract()
+        )
+
+    assert "fetch failed" in str(exc_info.value)
+    assert sensitive_value not in str(exc_info.value)
+
+
+def test_binding_wrong_origin_does_not_expose_embedded_credential(tmp_path: Path) -> None:
+    """A foreign origin failure does not copy a URL credential to diagnostics."""
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    sensitive_value = "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+    git = FakeGit(
+        **{
+            "config --get remote.origin.url": _completed(
+                stdout=f"https://{sensitive_value}@github.com/Other/repository.git\n"
+            )
+        }
+    )
+
+    with pytest.raises(MnemosyneBindingError) as exc_info:
+        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
+            contract=_contract()
+        )
+
+    assert "wrong origin" in str(exc_info.value)
+    assert sensitive_value not in str(exc_info.value)
 
 
 def test_binding_rejects_symlinked_checkout_parent_before_clone(tmp_path: Path) -> None:
@@ -158,7 +270,9 @@ def test_binding_rejects_symlinked_checkout_parent_before_clone(tmp_path: Path) 
     git = FakeGit()
 
     with pytest.raises(MnemosyneBindingError, match="parent must not be a symlink"):
-        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
+            contract=_contract()
+        )
 
     assert git.calls == []
 
@@ -173,18 +287,20 @@ def test_binding_fails_closed_when_checkout_clone_fails(tmp_path: Path) -> None:
             argv: tuple[str, ...],
             timeout_s: int,
         ) -> subprocess.CompletedProcess[str]:
-            if argv[0] == "clone":
+            if _git_command(argv)[0] == "clone":
                 self.calls.append(argv)
                 return _completed(returncode=128, stderr="access denied")
             return super().__call__(cwd, argv, timeout_s)
 
     git = FailingCloneGit()
-    with pytest.raises(MnemosyneBindingError, match="clone failed: access denied"):
-        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+    with pytest.raises(MnemosyneBindingError, match="clone failed: remote Git transport"):
+        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
+            contract=_contract()
+        )
 
     assert root.parent.is_dir()
     assert root.exists() is False
-    assert git.calls == [
+    assert [_git_command(call) for call in git.calls] == [
         (
             "clone",
             "--origin",
@@ -223,7 +339,12 @@ def test_binding_rejects_untrusted_checkout_states(
 ) -> None:
     root = tmp_path / "knowledge"
     root.mkdir()
-    service = MnemosyneBindingService(root=root, resolver=_target, git=FakeGit(**override))
+    service = MnemosyneBindingService(
+        root=root,
+        resolver=_target,
+        git=FakeGit(**override),
+        remote_git_config=(),
+    )
 
     with pytest.raises(MnemosyneBindingError, match=match):
         service.bind(contract=_contract())
@@ -234,7 +355,9 @@ def test_binding_rejects_symlinked_checkout(tmp_path: Path) -> None:
     real.mkdir()
     root = tmp_path / "knowledge"
     root.symlink_to(real, target_is_directory=True)
-    service = MnemosyneBindingService(root=root, resolver=_target, git=FakeGit())
+    service = MnemosyneBindingService(
+        root=root, resolver=_target, git=FakeGit(), remote_git_config=()
+    )
 
     with pytest.raises(MnemosyneBindingError, match="symlink"):
         service.bind(contract=_contract())

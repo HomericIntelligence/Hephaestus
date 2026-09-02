@@ -1667,6 +1667,14 @@ its resolved path must remain below `ROOT`. Other automation CLIs do not expose
 the exception. No wrapper reads an environment equivalent or discovers this
 exception through `PATH`.
 
+The loop passes this admitted executable to its worker Git operations and its
+host-owned Mnemosyne binding. Each remote Git command uses an isolated child
+environment and a command-scoped `gh auth git-credential` helper. A missing
+helper or a failed fetch stops the operation. The loop does not continue with a
+stale remote-tracking ref, and its diagnostic does not copy remote command
+output. The summary retains only an allowed remote authentication, identity, or
+transport failure class.
+
 Three Codex-only flags control per-role reasoning effort:
 `--planner-reasoning-effort {default|low|medium|high|xhigh}` and the
 analogous `--reviewer-reasoning-effort` and `--implementer-reasoning-effort`

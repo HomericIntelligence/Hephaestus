@@ -2279,6 +2279,93 @@ class TestGitOps:
         assert result.value is None
         assert prepare.call_args.kwargs["expected_repo"] == "HomericIntelligence/Hephaestus"
 
+    def test_create_worktree_authenticates_requested_remote_refresh(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """The worker gives a remote refresh an isolated GitHub credential helper."""
+        job = GitJob(
+            repo="Hephaestus",
+            expected_repository="HomericIntelligence/Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2924,
+                "branch_name": "2924-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": True,
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = tmp_path / "build" / ".worktrees" / "issue-2924"
+        remote_env = {"GIT_TERMINAL_PROMPT": "0"}
+        remote_config = ("-c", "credential.helper=!trusted-gh auth git-credential")
+
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=(remote_env, remote_config),
+            ) as authenticate,
+            patch(f"{_WP}.WorktreeManager", return_value=manager) as manager_type,
+        ):
+            result = pool._git_create_worktree(job)
+
+        assert result.ok is True
+        authenticate.assert_called_once_with(
+            cwd=tmp_path,
+            expected_repo="HomericIntelligence/Hephaestus",
+            timeout=60,
+        )
+        manager_type.assert_called_once_with(
+            base_dir=tmp_path / "build" / ".worktrees",
+            repo_root=tmp_path,
+            remote_git_env=remote_env,
+            remote_git_config=remote_config,
+        )
+
+    def test_create_worktree_remote_refresh_failure_is_safe_and_classified(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A failed refresh does not copy remote output into the job result."""
+        sensitive_value = "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+        job = GitJob(
+            repo="Hephaestus",
+            expected_repository="HomericIntelligence/Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2924,
+                "branch_name": "2924-auto",
+                "repo_root": str(tmp_path),
+                "refresh_base": True,
+            },
+        )
+        manager = MagicMock()
+        manager.create_worktree.side_effect = subprocess.CalledProcessError(
+            128,
+            ["git", "fetch", "origin"],
+            stderr=f"access denied for {sensitive_value}",
+        )
+
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=({}, ()),
+            ),
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+        ):
+            result = pool._run_git(job)
+
+        assert result.ok is False
+        assert result.value == {"failure_kind": "remote_git_transport"}
+        assert result.error == "worktree remote refresh failed"
+        assert sensitive_value not in result.stderr_tail
+
     def test_create_worktree_reports_existing_branch_owner(
         self,
         pool: WorkerPool,

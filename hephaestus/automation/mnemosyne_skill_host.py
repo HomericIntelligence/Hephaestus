@@ -17,6 +17,7 @@ from hephaestus.automation.athena_contract import (
 )
 from hephaestus.automation.github_api import gh_call
 from hephaestus.automation.mnemosyne_binding import (
+    MnemosyneBindingError,
     MnemosyneBindingReceipt,
     MnemosyneBindingService,
 )
@@ -509,10 +510,13 @@ class MnemosyneSkillHost:
         binding_service: BindingService | None = None,
         corpus_reader: CorpusReader | None = None,
         delivery_service: LearnDeliveryBackend | None = None,
+        gh_extra_path_root: Path | None = None,
     ) -> None:
         """Initialize the host with injectable contract, binding, and delivery services."""
         self.contract_loader = contract_loader or self._load_contract
-        self.binding_service = binding_service or MnemosyneBindingService()
+        self.binding_service = binding_service or MnemosyneBindingService(
+            gh_extra_path_root=gh_extra_path_root
+        )
         self.corpus_reader = corpus_reader or DefaultCorpusReader()
         self.delivery_service = delivery_service or DefaultLearnDeliveryBackend()
 
@@ -549,6 +553,8 @@ class MnemosyneSkillHost:
             return AthenaSkillResult(
                 kind=str(request.kind), error=f"unsupported Athena skill {request.kind!r}"
             )
+        except MnemosyneBindingError as exc:
+            return AthenaSkillResult(kind=str(request.kind), error=f"{exc.failure_kind}: {exc}")
         except Exception as exc:
             return AthenaSkillResult(kind=str(request.kind), error=str(exc))
 
