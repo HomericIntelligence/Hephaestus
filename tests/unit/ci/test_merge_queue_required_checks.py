@@ -57,11 +57,16 @@ def _green_required_needs() -> dict[str, dict[str, Any]]:
 
 
 def _run_required_gate(
-    needs: dict[str, dict[str, Any]], *, event_name: str
+    needs: dict[str, dict[str, Any]],
+    *,
+    event_name: str,
+    allowed_skips: dict[str, list[str]] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the aggregate's real verdict step with controlled job results."""
     gate = _load_workflow(REQUIRED_WORKFLOW)["jobs"]["required-checks-gate"]
     step = gate["steps"][0]
+    if allowed_skips is not None:
+        step["env"]["ALLOWED_SKIPS"] = json.dumps(allowed_skips)
     env = os.environ | {
         "GITHUB_EVENT_NAME": event_name,
         "RESULTS": json.dumps(needs),
@@ -204,6 +209,22 @@ def test_required_gate_rejects_unknown_dependency() -> None:
 
     assert result.returncode != 0
     assert "unexpected" in result.stdout
+    assert "unknown-job" in result.stdout
+
+
+def test_required_gate_rejects_stale_skip_allowlist_at_runtime() -> None:
+    """The real gate must reject a skip policy for an unknown job."""
+    allowed_skips = {event: list(job_names) for event, job_names in EXPECTED_SKIP_POLICY.items()}
+    allowed_skips["push"].append("unknown-job")
+
+    result = _run_required_gate(
+        _green_required_needs(),
+        event_name="pull_request",
+        allowed_skips=allowed_skips,
+    )
+
+    assert result.returncode != 0
+    assert "skip policy references unknown jobs" in result.stdout
     assert "unknown-job" in result.stdout
 
 
