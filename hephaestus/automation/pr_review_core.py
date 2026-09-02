@@ -19,7 +19,9 @@ share exactly one invocation body (DRY).
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -87,6 +89,19 @@ _MAX_PR_REVIEW_RECEIPTS_CHARS = 64_000
 _MAX_HOST_RECEIPT_STREAM_CHARS = 512
 _MAX_REVIEW_VALIDATION_COMMENTS_CHARS = 40_000
 _MAX_REVIEW_VALIDATION_TITLE_CHARS = 4_000
+
+_HOST_RECEIPT_IDENTITY_FIELDS = (
+    "argv",
+    "head_sha",
+    "immutable_source",
+    "ok",
+    "status",
+    "platform",
+    "failure_kind",
+)
+_HOST_RECEIPT_SUMMARY_POLICY = "host-receipt-identities-v1"
+_HOST_RECEIPT_DIGEST_SUMMARY_POLICY = "host-receipt-digests-v1"
+_HOST_RECEIPT_AGGREGATE_SUMMARY_POLICY = "host-receipt-aggregate-v1"
 
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.* b/(.*)$", re.MULTILINE)
 
@@ -180,7 +195,13 @@ def _truncate_review_text(text: str, *, max_chars: int, label: str) -> str:
 
 
 def _compact_host_verifications_json(host_verifications_json: str) -> str:
-    """Retain every host receipt while bounding diagnostic stream payloads."""
+    """Retain every host receipt while bounding diagnostic stream payloads.
+
+    If the compact receipt list exceeds its prompt budget, replace each full
+    receipt with one identity record. If those records still exceed the
+    budget, use one digest for each receipt. A larger stream uses one digest
+    for the ordered identity set and its receipt count.
+    """
     try:
         parsed = json.loads(host_verifications_json)
     except (TypeError, json.JSONDecodeError):
@@ -211,10 +232,78 @@ def _compact_host_verifications_json(host_verifications_json: str) -> str:
                     label="host verification output",
                 )
         compacted.append(compact)
-    return _truncate_review_text(
-        json.dumps(compacted, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        max_chars=_MAX_PR_REVIEW_RECEIPTS_CHARS,
-        label="host verification receipts",
+    serialized = json.dumps(compacted, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(serialized) <= _MAX_PR_REVIEW_RECEIPTS_CHARS:
+        return serialized
+
+    identity_records = [
+        (
+            [receipt.get(field) for field in _HOST_RECEIPT_IDENTITY_FIELDS]
+            if isinstance(receipt, dict)
+            else [receipt, *([None] * (len(_HOST_RECEIPT_IDENTITY_FIELDS) - 1))]
+        )
+        for receipt in compacted
+    ]
+    identity_summary = json.dumps(
+        {
+            "summary_policy": _HOST_RECEIPT_SUMMARY_POLICY,
+            "receipt_count": len(compacted),
+            "identity_fields": list(_HOST_RECEIPT_IDENTITY_FIELDS),
+            "receipts": identity_records,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if len(identity_summary) <= _MAX_PR_REVIEW_RECEIPTS_CHARS:
+        return identity_summary
+
+    receipt_digests = [
+        base64.urlsafe_b64encode(
+            hashlib.sha256(
+                json.dumps(
+                    identity,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).digest()
+        )
+        .decode("ascii")
+        .rstrip("=")
+        for identity in identity_records
+    ]
+    digest_summary = json.dumps(
+        {
+            "summary_policy": _HOST_RECEIPT_DIGEST_SUMMARY_POLICY,
+            "receipt_count": len(compacted),
+            "identity_fields": list(_HOST_RECEIPT_IDENTITY_FIELDS),
+            "receipt_digests": receipt_digests,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if len(digest_summary) <= _MAX_PR_REVIEW_RECEIPTS_CHARS:
+        return digest_summary
+
+    return json.dumps(
+        {
+            "summary_policy": _HOST_RECEIPT_AGGREGATE_SUMMARY_POLICY,
+            "receipt_count": len(compacted),
+            "identity_fields": list(_HOST_RECEIPT_IDENTITY_FIELDS),
+            "identity_sha256": hashlib.sha256(
+                json.dumps(
+                    identity_records,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 

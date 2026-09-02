@@ -15,6 +15,7 @@ from hephaestus.automation.pr_review_core import (
     AGGRESSIVE_DIFF_BUDGET_CHARS,
     DEFAULT_DIFF_BUDGET_CHARS,
     MAX_PR_REVIEW_RENDERED_CHARS,
+    _compact_host_verifications_json,
     budget_diff_for_prompt,
     build_bounded_pr_review_analysis_prompt,
     gather_impl_review_context,
@@ -580,6 +581,102 @@ def test_bounded_review_prompt_preserves_receipts_without_exceeding_agent_limit(
     assert "tests/unit/test_0.py" in prompt
     assert "tests/unit/test_34.py" in prompt
     assert "[... PR diff truncated ...]" in prompt
+
+
+def test_host_receipt_overflow_keeps_valid_identity_records() -> None:
+    """The overflow summary keeps one identity record for each receipt."""
+    receipts = [
+        {
+            "argv": [
+                "uv",
+                "run",
+                "pytest",
+                "-o",
+                "addopts=",
+                f"tests/unit/test_{index}_{'x' * 220}.py",
+                "-q",
+            ],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "failure_kind": "none",
+            "ok": True,
+            "platform": "darwin",
+            "status": "passed",
+            "stdout_tail": "s" * 4_000,
+            "stderr_tail": "e" * 4_000,
+        }
+        for index in range(240)
+    ]
+
+    compacted_json = _compact_host_verifications_json(json.dumps(receipts))
+    compacted = json.loads(compacted_json)
+
+    assert compacted["summary_policy"] == "host-receipt-digests-v1"
+    assert compacted["receipt_count"] == len(receipts)
+    identity_fields = [
+        "argv",
+        "head_sha",
+        "immutable_source",
+        "ok",
+        "status",
+        "platform",
+        "failure_kind",
+    ]
+    assert compacted["identity_fields"] == identity_fields
+    assert len(compacted["receipt_digests"]) == len(receipts)
+    assert all(isinstance(digest, str) and digest for digest in compacted["receipt_digests"])
+
+
+def test_bounded_review_prompt_caps_extreme_receipt_count() -> None:
+    """The digest summary keeps an extreme receipt stream under the prompt cap."""
+    receipts = [
+        {
+            "argv": ["uv", "run", "pytest", f"tests/unit/test_{index}_{'x' * 220}.py"],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "failure_kind": "none",
+            "ok": True,
+            "platform": "darwin",
+            "status": "passed",
+            "stdout_tail": "s" * 4_000,
+            "stderr_tail": "e" * 4_000,
+        }
+        for index in range(1_000)
+    ]
+    host_verifications_json = json.dumps(receipts)
+
+    compacted = json.loads(_compact_host_verifications_json(host_verifications_json))
+    prompt = build_bounded_pr_review_analysis_prompt(
+        pr_number=2755,
+        issue_number=2705,
+        host_verifications_json=host_verifications_json,
+    )
+
+    assert compacted["summary_policy"] == "host-receipt-digests-v1"
+    assert compacted["receipt_count"] == len(receipts)
+    assert len(compacted["receipt_digests"]) == len(receipts)
+    assert len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS
+
+
+def test_host_receipt_aggregate_summary_is_bounded_and_valid() -> None:
+    """The aggregate policy records count and identity for a very large stream."""
+    receipts = [
+        {
+            "argv": ["pytest", f"tests/unit/test_{index}.py"],
+            "head_sha": "a" * 40,
+            "immutable_source": True,
+            "ok": True,
+            "status": "passed",
+        }
+        for index in range(2_000)
+    ]
+
+    compacted = json.loads(_compact_host_verifications_json(json.dumps(receipts)))
+
+    assert compacted["summary_policy"] == "host-receipt-aggregate-v1"
+    assert compacted["receipt_count"] == len(receipts)
+    assert len(compacted["identity_sha256"]) == 64
+    assert len(json.dumps(compacted, separators=(",", ":"))) <= 64_000
 
 
 class TestStructuralAuditNotProse:
