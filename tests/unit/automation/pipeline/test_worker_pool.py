@@ -2249,6 +2249,36 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == str(tmp_path / "wt")
 
+    def test_create_worktree_uses_canonical_repository_for_remote_validation(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A short scheduler key never becomes the authenticated origin identity."""
+        job = GitJob(
+            repo="Hephaestus",
+            expected_repository="HomericIntelligence/Hephaestus",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={"issue_number": 2912, "branch_name": "2912-auto", "repo_root": str(tmp_path)},
+        )
+        manager = MagicMock()
+        manager.create_worktree.return_value = None
+
+        with (
+            patch.object(
+                pool,
+                "_prepare_direct_scope_worktree",
+                return_value=(None, "2912-auto"),
+            ) as prepare,
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+        ):
+            result = pool._git_create_worktree(job)
+
+        assert result.ok is True
+        assert result.value is None
+        assert prepare.call_args.kwargs["expected_repo"] == "HomericIntelligence/Hephaestus"
+
     def test_create_worktree_reports_existing_branch_owner(
         self,
         pool: WorkerPool,

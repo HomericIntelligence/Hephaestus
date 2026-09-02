@@ -849,6 +849,7 @@ def _build_rebase_job(item: WorkItem, ctx: StageContext, *, descr: str) -> GitJo
         repo=item.repo,
         op="rebase",
         timeout_s=stage_timeout(ctx, "rebase", GIT_JOB_TIMEOUT_S),
+        expected_repository=f"{ctx.org}/{item.repo}",
         kwargs={
             "cwd": _worktree_path(item, ctx),
             "base_branch": str(item.payload.get("base_branch") or "main"),

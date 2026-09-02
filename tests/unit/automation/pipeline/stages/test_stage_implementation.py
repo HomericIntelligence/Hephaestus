@@ -1418,6 +1418,10 @@ class TestWorktreeAndAdvise:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, GitJob)
         assert result.job.op == "create_worktree"
+        # The short repository key remains the scheduler identity, while Git
+        # transport must authenticate against the canonical GitHub owner/name.
+        assert result.job.repo == "test-repo"
+        assert result.job.expected_repository == "test-org/test-repo"
         assert result.job.kwargs == {
             "issue_number": 1,
             "branch_name": "1-auto-impl",

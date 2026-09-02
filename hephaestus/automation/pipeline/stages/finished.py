@@ -232,6 +232,7 @@ class FinishedStage(Stage):
                                 repo=item.repo,
                                 op="release_branch_reservation",
                                 timeout_s=stage_timeout(ctx, "metadata", GIT_JOB_TIMEOUT_S),
+                                expected_repository=f"{ctx.org}/{item.repo}",
                                 kwargs={
                                     "branch": branch_name,
                                     "base_sha": base_sha,

@@ -2575,7 +2575,7 @@ class WorkerPool:
             cwd = Path(str(job.kwargs.get("cwd") or ""))
 
             revalidate_remote = self._authenticated_remote_revalidator(
-                cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
+                cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
             )
             remote_env, remote_config = revalidate_remote()
             git_utils.push_current_branch_with_lease_on_divergence(
@@ -2596,7 +2596,7 @@ class WorkerPool:
             repo_root = Path(str(job.kwargs.get("repo_root") or ""))
 
             revalidate_remote = self._authenticated_remote_revalidator(
-                cwd=repo_root, expected_repo=job.repo, timeout=job.timeout_s
+                cwd=repo_root, expected_repo=job.transport_repository, timeout=job.timeout_s
             )
             remote_env, remote_config = revalidate_remote()
             return run_cleanup_job(
@@ -2682,7 +2682,7 @@ class WorkerPool:
         cwd = Path(str(kwargs.get("cwd") or ""))
 
         revalidate_remote = self._authenticated_remote_revalidator(
-            cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
+            cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
         if publish_rebased_head:
@@ -2696,7 +2696,7 @@ class WorkerPool:
                 enabled=sync_to_expected_remote_head,
                 branch=branch,
                 remote=remote,
-                expected_repo=job.repo,
+                expected_repo=job.transport_repository,
                 pr_number=pr_number,
                 expected_remote_sha=expected_remote_sha,
                 timeout=job.timeout_s,
@@ -2720,7 +2720,7 @@ class WorkerPool:
                     cwd,
                     remote=remote,
                     branch=branch,
-                    expected_repo=job.repo,
+                    expected_repo=job.transport_repository,
                     expected_remote_sha=expected_remote_sha,
                     timeout=job.timeout_s,
                 )
@@ -2763,7 +2763,7 @@ class WorkerPool:
             return source_sha
         remote_env, remote_config = self._authenticated_remote_git_configuration(
             cwd=cwd,
-            expected_repo=job.repo,
+            expected_repo=job.transport_repository,
             timeout=job.timeout_s,
         )
         git_utils.push_head_to_branch(
@@ -3071,7 +3071,7 @@ class WorkerPool:
             cwd,
             remote=remote,
             branch=branch,
-            expected_repo=job.repo,
+            expected_repo=job.transport_repository,
             timeout=job.timeout_s,
         )
         if isinstance(remote_head, JobResult):
@@ -3121,7 +3121,7 @@ class WorkerPool:
             return JobResult(ok=False, error="completed rebase did not rewrite the branch head")
 
         revalidate_remote = self._authenticated_remote_revalidator(
-            cwd=cwd, expected_repo=job.repo, timeout=job.timeout_s
+            cwd=cwd, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
         git_utils.push_head_to_branch(
@@ -3654,7 +3654,7 @@ class WorkerPool:
                 kwargs=kwargs,
                 sync_to_remote=sync_to_remote,
                 repo_root=repo_root,
-                expected_repo=job.repo,
+                expected_repo=job.transport_repository,
                 timeout_s=job.timeout_s,
             )
         except git_utils.DirectBranchReservationCollisionError as exc:
@@ -3690,7 +3690,7 @@ class WorkerPool:
                     branch_name=branch_name,
                     base_sha=base_sha,
                     repo_root=repo_root,
-                    expected_repo=job.repo,
+                    expected_repo=job.transport_repository,
                     timeout_s=job.timeout_s,
                     error=f"worktree creation failed: {exc}",
                 )
@@ -3700,7 +3700,7 @@ class WorkerPool:
             base_sha=base_sha,
             branch_name=branch_name,
             repo_root=repo_root,
-            repo=job.repo,
+            repo=job.transport_repository,
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
             timeout_s=job.timeout_s,
@@ -3939,7 +3939,7 @@ class WorkerPool:
         self._sync_worktree_to_remote_branch(
             worktree,
             branch,
-            expected_repo=job.repo,
+            expected_repo=job.transport_repository,
             pr_number=int(pr_number) if pr_number is not None else None,
             timeout=job.timeout_s,
         )
@@ -3955,7 +3955,7 @@ class WorkerPool:
         # distinguish an A -> B -> A head race from a stable A snapshot.
         remote_env, remote_config = self._authenticated_remote_git_configuration(
             cwd=worktree,
-            expected_repo=job.repo,
+            expected_repo=job.transport_repository,
             timeout=job.timeout_s,
         )
         git_utils.run(
@@ -4192,7 +4192,7 @@ class WorkerPool:
             return source_sha
 
         revalidate_remote = self._authenticated_remote_revalidator(
-            cwd=worktree_path, expected_repo=job.repo, timeout=job.timeout_s
+            cwd=worktree_path, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
         if isinstance(expected_remote_sha, str):
@@ -4332,7 +4332,7 @@ class WorkerPool:
             return True
 
         revalidate_remote = self._authenticated_remote_revalidator(
-            cwd=worktree_path, expected_repo=job.repo, timeout=job.timeout_s
+            cwd=worktree_path, expected_repo=job.transport_repository, timeout=job.timeout_s
         )
         remote_env, remote_config = revalidate_remote()
         released = git_utils.delete_reserved_branch_if_unchanged(
