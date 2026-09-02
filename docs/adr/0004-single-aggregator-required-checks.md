@@ -19,15 +19,19 @@ job:
 
 1. One job, `required-checks-gate`
    (`.github/workflows/_required.yml:924`), fans in every gating job via its
-   `needs:` list. It PASSES when every needed job is `success` or `skipped`
-   (skipped = legitimately gated off) and FAILS on `failure`/`cancelled`.
+   `needs:` list. All dependencies must succeed by default. Only `pr-policy`
+   may be `skipped` on `push`. A `skipped` result for any other dependency, or
+   a `failure`, `cancelled`, missing, or unknown result, fails the gate. On
+   `pull_request` and `merge_group`, every dependency must be `success`.
 2. Branch protection requires only that single context (alongside the two
    `test (...)` contexts from `test.yml`), with `strict: false` — the checks
    gate every merge, but PRs are not required to be up to date with `main`
    (avoids rebase churn under a fast-moving `main`; see
    `docs/ci/required-checks.md`).
 3. `if: always()` is mandatory so the gate reports a definite
-   success/failure even when heavy jobs skip on label / auto-merge events.
+   success/failure for each supported event. The gate supports `push`,
+   `pull_request`, and `merge_group` only. Unsupported events are rejected
+   until reviewed.
 
 `docs/ci/required-checks.md` is the operational source of truth for the gate;
 this ADR records the *why*. Workflow changes are reviewed directly and
