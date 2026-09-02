@@ -4216,11 +4216,14 @@ class TestEvalVerdicts:
         assert github.pending_go_audits == {}
         assert github.comments.get(1001, []) == []
 
+    @pytest.mark.parametrize("grade", ["A", "F"])
     def test_explicit_go_verdict_creates_implementation_go_artifacts(
-        self, make_ctx: Any, make_work_item: Any
+        self, make_ctx: Any, make_work_item: Any, grade: str
     ) -> None:
-        """A valid structured GO verdict permits the normal GO transition."""
-        audit = parse_review_audit('{"grade":"A","verdict":"GO","summary":"Clean","comments":[]}')
+        """A valid GO verdict, not the grade, permits the normal GO transition."""
+        audit = parse_review_audit(
+            f'{{"grade":"{grade}","verdict":"GO","summary":"Clean","comments":[]}}'
+        )
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)])
         item = make_work_item(issue=1, pr=1001, state="EVAL")
@@ -4230,6 +4233,7 @@ class TestEvalVerdicts:
 
         assert audit.valid is True
         assert audit.verdict == "GO"
+        assert audit.grade == grade
         assert result == StageOutcome(Disposition.ADVANCE, "review audit; merge wait pending")
         names = [name for name, _args in github.mutation_log]
         assert "persist_pending_implementation_go_audit" in names
