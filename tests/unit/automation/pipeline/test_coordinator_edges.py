@@ -1026,6 +1026,67 @@ class TestLivenessAndFatal:
 
         assert ran == [1]
 
+    def test_stall_recovery_preserves_retained_overlap_claim_and_runs_independent_work(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Implementation recovery keeps blocked work queued and runs safe work."""
+        coordinator = _coordinator(
+            tmp_path,
+            monkeypatch,
+            max_workers=3,
+            serialize_file_overlap=True,
+            coordinator_kwargs={"stall_ticks_before_force": 1},
+        )
+        ran: list[int] = []
+        shared_claim = (("org", "repo-a"), "shared.py")
+        independent_claim = (("org", "repo-a"), "independent.py")
+
+        class ImplementationStage:
+            def on_enter(self, i: WorkItem, ctx: Any) -> Any:
+                return None
+
+            def step(self, i: WorkItem, ctx: Any) -> Any:
+                ran.append(i.issue or 0)
+                return StageOutcome(Disposition.SKIP, "recovered")
+
+            def on_job_done(self, i: WorkItem, result: Any, ctx: Any) -> None:
+                pass
+
+        coordinator.stages[StageName.IMPLEMENTATION] = ImplementationStage()
+        owner = _item(1, StageName.PR_REVIEW)
+        owner.payload["_implementation_file_claims"] = {shared_claim}
+        assert coordinator._push_item(owner, StageName.PR_REVIEW, enter=False)
+        assert coordinator._claim_item(StageName.PR_REVIEW) is owner
+        coordinator._implementation_file_claims[id(owner)] = {shared_claim}
+
+        assert id(owner) in coordinator._leases
+        assert all(owner not in queue.snapshot() for queue in coordinator.queues.values())
+        assert owner not in coordinator.in_flight.values()
+        assert owner not in coordinator.auxiliary_in_flight.values()
+        assert shared_claim in coordinator._active_implementation_file_claims()
+
+        blocked = _item(2, StageName.IMPLEMENTATION)
+        blocked.payload["_implementation_file_claims"] = {shared_claim}
+        assert coordinator._push_item(blocked, StageName.IMPLEMENTATION, enter=False)
+        coordinator._progress = False
+
+        coordinator._idle_wait()
+
+        assert ran == []
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [blocked]
+        assert coordinator._implementation_file_claims[id(owner)] == {shared_claim}
+
+        independent = _item(3, StageName.IMPLEMENTATION)
+        independent.payload["_implementation_file_claims"] = {independent_claim}
+        assert coordinator._push_item(independent, StageName.IMPLEMENTATION, enter=False)
+        coordinator._progress = False
+
+        coordinator._idle_wait()
+
+        assert ran == [3]
+        assert coordinator.queues[StageName.IMPLEMENTATION].snapshot() == [blocked]
+        assert coordinator._implementation_file_claims[id(owner)] == {shared_claim}
+
     def test_idle_wait_uses_named_poll_interval_constant(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

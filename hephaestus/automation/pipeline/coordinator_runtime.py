@@ -633,13 +633,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         )
 
     def _idle_wait(self) -> None:
-        """Block on the completion queue (the loop's only sleep).
-
-        Also breaks a theoretical no-progress stall: if a full tick made no
-        progress with nothing in flight and no timers pending, force-run the
-        most-downstream queued item ignoring admission (liveness guarantee —
-        admission can only defer while something else is running or parked).
-        """
+        """Wait for completion. Implementation recovery uses normal admission controls."""
         if self._progress:
             self._progress = False
             self._stalled_ticks = 0
@@ -654,7 +648,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         self._wait_for_completion(timeout=timeout)
 
     def _force_run_one(self) -> None:
-        """Run the first item of the most-downstream non-empty queue."""
+        """Recover one item from the most-downstream non-empty queue."""
         assert not self.in_flight and not self.auxiliary_in_flight, (  # noqa: S101
             "force-run requires no in-flight work"
         )
@@ -662,6 +656,14 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
         for stage_name in ct._DRAIN_ORDER:
             q = self.queues[stage_name]
             if len(q):
+                if stage_name is ct.StageName.IMPLEMENTATION:
+                    logger.error(
+                        "pipeline stalled with no in-flight work; "
+                        "running normal implementation dispatch; inflight_per_repo=%s",
+                        dict(self.inflight_per_repo),
+                    )
+                    self._drain_implementation()
+                    return
                 item = self._claim_item(stage_name)
                 if item is None:  # pragma: no cover - len/claim are coordinator-thread atomic
                     continue
@@ -677,9 +679,7 @@ class CoordinatorRuntime(PendingHandoffCoordinator, _CoordinatorHost):
 
     def _timer_park(self, item: ct.WorkItem, delay_s: float) -> None:
         """Park *item* on the timer heap for ``delay_s`` seconds."""
-        # A timer is outside every stage queue.  Release a normal drain's
-        # source lease before parking so its capacity is not stranded while
-        # preserving the timer's single owner for the work item.
+        # Timers own items outside queues. Release source leases before parking.
         self._release_source_lease(item)
         wake = self._monotonic() + max(0.0, delay_s)
         heapq.heappush(self.timers, (wake, self._seq, item))
