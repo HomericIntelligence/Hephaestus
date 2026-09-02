@@ -8,9 +8,11 @@ ownership check) and
 binding contract):
 
 - States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
+  DIRTY_RECOVERY_WAIT ->
   ADVISE_WAIT -> IMPLEMENT_WAIT -> REBASE_CONTINUE_WAIT / TEST_WAIT -> TESTFIX_WAIT ->
   COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
-  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
+  WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> DIRTY_RECOVERY_WAIT -> ADOPTED
+  (ADVANCE to pr_review).
 - Budgets: ``implement`` = 2 (bounds ordinary implement attempts INCLUDING
   agent_error retries — the doc's "agent_error -> RETRY (consumes the
   implement budget)"), ``test_fix`` = 1 (one fix attempt on red pre-PR
@@ -185,6 +187,7 @@ ENTER = "ENTER"
 GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
+DIRTY_RECOVERY_WAIT = "DIRTY_RECOVERY_WAIT"
 REBASE_WAIT = "REBASE_WAIT"
 REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
@@ -204,6 +207,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     GATE: "_gate",
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
+    DIRTY_RECOVERY_WAIT: "_dirty_recovery_wait",
     REBASE_WAIT: "_rebase_wait",
     REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
     REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
@@ -225,6 +229,21 @@ _REPLY_JOURNAL_APPEND_RESULT = "_reply_journal_append_result"
 _REPLY_HANDOFF_RESULT = "_reply_handoff_result"
 _SYNC_RESTORED_WRITER_BEFORE_REBASE = "sync_restored_writer_before_rebase"
 _REBASE_HEAD_DRIFT = "rebase_head_drift"
+
+
+def parse_dirty_worktree_decision(output: object) -> str | None:
+    """Return a valid dirty-worktree action from an agent response.
+
+    The final nonempty line is the action. It must be the exact token that
+    grants the host Git worker its limited recovery authority.
+    """
+    if not isinstance(output, str):
+        return None
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        return None
+    action = lines[-1]
+    return action if action in {"COMMIT", "STASH"} else None
 
 
 def _issue_number(item: WorkItem) -> int:
@@ -581,15 +600,7 @@ class ImplementationStage(Stage):
             if outcome.disposition is Disposition.RETRY:
                 item.state = WORKTREE_WAIT
             return outcome
-        # Reviewers never rebase. A reviewed head that merge-wait finds behind
-        # or conflicting returns here for implementation-owned rebasing, then
-        # passes through a fresh review of the rewritten head.
-        if item.payload.get("post_review_rebase_required"):
-            adopted_next = REBASE_WAIT
-        elif item.payload.get("existing_pr_impl_go"):
-            adopted_next = ADOPTED
-        else:
-            adopted_next = REBASE_WAIT if item.payload.get("existing_pr") else ADVISE_WAIT
+        adopted_next = self._dirty_recovery_destination(item)
         if not item.payload.get("worktree_dirty"):
             return Continue(next_state=adopted_next)
         logger.info("implementation:%d: requesting dirty-worktree decision", issue)
@@ -620,9 +631,91 @@ class ImplementationStage(Stage):
                 "status_text": item.payload.get("worktree_status", ""),
                 "diff_text": item.payload.get("worktree_diff", ""),
             },
+            parse=parse_dirty_worktree_decision,
             descr="dirty_decision",
         )
-        return JobRequest(job, on_done_state=adopted_next)
+        return JobRequest(job, on_done_state=DIRTY_RECOVERY_WAIT)
+
+    @staticmethod
+    def _dirty_recovery_destination(item: WorkItem) -> str:
+        """Return the state to enter after a verified dirty-worktree recovery."""
+        if item.payload.get("post_review_rebase_required"):
+            return REBASE_WAIT
+        if item.payload.get("existing_pr_impl_go"):
+            return ADOPTED
+        return REBASE_WAIT if item.payload.get("existing_pr") else ADVISE_WAIT
+
+    def _dirty_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Recover a dirty adopted writer through a locked host Git job."""
+        if not item.payload.get("worktree_dirty"):
+            return Continue(next_state=self._dirty_recovery_destination(item))
+        action = item.payload.get("dirty_decision")
+        if action not in {"COMMIT", "STASH"}:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_decision_invalid")
+        if item.pr is None or not item.worktree:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_writer_unavailable")
+        branch = item.payload.get("worktree_registered_branch")
+        local_head = item.payload.get("worktree_local_head")
+        if branch != item.branch or not is_full_commit_sha(local_head):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_writer_identity_invalid")
+        if item.payload.get("dirty_recovery_submitted"):
+            disposition = item.payload.get("dirty_recovery_disposition")
+            if not self._valid_dirty_recovery_disposition(disposition, item.branch):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_failed")
+            recovery_record = cast(dict[str, object], disposition)
+            recovered_head = cast(str, recovery_record["current_head"])
+            fresh = ctx.github.gh_pr_state(item.pr)
+            fresh_head = fresh.get("headRefOid") if isinstance(fresh, dict) else None
+            if not _is_confirmed_open_unarmed(fresh) or fresh_head != recovered_head:
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_head_drift")
+            item.payload["worktree_dirty"] = False
+            item.payload["_impl_source_revision"] = recovered_head
+            if self._dirty_recovery_destination(item) == REBASE_WAIT:
+                item.payload["dirty_recovery_rebase_lease"] = recovered_head
+            return Continue(next_state=self._dirty_recovery_destination(item))
+        state = ctx.github.gh_pr_state(item.pr)
+        if not _is_confirmed_open_unarmed(state):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_state_unverified")
+        remote_head = state.get("headRefOid") if isinstance(state, dict) else None
+        if not is_full_commit_sha(remote_head) or remote_head != local_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_head_drift")
+        item.payload["dirty_recovery_submitted"] = True
+        return JobRequest(
+            GitJob(
+                repo=item.repo,
+                op="recover_dirty_worktree",
+                timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                expected_repository=f"{ctx.org}/{item.repo}",
+                kwargs={
+                    "repo_root": str(ctx.paths.repo_root),
+                    "worktree_path": item.worktree,
+                    "branch": item.branch,
+                    "expected_local_head": local_head,
+                    "expected_remote_head": remote_head,
+                    "action": action,
+                    "issue_number": _issue_number(item),
+                    "agent": agent_provider(ctx),
+                    "agent_model": stage_model(ctx, "implementer", implementer_model),
+                    "git_message_timeout": git_message_agent_timeout(),
+                },
+                descr="recover_dirty_worktree",
+            ),
+            on_done_state=DIRTY_RECOVERY_WAIT,
+        )
+
+    @staticmethod
+    def _valid_dirty_recovery_disposition(value: object, branch: str) -> bool:
+        """Return whether a worker recovery receipt authorizes stage progress."""
+        if not isinstance(value, dict):
+            return False
+        return (
+            value.get("outcome") == "success"
+            and value.get("branch") == branch
+            and value.get("action") in {"COMMIT", "STASH"}
+            and value.get("action_applied") is True
+            and value.get("final_clean") is True
+            and is_full_commit_sha(value.get("current_head"))
+        )
 
     def _rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Rebase an adopted writer branch before implementation or review.
@@ -654,9 +747,13 @@ class ImplementationStage(Stage):
         state = ctx.github.gh_pr_state(item.pr)
         if not _is_confirmed_open_unarmed(state):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_state_unverified")
-        expected_head = state.get("headRefOid") if isinstance(state, dict) else None
+        expected_head = item.payload.get("dirty_recovery_rebase_lease") or (
+            state.get("headRefOid") if isinstance(state, dict) else None
+        )
         if not is_full_commit_sha(expected_head):
             return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_head_unavailable")
+        if not isinstance(state, dict) or state.get("headRefOid") != expected_head:
+            return StageOutcome(Disposition.FINISH_FAIL, "rebase_pr_head_drift")
         kwargs: dict[str, object] = {
             "cwd": _worktree_path(item, ctx),
             "base_branch": "main",
@@ -1292,9 +1389,11 @@ class ImplementationStage(Stage):
             return
 
         if item.state == DIRTY_DECISION_WAIT:
-            if result.ok and result.value:
-                # COMMIT/STASH decision; the git worker acts on it (#1817).
-                item.payload["dirty_decision"] = str(result.value)
+            item.payload["dirty_decision"] = result.value if result.ok else None
+            return
+
+        if item.state == DIRTY_RECOVERY_WAIT:
+            item.payload["dirty_recovery_disposition"] = result.value
             return
 
         if item.state == REBASE_WAIT:
@@ -1764,6 +1863,12 @@ class ImplementationStage(Stage):
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
+            if value.get("dirty"):
+                item.payload["worktree_registered_branch"] = value.get("registered_branch")
+                item.payload["worktree_local_head"] = value.get("local_head")
+            else:
+                item.payload.pop("worktree_registered_branch", None)
+                item.payload.pop("worktree_local_head", None)
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
                 not bool(item.payload.get("existing_pr")) and direct_base_sha is not None

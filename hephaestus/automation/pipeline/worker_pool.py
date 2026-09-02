@@ -2590,6 +2590,9 @@ class WorkerPool:
         elif job.op == "commit_push":
             return self._git_commit_push(job)
 
+        elif job.op == "recover_dirty_worktree":
+            return self._git_recover_dirty_worktree(job)
+
         elif job.op == "release_branch_reservation":
             from .git_cleanup import run_cleanup_job
 
@@ -3765,7 +3768,7 @@ class WorkerPool:
             )
         return JobResult(ok=False, error=error)
 
-    def _finalize_created_worktree(
+    def _finalize_created_worktree(  # noqa: C901
         self,
         *,
         created: Path | None,
@@ -3847,6 +3850,20 @@ class WorkerPool:
                 )
                 status = status_result.stdout or ""
                 diff = diff_result.stdout or ""
+                registered_branch = git_utils.run(
+                    ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout_s,
+                ).stdout.strip()
+                local_head = git_utils.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=worktree_path,
+                    capture_output=True,
+                    timeout=timeout_s,
+                ).stdout.strip()
+                if registered_branch != branch_name or not _is_full_commit_sha(local_head):
+                    raise RuntimeError("dirty adopted writer identity is unavailable")
             elif branch_name:
                 self._sync_worktree_to_remote_branch(
                     worktree_path,
@@ -3867,6 +3884,9 @@ class WorkerPool:
             "status": status,
             "diff": diff,
         }
+        if dirty:
+            value["registered_branch"] = registered_branch
+            value["local_head"] = local_head
         return JobResult(ok=True, value=value)
 
     def _prepare_direct_scope_worktree(
@@ -4091,6 +4111,229 @@ class WorkerPool:
         if scope_retraction is not None:
             return scope_retraction
         return self._publish_commit_push(job, branch, Path(worktree_path))
+
+    def _git_recover_dirty_worktree(self, job: GitJob) -> JobResult:  # noqa: C901
+        """Recover one dirty adopted writer without discarding its changes.
+
+        This operation is intentionally closed: it can create and publish one
+        signed commit, or it can create one stash. It does not reset, clean,
+        overwrite, pop, or drop data.
+        """
+        kwargs = job.kwargs
+        action = kwargs.get("action")
+        branch = kwargs.get("branch")
+        raw_path = kwargs.get("worktree_path")
+        raw_root = kwargs.get("repo_root")
+        expected_head = kwargs.get("expected_local_head")
+        expected_remote = kwargs.get("expected_remote_head")
+        path = Path(str(raw_path)) if isinstance(raw_path, str) and raw_path else None
+        root = Path(str(raw_root)) if isinstance(raw_root, str) and raw_root else None
+        disposition: dict[str, object] = {
+            "outcome": "failure",
+            "failure_kind": "validation",
+            "action": action if action in {"COMMIT", "STASH"} else None,
+            "branch": branch if isinstance(branch, str) else None,
+            "worktree_path": str(path) if path is not None else None,
+            "pre_action_head": expected_head if _is_full_commit_sha(expected_head) else None,
+            "current_head": None,
+            "expected_remote_head": (
+                expected_remote if _is_full_commit_sha(expected_remote) else None
+            ),
+            "remote_head": None,
+            "published": False,
+            "stash_object": None,
+            "action_applied": False,
+            "final_clean": False,
+            "cause": None,
+        }
+
+        def failed(kind: str, cause: object) -> JobResult:
+            disposition["failure_kind"] = kind
+            disposition["cause"] = bounded_git_diagnostic(cause, limit=500)
+            return JobResult(ok=False, value=disposition, error=f"dirty recovery {kind}")
+
+        if (
+            action not in {"COMMIT", "STASH"}
+            or not isinstance(branch, str)
+            or not branch
+            or path is None
+            or root is None
+            or not _is_full_commit_sha(expected_head)
+            or not _is_full_commit_sha(expected_remote)
+        ):
+            return failed("arguments_invalid", "dirty recovery arguments are invalid")
+        try:
+            canonical_root = root.resolve(strict=True)
+            canonical_path = path.resolve(strict=True)
+            relative = canonical_path.relative_to(canonical_root)
+            candidate = canonical_root
+            for component in relative.parts:
+                candidate /= component
+                if candidate.is_symlink():
+                    return failed("path_invalid", "worktree path contains a symbolic link")
+            manager = WorktreeManager(
+                base_dir=canonical_root / "build" / ".worktrees",
+                repo_root=canonical_root,
+            )
+            expected_branch_ref = f"refs/heads/{branch}"
+            registered = any(
+                Path(record.get("path", "")).resolve(strict=True) == canonical_path
+                and record.get("branch") == expected_branch_ref
+                and record.get("commit") == expected_head
+                for record in manager.list_worktrees(raise_on_error=True, timeout=job.timeout_s)
+            )
+            if not registered:
+                return failed("writer_identity_mismatch", "worktree registration changed")
+            local_branch = git_utils.run(
+                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                cwd=canonical_path,
+                capture_output=True,
+                timeout=job.timeout_s,
+            ).stdout.strip()
+            current_head = self._read_publish_head(canonical_path, timeout=job.timeout_s)
+            if isinstance(current_head, JobResult):
+                return failed(
+                    "writer_identity_mismatch", current_head.error or "cannot read local head"
+                )
+            disposition["current_head"] = current_head
+            if local_branch != branch or current_head != expected_head:
+                return failed("writer_identity_mismatch", "writer branch or local head changed")
+            remote_head = self._read_remote_branch_head(
+                canonical_path,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            if isinstance(remote_head, JobResult):
+                return failed(
+                    "remote_identity_unavailable", remote_head.error or "cannot read remote head"
+                )
+            disposition["remote_head"] = remote_head
+            if remote_head != expected_remote or remote_head != expected_head:
+                return failed("remote_identity_mismatch", "remote writer head changed")
+            if git_utils.is_clean_working_tree(canonical_path, timeout=job.timeout_s):
+                return failed("writer_not_dirty", "writer is already clean")
+
+            if action == "COMMIT":
+                issue_number = kwargs.get("issue_number")
+                if not isinstance(issue_number, int):
+                    return failed("arguments_invalid", "issue number is invalid")
+                changed = self._commit_if_changes_with_controlled_signing(
+                    job,
+                    (issue_number, canonical_path, str(kwargs.get("agent", "claude"))),
+                    None,
+                    kwargs.get("agent_model"),
+                    int(kwargs.get("git_message_timeout", 1200)),
+                )
+                if isinstance(changed, JobResult):
+                    return failed("commit_failed", changed.error or "controlled commit failed")
+                if not changed:
+                    return failed("commit_failed", "controlled commit made no commit")
+                current_head = self._read_publish_head(canonical_path, timeout=job.timeout_s)
+                if isinstance(current_head, JobResult):
+                    return failed(
+                        "post_commit_inspection_failed",
+                        current_head.error or "cannot read commit",
+                    )
+                disposition["current_head"] = current_head
+                disposition["action_applied"] = True
+                parent = git_utils.run(
+                    ["git", "rev-parse", "HEAD^"],
+                    cwd=canonical_path,
+                    capture_output=True,
+                    timeout=job.timeout_s,
+                ).stdout.strip()
+                if parent != expected_head:
+                    return failed("post_commit_identity_mismatch", "recovery commit parent changed")
+                revalidate_remote = self._authenticated_remote_revalidator(
+                    cwd=canonical_path,
+                    expected_repo=job.transport_repository,
+                    timeout=job.timeout_s,
+                )
+                remote_env, remote_config = revalidate_remote()
+                git_utils.push_head_to_branch(
+                    branch,
+                    expected_remote,
+                    canonical_path,
+                    source_sha=current_head,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                    revalidate_remote=revalidate_remote,
+                )
+                disposition["published"] = True
+            else:
+                before = git_utils.run(
+                    ["git", "rev-parse", "--verify", "-q", "refs/stash"],
+                    cwd=canonical_path,
+                    capture_output=True,
+                    check=False,
+                    timeout=job.timeout_s,
+                ).stdout.strip()
+                git_utils.run(
+                    [
+                        "git",
+                        "stash",
+                        "push",
+                        "--include-untracked",
+                        "-m",
+                        "hephaestus dirty writer recovery",
+                    ],
+                    cwd=canonical_path,
+                    timeout=job.timeout_s,
+                )
+                stash = git_utils.run(
+                    ["git", "rev-parse", "--verify", "-q", "refs/stash"],
+                    cwd=canonical_path,
+                    capture_output=True,
+                    check=False,
+                    timeout=job.timeout_s,
+                ).stdout.strip()
+                if not _is_full_commit_sha(stash) or stash == before:
+                    return failed("stash_failed", "recovery did not create a new stash")
+                disposition["stash_object"] = stash
+                disposition["action_applied"] = True
+                current_head = self._read_publish_head(canonical_path, timeout=job.timeout_s)
+                if isinstance(current_head, JobResult):
+                    return failed(
+                        "post_stash_inspection_failed",
+                        current_head.error or "cannot read head",
+                    )
+                disposition["current_head"] = current_head
+                if current_head != expected_head:
+                    return failed("post_stash_identity_mismatch", "stash changed local head")
+
+            remote_head = self._read_remote_branch_head(
+                canonical_path,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            if isinstance(remote_head, JobResult):
+                return failed(
+                    "postflight_remote_unavailable",
+                    remote_head.error or "cannot read remote head",
+                )
+            disposition["remote_head"] = remote_head
+            recovered_head = disposition["current_head"]
+            if not isinstance(recovered_head, str):
+                return failed("postflight_identity_unavailable", "recovery head is unavailable")
+            if remote_head != recovered_head:
+                return failed(
+                    "postflight_remote_mismatch",
+                    "remote writer head does not match recovery head",
+                )
+            final_clean = git_utils.is_clean_working_tree(canonical_path, timeout=job.timeout_s)
+            disposition["final_clean"] = final_clean
+            if not final_clean:
+                return failed("postflight_dirty", "writer remains dirty after recovery")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return failed("host_operation_failed", exc)
+        disposition["outcome"] = "success"
+        disposition["failure_kind"] = None
+        return JobResult(ok=True, value=disposition)
 
     @staticmethod
     def _commit_if_changes_with_controlled_signing(

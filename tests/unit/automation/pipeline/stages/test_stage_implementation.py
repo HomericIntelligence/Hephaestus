@@ -41,11 +41,13 @@ from hephaestus.automation.pipeline.stages import (
 )
 from hephaestus.automation.pipeline.stages.implementation import (
     BRANCH_WORKTREE_OWNER_PENDING_DELAY_S,
+    DIRTY_RECOVERY_WAIT,
     GIT_ERROR_RETRY_CAP,
     PRE_PR_TEST_ARGV,
     ImplementationStage,
     build_implementation_prompt,
     build_test_fix_prompt,
+    parse_dirty_worktree_decision,
 )
 from hephaestus.automation.prompts.address_review import get_address_review_prompt
 from hephaestus.automation.state_labels import (
@@ -167,6 +169,82 @@ class TestComposedPromptBuilders:
 
         assert "FAILED tests/unit/test_x.py::test_y" in prompt
         assert "Address every concrete finding above" in prompt
+
+
+class TestDirtyWorktreeRecovery:
+    """Dirty adopted writers require an explicit host recovery action."""
+
+    @pytest.mark.parametrize("decision", ["COMMIT", "STASH"])
+    def test_dirty_decision_parser_accepts_exact_final_tokens(self, decision: str) -> None:
+        """Only an exact final action token is accepted."""
+        assert parse_dirty_worktree_decision(f"inspection complete\n{decision}\n") == decision
+
+    @pytest.mark.parametrize(
+        "output",
+        ["", "commit", "COMMIT now", "```\nCOMMIT\n```", "COMMIT\nextra"],
+    )
+    def test_dirty_decision_parser_rejects_malformed_output(self, output: str) -> None:
+        """Malformed agent output must not grant a Git mutation action."""
+        assert parse_dirty_worktree_decision(output) is None
+
+    def test_dirty_decision_wait_requires_host_recovery_before_rebase(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A dirty adopted writer cannot route directly to rebase."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "worktree_dirty": True,
+                "worktree_registered_branch": "1-auto-impl",
+                "worktree_local_head": "a" * 40,
+            }
+        )
+
+        decision = stage.step(item, make_ctx())
+
+        assert isinstance(decision, JobRequest)
+        assert decision.on_done_state == DIRTY_RECOVERY_WAIT
+
+    def test_verified_recovery_uses_the_published_head_for_rebase(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A published recovery commit becomes the next rebase lease."""
+        stage = ImplementationStage()
+        recovered_head = "b" * 40
+        github = FakeStageGitHub(
+            pr_state={"state": "OPEN", "headRefOid": recovered_head, "autoMergeRequest": None}
+        )
+        item = make_work_item(issue=1, pr=1001, state=DIRTY_RECOVERY_WAIT)
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/implementation-writer"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "worktree_dirty": True,
+                "worktree_registered_branch": "1-auto-impl",
+                "worktree_local_head": "a" * 40,
+                "dirty_decision": "COMMIT",
+                "dirty_recovery_submitted": True,
+                "dirty_recovery_disposition": {
+                    "outcome": "success",
+                    "action": "COMMIT",
+                    "branch": "1-auto-impl",
+                    "current_head": recovered_head,
+                    "action_applied": True,
+                    "final_clean": True,
+                },
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="REBASE_WAIT")
+        assert item.payload["_impl_source_revision"] == recovered_head
+        assert item.payload["dirty_recovery_rebase_lease"] == recovered_head
 
 
 class TestImplementationStageOnEnter:
@@ -666,7 +744,7 @@ class TestGate:
 
         assert isinstance(result, JobRequest)
         assert result.job.descr == "dirty_decision"
-        assert result.on_done_state == "REBASE_WAIT"
+        assert result.on_done_state == "DIRTY_RECOVERY_WAIT"
 
     def test_rebase_wait_rebases_and_lease_publishes_the_writer_before_review(
         self, make_ctx: Any, make_work_item: Any
@@ -1819,7 +1897,7 @@ class TestWorktreeAndAdvise:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.job.descr == "dirty_decision"
-        assert result.on_done_state == "ADVISE_WAIT"
+        assert result.on_done_state == "DIRTY_RECOVERY_WAIT"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
         assert result.job.prompt_kwargs["status_text"] == "M x.py"
 

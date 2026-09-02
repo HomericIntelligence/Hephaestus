@@ -1001,6 +1001,11 @@ stateDiagram-v2
     InspectPR --> Failed: closed without merge
     Adopt --> Prepare: safe to continue
     Adopt --> Failed: unsafe adoption
+    Prepare --> DirtyDecision: adopted writer is dirty
+    DirtyDecision --> DirtyRecovery: valid COMMIT or STASH decision
+    DirtyDecision --> Failed: invalid decision
+    DirtyRecovery --> Prepare: clean writer and verified PR head
+    DirtyRecovery --> Failed: recovery or identity check failed
     Prepare --> Implement: workspace ready
     Prepare --> Failed: workspace unavailable
     Implement --> Publish: changes complete
@@ -1023,6 +1028,18 @@ Architectural contract:
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
+- A dirty adopted writer cannot enter advice, rebase, adoption, or
+  implementation. A read-only agent returns the exact final token `COMMIT` or
+  `STASH`. The host validates this token and runs the selected recovery action
+  in the locked Git worker.
+- `COMMIT` creates one controlled signed and DCO-signed commit. The worker
+  verifies its direct parent, then publishes the exact commit with the prior
+  remote head as its lease. `STASH` uses `git stash push --include-untracked`.
+  It keeps the new stash object and does not pop or drop it.
+- Recovery checks the writer path, worktree registration, branch, local head,
+  remote head, final cleanliness, and the current open unarmed PR head. A
+  failed check preserves the writer worktree and its recovery commit or stash
+  record. Recovery does not reset, clean, overwrite, or remove dirty work.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot

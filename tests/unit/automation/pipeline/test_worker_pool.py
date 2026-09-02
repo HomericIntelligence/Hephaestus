@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, call, patch
 
@@ -2213,6 +2214,122 @@ class TestGitOps:
 
         monkeypatch.setattr(f"{_WP}._trusted_gh_executable", executable)
         monkeypatch.setattr(f"{__name__}._trusted_gh_executable", executable)
+
+    def test_dirty_recovery_commit_publishes_exact_head(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """COMMIT creates one recovery commit and lease-publishes its exact head."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(tmp_path),
+                "branch": "1-auto-impl",
+                "expected_local_head": old_head,
+                "expected_remote_head": old_head,
+                "action": "COMMIT",
+                "issue_number": 1,
+            },
+        )
+        manager = MagicMock()
+        manager.list_worktrees.return_value = [
+            {"path": str(tmp_path), "branch": "refs/heads/1-auto-impl", "commit": old_head}
+        ]
+        command_outputs = iter(["1-auto-impl", old_head])
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=lambda *_args, **_kwargs: SimpleNamespace(
+                    stdout=next(command_outputs), returncode=0
+                ),
+            ),
+            patch.object(pool, "_read_publish_head", side_effect=[old_head, new_head]),
+            patch.object(pool, "_read_remote_branch_head", side_effect=[old_head, new_head]),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing", return_value=True),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=lambda: ({}, ()),
+            ),
+            patch("hephaestus.automation.git_utils.push_head_to_branch") as push,
+            patch(
+                "hephaestus.automation.git_utils.is_clean_working_tree",
+                side_effect=[False, True],
+            ),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value["current_head"] == new_head
+        assert result.value["published"] is True
+        assert result.value["final_clean"] is True
+        push.assert_called_once_with(
+            "1-auto-impl",
+            old_head,
+            tmp_path,
+            source_sha=new_head,
+            timeout=60,
+            env={},
+            remote_config=(),
+            revalidate_remote=ANY,
+        )
+
+    def test_dirty_recovery_stash_retains_stash_identity_on_postflight_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A post-stash failure retains the new stash object for manual recovery."""
+        head = "a" * 40
+        stash = "c" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(tmp_path),
+                "branch": "1-auto-impl",
+                "expected_local_head": head,
+                "expected_remote_head": head,
+                "action": "STASH",
+                "issue_number": 1,
+            },
+        )
+        manager = MagicMock()
+        manager.list_worktrees.return_value = [
+            {"path": str(tmp_path), "branch": "refs/heads/1-auto-impl", "commit": head}
+        ]
+        command_outputs = iter(["1-auto-impl", "", "", stash])
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=manager),
+            patch(
+                "hephaestus.automation.git_utils.run",
+                side_effect=lambda *_args, **_kwargs: SimpleNamespace(
+                    stdout=next(command_outputs), returncode=0
+                ),
+            ),
+            patch.object(pool, "_read_publish_head", side_effect=[head, head]),
+            patch.object(pool, "_read_remote_branch_head", side_effect=[head, "b" * 40]),
+            patch("hephaestus.automation.git_utils.is_clean_working_tree", return_value=False),
+        ):
+            pool.submit(job, StageName.IMPLEMENTATION)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.value["stash_object"] == stash
+        assert result.value["action_applied"] is True
+        assert result.value["failure_kind"] == "postflight_remote_mismatch"
 
     def test_create_worktree_dispatch(
         self,
