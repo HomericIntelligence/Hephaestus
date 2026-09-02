@@ -337,6 +337,12 @@ remain host-owned. Preparation or delivery failure is terminal only for the
 ancillary learning record; it does not change the primary result, and cleanup
 still waits for that terminal state.
 
+The scheduler and the learning journal use the short repository name in the
+durable intent key. At the host boundary, `LearningStage` qualifies this name
+with the trusted organization and adds the short name as `identity_repo`. It
+rejects malformed, foreign, or mismatched identities before host dispatch. An
+identity rejection is terminal only for the ancillary learning record.
+
 Queue draining claims an item through a
 [`StageQueueLease`](../hephaestus/automation/pipeline/queues.py). The lease keeps
 the source queue slot occupied while a stage runs. A transition is

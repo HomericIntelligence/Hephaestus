@@ -20,7 +20,11 @@ from hephaestus.automation.pipeline.stages import (
     StageOutcome,
 )
 from hephaestus.automation.pipeline.stages.base import Disposition
-from hephaestus.automation.pipeline.work_item import ItemResult, LearningIntent
+from hephaestus.automation.pipeline.work_item import (
+    ItemResult,
+    LearningIntent,
+    LearningIntentKind,
+)
 from hephaestus.automation.review_journal import plan_fingerprint, render_current_plan
 from hephaestus.automation.state_labels import STATE_PLAN_GO
 from tests.unit.automation.pipeline.stages.conftest import FakeStageGitHub
@@ -69,11 +73,93 @@ def test_learning_stage_owns_claim_and_submits_only_host_job(
     assert request.job.request.kind == "learn"
     assert request.job.request.payload == {
         "issue_number": 2705,
-        "learning_intent": item.learning_intents[0].to_payload(),
+        "learning_intent": {
+            **item.learning_intents[0].to_payload(),
+            "repo": "test-org/test-repo",
+            "identity_repo": "test-repo",
+        },
     }
     assert "learn_delivery" not in request.job.request.payload
     record = journal.load(item.learning_intents[0].key)
     assert record is not None and record["status"] == "claimed"
+
+
+def test_post_merge_learning_uses_the_qualified_delivery_contract(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """Post-merge learning qualifies the source and retains its journal key."""
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(org="LLM360", learning_journal=journal)
+    item = make_work_item(repo="comet", issue=813, pr=900, state="ENTER")
+    intent = LearningIntent.post_merge(repo="comet", issue=813, pr=900)
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.FINISHED
+    stage = LearningStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "CLAIM"
+
+    request = stage.step(item, ctx)
+
+    assert isinstance(request, JobRequest)
+    payload = request.job.request.payload["learning_intent"]
+    assert isinstance(payload, dict)
+    parsed = LearningIntent.from_payload(payload)
+    assert parsed.repo == "LLM360/comet"
+    assert parsed.key == intent.key
+
+
+def test_foreign_learning_repository_records_safe_summary_failure(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A foreign source fails before host dispatch with a safe failure class."""
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(org="LLM360", learning_journal=journal)
+    item = make_work_item(repo="Other/comet", issue=813, pr=900, state="ENTER")
+    intent = LearningIntent.post_merge(repo=item.repo, issue=813, pr=900)
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.FINISHED
+    stage = LearningStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "CLAIM"
+
+    result = stage.step(item, ctx)
+
+    assert result == Continue(next_state="CLAIM")
+    record = journal.load(intent.key)
+    assert record is not None and record["status"] == "failed"
+    assert record["error"] == "learning_repository_identity_rejected"
+    assert item.payload["learning_failures"] == [
+        {"key": intent.key, "error": "learning_repository_identity_rejected"}
+    ]
+    assert item.payload["_planning_summary_actions"] == ["learning_repository_identity_rejected"]
+
+
+def test_mismatched_historical_identity_fails_before_host_dispatch(
+    tmp_path: Path, make_ctx: Any, make_work_item: Any
+) -> None:
+    """A malformed historical identity cannot enter the host learning queue."""
+    journal = LearningJournalStore(lambda: tmp_path)
+    ctx = make_ctx(org="LLM360", learning_journal=journal)
+    item = make_work_item(repo="comet", issue=813, pr=900, state="ENTER")
+    intent = LearningIntent(
+        kind=LearningIntentKind.POST_MERGE,
+        repo="comet",
+        issue=813,
+        pr=900,
+        identity_repo="different-repo",
+    )
+    item.learning_intents.append(intent)
+    item.learning_resume_stage = StageName.FINISHED
+    stage = LearningStage()
+    assert stage.on_enter(item, ctx) is None
+    item.state = "CLAIM"
+
+    result = stage.step(item, ctx)
+
+    assert result == Continue(next_state="CLAIM")
+    record = journal.load(intent.key)
+    assert record is not None
+    assert record["error"] == "learning_repository_identity_rejected"
 
 
 def test_learning_stage_accepts_superseded_owned_plan_history(

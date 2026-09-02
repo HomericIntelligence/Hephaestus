@@ -60,6 +60,7 @@ class LearningIntent:
     pr: int | None = None
     plan_revision: int | None = None
     plan_fingerprint: str = ""
+    identity_repo: str = ""
 
     @property
     def key(self) -> str:
@@ -70,7 +71,7 @@ class LearningIntent:
             "plan_fingerprint": self.plan_fingerprint,
             "plan_revision": self.plan_revision,
             "pr": self.pr,
-            "repo": self.repo,
+            "repo": self.identity_repo or self.repo,
         }
         digest = sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
         return f"{self.kind.value}:{digest}"
@@ -78,21 +79,58 @@ class LearningIntent:
     def journal_identity(self) -> dict[str, object]:
         """Return the bounded identity fields needed for restart recovery."""
         return {
-            "repo": self.repo,
+            "repo": self.identity_repo or self.repo,
             "issue": self.issue,
             "pr": self.pr,
             "plan_revision": self.plan_revision,
             "plan_fingerprint": self.plan_fingerprint,
         }
 
-    def to_payload(self) -> dict[str, object]:
-        """Return the closed semantic request accepted by the learning host."""
+    def to_payload(self, *, owner: str | None = None) -> dict[str, object]:
+        """Return the closed semantic request accepted by the learning host.
+
+        Args:
+            owner: Trusted organization that qualifies a short internal
+                repository name at the external learning boundary.
+
+        Raises:
+            ValueError: If the repository identity is malformed or belongs to
+                a different owner.
+
+        """
+        repository = self.repo
+        identity_repo = self.identity_repo
+        if owner is not None:
+            component = r"[A-Za-z0-9_.-]+"
+            if re.fullmatch(component, owner) is None:
+                raise ValueError("learning repository identity is invalid")
+            parts = repository.split("/")
+            if len(parts) == 1 and re.fullmatch(component, repository):
+                if identity_repo and identity_repo != repository:
+                    raise ValueError("learning repository identity is foreign or invalid")
+                identity_repo = repository
+                repository = f"{owner}/{repository}"
+            elif (
+                len(parts) != 2
+                or parts[0] != owner
+                or not all(re.fullmatch(component, part) for part in parts)
+            ):
+                raise ValueError("learning repository identity is foreign or invalid")
+            if identity_repo and (
+                re.fullmatch(component, identity_repo) is None
+                or repository.rsplit("/", 1)[-1] != identity_repo
+            ):
+                raise ValueError("learning repository identity is foreign or invalid")
+            if len(repository) > 200:
+                raise ValueError("learning repository identity is invalid")
         payload: dict[str, object] = {
             "kind": self.kind.value,
-            "repo": self.repo,
+            "repo": repository,
             "issue": self.issue,
             "intent_key": self.key,
         }
+        if identity_repo:
+            payload["identity_repo"] = identity_repo
         if self.kind is LearningIntentKind.APPROVED_PLAN:
             payload.update(
                 {
@@ -118,15 +156,24 @@ class LearningIntent:
             if kind is LearningIntentKind.APPROVED_PLAN
             else {"pr"}
         )
-        if set(payload) != expected:
+        if set(payload) not in {frozenset(expected), frozenset(expected | {"identity_repo"})}:
             raise ValueError("learning intent payload has unsupported or missing fields")
         repo = payload.get("repo")
+        identity_repo = payload.get("identity_repo", "")
         issue = payload.get("issue")
         intent_key = payload.get("intent_key")
         if (
             not isinstance(repo, str)
             or len(repo) > 200
             or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None
+            or not isinstance(identity_repo, str)
+            or (
+                bool(identity_repo)
+                and (
+                    re.fullmatch(r"[A-Za-z0-9_.-]+", identity_repo) is None
+                    or repo.rsplit("/", 1)[-1] != identity_repo
+                )
+            )
             or isinstance(issue, bool)
             or not isinstance(issue, int)
             or issue <= 0
@@ -145,17 +192,25 @@ class LearningIntent:
                 or not fingerprint
             ):
                 raise ValueError("learning intent payload has invalid approved-plan fields")
-            intent = cls.approved_plan(
+            intent = cls(
+                kind=kind,
                 repo=repo,
                 issue=issue,
                 plan_revision=revision,
                 plan_fingerprint=fingerprint,
+                identity_repo=identity_repo,
             )
         else:
             pr = payload.get("pr")
             if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
                 raise ValueError("learning intent payload has invalid post-merge fields")
-            intent = cls.post_merge(repo=repo, issue=issue, pr=pr)
+            intent = cls(
+                kind=kind,
+                repo=repo,
+                issue=issue,
+                pr=pr,
+                identity_repo=identity_repo,
+            )
         if intent.key != intent_key:
             raise ValueError("learning intent payload identity does not match its key")
         return intent
