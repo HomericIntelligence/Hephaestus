@@ -697,16 +697,9 @@ class TestPrReviewStageOnEnter:
 
         result = _complete_github_job(PrReviewStage(), item, ctx)
 
-        assert result == Continue(next_state="EVAL")
+        assert result == Continue(next_state="REVIEW_WAIT")
         assert 1001 not in github.reviews
-        assert item.payload["review_audit"] == ReviewAudit(
-            grade="A",
-            verdict="GO",
-            summary="Reviewer validated the implementation responses to all open threads.",
-            findings=(),
-            raw_feedback="",
-            valid=True,
-        )
+        assert "review_audit" not in item.payload
 
     def test_on_enter_double_call_rechecks_unarmed_state_without_mutation(
         self, make_ctx: Any, make_work_item: Any

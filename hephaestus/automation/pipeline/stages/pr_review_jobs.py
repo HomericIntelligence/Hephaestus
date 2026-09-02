@@ -1198,14 +1198,10 @@ class PrReviewJobs(_PrReviewHost):
         item.payload["remediation_thread_snapshots"] = [dict(value) for value in unresolved]
         item.payload["unresolved_threads_before_address"] = len(remediation)
         if item.payload.pop(_COMMENT_VALIDATION_ONLY, None):
-            item.payload["review_audit"] = ReviewAudit(
-                grade="A",
-                summary="Reviewer validated the implementation responses to all open threads.",
-                findings=(),
-                raw_feedback="",
-                valid=True,
-                verdict="GO",
-            )
+            # Thread validation can resolve comments but cannot manufacture
+            # the reviewer-owned decision required to authorize GO.
+            item.payload.pop("review_audit", None)
+            return Continue(next_state=REVIEW_WAIT)
         return Continue(next_state=ADDRESS_WAIT if remediation else EVAL)
 
     def _post(  # noqa: C901
