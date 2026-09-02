@@ -39,6 +39,9 @@ PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL = "pending_implementation_reply_han
 PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RETRIES = (
     "pending_implementation_reply_handoff_journal_retries"
 )
+PENDING_IMPLEMENTATION_REPLY_HANDOFF_JOURNAL_RECOVERY_RETRIES = (
+    "pending_implementation_reply_handoff_journal_recovery_retries"
+)
 
 _BATCH_NONCE_RE = re.compile(r"[0-9a-f]{32}")
 _FULL_COMMIT_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")

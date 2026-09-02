@@ -80,6 +80,7 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
+from hephaestus.automation.review_journal import CommentJournalReadError
 from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
@@ -97,6 +98,7 @@ from hephaestus.config.child_environments import (
     read_approved_parent_env,
 )
 from hephaestus.diagnostics import bounded_git_diagnostic
+from hephaestus.github.client import GitHubRateLimitError, GitHubUnavailableError
 from hephaestus.io.utils import write_secure
 from hephaestus.resilience import (
     CircuitBreakerOpenError,
@@ -198,6 +200,40 @@ def _valid_dirty_content_snapshot(value: object) -> TypeGuard[dict[str, str]]:
             for digest in value.values()
         )
     )
+
+
+def _classify_github_failure(error: BaseException, *, now_epoch: float) -> tuple[str, float] | None:
+    """Return a safe GitHub failure class and its first retry delay."""
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    while current is not None and all(current is not seen for seen in chain):
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    rate_error = next((item for item in chain if isinstance(item, GitHubRateLimitError)), None)
+    breaker_error = next(
+        (item for item in chain if isinstance(item, CircuitBreakerOpenError)), None
+    )
+    if isinstance(rate_error, GitHubRateLimitError):
+        delay = (
+            max(0.0, float(rate_error.reset_epoch) - now_epoch)
+            if rate_error.reset_epoch > 0
+            else 60.0
+        )
+        return "github_rate_limit", delay
+    if any(isinstance(item, GitHubUnavailableError) for item in chain) or isinstance(
+        breaker_error, CircuitBreakerOpenError
+    ):
+        delay = (
+            max(0.0, breaker_error.time_until_recovery)
+            if isinstance(breaker_error, CircuitBreakerOpenError)
+            else 60.0
+        )
+        return "github_unavailable", delay
+    if any(isinstance(item, subprocess.CalledProcessError) for item in chain):
+        return "github_cli_error", 1.0
+    if any(isinstance(item, CommentJournalReadError) for item in chain):
+        return "comment_journal_read_error", 1.0
+    return None
 
 
 @contextmanager
@@ -2106,8 +2142,23 @@ class WorkerPool:
         """Execute one closed GitHub operation exactly once per submission."""
         if self._github_job_runner is None:
             raise RuntimeError("GitHubJob submitted without a GitHubJobRunner")
-        with self._repo_lock(job.repo):
-            receipt = self._github_job_runner.run(job)
+        try:
+            with self._repo_lock(job.repo):
+                receipt = self._github_job_runner.run(job)
+        except Exception as exc:
+            failure = _classify_github_failure(exc, now_epoch=time.time())
+            if failure is None:
+                raise
+            failure_kind, retry_delay_s = failure
+            logger.warning("GitHub job failed: %s", failure_kind)
+            return JobResult(
+                ok=False,
+                error=failure_kind,
+                value={
+                    "failure_kind": failure_kind,
+                    "retry_delay_s": retry_delay_s,
+                },
+            )
         return JobResult(ok=True, value=receipt)
 
     def _run_athena_skill(self, job: AthenaSkillJob) -> JobResult:
@@ -4893,11 +4944,24 @@ class WorkerPool:
         """Return whether a clean worktree still needs coordinator-owned publication."""
         expected_remote_sha = job.kwargs.get("expected_remote_sha")
         if expected_remote_sha is None:
+            publish_base_sha = job.kwargs.get("publish_base_sha")
+            if publish_base_sha is not None and not _is_full_commit_sha(publish_base_sha):
+                return JobResult(ok=False, error="publication base pin invalid")
+            if publish_base_sha is None:
+                return bool(
+                    branch
+                    and git_utils.has_unpushed_commits(
+                        branch,
+                        worktree_path,
+                        timeout=job.timeout_s,
+                    )
+                )
             return bool(
                 branch
                 and git_utils.has_unpushed_commits(
                     branch,
                     worktree_path,
+                    base_revision=publish_base_sha,
                     timeout=job.timeout_s,
                 )
             )
