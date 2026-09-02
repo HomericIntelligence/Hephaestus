@@ -143,12 +143,13 @@ def test_required_gate_policy_matches_the_complete_job_graph() -> None:
     _assert_required_gate_contract(_load_workflow(REQUIRED_WORKFLOW))
 
 
-def test_required_gate_rejects_unallowlisted_skipped_dependency() -> None:
+@pytest.mark.parametrize("event_name", ["pull_request", "push", "merge_group"])
+def test_required_gate_rejects_unallowlisted_skipped_dependency(event_name: str) -> None:
     """A dependency-induced skip cannot satisfy the required aggregate."""
     needs = _green_required_needs()
     needs["lint"]["result"] = "skipped"
 
-    result = _run_required_gate(needs, event_name="pull_request")
+    result = _run_required_gate(needs, event_name=event_name)
 
     assert result.returncode != 0
     assert "lint" in result.stdout
