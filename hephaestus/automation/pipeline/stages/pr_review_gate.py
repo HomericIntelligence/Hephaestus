@@ -1,5 +1,7 @@
 # This mixin consumes the stage thread namespace by design.
 # ruff: noqa: F403, F405
+from hephaestus.automation.review_audit import is_clean_go_review
+
 from .pr_review_threads import *
 
 
@@ -224,10 +226,8 @@ class PrReviewGate(_PrReviewHost):
             item.attempts["pr_review_hard"] = item.attempts.get("pr_review_hard", 0) + 1
 
         if not open_thread_count:
-            # A clean thread read is necessary but cannot infer GO. Only the
-            # typed reviewer verdict can select the implementation-GO path.
-            # Keep the shared helper as a defense at the receipt boundaries.
-            if audit.verdict != "GO" or audit.findings:
+            # A clean thread read cannot infer GO; the shared contract requires GO and no findings.
+            if not is_clean_go_review(audit):
                 return self._handle_non_go(
                     item,
                     ctx,

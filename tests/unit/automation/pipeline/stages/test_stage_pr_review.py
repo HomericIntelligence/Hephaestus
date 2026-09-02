@@ -4240,13 +4240,32 @@ class TestEvalVerdicts:
         assert "mark_pr_implementation_go" in names
         assert "publish_implementation_go_audit" in names
 
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param(
+                '{"grade":"A","verdict":"NOGO","summary":"Needs work","comments":[]}',
+                id="nogo",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"BLOCKED","summary":"Cannot review","comments":[]}',
+                id="blocked",
+            ),
+            pytest.param(
+                '{"grade":"A","summary":"Authentication is unavailable","comments":[]}',
+                id="missing",
+            ),
+            pytest.param(
+                '{"grade":"A","verdict":"MAYBE","summary":"Unclear","comments":[]}',
+                id="malformed",
+            ),
+        ],
+    )
     def test_stale_non_go_receipt_cannot_recover_implementation_go(
-        self, make_ctx: Any, make_work_item: Any
+        self, make_ctx: Any, make_work_item: Any, response: str
     ) -> None:
-        """A recovery receipt with NOGO cannot bypass the verdict gate."""
-        stale_audit = parse_review_audit(
-            '{"grade":"A","verdict":"NOGO","summary":"Needs work","comments":[]}'
-        )
+        """A non-GO or invalid receipt cannot bypass the verdict gate."""
+        stale_audit = parse_review_audit(response)
         stage = PrReviewStage()
         github = FakeStageGitHub(unresolved=[(0, 0)], pr_impl_state=(True, False))
         item = make_work_item(issue=1, pr=1001, state="ENTER")
