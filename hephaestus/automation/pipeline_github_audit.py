@@ -183,8 +183,18 @@ class PipelineGitHubAuditReceipts(_PipelineGitHubHost):
             for comment in self._marker_comments(comments, marker)
             if self._comment_owned_by_viewer(comment)
         ]
-        if visible_public:
+        if any(str(comment.get("body", "")) == body for comment in visible_public):
             return comments
+        if visible_public:
+            if len(visible_public) != 1:
+                raise RuntimeError("implementation-go audit comment identity is ambiguous")
+            public_id = visible_public[0].get("databaseId")
+            if public_id is None:
+                raise RuntimeError("owned implementation-go audit has no database id")
+            # A version-1 public audit has this exact marker but lacks the
+            # typed verdict. Replace only the one actor-owned marker match.
+            self._patch_issue_comment(int(public_id), body)
+            return self._repo_issue_comments(pr_number)
         pending = [
             comment
             for comment in self._marker_comments(comments, pending_marker)

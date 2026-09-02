@@ -3554,6 +3554,25 @@ class TestMutatorMapping:
         assert receipt.audit.grade == "A"
         assert receipt.audit.summary == "Clean"
 
+    def test_go_audit_replaces_matching_legacy_public_receipt(
+        self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typed audit replaces one owned public receipt that predates verdicts."""
+        head = "a" * 40
+        audit = ReviewAudit("A", "Clean", (), "", valid=True, verdict="GO")
+        _marker, body = render_implementation_go_audit(audit, pr_number=5, head_sha=head)
+        legacy_body = body.replace("Reviewer verdict: GO\n\n", "")
+        legacy = {"body": legacy_body, "databaseId": 12, "viewerDidAuthor": True}
+        public = {"body": body, "databaseId": 12, "viewerDidAuthor": True}
+        fetch = MagicMock(side_effect=[[legacy], [public], [public]])
+        monkeypatch.setattr(adapter, "_repo_issue_comments", fetch)
+        patch_comment = MagicMock()
+        monkeypatch.setattr(adapter, "_patch_issue_comment", patch_comment)
+
+        adapter.publish_implementation_go_audit(5, head, audit)
+
+        patch_comment.assert_called_once_with(12, body)
+
     def test_legacy_pending_go_audit_is_inert_for_restart_recovery(
         self, adapter: pg.PipelineGitHub, monkeypatch: pytest.MonkeyPatch
     ) -> None:

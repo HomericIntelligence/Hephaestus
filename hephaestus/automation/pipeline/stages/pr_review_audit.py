@@ -65,6 +65,13 @@ class PrReviewAudit:
         if isinstance(outcome, StageOutcome) and outcome.disposition is Disposition.ADVANCE:
             item.payload["implementation_go_audit_retries"] = 0
             return self._go_audit_publish(item, ctx)
+        if isinstance(outcome, Continue) and outcome.next_state == REVIEW_WAIT:
+            # The exact head changed after the receipt was persisted.  A new
+            # review must not inherit a receipt or label proof for the old
+            # head, while transport retries deliberately retain those facts.
+            item.payload.pop("pending_implementation_go_audit", None)
+            item.payload.pop("pending_implementation_go_audit_head", None)
+            item.payload.pop("pending_implementation_go_label_confirmed", None)
         return outcome  # type: ignore[no-any-return]
 
     def _go_audit_publish(self, item: WorkItem, ctx: StageContext) -> StepResult:

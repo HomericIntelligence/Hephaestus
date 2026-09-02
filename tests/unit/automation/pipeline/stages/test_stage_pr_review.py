@@ -4507,6 +4507,9 @@ class TestEvalVerdicts:
 
         assert result == Continue(next_state="REVIEW_WAIT")
         assert "reviewed_pr_head_sha" not in item.payload
+        assert "pending_implementation_go_audit" not in item.payload
+        assert "pending_implementation_go_audit_head" not in item.payload
+        assert "pending_implementation_go_label_confirmed" not in item.payload
         names = [name for name, _args in github.mutation_log]
         assert "mark_pr_implementation_go" not in names
         assert "publish_implementation_go_audit" not in names
