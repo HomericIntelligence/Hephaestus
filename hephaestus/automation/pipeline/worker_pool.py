@@ -2557,6 +2557,9 @@ class WorkerPool:
         if job.op == "create_worktree":
             return self._git_create_worktree(job)
 
+        elif job.op == "recover_dirty_worktree":
+            return self._git_recover_dirty_worktree(job)
+
         elif job.op == "verify_pr_review_checkout":
             return self._git_verify_pr_review_checkout(job)
 
@@ -3765,7 +3768,7 @@ class WorkerPool:
             )
         return JobResult(ok=False, error=error)
 
-    def _finalize_created_worktree(
+    def _finalize_created_worktree(  # noqa: C901
         self,
         *,
         created: Path | None,
@@ -3809,22 +3812,13 @@ class WorkerPool:
                 ok=False,
                 error=error,
             )
-        if not sync_to_remote:
-            if base_sha is not None:
-                return JobResult(
-                    ok=True,
-                    value={
-                        "path": str(worktree_path),
-                        "direct_scope_reservation": {
-                            "branch": branch_name,
-                            "base_sha": base_sha,
-                        },
-                    },
-                )
-            return JobResult(ok=True, value=str(worktree_path))
-
         if pr_number is not None and not isinstance(pr_number, (int, str)):
             return JobResult(ok=False, error="worktree sync received an invalid PR number")
+        if not worktree_path.exists() and not sync_to_remote and base_sha is None:
+            # Keep compatibility with test and alternate managers that return
+            # a planned path. A materialized reusable checkout always exists
+            # and must pass through the dirty snapshot below.
+            return JobResult(ok=True, value=str(worktree_path))
 
         try:
             dirty = not git_utils.is_clean_working_tree(worktree_path, timeout=timeout_s)
@@ -3847,7 +3841,7 @@ class WorkerPool:
                 )
                 status = status_result.stdout or ""
                 diff = diff_result.stdout or ""
-            elif branch_name:
+            elif sync_to_remote and branch_name:
                 self._sync_worktree_to_remote_branch(
                     worktree_path,
                     branch_name,
@@ -3861,12 +3855,34 @@ class WorkerPool:
                 error=f"worktree post-create preparation failed: {exc}",
                 value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
             )
-        value: dict[str, object] = {
-            "path": str(worktree_path),
-            "dirty": dirty,
-            "status": status,
-            "diff": diff,
-        }
+        if not dirty and not sync_to_remote and base_sha is None:
+            return JobResult(ok=True, value=str(worktree_path))
+        value: dict[str, object] = {"path": str(worktree_path)}
+        if dirty or sync_to_remote:
+            value.update(dirty=dirty, status=status, diff=diff)
+        if dirty:
+            observed_branch = git_utils.run(
+                ["git", "branch", "--show-current"],
+                cwd=worktree_path,
+                timeout=timeout_s,
+            ).stdout.strip()
+            observed_head = git_utils.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree_path,
+                timeout=timeout_s,
+            ).stdout.strip()
+            if observed_branch != branch_name or not _is_full_commit_sha(observed_head):
+                return JobResult(
+                    ok=False,
+                    error="dirty worktree identity does not match its requested branch",
+                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
+                )
+            value.update(branch=observed_branch, head_sha=observed_head)
+        if base_sha is not None:
+            value["direct_scope_reservation"] = {
+                "branch": branch_name,
+                "base_sha": base_sha,
+            }
         return JobResult(ok=True, value=value)
 
     def _prepare_direct_scope_worktree(
@@ -4017,6 +4033,219 @@ class WorkerPool:
         from .git_cleanup import run_cleanup_job
 
         return run_cleanup_job(job, worktree_manager_type=WorktreeManager)
+
+    def _git_recover_dirty_worktree(self, job: GitJob) -> JobResult:  # noqa: C901
+        """Preserve one identity-bound dirty writer by commit or stash."""
+        worktree = Path(str(job.kwargs.get("worktree_path") or ""))
+        repo_root = Path(str(job.kwargs.get("repo_root") or ""))
+        branch = str(job.kwargs.get("branch") or "")
+        action = str(job.kwargs.get("action") or "")
+        pre_action_head = str(job.kwargs.get("pre_action_head") or "")
+        expected_remote_head = str(job.kwargs.get("expected_remote_head") or "")
+        expected_status = str(job.kwargs.get("status") or "")
+        expected_diff = str(job.kwargs.get("diff") or "")
+        issue_number = job.kwargs.get("issue_number")
+        receipt: dict[str, object] = {
+            "outcome": "failed",
+            "failure_kind": "invalid_request",
+            "action": action,
+            "branch": branch,
+            "worktree_path": str(worktree),
+            "pre_action_head": pre_action_head,
+            "current_head": pre_action_head,
+            "expected_remote_head": expected_remote_head,
+            "remote_head": None,
+            "published": False,
+            "stash_object": None,
+            "action_applied": False,
+            "final_clean": False,
+        }
+
+        def fail(kind: str, cause: str) -> JobResult:
+            receipt["failure_kind"] = kind
+            receipt["cause"] = bounded_git_diagnostic(cause, limit=_ERR_MAX)
+            return JobResult(ok=False, value=dict(receipt), error=f"dirty recovery {kind}")
+
+        if (
+            action not in {"COMMIT", "STASH"}
+            or not branch
+            or not _is_full_commit_sha(pre_action_head)
+            or not _is_full_commit_sha(expected_remote_head)
+            or isinstance(issue_number, bool)
+            or not isinstance(issue_number, int)
+        ):
+            return fail(
+                "invalid_request",
+                "recovery requires action, branch, issue, and exact heads",
+            )
+        try:
+            confined_root = repo_root.resolve(strict=True)
+            confined_worktree = worktree.resolve(strict=True)
+        except OSError as exc:
+            return fail("worktree_unavailable", str(exc))
+        if (
+            worktree.is_symlink()
+            or not confined_worktree.is_dir()
+            or not (confined_worktree / ".git").exists()
+            or (
+                confined_worktree != confined_root
+                and confined_root not in confined_worktree.parents
+            )
+        ):
+            return fail("worktree_unconfined", "worktree is outside the repository root")
+        worktree = confined_worktree
+        receipt["worktree_path"] = str(worktree)
+        try:
+            listing = git_utils.run(
+                ["git", "worktree", "list", "--porcelain"],
+                cwd=repo_root,
+                timeout=job.timeout_s,
+                env=_controlled_git_env(),
+            ).stdout
+            expected_block = (
+                f"worktree {worktree}\nHEAD {pre_action_head}\nbranch refs/heads/{branch}\n"
+            )
+            if expected_block not in f"{listing.rstrip()}\n":
+                return fail("worktree_identity_drift", "registered worktree identity changed")
+            current_head = git_utils.run(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, timeout=job.timeout_s
+            ).stdout.strip()
+            current_branch = git_utils.run(
+                ["git", "branch", "--show-current"], cwd=worktree, timeout=job.timeout_s
+            ).stdout.strip()
+            receipt["current_head"] = current_head
+            if current_head != pre_action_head or current_branch != branch:
+                return fail("worktree_identity_drift", "worktree branch or head changed")
+            status = git_utils.run(
+                ["git", "status", "--short"], cwd=worktree, timeout=job.timeout_s
+            ).stdout
+            diff = git_utils.run(["git", "diff"], cwd=worktree, timeout=job.timeout_s).stdout
+            if not status.strip():
+                return fail("worktree_clean", "captured dirty worktree is now clean")
+            if status != expected_status or diff != expected_diff:
+                return fail("worktree_content_drift", "dirty snapshot changed before recovery")
+            remote_head = self._read_remote_branch_head(
+                worktree,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            if isinstance(remote_head, JobResult):
+                return fail("remote_probe_failed", remote_head.error or "remote probe failed")
+            receipt["remote_head"] = remote_head
+            if remote_head != expected_remote_head or remote_head != pre_action_head:
+                return fail("remote_head_drift", "remote head does not match captured local head")
+
+            if action == "COMMIT":
+                changed = self._commit_if_changes_with_controlled_signing(
+                    job,
+                    (issue_number, worktree, str(job.kwargs.get("agent") or "claude")),
+                    None,
+                    job.kwargs.get("agent_model"),
+                    int(job.kwargs.get("git_message_timeout", 1200)),
+                )
+                if isinstance(changed, JobResult):
+                    return fail("commit_failed", changed.error or "commit failed")
+                if not changed:
+                    return fail("commit_failed", "dirty changes did not produce a commit")
+                receipt["action_applied"] = True
+                publish_head = self._read_publish_head(worktree, timeout=job.timeout_s)
+                if isinstance(publish_head, JobResult):
+                    return fail(
+                        "commit_postflight_failed",
+                        publish_head.error or "head unavailable",
+                    )
+                current_head = publish_head
+                receipt["current_head"] = current_head
+                parent = git_utils.run(
+                    ["git", "rev-parse", "HEAD^"], cwd=worktree, timeout=job.timeout_s
+                ).stdout.strip()
+                raw_commit = git_utils.run(
+                    ["git", "cat-file", "-p", current_head],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                ).stdout
+                if (
+                    parent != pre_action_head
+                    or "\ngpgsig " not in f"\n{raw_commit}"
+                    or "Signed-off-by:" not in raw_commit
+                ):
+                    return fail(
+                        "commit_metadata_invalid",
+                        "commit lacks exact parent, signature, or DCO",
+                    )
+                revalidate_remote = self._authenticated_remote_revalidator(
+                    cwd=worktree,
+                    expected_repo=job.transport_repository,
+                    timeout=job.timeout_s,
+                )
+                remote_env, remote_config = revalidate_remote()
+                git_utils.push_head_to_branch(
+                    branch,
+                    expected_remote_head,
+                    worktree,
+                    source_sha=current_head,
+                    timeout=job.timeout_s,
+                    env=remote_env,
+                    remote_config=remote_config,
+                    revalidate_remote=revalidate_remote,
+                )
+                receipt["published"] = True
+            else:
+                before_stash = git_utils.run(
+                    ["git", "rev-parse", "--verify", "-q", "refs/stash"],
+                    cwd=worktree,
+                    check=False,
+                    log_errors=False,
+                    timeout=job.timeout_s,
+                ).stdout.strip()
+                message = f"hephaestus dirty recovery issue #{issue_number}"[:120]
+                git_utils.run(
+                    ["git", "stash", "push", "--include-untracked", "-m", message],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                    env=_controlled_git_env(),
+                )
+                receipt["action_applied"] = True
+                stash_object = git_utils.run(
+                    ["git", "rev-parse", "--verify", "refs/stash"],
+                    cwd=worktree,
+                    timeout=job.timeout_s,
+                ).stdout.strip()
+                if not _is_full_commit_sha(stash_object) or stash_object == before_stash:
+                    return fail("stash_evidence_invalid", "stash reference did not advance")
+                receipt["stash_object"] = stash_object
+
+            current_head = git_utils.run(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, timeout=job.timeout_s
+            ).stdout.strip()
+            receipt["current_head"] = current_head
+            final_clean = git_utils.is_clean_working_tree(worktree, timeout=job.timeout_s)
+            receipt["final_clean"] = final_clean
+            if not final_clean:
+                return fail("postflight_dirty", "recovery left worktree dirty")
+            final_remote = self._read_remote_branch_head(
+                worktree,
+                remote="origin",
+                branch=branch,
+                expected_repo=job.transport_repository,
+                timeout=job.timeout_s,
+            )
+            if isinstance(final_remote, JobResult):
+                return fail("remote_postflight_failed", final_remote.error or "remote probe failed")
+            receipt["remote_head"] = final_remote
+            expected_final = current_head if action == "COMMIT" else expected_remote_head
+            if final_remote != expected_final:
+                return fail("remote_postflight_drift", "remote head does not match recovery result")
+            if action == "STASH" and current_head != pre_action_head:
+                return fail("stash_head_drift", "stash changed the local branch head")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return fail("operation_failed", str(exc))
+        receipt["outcome"] = "recovered"
+        receipt["failure_kind"] = None
+        receipt["cause"] = ""
+        return JobResult(ok=True, value=receipt)
 
     def _git_commit_push(self, job: GitJob) -> JobResult:
         """Commit pending changes in a worktree, then push its branch.

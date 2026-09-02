@@ -666,7 +666,7 @@ class TestGate:
 
         assert isinstance(result, JobRequest)
         assert result.job.descr == "dirty_decision"
-        assert result.on_done_state == "REBASE_WAIT"
+        assert result.on_done_state == "DIRTY_DECISION_WAIT"
 
     def test_rebase_wait_rebases_and_lease_publishes_the_writer_before_review(
         self, make_ctx: Any, make_work_item: Any
@@ -1630,6 +1630,33 @@ class TestWorktreeAndAdvise:
         assert item.payload["worktree_status"] == "M x.py"
         assert item.payload["worktree_diff"] == "+x"
 
+    def test_failed_worktree_result_clears_all_stale_dirty_identity_metadata(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A failed retry cannot reuse a prior dirty snapshot or its identity."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.payload.update(
+            {
+                "worktree_dirty": True,
+                "worktree_status": "M old.py",
+                "worktree_diff": "+old",
+                "worktree_branch": "old-branch",
+                "worktree_head_sha": "a" * 40,
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=False, error="checkout failed"), make_ctx())
+
+        for key in (
+            "worktree_dirty",
+            "worktree_status",
+            "worktree_diff",
+            "worktree_branch",
+            "worktree_head_sha",
+        ):
+            assert key not in item.payload
+
     def test_direct_worktree_result_stores_remote_reservation_receipt(
         self, make_ctx: Any, make_work_item: Any
     ) -> None:
@@ -1715,6 +1742,31 @@ class TestWorktreeAndAdvise:
         stage.on_job_done(item, JobResult(ok=True, value="/tmp/wt2"), ctx)
 
         assert item.worktree == "/tmp/wt2"
+
+    def test_clean_worktree_retry_clears_a_prior_dirty_snapshot(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A clean retry cannot reuse dirty metadata from an earlier attempt."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+        item.payload.update(
+            {
+                "worktree_dirty": True,
+                "worktree_status": " M changed.py",
+                "worktree_diff": "+changed",
+                "worktree_branch": "1-auto-impl",
+                "worktree_head_sha": "a" * 40,
+            }
+        )
+
+        stage.on_job_done(item, JobResult(ok=True, value="/tmp/clean-wt"), make_ctx())
+
+        assert item.worktree == "/tmp/clean-wt"
+        assert "worktree_dirty" not in item.payload
+        assert "worktree_status" not in item.payload
+        assert "worktree_diff" not in item.payload
+        assert "worktree_branch" not in item.payload
+        assert "worktree_head_sha" not in item.payload
 
     def test_worktree_failure_retries_without_burning_budget(
         self, make_ctx: Any, make_work_item: Any
@@ -1819,7 +1871,7 @@ class TestWorktreeAndAdvise:
         assert isinstance(result, JobRequest)
         assert isinstance(result.job, AgentJob)  # narrow the job union
         assert result.job.descr == "dirty_decision"
-        assert result.on_done_state == "ADVISE_WAIT"
+        assert result.on_done_state == "DIRTY_DECISION_WAIT"
         assert result.job.prompt_kwargs["branch_name"] == "1-auto-impl"
         assert result.job.prompt_kwargs["status_text"] == "M x.py"
 
@@ -1832,6 +1884,315 @@ class TestWorktreeAndAdvise:
         stage.on_job_done(item, JobResult(ok=True, value="COMMIT"), ctx)
 
         assert item.payload["dirty_decision"] == "COMMIT"
+
+    def test_dirty_decision_uses_exact_final_action_then_requests_host_recovery(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Agent prose cannot bypass the host-owned dirty recovery boundary."""
+        stage = ImplementationStage()
+        ctx = make_ctx(
+            github=FakeStageGitHub(
+                pr_head_branch="1-auto-impl",
+                pr_state={
+                    "state": "OPEN",
+                    "headRefOid": "a" * 40,
+                    "headRefName": "1-auto-impl",
+                    "autoMergeRequest": None,
+                },
+            )
+        )
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/wt"
+        item.payload.update(
+            {
+                "existing_pr": True,
+                "worktree_dirty": True,
+                "worktree_branch": "1-auto-impl",
+                "worktree_head_sha": "a" * 40,
+                "worktree_status": " M x.py",
+                "worktree_diff": "+x",
+            }
+        )
+
+        stage.on_job_done(
+            item,
+            JobResult(ok=True, value="Inspecting the changes.\n\nCOMMIT\n"),
+            ctx,
+        )
+        recovery = stage.step(item, ctx)
+
+        assert item.payload["dirty_decision"] == "COMMIT"
+        assert isinstance(recovery, JobRequest)
+        assert isinstance(recovery.job, GitJob)
+        assert recovery.job.op == "recover_dirty_worktree"
+        assert recovery.on_done_state == "DIRTY_RECOVERY_WAIT"
+        assert recovery.job.kwargs["pre_action_head"] == "a" * 40
+        assert recovery.job.kwargs["expected_remote_head"] == "a" * 40
+
+    @pytest.mark.parametrize("output", ["commit", "COMMIT now", "STASH\nextra", ""])
+    def test_dirty_decision_rejects_any_nonexact_final_action(
+        self,
+        output: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """Only an exact final COMMIT or STASH line can authorize recovery."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_DECISION_WAIT")
+        item.payload["worktree_dirty"] = True
+
+        stage.on_job_done(item, JobResult(ok=True, value=output), make_ctx())
+
+        assert stage.step(item, make_ctx()) == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "dirty_worktree_decision_invalid",
+        )
+
+    def test_dirty_recovery_success_rebinds_source_only_after_fresh_pr_check(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A durable recovery receipt binds the new source after a fresh PR read."""
+        recovered_head = "b" * 40
+        github = FakeStageGitHub(
+            pr_head_branch="1-auto-impl",
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": recovered_head,
+                "headRefName": "1-auto-impl",
+                "autoMergeRequest": None,
+            },
+        )
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_RECOVERY_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/issue-1"
+        item.payload.update(
+            {
+                "worktree_dirty": True,
+                "worktree_head_sha": "a" * 40,
+                "dirty_decision": "COMMIT",
+                "dirty_recovery_next_state": "REBASE_WAIT",
+                "dirty_recovery_receipt": {
+                    "outcome": "recovered",
+                    "failure_kind": None,
+                    "action": "COMMIT",
+                    "branch": "1-auto-impl",
+                    "worktree_path": "/tmp/issue-1",
+                    "pre_action_head": "a" * 40,
+                    "current_head": recovered_head,
+                    "expected_remote_head": "a" * 40,
+                    "remote_head": recovered_head,
+                    "published": True,
+                    "stash_object": None,
+                    "action_applied": True,
+                    "final_clean": True,
+                    "cause": "",
+                },
+            }
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="REBASE_WAIT")
+        assert item.payload["_impl_source_revision"] == recovered_head
+        assert item.payload["rebase_expected_remote_sha"] == recovered_head
+        assert item.payload["worktree_dirty"] is False
+
+    def test_stash_recovery_hands_unchanged_lease_to_noop_adoption(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A stash recovery keeps the exact lease for the no-rebase handoff."""
+        head = "a" * 40
+        github = FakeStageGitHub(
+            pr_head_branch="1-auto-impl",
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": head,
+                "headRefName": "1-auto-impl",
+                "autoMergeRequest": None,
+            },
+        )
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_RECOVERY_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/issue-1"
+        item.payload.update(
+            {
+                "worktree_dirty": True,
+                "worktree_head_sha": head,
+                "dirty_decision": "STASH",
+                "dirty_recovery_next_state": "ADOPTED",
+                "dirty_recovery_receipt": {
+                    "outcome": "recovered",
+                    "failure_kind": None,
+                    "action": "STASH",
+                    "branch": "1-auto-impl",
+                    "worktree_path": "/tmp/issue-1",
+                    "pre_action_head": head,
+                    "current_head": head,
+                    "expected_remote_head": head,
+                    "remote_head": head,
+                    "published": False,
+                    "stash_object": "d" * 40,
+                    "action_applied": True,
+                    "final_clean": True,
+                    "cause": "",
+                },
+            }
+        )
+
+        result = ImplementationStage().step(item, make_ctx(github=github))
+
+        assert result == Continue(next_state="ADOPTED")
+        assert item.payload["_impl_source_revision"] == head
+        assert item.payload["rebase_expected_remote_sha"] == head
+
+    def test_dirty_recovery_failure_keeps_source_unbound(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A partial recovery failure cannot bind source or continue implementation."""
+        stage = ImplementationStage()
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_RECOVERY_WAIT")
+        item.worktree = "/tmp/preserved-dirty-worktree"
+        item.payload["dirty_recovery_receipt"] = {
+            "outcome": "failed",
+            "failure_kind": "remote_postflight_drift",
+            "action_applied": True,
+            "current_head": "b" * 40,
+        }
+
+        result = stage.step(item, make_ctx())
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "dirty_recovery_remote_postflight_drift",
+        )
+        assert item.worktree == "/tmp/preserved-dirty-worktree"
+        assert "_impl_source_revision" not in item.payload
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("action", "DELETE"),
+            ("branch", "other-branch"),
+            ("worktree_path", "/tmp/other-worktree"),
+            ("pre_action_head", "c" * 40),
+            ("expected_remote_head", "c" * 40),
+            ("published", False),
+            ("action_applied", False),
+            ("final_clean", False),
+        ],
+    )
+    def test_dirty_recovery_rejects_malformed_or_unpublished_commit_receipt(
+        self,
+        field: str,
+        value: object,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A success label cannot replace complete identity and durability proof."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        github = FakeStageGitHub(
+            pr_head_branch="1-auto-impl",
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": new_head,
+                "headRefName": "1-auto-impl",
+                "autoMergeRequest": None,
+            },
+        )
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_RECOVERY_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/issue-1"
+        item.payload.update(
+            {
+                "worktree_head_sha": old_head,
+                "dirty_decision": "COMMIT",
+                "dirty_recovery_next_state": "REBASE_WAIT",
+                "dirty_recovery_receipt": {
+                    "outcome": "recovered",
+                    "failure_kind": None,
+                    "action": "COMMIT",
+                    "branch": "1-auto-impl",
+                    "worktree_path": "/tmp/issue-1",
+                    "pre_action_head": old_head,
+                    "current_head": new_head,
+                    "expected_remote_head": old_head,
+                    "remote_head": new_head,
+                    "published": True,
+                    "stash_object": None,
+                    "action_applied": True,
+                    "final_clean": True,
+                    "cause": "",
+                },
+            }
+        )
+        item.payload["dirty_recovery_receipt"][field] = value
+
+        result = ImplementationStage().step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "dirty_recovery_receipt_invalid",
+        )
+        assert "_impl_source_revision" not in item.payload
+
+    @pytest.mark.parametrize(
+        ("pr_branch", "pr_head"),
+        [("other-branch", "b" * 40), ("1-auto-impl", "c" * 40)],
+    )
+    def test_dirty_recovery_rejects_fresh_pr_branch_or_head_drift(
+        self,
+        pr_branch: str,
+        pr_head: str,
+        make_ctx: Any,
+        make_work_item: Any,
+    ) -> None:
+        """A fresh PR identity change blocks source rebinding."""
+        item = make_work_item(issue=1, pr=1001, state="DIRTY_RECOVERY_WAIT")
+        item.branch = "1-auto-impl"
+        item.worktree = "/tmp/issue-1"
+        item.payload.update(
+            {
+                "worktree_head_sha": "a" * 40,
+                "dirty_decision": "COMMIT",
+                "dirty_recovery_next_state": "REBASE_WAIT",
+                "dirty_recovery_receipt": {
+                    "outcome": "recovered",
+                    "failure_kind": None,
+                    "action": "COMMIT",
+                    "branch": "1-auto-impl",
+                    "worktree_path": "/tmp/issue-1",
+                    "pre_action_head": "a" * 40,
+                    "current_head": "b" * 40,
+                    "expected_remote_head": "a" * 40,
+                    "remote_head": "b" * 40,
+                    "published": True,
+                    "stash_object": None,
+                    "action_applied": True,
+                    "final_clean": True,
+                    "cause": "",
+                },
+            }
+        )
+        github = FakeStageGitHub(
+            pr_head_branch=pr_branch,
+            pr_state={
+                "state": "OPEN",
+                "headRefOid": pr_head,
+                "headRefName": pr_branch,
+                "autoMergeRequest": None,
+            },
+        )
+
+        result = ImplementationStage().step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "dirty_recovery_postflight_invalid",
+        )
+        assert "_impl_source_revision" not in item.payload
 
     def test_advise_disabled_skips_to_implement(self, make_ctx: Any, make_work_item: Any) -> None:
         """Advise disabled continues straight to IMPLEMENT_WAIT."""

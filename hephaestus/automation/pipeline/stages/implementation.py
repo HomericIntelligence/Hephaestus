@@ -7,7 +7,7 @@ ownership check) and
 (docs/architecture.md §5.4 "implementation" is the
 binding contract):
 
-- States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT ->
+- States: ENTER -> GATE -> WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> DIRTY_RECOVERY_WAIT ->
   ADVISE_WAIT -> IMPLEMENT_WAIT -> REBASE_CONTINUE_WAIT / TEST_WAIT -> TESTFIX_WAIT ->
   COMMIT_PUSH_WAIT -> PR_CREATE. The existing-PR fast path short-circuits
   WORKTREE_WAIT -> DIRTY_DECISION_WAIT -> ADOPTED (ADVANCE to pr_review).
@@ -185,6 +185,7 @@ ENTER = "ENTER"
 GATE = "GATE"
 WORKTREE_WAIT = "WORKTREE_WAIT"
 DIRTY_DECISION_WAIT = "DIRTY_DECISION_WAIT"
+DIRTY_RECOVERY_WAIT = "DIRTY_RECOVERY_WAIT"
 REBASE_WAIT = "REBASE_WAIT"
 REBASE_CONFLICT_WAIT = "REBASE_CONFLICT_WAIT"
 REBASE_CONTINUE_WAIT = "REBASE_CONTINUE_WAIT"
@@ -204,6 +205,7 @@ _STEP_HANDLER_NAMES: dict[str, str] = {
     GATE: "_gate",
     WORKTREE_WAIT: "_worktree_wait",
     DIRTY_DECISION_WAIT: "_dirty_decision_wait",
+    DIRTY_RECOVERY_WAIT: "_dirty_recovery_wait",
     REBASE_WAIT: "_rebase_wait",
     REBASE_CONFLICT_WAIT: "_rebase_conflict_wait",
     REBASE_CONTINUE_WAIT: "_rebase_continue_wait",
@@ -528,7 +530,9 @@ class ImplementationStage(Stage):
         )
         return JobRequest(worktree_job, on_done_state=DIRTY_DECISION_WAIT)
 
-    def _dirty_decision_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+    def _dirty_decision_wait(  # noqa: C901
+        self, item: WorkItem, ctx: StageContext
+    ) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
         if (ownership := item.payload.get("branch_worktree_owner")) is not None:
@@ -592,6 +596,61 @@ class ImplementationStage(Stage):
             adopted_next = REBASE_WAIT if item.payload.get("existing_pr") else ADVISE_WAIT
         if not item.payload.get("worktree_dirty"):
             return Continue(next_state=adopted_next)
+        if item.payload.pop("dirty_decision_invalid", False):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_worktree_decision_invalid")
+        decision = item.payload.get("dirty_decision")
+        if decision is not None:
+            if decision not in {"COMMIT", "STASH"}:
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_worktree_decision_invalid")
+            if item.pr is None:
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_unavailable")
+            pr_state = ctx.github.gh_pr_state(item.pr)
+            if not _is_confirmed_open_unarmed(pr_state):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_unverified")
+            pr_branch = ctx.github.get_pr_head_branch(item.pr)
+            if pr_branch != item.branch or not ctx.github.pr_head_is_writable(item.pr):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_not_writable")
+            expected_remote_head = (
+                pr_state.get("headRefOid") if isinstance(pr_state, dict) else None
+            )
+            captured_branch = item.payload.get("worktree_branch")
+            captured_head = item.payload.get("worktree_head_sha")
+            if (
+                captured_branch != item.branch
+                or not is_full_commit_sha(captured_head)
+                or expected_remote_head != captured_head
+                or not item.worktree
+            ):
+                return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_snapshot_invalid")
+            item.payload["dirty_recovery_next_state"] = adopted_next
+            item.payload["dirty_recovery_inflight"] = True
+            return JobRequest(
+                GitJob(
+                    repo=item.repo,
+                    op="recover_dirty_worktree",
+                    timeout_s=stage_timeout(ctx, "network", GIT_JOB_TIMEOUT_S),
+                    expected_repository=f"{ctx.org}/{item.repo}",
+                    kwargs={
+                        "repo_root": str(ctx.paths.repo_root),
+                        "worktree_path": item.worktree,
+                        "branch": item.branch,
+                        "issue_number": issue,
+                        "pr_number": item.pr,
+                        "action": decision,
+                        "pre_action_head": captured_head,
+                        "expected_remote_head": expected_remote_head,
+                        "status": item.payload.get("worktree_status", ""),
+                        "diff": item.payload.get("worktree_diff", ""),
+                        "agent": agent_provider(ctx),
+                        "agent_model": stage_model(ctx, "implementer", implementer_model),
+                        "git_message_timeout": stage_timeout(
+                            ctx, "git_message", git_message_agent_timeout()
+                        ),
+                    },
+                    descr="recover_dirty_worktree",
+                ),
+                on_done_state=DIRTY_RECOVERY_WAIT,
+            )
         logger.info("implementation:%d: requesting dirty-worktree decision", issue)
         job = AgentJob(
             repo=item.repo,
@@ -622,7 +681,69 @@ class ImplementationStage(Stage):
             },
             descr="dirty_decision",
         )
-        return JobRequest(job, on_done_state=adopted_next)
+        return JobRequest(job, on_done_state=DIRTY_DECISION_WAIT)
+
+    def _dirty_recovery_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
+        """Validate host recovery and route only its exact durable result."""
+        receipt = item.payload.get("dirty_recovery_receipt")
+        if not isinstance(receipt, dict) or receipt.get("outcome") != "recovered":
+            kind = receipt.get("failure_kind") if isinstance(receipt, dict) else "result_invalid"
+            return StageOutcome(Disposition.FINISH_FAIL, f"dirty_recovery_{kind}")
+        action = receipt.get("action")
+        pre_action_head = receipt.get("pre_action_head")
+        current_head = receipt.get("current_head")
+        expected_remote_head = receipt.get("expected_remote_head")
+        remote_head = receipt.get("remote_head")
+        common_receipt_valid = (
+            action in {"COMMIT", "STASH"}
+            and action == item.payload.get("dirty_decision")
+            and receipt.get("failure_kind") is None
+            and receipt.get("branch") == item.branch
+            and receipt.get("worktree_path") == item.worktree
+            and is_full_commit_sha(pre_action_head)
+            and pre_action_head == item.payload.get("worktree_head_sha")
+            and is_full_commit_sha(current_head)
+            and is_full_commit_sha(expected_remote_head)
+            and expected_remote_head == pre_action_head
+            and is_full_commit_sha(remote_head)
+            and receipt.get("action_applied") is True
+            and receipt.get("final_clean") is True
+        )
+        commit_receipt_valid = (
+            action == "COMMIT"
+            and current_head != pre_action_head
+            and remote_head == current_head
+            and receipt.get("published") is True
+            and receipt.get("stash_object") is None
+        )
+        stash_receipt_valid = (
+            action == "STASH"
+            and current_head == pre_action_head
+            and remote_head == expected_remote_head
+            and receipt.get("published") is False
+            and is_full_commit_sha(receipt.get("stash_object"))
+        )
+        if not common_receipt_valid or not (commit_receipt_valid or stash_receipt_valid):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_receipt_invalid")
+        if item.pr is None:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_pr_unavailable")
+        pr_state = ctx.github.gh_pr_state(item.pr)
+        if (
+            not isinstance(pr_state, dict)
+            or not _is_confirmed_open_unarmed(pr_state)
+            or pr_state.get("headRefOid") != current_head
+            or ctx.github.get_pr_head_branch(item.pr) != item.branch
+            or not ctx.github.pr_head_is_writable(item.pr)
+            or receipt.get("final_clean") is not True
+        ):
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_postflight_invalid")
+        item.payload["_impl_source_revision"] = current_head
+        item.payload["rebase_expected_remote_sha"] = current_head
+        item.payload["worktree_dirty"] = False
+        next_state = item.payload.pop("dirty_recovery_next_state", None)
+        if not isinstance(next_state, str) or next_state not in _STEP_HANDLER_NAMES:
+            return StageOutcome(Disposition.FINISH_FAIL, "dirty_recovery_continuation_invalid")
+        return Continue(next_state=next_state)
 
     def _rebase_wait(self, item: WorkItem, ctx: StageContext) -> StepResult:
         """Rebase an adopted writer branch before implementation or review.
@@ -1292,9 +1413,37 @@ class ImplementationStage(Stage):
             return
 
         if item.state == DIRTY_DECISION_WAIT:
-            if result.ok and result.value:
-                # COMMIT/STASH decision; the git worker acts on it (#1817).
-                item.payload["dirty_decision"] = str(result.value)
+            if item.payload.pop("dirty_recovery_inflight", False):
+                value = result.value if isinstance(result.value, dict) else {}
+                item.payload["dirty_recovery_receipt"] = dict(value)
+                if not result.ok and "failure_kind" not in value:
+                    item.payload["dirty_recovery_receipt"] = {
+                        "outcome": "failed",
+                        "failure_kind": "worker_error",
+                        "cause": redact_diagnostic_text(result.error or "dirty recovery failed")[
+                            :500
+                        ],
+                    }
+                return
+            lines = [line.strip() for line in str(result.value or "").splitlines() if line.strip()]
+            decision = lines[-1] if result.ok and lines else None
+            if decision in {"COMMIT", "STASH"}:
+                item.payload["dirty_decision"] = decision
+                item.payload.pop("dirty_decision_invalid", None)
+            else:
+                item.payload.pop("dirty_decision", None)
+                item.payload["dirty_decision_invalid"] = True
+            return
+
+        if item.state == DIRTY_RECOVERY_WAIT:
+            value = result.value if isinstance(result.value, dict) else {}
+            item.payload["dirty_recovery_receipt"] = dict(value)
+            if not result.ok and "failure_kind" not in value:
+                item.payload["dirty_recovery_receipt"] = {
+                    "outcome": "failed",
+                    "failure_kind": "worker_error",
+                    "cause": redact_diagnostic_text(result.error or "dirty recovery failed")[:500],
+                }
             return
 
         if item.state == REBASE_WAIT:
@@ -1683,7 +1832,7 @@ class ImplementationStage(Stage):
         item.payload["rebase_expected_remote_sha"] = expected_remote_sha
 
     @staticmethod
-    def _on_worktree_done(item: WorkItem, result: JobResult) -> None:
+    def _on_worktree_done(item: WorkItem, result: JobResult) -> None:  # noqa: C901
         """Record the created worktree's path and dirty snapshot.
 
         A failed worktree job flags ``git_error`` (transient — the
@@ -1750,20 +1899,36 @@ class ImplementationStage(Stage):
                     "branch": item.branch,
                     "base_sha": direct_base_sha,
                 }
-            item.payload.pop("worktree_dirty", None)
-            item.payload.pop("worktree_status", None)
-            item.payload.pop("worktree_diff", None)
+            for key in (
+                "worktree_dirty",
+                "worktree_status",
+                "worktree_diff",
+                "worktree_branch",
+                "worktree_head_sha",
+            ):
+                item.payload.pop(key, None)
             item.payload["git_error"] = True
             return
         # A successful worktree job ends the consecutive-git-failure streak.
         item.payload.pop(WORKTREE_MATERIALIZED_KEY, None)
         item.payload.pop("git_error_retries", None)
+        for key in (
+            "worktree_dirty",
+            "worktree_status",
+            "worktree_diff",
+            "worktree_branch",
+            "worktree_head_sha",
+        ):
+            item.payload.pop(key, None)
         value = result.value
         if isinstance(value, dict):
             item.worktree = str(value.get("path", item.worktree))
             item.payload["worktree_dirty"] = bool(value.get("dirty"))
             item.payload["worktree_status"] = str(value.get("status", ""))
             item.payload["worktree_diff"] = str(value.get("diff", ""))
+            if item.payload["worktree_dirty"]:
+                item.payload["worktree_branch"] = value.get("branch")
+                item.payload["worktree_head_sha"] = value.get("head_sha")
             direct_base_sha = item.payload.get(DIRECT_SCOPE_BASE_SHA_KEY)
             requires_fresh_direct_reservation = (
                 not bool(item.payload.get("existing_pr")) and direct_base_sha is not None

@@ -48,6 +48,7 @@ from hephaestus.automation.pipeline.routing import (
 )
 from hephaestus.automation.pipeline.seeding import SeedEntry
 from hephaestus.automation.pipeline.stages.base import JobRequest
+from hephaestus.automation.pipeline.stages.implementation import DIRTY_RECOVERY_WAIT
 from hephaestus.automation.pipeline.work_item import ItemKind, ItemResult, WorkItem
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
 from hephaestus.resilience import (
@@ -309,6 +310,45 @@ def test_github_receipt_applies_before_on_done_state_and_routing(
     )
 
     assert calls == [("on_job_done", "POST"), ("step", "POST_APPLY")]
+
+
+def test_dirty_recovery_completion_is_stored_before_recovery_state_routing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coordinator callback order cannot skip the recovery receipt gate."""
+    coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+    item = _issue_item(2920, StageName.IMPLEMENTATION)
+    item.state = "DIRTY_DECISION_WAIT"
+    item.pr = 3000
+    item.branch = "2920-auto-impl"
+    item.worktree = str(tmp_path / "issue-2920")
+    item.payload.update(
+        {
+            "dirty_decision": "COMMIT",
+            "dirty_recovery_inflight": True,
+            "dirty_recovery_next_state": "REBASE_WAIT",
+            "worktree_head_sha": "a" * 40,
+        }
+    )
+    job = GitJob(repo="repo-a", op="recover_dirty_worktree", timeout_s=60)
+    handle = JobHandle(job=job, on_done_state=DIRTY_RECOVERY_WAIT)
+    coordinator.in_flight[handle] = item
+    coordinator.inflight_per_repo[item.repo] = 1
+    receipt = {
+        "outcome": "failed",
+        "failure_kind": "remote_postflight_drift",
+        "action_applied": True,
+        "current_head": "b" * 40,
+    }
+
+    coordinator._handle_completion(handle, JobResult(ok=False, value=receipt))
+
+    assert item.payload["dirty_recovery_receipt"] == receipt
+    assert item.stage is StageName.FINISHED
+    assert item.result is not None and item.result.passed is False
+    assert item.result.reason == "dirty_recovery_remote_postflight_drift"
+    assert "_impl_source_revision" not in item.payload
 
 
 def test_interrupted_github_job_never_applies_a_receipt(
@@ -1419,6 +1459,34 @@ class TestFailBackRouting:
         assert item.stage is StageName.FINISHED
         assert item.result is not None and not item.result.passed
         assert "poisoned: boom" in item.result.reason
+
+    def test_dirty_recovery_failure_routes_to_finished_with_worktree_evidence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coordinator routing retains partial recovery evidence for Finished."""
+        coordinator, _, _ = make_coordinator(tmp_path, monkeypatch)
+        item = _issue_item(2920, StageName.IMPLEMENTATION)
+        item.worktree = str(tmp_path / "issue-2920")
+        receipt = {
+            "outcome": "failed",
+            "failure_kind": "remote_postflight_drift",
+            "action_applied": True,
+            "current_head": "b" * 40,
+        }
+        item.payload["dirty_recovery_receipt"] = receipt
+
+        coordinator._route(
+            item,
+            StageOutcome(
+                Disposition.FINISH_FAIL,
+                "dirty_recovery_remote_postflight_drift",
+            ),
+        )
+
+        assert item.stage is StageName.FINISHED
+        assert item.worktree == str(tmp_path / "issue-2920")
+        assert item.payload["dirty_recovery_receipt"] == receipt
+        assert item.result is not None and item.result.passed is False
 
     def test_dry_run_fail_back_finishes_instead_of_regressing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

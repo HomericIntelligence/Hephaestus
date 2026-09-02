@@ -999,7 +999,10 @@ stateDiagram-v2
     InspectPR --> Adopt: open PR exists
     InspectPR --> Complete: already merged
     InspectPR --> Failed: closed without merge
-    Adopt --> Prepare: safe to continue
+    Adopt --> RecoverDirty: reused workspace is dirty
+    RecoverDirty --> Prepare: exact COMMIT or STASH recovery succeeds
+    RecoverDirty --> Failed: identity, recovery, or postflight check fails
+    Adopt --> Prepare: clean workspace is safe to continue
     Adopt --> Failed: unsafe adoption
     Prepare --> Implement: workspace ready
     Prepare --> Failed: workspace unavailable
@@ -1023,6 +1026,17 @@ Architectural contract:
 - Implementation never writes `state:implementation-go`.
 - Missing approval returns to plan review; unsafe or exhausted work terminates
   without approval.
+- A reused dirty writer carries its registered path, branch, head, status, and
+  diff to `DIRTY_DECISION_WAIT`. Only an exact final nonempty `COMMIT` or
+  `STASH` line can request recovery. The host confirms the open unarmed
+  writable PR and branch ownership. The Git worker then checks the registered
+  identity, local and remote heads, and dirty snapshot before it changes the
+  worktree. `COMMIT` creates one
+  signed DCO commit with the captured head as its direct parent and publishes
+  it with an exact lease. `STASH` includes untracked files and does not change
+  either branch head. A clean-tree and head postflight must succeed before the
+  implementation source revision is rebound. All failures preserve the writer
+  worktree and any commit or stash evidence for diagnosis.
 - Before creating a direct-scope writer worktree, the coordinator atomically
   reserves its absent remote branch at the already-resolved base SHA. That
   metadata-only `git push` uses `--no-verify` so ambient pre-push hooks cannot
@@ -1336,6 +1350,9 @@ Architectural contract:
   branch receive a non-forced cleanup so a later direct run is not blocked by
   stale deterministic state. A late dirty edit makes that cleanup fail and
   preserves the worktree instead.
+- A dirty-recovery failure always preserves its writer worktree. This includes
+  a failure after a commit or stash was created, so the immutable recovery
+  evidence remains available.
 - Successful temporary workspaces are removed when safe.
 - Cleanup failure never rewrites the underlying result.
 
