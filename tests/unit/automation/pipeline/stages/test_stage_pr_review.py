@@ -73,6 +73,7 @@ from hephaestus.automation.pipeline.stages.pr_review_verification import (
 from hephaestus.automation.pipeline.work_item import ItemKind
 from hephaestus.automation.pipeline.worker_pool import WorkerPool
 from hephaestus.automation.pipeline_github_jobs import PipelineGitHubJobRunner
+from hephaestus.automation.pr_review_core import MAX_PR_REVIEW_RENDERED_CHARS
 from hephaestus.automation.review_audit import ReviewAudit, parse_review_audit
 from hephaestus.automation.review_journal import IssueComment
 from hephaestus.automation.state_labels import STATE_SKIP
@@ -1367,6 +1368,54 @@ class TestPrReviewStageStep:
         assert isinstance(result, JobRequest)
         assert result.on_done_state == "POST"
         assert result.job.descr == "validate"
+
+    def test_review_and_validation_jobs_bound_large_rendered_prompts(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """Both reviewer jobs keep large direct prompts below the provider limit."""
+        stage = PrReviewStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=2705, pr=2755, state="VALIDATE_WAIT")
+        large_diff = (
+            "diff --git a/large.py b/large.py\n--- a/large.py\n+++ b/large.py\n"
+            + "\n".join(f"+line {index} {'x' * 30}" for index in range(20_000))
+        )
+        receipts = [
+            {
+                "argv": ["uv", "run", "pytest", f"tests/unit/test_{index}.py"],
+                "head_sha": "a" * 40,
+                "immutable_source": True,
+                "ok": True,
+                "status": "passed",
+                "stdout_tail": "s" * 4_000,
+                "stderr_tail": "e" * 4_000,
+            }
+            for index in range(35)
+        ]
+        item.payload.update(
+            {
+                "host_verification_receipts": receipts,
+                "pr_diff": large_diff,
+                "reviewed_pr_head_sha": "a" * 40,
+            }
+        )
+
+        review = stage._submit_review_job(item, ctx)
+        validation = stage.step(item, ctx)
+
+        assert isinstance(review.job, AgentJob)
+        assert isinstance(validation, JobRequest)
+        assert isinstance(validation.job, AgentJob)
+        prompts = [
+            review.job.prompt_builder(**review.job.prompt_kwargs),
+            validation.job.prompt_builder(**validation.job.prompt_kwargs),
+        ]
+        for prompt in prompts:
+            assert len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS
+            assert "[... host verification output truncated ...]" in prompt
+            assert "tests/unit/test_0.py" in prompt
+            assert "tests/unit/test_34.py" in prompt
+            assert "[... PR diff truncated ...]" in prompt
 
     def test_validate_wait_includes_fresh_head_bound_pr_metadata(
         self, make_ctx: Any, make_work_item: Any

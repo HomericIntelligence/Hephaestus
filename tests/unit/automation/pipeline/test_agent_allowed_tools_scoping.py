@@ -58,7 +58,11 @@ EXPECTED_SCOPES = {
         "_submit_review_job",
         "build_bounded_pr_review_analysis_prompt",
     ): PR_REVIEW,
-    ("stages/pr_review_jobs.py", "_validate_wait", "get_review_validation_prompt"): READ_ONLY,
+    (
+        "stages/pr_review_jobs.py",
+        "_validate_wait",
+        "build_bounded_review_validation_prompt",
+    ): READ_ONLY,
 }
 
 # Athena advise/learn calls are host-owned typed jobs, not prompt-only AgentJobs.

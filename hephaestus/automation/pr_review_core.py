@@ -46,7 +46,7 @@ from .agent_config import DEFAULT_AGENT_TIMEOUT
 from .claude_invoke import invoke_claude_with_session, raise_for_error_envelope
 from .claude_models import reviewer_model
 from .git_utils import get_repo_root, get_repo_slug, pr_ref
-from .prompts import get_pr_review_analysis_prompt
+from .prompts import get_pr_review_analysis_prompt, get_review_validation_prompt
 from .review_audit import ReviewAudit, parse_review_audit
 from .session_naming import AGENT_PR_REVIEWER
 
@@ -85,6 +85,8 @@ _MAX_PR_REVIEW_DESCRIPTION_CHARS = 20_000
 _MAX_PR_REVIEW_ADVISE_CHARS = 20_000
 _MAX_PR_REVIEW_RECEIPTS_CHARS = 64_000
 _MAX_HOST_RECEIPT_STREAM_CHARS = 512
+_MAX_REVIEW_VALIDATION_COMMENTS_CHARS = 40_000
+_MAX_REVIEW_VALIDATION_TITLE_CHARS = 4_000
 
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.* b/(.*)$", re.MULTILINE)
 
@@ -290,6 +292,76 @@ def build_bounded_pr_review_analysis_prompt(
         label="PR diff",
     )
     return render(reduced_diff)
+
+
+def build_bounded_review_validation_prompt(
+    pr_number: int,
+    issue_number: int,
+    prior_comments_json: str,
+    diff_text: str = "",
+    host_verifications_json: str = "",
+    pr_title: str = "",
+    pr_description: str = "",
+    review_context_kind: str = "issue",
+) -> str:
+    """Render a validation prompt within the provider-safe input budget."""
+    context = {
+        "prior_comments_json": _truncate_review_text(
+            prior_comments_json,
+            max_chars=_MAX_REVIEW_VALIDATION_COMMENTS_CHARS,
+            label="prior review comments",
+        ),
+        "diff_text": _budget_review_diff(
+            diff_text,
+            max_chars=_MAX_PR_REVIEW_DIFF_CHARS,
+        ),
+        "host_verifications_json": _compact_host_verifications_json(host_verifications_json),
+        "pr_title": _truncate_review_text(
+            pr_title,
+            max_chars=_MAX_REVIEW_VALIDATION_TITLE_CHARS,
+            label="PR title",
+        ),
+        "pr_description": _truncate_review_text(
+            pr_description,
+            max_chars=_MAX_PR_REVIEW_DESCRIPTION_CHARS,
+            label="PR description",
+        ),
+    }
+
+    def render() -> str:
+        return get_review_validation_prompt(
+            pr_number=pr_number,
+            issue_number=issue_number,
+            prior_comments_json=context["prior_comments_json"],
+            diff_text=context["diff_text"],
+            host_verifications_json=context["host_verifications_json"],
+            pr_title=context["pr_title"],
+            pr_description=context["pr_description"],
+            review_context_kind=review_context_kind,
+        )
+
+    prompt = render()
+    for field, label in (
+        ("diff_text", "PR diff"),
+        ("pr_description", "PR description"),
+        ("pr_title", "PR title"),
+        ("host_verifications_json", "host verification receipts"),
+        ("prior_comments_json", "prior review comments"),
+    ):
+        if len(prompt) <= MAX_PR_REVIEW_RENDERED_CHARS:
+            return prompt
+        context[field] = _truncate_review_text(
+            context[field],
+            max_chars=max(
+                0,
+                len(context[field]) - (len(prompt) - MAX_PR_REVIEW_RENDERED_CHARS),
+            ),
+            label=label,
+        )
+        prompt = render()
+    if len(prompt) > MAX_PR_REVIEW_RENDERED_CHARS:
+        raise ValueError("Review validation prompt fixed content exceeds the safe limit")
+    return prompt
 
 
 def _invoke_and_parse_review_session(
