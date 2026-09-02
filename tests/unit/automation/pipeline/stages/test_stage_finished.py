@@ -276,6 +276,31 @@ class TestCleanup:
         assert isinstance(result, Continue) and result.next_state == "DONE"
         assert preserved == [("repo-a", 42, "/wt/issue-42")]
 
+    def test_partial_dirty_recovery_failure_preserves_commit_or_stash_evidence(
+        self,
+        stage: FinishedStage,
+        preserved: list[tuple[str, int, str]],
+        make_ctx: Any,
+    ) -> None:
+        """Finished preserves a worktree after the recovery action was applied."""
+        item = _item(
+            passed=False,
+            reason="dirty_recovery_remote_postflight_drift",
+            worktree="/wt/issue-2920",
+            state="CLEANUP",
+        )
+        item.payload["dirty_recovery_receipt"] = {
+            "outcome": "failed",
+            "action_applied": True,
+            "current_head": "b" * 40,
+            "stash_object": None,
+        }
+
+        result = stage.step(item, make_ctx())
+
+        assert result == Continue(next_state="DONE")
+        assert preserved == [("repo-a", 42, "/wt/issue-2920")]
+
     @pytest.mark.parametrize(
         "failure",
         [
