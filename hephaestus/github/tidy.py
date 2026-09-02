@@ -66,6 +66,10 @@ _PROBLEM_HEADER = re.compile(r"WARNING:\s*Unable to auto-rebase the following br
 _PROBLEM_BULLET = re.compile(r"^\s*\*\s+(\S+)")
 
 
+class WorktreeInventoryError(RuntimeError):
+    """Raised when Git cannot supply an unambiguous worktree inventory."""
+
+
 def _detect_default_branch(override: str | None, *, gh_timeout: int = DEFAULT_GH_TIMEOUT) -> str:
     """Return the repo's default branch, using override if supplied."""
     if override:
@@ -113,29 +117,114 @@ def _repo_root() -> Path:
 
 
 def _worktree_porcelain() -> str:
-    """Return the current repository's NUL-delimited worktree inventory."""
-    return run_git(["worktree", "list", "--porcelain", "-z"]).stdout
+    """Return a normalized NUL-delimited worktree inventory.
+
+    Git 2.36 and later support ``-z``. Older supported versions use the stable
+    line-delimited format. Strict validation rejects paths that old Git cannot
+    represent without ambiguity.
+    """
+    try:
+        nul_result = run_git(
+            ["worktree", "list", "--porcelain", "-z"],
+            check=False,
+            log_on_error=False,
+        )
+        if nul_result.returncode == 0:
+            return nul_result.stdout
+        if nul_result.returncode != 129:
+            raise WorktreeInventoryError("Git could not read the worktree inventory")
+        legacy_result = run_git(
+            ["worktree", "list", "--porcelain"],
+            check=False,
+            log_on_error=False,
+        )
+    except (subprocess.SubprocessError, RuntimeError) as error:
+        if isinstance(error, WorktreeInventoryError):
+            raise
+        raise WorktreeInventoryError("Git could not read the worktree inventory") from error
+    if legacy_result.returncode:
+        raise WorktreeInventoryError("Git does not support a safe worktree inventory format")
+    if "\0" in legacy_result.stdout:
+        raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+    normalized = legacy_result.stdout.replace("\n", "\0")
+    _parse_worktree_porcelain(normalized, Path())
+    return normalized
+
+
+def _inventory_path(field: str, current: Path | None) -> Path:
+    """Parse one worktree path field or reject the inventory."""
+    path_text = field.removeprefix("worktree ")
+    path = Path(path_text)
+    if current is not None or not path_text or not path.is_absolute():
+        raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+    return path
+
+
+def _inventory_attribute(field: str) -> tuple[str, str | None]:
+    """Parse one non-path inventory attribute."""
+    if field.startswith("branch refs/heads/"):
+        return "branch", field.removeprefix("branch refs/heads/")
+    if field.startswith("HEAD "):
+        return "HEAD", field.removeprefix("HEAD ")
+    if field in {"bare", "detached"}:
+        return field, None
+    if field == "locked" or field.startswith("locked "):
+        return "locked", None
+    if field == "prunable" or field.startswith("prunable "):
+        return "prunable", None
+    raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+
+
+def _add_inventory_attribute(
+    field: str,
+    path: Path | None,
+    attributes: set[str],
+    branch: str | None,
+) -> str | None:
+    """Add a valid record attribute and return its branch value."""
+    name, value = _inventory_attribute(field)
+    if path is None or name in attributes or (name in {"HEAD", "branch"} and not value):
+        raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+    attributes.add(name)
+    return value if name == "branch" else branch
+
+
+def _validate_inventory_record(attributes: set[str]) -> None:
+    """Reject an incomplete or contradictory worktree record."""
+    if "branch" in attributes and ({"bare", "detached"} & attributes):
+        raise WorktreeInventoryError("Git returned a malformed worktree inventory")
+    if "bare" not in attributes and "HEAD" not in attributes:
+        raise WorktreeInventoryError("Git returned a malformed worktree inventory")
 
 
 def _parse_worktree_porcelain(output: str, root: Path) -> list[tuple[Path, str]]:
-    """Return attached, non-primary worktrees from NUL-delimited output."""
+    """Return attached, non-primary worktrees from strict NUL output."""
     worktrees: list[tuple[Path, str]] = []
     primary: Path | None = None
     path: Path | None = None
     branch: str | None = None
+    attributes: set[str] = set()
+    records = 0
     for field in [*output.split("\0"), ""]:
         if field.startswith("worktree "):
-            path = Path(field.removeprefix("worktree "))
+            path = _inventory_path(field, path)
             if primary is None:
                 primary = path
             branch = None
-        elif field.startswith("branch refs/heads/"):
-            branch = field.removeprefix("branch refs/heads/")
+            attributes = {"worktree"}
         elif not field:
-            if path is not None and branch is not None and path not in {primary, root}:
-                worktrees.append((path, branch))
+            if path is not None:
+                _validate_inventory_record(attributes)
+                if branch is not None and path not in {primary, root}:
+                    worktrees.append((path, branch))
+                records += 1
             path = None
             branch = None
+            attributes = set()
+        else:
+            branch = _add_inventory_attribute(field, path, attributes, branch)
+    if records == 0:
+        raise WorktreeInventoryError("Git returned a malformed worktree inventory")
     return worktrees
 
 
@@ -198,8 +287,12 @@ def _cleanup_stale_worktrees(
     gh_timeout: int = DEFAULT_GH_TIMEOUT,
 ) -> int:
     """Interactively remove clean worktrees for closed issues or merged branches."""
-    porcelain = _worktree_porcelain()
-    candidates = _parse_worktree_porcelain(porcelain, root)
+    try:
+        porcelain = _worktree_porcelain()
+        candidates = _parse_worktree_porcelain(porcelain, root)
+    except WorktreeInventoryError as error:
+        logger.error("Cannot inspect worktrees safely: %s", error)
+        return 1
     stale_count = 0
     for path, branch in candidates:
         match = re.match(r"(\d+)", branch)

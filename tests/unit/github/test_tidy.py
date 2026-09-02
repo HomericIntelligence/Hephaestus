@@ -6,7 +6,7 @@ import importlib
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
 
@@ -38,6 +38,7 @@ WORKTREE_PORCELAIN = "\0".join(
         "HEAD deadbeef",
         "detached",
         "",
+        "worktree /repo/bare",
         "bare",
         "",
     )
@@ -66,6 +67,19 @@ LOCKED_SPACED_WORKTREE_PORCELAIN = "\0".join(
         "HEAD 123456",
         "branch refs/heads/123-finished",
         "locked",
+        "",
+    )
+)
+
+NEWLINE_WORKTREE_PORCELAIN = "\0".join(
+    (
+        "worktree /repo",
+        "HEAD abcdef",
+        "branch refs/heads/main",
+        "",
+        "worktree /repo/.worktrees/123\nfinished",
+        "HEAD 123456",
+        "branch refs/heads/123-finished",
         "",
     )
 )
@@ -238,7 +252,65 @@ def test_worktree_porcelain_requests_nul_terminated_output(
     monkeypatch.setattr(tidy_module, "run_git", run_git)
 
     assert tidy_module._worktree_porcelain() == "inventory"
-    run_git.assert_called_once_with(["worktree", "list", "--porcelain", "-z"])
+    run_git.assert_called_once_with(
+        ["worktree", "list", "--porcelain", "-z"],
+        check=False,
+        log_on_error=False,
+    )
+
+
+def test_worktree_porcelain_falls_back_when_git_rejects_nul_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git without ``-z`` support uses strict line-delimited porcelain."""
+    unsupported = subprocess.CompletedProcess([], 129, stdout="", stderr="usage")
+    legacy = subprocess.CompletedProcess(
+        [],
+        0,
+        stdout=WORKTREE_PORCELAIN.replace("\0", "\n"),
+        stderr="",
+    )
+    run_git = MagicMock(side_effect=(unsupported, legacy))
+    monkeypatch.setattr(tidy_module, "run_git", run_git)
+
+    assert tidy_module._worktree_porcelain() == WORKTREE_PORCELAIN
+    assert run_git.call_args_list == [
+        call(
+            ["worktree", "list", "--porcelain", "-z"],
+            check=False,
+            log_on_error=False,
+        ),
+        call(
+            ["worktree", "list", "--porcelain"],
+            check=False,
+            log_on_error=False,
+        ),
+    ]
+
+
+def test_worktree_porcelain_rejects_ambiguous_legacy_newline_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy output stops safely when a newline splits a worktree path."""
+    unsupported = subprocess.CompletedProcess([], 129, stdout="", stderr="usage")
+    ambiguous = subprocess.CompletedProcess(
+        [],
+        0,
+        stdout=(
+            "worktree /repo\nHEAD abcdef\nbranch refs/heads/main\n\n"
+            "worktree /repo/.worktrees/123\nfinished\n"
+            "HEAD 123456\nbranch refs/heads/123-finished\n\n"
+        ),
+        stderr="",
+    )
+    monkeypatch.setattr(
+        tidy_module,
+        "run_git",
+        MagicMock(side_effect=(unsupported, ambiguous)),
+    )
+
+    with pytest.raises(tidy_module.WorktreeInventoryError, match="malformed"):
+        tidy_module._worktree_porcelain()
 
 
 def test_parse_worktree_porcelain_preserves_space_in_path() -> None:
@@ -247,6 +319,33 @@ def test_parse_worktree_porcelain_preserves_space_in_path() -> None:
         SPACED_WORKTREE_PORCELAIN,
         Path("/repo"),
     ) == [(Path("/repo/.worktrees/123 finished"), "123-finished")]
+
+
+def test_parse_worktree_porcelain_preserves_newline_in_nul_path() -> None:
+    """NUL output preserves a newline-containing worktree path."""
+    assert tidy_module._parse_worktree_porcelain(
+        NEWLINE_WORKTREE_PORCELAIN,
+        Path("/repo"),
+    ) == [(Path("/repo/.worktrees/123\nfinished"), "123-finished")]
+
+
+def test_cleanup_rejects_malformed_inventory_without_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed inventory stops cleanup before state classification."""
+    monkeypatch.setattr(
+        tidy_module,
+        "_worktree_porcelain",
+        lambda: "worktree /repo\0HEAD abcdef\0\0unexpected\0",
+    )
+    branch_is_merged = MagicMock()
+    remove = MagicMock()
+    monkeypatch.setattr(tidy_module, "_branch_is_merged", branch_is_merged)
+    monkeypatch.setattr(tidy_module, "_remove_worktree", remove)
+
+    assert tidy_module._cleanup_stale_worktrees(Path("/repo"), "main", dry_run=False) == 1
+    branch_is_merged.assert_not_called()
+    remove.assert_not_called()
 
 
 def test_cleanup_stale_worktrees_dry_run_reports_closed_issue_without_removing(
