@@ -12,7 +12,7 @@ from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -4130,6 +4130,36 @@ class TestEvalVerdicts:
         assert ("mark_pr_implementation_go", (1001,)) not in github.mutation_log
 
     @pytest.mark.parametrize(
+        "verdict",
+        [
+            pytest.param(None, id="missing"),
+            pytest.param(cast(Any, "MAYBE"), id="malformed"),
+        ],
+    )
+    def test_invalid_audit_object_retries_without_implementation_go_artifacts(
+        self, make_ctx: Any, make_work_item: Any, verdict: Any
+    ) -> None:
+        """An invalid in-memory verdict is a bounded reviewer failure."""
+        stage = PrReviewStage()
+        github = FakeStageGitHub(unresolved=[(0, 0)])
+        item = make_work_item(issue=1, pr=1001, state="EVAL")
+        item.payload["review_audit"] = ReviewAudit(
+            grade="A",
+            verdict=verdict,
+            summary="Clean",
+            findings=(),
+            raw_feedback="",
+            valid=True,
+        )
+
+        result = stage.step(item, make_ctx(github=github))
+
+        assert result == StageOutcome(Disposition.RETRY, "review audit format failure")
+        assert github.mutation_log == []
+        assert github.pending_go_audits == {}
+        assert github.comments.get(1001, []) == []
+
+    @pytest.mark.parametrize(
         ("response", "case"),
         [
             pytest.param(
@@ -4771,6 +4801,7 @@ class TestEvalVerdicts:
         item = make_work_item(issue=1, pr=1001, state="EVAL")
         item.payload["review_audit"] = ReviewAudit(
             grade="F",
+            verdict="NOGO",
             summary="Material findings remain",
             findings=(),
             raw_feedback="",

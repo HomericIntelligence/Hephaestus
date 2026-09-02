@@ -163,6 +163,11 @@ class PrReviewGate(_PrReviewHost):
             return self._handle_error_verdict(item, ReviewAudit(None, "", (), "", valid=False))
         if not audit.valid:
             return self._handle_error_verdict(item, audit)
+        if audit.verdict not in {"GO", "NOGO", "BLOCKED"}:
+            # The parser rejects this state, but the gate also validates an
+            # in-memory audit. A malformed payload is an agent failure, not
+            # a NOGO result that can burn the review budget or write a label.
+            return self._handle_error_verdict(item, audit)
         if not item.payload.get("reviewed_pr_head_sha"):
             # Addressing a finding or pushing a new commit clears the prior
             # head proof. A fresh negative transition may still be based on
