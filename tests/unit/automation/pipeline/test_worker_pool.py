@@ -77,6 +77,7 @@ from hephaestus.automation.session_naming import (
     AGENT_IMPLEMENTER,
     AGENT_PR_REVIEWER,
 )
+from hephaestus.automation.source_worktree import SourceWorkspaceError
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -3926,6 +3927,45 @@ class TestGitOps:
             path=writer_path,
         )
         assert result.ok is True
+
+    def test_create_implementation_source_lane_returns_typed_claim_failure(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A failed writer handoff does not become a generic Git error."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        source_manager = MagicMock()
+        source_manager.claim_implementation_writer.side_effect = SourceWorkspaceError("mismatch")
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is False
+        assert result.error == "source_workspace_ownership_unavailable: mismatch"
+        assert result.value == {
+            "path": str(writer_path),
+            WORKTREE_MATERIALIZED_KEY: True,
+        }
 
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,

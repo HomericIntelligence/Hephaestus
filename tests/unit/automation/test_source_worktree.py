@@ -273,6 +273,65 @@ def test_claim_implementation_writer_rejects_an_incompatible_receipt(
     assert _git(writer, "branch", "--show-current") == "writer-branch"
 
 
+def test_claim_implementation_writer_rejects_a_wrong_attached_branch(
+    tmp_path: Path,
+) -> None:
+    """A deterministic path does not authorize a different writer branch."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "other-writer-branch", str(writer), second)
+
+    with pytest.raises(SourceWorkspaceError, match="does not match the requested branch"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert _git(writer, "branch", "--show-current") == "other-writer-branch"
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_preserves_a_dirty_writer(tmp_path: Path) -> None:
+    """A dirty controlled writer remains available for recovery."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+    dirty_file = writer / "recover-me.txt"
+    dirty_file.write_text("preserve this\n", encoding="utf-8")
+
+    with pytest.raises(SourceWorkspaceError, match="dirty and preserved"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert dirty_file.read_text(encoding="utf-8") == "preserve this\n"
+    assert not (manager.state_dir / "9-impl.json").exists()
+
+
+def test_claim_implementation_writer_rejects_a_foreign_receipt(tmp_path: Path) -> None:
+    """A different repository identity cannot refresh a writer receipt."""
+    repo, _, second = _repository(tmp_path)
+    first = SourceWorkspaceManager(repo, repository="one/project")
+    writer = first.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+    first.claim_implementation_writer(9, branch="writer-branch", path=writer)
+    second_manager = SourceWorkspaceManager(repo, repository="two/project")
+
+    with pytest.raises(SourceWorkspaceError, match="owned by another repository"):
+        second_manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert _git(writer, "branch", "--show-current") == "writer-branch"
+
+
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
     """A review lane created with the current deterministic name is removable."""
     repo, _, second = _repository(tmp_path)
