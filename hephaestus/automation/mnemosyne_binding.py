@@ -14,7 +14,7 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable,
     trusted_remote_git_config,
 )
-from hephaestus.config.child_environments import build_git_child_env
+from hephaestus.config.child_environments import build_gh_child_env, build_git_child_env
 from hephaestus.github.mnemosyne_repo import MnemosyneTarget, resolve_mnemosyne_target
 from hephaestus.utils.helpers import NETWORK_TIMEOUT, run_subprocess
 
@@ -30,10 +30,6 @@ class MnemosyneBindingError(RuntimeError):
 
 GitRunner = Callable[[Path, tuple[str, ...], int], subprocess.CompletedProcess[str]]
 Resolver = Callable[[], MnemosyneTarget]
-
-_UNSAFE_CONFIG_RE = (
-    r"^(alias\.|include\.|includeIf\.|core\.hooksPath|core\.fsmonitor|core\.sshCommand)"
-)
 
 
 @dataclass(frozen=True)
@@ -87,13 +83,58 @@ def _require_remote_success(result: subprocess.CompletedProcess[str], action: st
 
 def _origin_matches(origin: str, slug: str) -> bool:
     normalized = origin.removesuffix(".git")
-    return bool(
-        normalized == slug
-        or normalized.endswith(f"/{slug}")
-        or normalized.endswith(f":{slug}")
-        or normalized == f"https://github.com/{slug}"
-        or normalized == f"git@github.com:{slug}"
-    )
+    return normalized in {
+        f"https://github.com/{slug}",
+        f"ssh://git@github.com/{slug}",
+        f"git@github.com:{slug}",
+    }
+
+
+def _unsafe_config_key(config: str) -> str | None:
+    """Return an unsafe effective Git configuration key."""
+    for entry in config.split("\0"):
+        key, separator, _value = entry.partition("\n")
+        if not separator:
+            continue
+        normalized = key.lower()
+        if normalized.startswith(("alias.", "include.", "includeif.", "http.", "url.")):
+            return key
+        if normalized in {
+            "core.askpass",
+            "core.fsmonitor",
+            "core.gitproxy",
+            "core.hookspath",
+            "core.sshcommand",
+        }:
+            return key
+        if normalized == "credential.helper" or (
+            normalized.startswith("credential.") and normalized.endswith(".helper")
+        ):
+            return key
+        if normalized.startswith("remote.") and normalized.rsplit(".", 1)[-1] in {
+            "proxy",
+            "proxyauthmethod",
+            "pushurl",
+            "receivepack",
+            "uploadpack",
+        }:
+            return key
+    return None
+
+
+def _gh_auth_status(command: str, timeout_s: int) -> bool:
+    """Return true when the trusted GitHub CLI has a login for GitHub.com."""
+    try:
+        result = run_subprocess(
+            [command, "auth", "status", "--hostname", "github.com"],
+            env=build_gh_child_env(),
+            check=False,
+            timeout=timeout_s,
+            track_process_group=True,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 class MnemosyneBindingService:
@@ -162,6 +203,11 @@ class MnemosyneBindingService:
                 "remote Git authentication unavailable: trusted GitHub executable missing",
                 failure_kind="remote_git_authentication",
             )
+        if not _gh_auth_status(gh_command, self.timeout_s):
+            raise MnemosyneBindingError(
+                "remote Git authentication unavailable: GitHub login missing",
+                failure_kind="remote_git_authentication",
+            )
         remote_config = trusted_remote_git_config(gh_command)
         if remote_config is None:
             raise MnemosyneBindingError(
@@ -225,12 +271,11 @@ class MnemosyneBindingService:
             )
 
     def _validate_safe_config(self, root: Path) -> None:
-        result = self._git(root, "config", "--local", "--get-regexp", _UNSAFE_CONFIG_RE)
-        if result.returncode == 0:
-            detail = (result.stdout or "").strip()
-            raise MnemosyneBindingError(f"unsafe Git config: {detail}")
-        if result.returncode != 1:
-            _require_success(result, "unsafe Git config scan")
+        result = self._git(root, "config", "--null", "--list")
+        if result.returncode != 0:
+            raise MnemosyneBindingError("Git configuration scan failed")
+        if _unsafe_config_key(result.stdout or "") is not None:
+            raise MnemosyneBindingError("unsafe Git configuration")
 
     def _validate_clean(self, root: Path) -> None:
         status = _require_success(self._git(root, "status", "--porcelain"), "status read")

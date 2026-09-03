@@ -13,15 +13,13 @@ from hephaestus.automation.athena_contract import AthenaContractReceipt
 from hephaestus.automation.mnemosyne_binding import (
     MnemosyneBindingError,
     MnemosyneBindingService,
+    _origin_matches,
     default_mnemosyne_root,
 )
 from hephaestus.github.mnemosyne_repo import MnemosyneTarget, MnemosyneTrustBasis
 
 SHA = "c" * 40
-UNSAFE_CONFIG_COMMAND = (
-    "config --local --get-regexp "
-    "^(alias\\.|include\\.|includeIf\\.|core\\.hooksPath|core\\.fsmonitor|core\\.sshCommand)"
-)
+UNSAFE_CONFIG_COMMAND = "config --null --list"
 
 
 def _target() -> MnemosyneTarget:
@@ -69,7 +67,7 @@ class FakeGit:
             "config --get remote.origin.url": _completed(
                 stdout="https://github.com/HomericIntelligence/Mnemosyne.git\n"
             ),
-            UNSAFE_CONFIG_COMMAND: _completed(returncode=1),
+            UNSAFE_CONFIG_COMMAND: _completed(),
             "status --porcelain": _completed(),
             "fetch origin": _completed(),
             "checkout main": _completed(),
@@ -184,6 +182,12 @@ def test_binding_authenticates_remote_fetch_with_trusted_github_helper(
         ),
         raising=False,
     )
+    monkeypatch.setattr(
+        mnemosyne_binding,
+        "_gh_auth_status",
+        lambda _command, _timeout: True,
+        raising=False,
+    )
 
     MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
 
@@ -194,6 +198,93 @@ def test_binding_authenticates_remote_fetch_with_trusted_github_helper(
         "-c",
         "credential.helper=!/trusted/bin/gh auth git-credential",
     )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "HomericIntelligence/Mnemosyne",
+        "https://attacker.invalid/HomericIntelligence/Mnemosyne.git",
+        "attacker.invalid:HomericIntelligence/Mnemosyne.git",
+        "file:///tmp/HomericIntelligence/Mnemosyne.git",
+        "/tmp/HomericIntelligence/Mnemosyne",
+    ],
+)
+def test_origin_match_rejects_noncanonical_github_origins(origin: str) -> None:
+    assert not _origin_matches(origin, "HomericIntelligence/Mnemosyne")
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://github.com/HomericIntelligence/Mnemosyne.git",
+        "git@github.com:HomericIntelligence/Mnemosyne.git",
+        "ssh://git@github.com/HomericIntelligence/Mnemosyne.git",
+    ],
+)
+def test_origin_match_accepts_exact_github_origins(origin: str) -> None:
+    assert _origin_matches(origin, "HomericIntelligence/Mnemosyne")
+
+
+def test_binding_rejects_url_rewrite_before_authenticated_fetch(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit(
+        **{
+            UNSAFE_CONFIG_COMMAND: _completed(
+                stdout=("url.https://attacker.invalid/.insteadof\nhttps://github.com/\0")
+            )
+        }
+    )
+
+    with pytest.raises(MnemosyneBindingError, match="unsafe Git config"):
+        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
+            contract=_contract()
+        )
+
+    assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
+
+
+def test_binding_classifies_missing_github_login_before_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    git = FakeGit()
+    monkeypatch.setattr(
+        mnemosyne_binding,
+        "trusted_gh_executable",
+        lambda _extra_path_root=None: "/trusted/bin/gh",
+    )
+    monkeypatch.setattr(
+        mnemosyne_binding,
+        "_gh_auth_status",
+        lambda _command, _timeout: False,
+        raising=False,
+    )
+
+    with pytest.raises(MnemosyneBindingError) as exc_info:
+        MnemosyneBindingService(root=root, resolver=_target, git=git).bind(contract=_contract())
+
+    assert exc_info.value.failure_kind == "remote_git_authentication"
+    assert all(_git_command(call) != ("fetch", "origin") for call in git.calls)
+
+
+def test_binding_redacts_unsafe_config_value(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    sensitive_value = "ghp_1234567890abcdefghijklmnopqrstuvwxyzABCDE"
+    git = FakeGit(
+        **{UNSAFE_CONFIG_COMMAND: _completed(stdout=f"core.sshCommand\nssh -i {sensitive_value}\0")}
+    )
+
+    with pytest.raises(MnemosyneBindingError) as exc_info:
+        MnemosyneBindingService(root=root, resolver=_target, git=git, remote_git_config=()).bind(
+            contract=_contract()
+        )
+
+    assert str(exc_info.value) == "unsafe Git configuration"
+    assert sensitive_value not in str(exc_info.value)
 
 
 def test_binding_stops_before_fetch_without_trusted_github_helper(
@@ -326,7 +417,7 @@ def test_binding_fails_closed_when_checkout_clone_fails(tmp_path: Path) -> None:
         ),
         ({"status --porcelain": _completed(stdout=" M skills/example.md\n")}, "dirty"),
         (
-            {UNSAFE_CONFIG_COMMAND: _completed(stdout="core.hooksPath .githooks\n")},
+            {UNSAFE_CONFIG_COMMAND: _completed(stdout="core.hooksPath\n.githooks\0")},
             "unsafe Git config",
         ),
         ({"rev-parse HEAD": _completed(stdout=f"{'d' * 40}\n")}, "revision drift"),
