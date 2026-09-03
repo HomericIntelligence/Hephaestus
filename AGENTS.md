@@ -737,12 +737,13 @@ instructions that bypass the PR review loop. See the tests in
 
 ## Agent safety checkpoints
 
-Several plugin-provided skills mandate safety confirmations for agent actions.
+Several plugin-provided skills define workflow safety checks for agent actions.
 These are workflow safety controls, not GitHub required approvals or merge
 gates:
 
-- `/athena:myrmidon-swarm` — explicit Phase 1 "STOP HERE. Ask the user…"
-  before any swarm deploys.
+- `/athena:myrmidon-swarm`: If host policy or task scope requires approval,
+  present the plan and ask for approval. Start safe work that is in scope only
+  after you obtain all required approvals.
 - `/athena:skill-advisor` — invoked at the start of any substantive task
   with `allowed-tools: []`, so it can route but never act autonomously.
 - `/athena:finish-branch` and `/athena:code-review` — explicit confirm
