@@ -553,6 +553,8 @@ class ImplementationStage(Stage):
     ) -> StepResult:
         """DIRTY_DECISION_WAIT routes either to retry or to the dirty-decision job."""
         issue = _issue_number(item)
+        if item.payload.pop("source_workspace_ownership_unavailable", None):
+            return StageOutcome(Disposition.FINISH_FAIL, "source_workspace_ownership_unavailable")
         if (ownership := item.payload.get("branch_worktree_owner")) is not None:
             branch = ownership.get("branch") if isinstance(ownership, dict) else None
             owner_path = ownership.get("owner_path") if isinstance(ownership, dict) else None
@@ -1894,6 +1896,20 @@ class ImplementationStage(Stage):
         """
         if not result.ok:
             logger.warning("implementation:%s: worktree job failed: %s", item.issue, result.error)
+            if (result.error or "").startswith("source_workspace_ownership_unavailable:"):
+                item.payload["source_workspace_ownership_unavailable"] = True
+                materialized_path = (
+                    result.value.get("path")
+                    if isinstance(result.value, dict)
+                    and result.value.get(WORKTREE_MATERIALIZED_KEY) is True
+                    else None
+                )
+                if isinstance(materialized_path, str) and materialized_path:
+                    item.worktree = materialized_path
+                    item.payload[WORKTREE_MATERIALIZED_KEY] = True
+                else:
+                    item.worktree = ""
+                return
             if result.error == BRANCH_WORKTREE_OWNED:
                 ownership = result.value if isinstance(result.value, dict) else {}
                 item.payload["branch_worktree_owner"] = {

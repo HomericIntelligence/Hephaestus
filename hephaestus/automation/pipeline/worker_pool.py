@@ -79,7 +79,7 @@ from hephaestus.automation.remote_git import (
     trusted_gh_executable as _shared_trusted_gh_executable,
     trusted_remote_git_config as _shared_trusted_remote_git_config,
 )
-from hephaestus.automation.source_worktree import SourceWorkspaceManager
+from hephaestus.automation.source_worktree import SourceWorkspaceError, SourceWorkspaceManager
 from hephaestus.automation.worktree_manager import (
     BRANCH_WORKTREE_OWNED,
     BranchWorktreeOwnedError,
@@ -3803,6 +3803,8 @@ class WorkerPool:
             repo=job.transport_repository,
             sync_to_remote=sync_to_remote,
             pr_number=pr_number,
+            source_lane=kwargs.get("source_lane"),
+            item_number=kwargs.get("issue_number"),
             timeout_s=job.timeout_s,
         )
 
@@ -3876,6 +3878,8 @@ class WorkerPool:
         sync_to_remote: bool,
         pr_number: object,
         timeout_s: int,
+        source_lane: object = None,
+        item_number: object = None,
     ) -> JobResult:
         """Validate a created worktree and attach a direct reservation receipt."""
         if created is None:
@@ -3950,7 +3954,26 @@ class WorkerPool:
                     pr_number=int(pr_number) if isinstance(pr_number, (int, str)) else None,
                     timeout=timeout_s,
                 )
+            if source_lane == "impl" and not dirty:
+                if isinstance(item_number, bool) or not isinstance(item_number, int):
+                    raise SourceWorkspaceError("implementation writer item number is invalid")
+                source_manager = SourceWorkspaceManager(
+                    repo_root,
+                    repository=repo,
+                    base_dir=worktree_path.parent,
+                )
+                source_manager.claim_implementation_writer(
+                    item_number,
+                    branch=branch_name,
+                    path=worktree_path,
+                )
         except Exception as exc:
+            if isinstance(exc, SourceWorkspaceError):
+                return JobResult(
+                    ok=False,
+                    error=f"source_workspace_ownership_unavailable: {exc}",
+                    value={"path": str(worktree_path), WORKTREE_MATERIALIZED_KEY: True},
+                )
             return JobResult(
                 ok=False,
                 error=f"worktree post-create preparation failed: {exc}",

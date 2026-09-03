@@ -3884,6 +3884,49 @@ class TestGitOps:
         }
         assert "post-create preparation failed" in (result.error or "")
 
+    def test_create_implementation_source_lane_claims_writer_ownership(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A controlled implementation writer is registered before source use."""
+        writer_path = tmp_path / "build" / ".worktrees" / "auto-7-impl"
+        writer_path.mkdir(parents=True)
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 7,
+                "branch_name": "7-auto",
+                "repo_root": str(tmp_path),
+                "source_lane": "impl",
+            },
+        )
+        worktree_manager = MagicMock()
+        worktree_manager.create_worktree.return_value = writer_path
+        source_manager = MagicMock()
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=worktree_manager),
+            patch(f"{_WP}.SourceWorkspaceManager", return_value=source_manager) as source_class,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        source_class.assert_called_once_with(
+            tmp_path,
+            repository="test/repo",
+            base_dir=writer_path.parent,
+        )
+        source_manager.claim_implementation_writer.assert_called_once_with(
+            7,
+            branch="7-auto",
+            path=writer_path,
+        )
+        assert result.ok is True
+
     def test_create_isolated_worktree_syncs_only_detached_checkout(
         self,
         pool: WorkerPool,

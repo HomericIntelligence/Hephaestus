@@ -251,6 +251,64 @@ class SourceWorkspaceManager:
             self._write_receipt(receipt)
             return binding
 
+    def claim_implementation_writer(
+        self,
+        item_number: int,
+        *,
+        branch: str,
+        path: Path,
+    ) -> WorkspaceBinding:
+        """Record ownership of one verified implementation writer checkout.
+
+        Only the worker that created the deterministic implementation checkout
+        calls this method. Generic preparation continues to reject an
+        unrecorded branch, so a caller cannot adopt an arbitrary branch.
+        """
+        lane = SourceLane.IMPLEMENTATION
+        expected_path = self.path_for(item_number, lane).resolve()
+        if path.resolve() != expected_path:
+            raise SourceWorkspaceError(
+                "implementation writer path does not match the deterministic lane"
+            )
+        with file_lock(self._lane_lock_path(item_number, lane), require_exclusive=True):
+            old = self._read_receipt(item_number, lane)
+            self._reject_foreign_owner(old, item_number, lane)
+            if old is not None and (
+                old.path.resolve() != expected_path or old.detached or old.branch != branch
+            ):
+                raise SourceWorkspaceError("incompatible source workspace receipt")
+            if not expected_path.exists():
+                raise SourceWorkspaceError("implementation writer worktree does not exist")
+            if self._is_dirty(expected_path):
+                raise SourceWorkspaceError(
+                    f"source workspace is dirty and preserved: {expected_path}"
+                )
+            revision = self._head_revision(expected_path)
+            if self._head_branch(expected_path) != f"refs/heads/{branch}":
+                raise SourceWorkspaceError(
+                    "implementation writer checkout does not match the requested branch"
+                )
+            receipt = SourceWorkspaceReceipt(
+                repository=self.repository,
+                repository_identity=self.repository_identity,
+                ownership_key=self.ownership_key(item_number, lane),
+                item_number=item_number,
+                lane=lane,
+                path=expected_path,
+                revision=revision,
+                generation=old.generation + 1 if old is not None else 1,
+                detached=False,
+                branch=branch,
+                obligations=old.obligations if old is not None else (),
+            )
+            binding = self._binding(receipt)
+            try:
+                validate_workspace_binding(binding)
+            except WorkspaceBindingError as exc:
+                raise SourceWorkspaceError(str(exc)) from exc
+            self._write_receipt(receipt)
+            return binding
+
     @contextmanager
     def acquire(self, binding: WorkspaceBinding, *, allowed_tools: str = "") -> Iterator[Path]:
         """Hold the lane lease while validating and using a source workspace."""

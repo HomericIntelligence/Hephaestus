@@ -24,7 +24,13 @@ from hephaestus.automation.pipeline.github_jobs import (
     ReplyJournalAppended,
     ReplyJournalRecovered,
 )
-from hephaestus.automation.pipeline.jobs import AgentJob, BuildTestJob, GitJob, JobResult
+from hephaestus.automation.pipeline.jobs import (
+    WORKTREE_MATERIALIZED_KEY,
+    AgentJob,
+    BuildTestJob,
+    GitJob,
+    JobResult,
+)
 from hephaestus.automation.pipeline.reply_handoff import (
     attempt_reply_handoff,
     implementation_reply_handoff,
@@ -1359,6 +1365,38 @@ class TestGitErrorRetryCap:
         assert outcome.disposition == Disposition.FINISH_FAIL
         assert outcome.note == "git_error"
         assert item.attempts["implement"] == 0  # git failures never burn implement
+
+    def test_source_workspace_ownership_failure_is_terminal(
+        self, make_ctx: Any, make_work_item: Any
+    ) -> None:
+        """A rejected writer handoff does not spend the Git retry budget."""
+        stage = ImplementationStage()
+        ctx = make_ctx()
+        item = make_work_item(issue=1, state="WORKTREE_WAIT")
+
+        stage.on_job_done(
+            item,
+            JobResult(
+                ok=False,
+                error="source_workspace_ownership_unavailable: writer mismatch",
+                value={
+                    "path": "/tmp/auto-1-impl",
+                    WORKTREE_MATERIALIZED_KEY: True,
+                },
+            ),
+            ctx,
+        )
+        item.state = "DIRTY_DECISION_WAIT"
+
+        outcome = stage.step(item, ctx)
+
+        assert outcome == StageOutcome(
+            Disposition.FINISH_FAIL,
+            "source_workspace_ownership_unavailable",
+        )
+        assert "git_error_retries" not in item.payload
+        assert item.worktree == "/tmp/auto-1-impl"
+        assert item.payload[WORKTREE_MATERIALIZED_KEY] is True
 
     def test_adopted_impl_go_worktree_failure_retries_worktree_not_ci(
         self, make_ctx: Any, make_work_item: Any

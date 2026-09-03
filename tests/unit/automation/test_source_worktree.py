@@ -206,6 +206,73 @@ def test_implementation_preserves_inactive_unowned_branch(tmp_path: Path) -> Non
     assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
 
 
+def test_claim_implementation_writer_records_the_controlled_checkout(
+    tmp_path: Path,
+) -> None:
+    """A deterministic, clean writer can become its source lane."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.path_for(9, SourceLane.IMPLEMENTATION)
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(writer), second)
+
+    binding = manager.claim_implementation_writer(
+        9,
+        branch="writer-branch",
+        path=writer,
+    )
+
+    rebound = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="writer-branch",
+    )
+    assert binding.cwd == writer
+    assert binding.revision == second
+    assert rebound == binding
+
+
+def test_claim_implementation_writer_rejects_a_non_lane_path(tmp_path: Path) -> None:
+    """A writer outside the deterministic lane cannot become source state."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    foreign_writer = tmp_path / "foreign-writer"
+    _git(repo, "worktree", "add", "-b", "writer-branch", str(foreign_writer), second)
+
+    with pytest.raises(SourceWorkspaceError, match="does not match the deterministic lane"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=foreign_writer,
+        )
+
+    assert not manager.path_for(9, SourceLane.IMPLEMENTATION).exists()
+
+
+def test_claim_implementation_writer_rejects_an_incompatible_receipt(
+    tmp_path: Path,
+) -> None:
+    """A controlled handoff cannot replace a lane's recorded branch."""
+    repo, _, second = _repository(tmp_path)
+    manager = SourceWorkspaceManager(repo, repository="example/project")
+    writer = manager.prepare(
+        9,
+        SourceLane.IMPLEMENTATION,
+        second,
+        branch="previous-writer-branch",
+    ).cwd
+    _git(writer, "switch", "-c", "writer-branch")
+
+    with pytest.raises(SourceWorkspaceError, match="incompatible source workspace receipt"):
+        manager.claim_implementation_writer(
+            9,
+            branch="writer-branch",
+            path=writer,
+        )
+
+    assert _git(writer, "branch", "--show-current") == "writer-branch"
+
+
 def test_current_review_lane_can_be_cleaned_by_pipeline_contract(tmp_path: Path) -> None:
     """A review lane created with the current deterministic name is removable."""
     repo, _, second = _repository(tmp_path)
