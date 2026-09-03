@@ -56,6 +56,7 @@ from hephaestus.automation.pipeline.worker_pool import (
     WorkerPool,
     _confirmed_pytest_failure,
     _controlled_git_signing_env,
+    _dirty_worktree_content_snapshot,
     _hdiutil_create_argv,
     _host_validation_failure_kind,
     _host_verification_command,
@@ -88,6 +89,11 @@ WRITING_STANDARD_SENTINEL = "ASD-STE100 Simplified Technical English, Issue 9"
 
 _WP = "hephaestus.automation.pipeline.worker_pool"
 _TEST_AGENT_CWD = Path(__file__).resolve().parents[4] / "build" / "worker-pool-tests"
+_DIRTY_CONTENT_SNAPSHOT = {
+    "index_sha256": "1" * 64,
+    "worktree_sha256": "2" * 64,
+    "untracked_sha256": "3" * 64,
+}
 
 
 def test_worker_persists_pi_session_and_resolved_policy_receipt(tmp_path: Path) -> None:
@@ -2249,6 +2255,1078 @@ class TestGitOps:
         assert result.ok is True
         assert result.value == str(tmp_path / "wt")
 
+    def test_create_worktree_normal_reuse_returns_complete_dirty_snapshot(
+        self,
+        pool: WorkerPool,
+        completion_q: CompletionQueue,
+        tmp_path: Path,
+    ) -> None:
+        """A normal reused checkout cannot hide dirty state behind a path result."""
+        worktree = tmp_path / "build" / ".worktrees" / "issue-2920"
+        branch = "2920-auto-impl"
+        head = "a" * 40
+        job = GitJob(
+            repo="test/repo",
+            op="create_worktree",
+            timeout_s=60,
+            kwargs={
+                "issue_number": 2920,
+                "branch_name": branch,
+                "repo_root": str(tmp_path),
+                "refresh_base": True,
+            },
+        )
+        instance = MagicMock()
+        instance.create_worktree.return_value = worktree
+        worktree.mkdir(parents=True)
+        (worktree / ".git").write_text("gitdir: fixture\n", encoding="utf-8")
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if args == ["git", "status", "--short"]:
+                return subprocess.CompletedProcess(args, 0, stdout=" M changed.py\n?? new.py\n")
+            if args == ["git", "diff"]:
+                return subprocess.CompletedProcess(args, 0, stdout="+changed\n")
+            if args == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(args, 0, stdout=f"{head}\n")
+            if args == ["git", "branch", "--show-current"]:
+                return subprocess.CompletedProcess(args, 0, stdout=f"{branch}\n")
+            raise AssertionError(args)
+
+        with (
+            patch(f"{_WP}.WorktreeManager", return_value=instance),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=False),
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+        ):
+            pool.submit(job, StageName.REPO)
+            _, result = completion_q.get(timeout=10)
+
+        assert result.ok is True
+        assert result.value == {
+            "path": str(worktree),
+            "branch": branch,
+            "head_sha": head,
+            "dirty": True,
+            "status": " M changed.py\n?? new.py\n",
+            "diff": "+changed\n",
+            "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+        }
+
+    @pytest.mark.parametrize("changed_kind", ["staged", "untracked", "untracked_newline"])
+    def test_recover_dirty_worktree_rejects_byte_drift_with_unchanged_status(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        changed_kind: str,
+    ) -> None:
+        """Recovery stops when staged or untracked bytes change after capture."""
+        repo = tmp_path / "repo"
+        branch = "2920-auto-impl"
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir()
+        git("init", "-q", "-b", branch)
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        changed_path = (
+            repo
+            / {
+                "staged": "tracked.txt",
+                "untracked": "new.txt",
+                "untracked_newline": "new\nfile.txt",
+            }[changed_kind]
+        )
+        changed_path.write_text("first bytes\n", encoding="utf-8")
+        if changed_kind == "staged":
+            git("add", "tracked.txt")
+
+        captured = pool._finalize_created_worktree(
+            created=repo,
+            base_sha=None,
+            branch_name=branch,
+            repo_root=repo,
+            repo="test/repo",
+            sync_to_remote=False,
+            pr_number=None,
+            timeout_s=60,
+        )
+        assert captured.ok is True
+        assert isinstance(captured.value, dict)
+        assert "content_snapshot" in captured.value
+        snapshot = cast(dict[str, str], captured.value["content_snapshot"])
+        status = cast(str, captured.value["status"])
+        diff = cast(str, captured.value["diff"])
+
+        changed_path.write_text("second byte content\n", encoding="utf-8")
+        if changed_kind == "staged":
+            git("add", "tracked.txt")
+        assert git("status", "--short").stdout == status
+        assert git("diff").stdout == diff
+
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(repo),
+                "worktree_path": str(repo),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": "COMMIT",
+                "pre_action_head": head,
+                "expected_remote_head": head,
+                "status": status,
+                "diff": diff,
+                "content_snapshot": snapshot,
+            },
+        )
+        with (
+            patch.object(pool, "_read_remote_branch_head") as remote_probe,
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                return_value=JobResult(ok=False, error="must not run"),
+            ) as commit,
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["failure_kind"] == "worktree_content_drift"
+        remote_probe.assert_not_called()
+        commit.assert_not_called()
+
+    @pytest.mark.parametrize("action", ["COMMIT", "STASH"])
+    def test_recover_dirty_worktree_rejects_drift_during_remote_probe(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        action: str,
+    ) -> None:
+        """Recovery rechecks bytes after its remote probe and before mutation."""
+        repo = tmp_path / "repo"
+        branch = "2920-auto-impl"
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        repo.mkdir()
+        git("init", "-q", "-b", branch)
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.invalid")
+        changed_path = repo / "tracked.txt"
+        changed_path.write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        head = git("rev-parse", "HEAD").stdout.strip()
+        changed_path.write_text("first bytes\n", encoding="utf-8")
+        status = git("status", "--short").stdout
+        diff = git("diff").stdout
+        snapshot = _dirty_worktree_content_snapshot(repo, timeout=60)
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(repo),
+                "worktree_path": str(repo),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": action,
+                "pre_action_head": head,
+                "expected_remote_head": head,
+                "status": status,
+                "diff": diff,
+                "content_snapshot": snapshot,
+            },
+        )
+
+        def remote_probe(*_args: object, **_kwargs: object) -> str:
+            changed_path.write_text("second byte content\n", encoding="utf-8")
+            return head
+
+        real_git_run = git_utils.run
+        with (
+            patch(f"{_WP}.git_utils.run", wraps=real_git_run) as run_git,
+            patch.object(pool, "_read_remote_branch_head", side_effect=remote_probe),
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                return_value=False,
+            ) as commit,
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["failure_kind"] == "worktree_content_drift"
+        commit.assert_not_called()
+        assert not any(
+            invocation.args and invocation.args[0][:3] == ["git", "stash", "push"]
+            for invocation in run_git.call_args_list
+        )
+
+    @staticmethod
+    def _exercise_real_dirty_recovery_rebase(
+        pool: WorkerPool,
+        tmp_path: Path,
+        *,
+        advance_main: bool,
+    ) -> tuple[JobResult, JobResult, Path, str]:
+        """Publish a real recovery commit and pass its head to writer rebase."""
+        origin = tmp_path / "origin.git"
+        checkout = tmp_path / "checkout"
+        signing_key = tmp_path / "signing-key"
+        branch = "2920-auto-impl"
+
+        def git(*args: str, cwd: Path = checkout) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        subprocess.run(
+            ["git", "init", "--bare", "--quiet", str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "init", "--quiet", "--initial-branch", "main", str(checkout)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                _executable_path("ssh-keygen"),
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(signing_key),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for key, value in (
+            ("user.name", "Test User"),
+            ("user.email", "test@example.invalid"),
+            ("gpg.format", "ssh"),
+            ("user.signingkey", str(signing_key)),
+            ("commit.gpgsign", "false"),
+        ):
+            git("config", key, value)
+        git("remote", "add", "origin", str(origin))
+        (checkout / "recovered.txt").write_text("base\n", encoding="utf-8")
+        git("add", "recovered.txt")
+        git("commit", "--quiet", "--no-gpg-sign", "-m", "test: base")
+        git("push", "--quiet", "-u", "origin", "main")
+        git("switch", "--quiet", "-c", branch)
+        git("push", "--quiet", "-u", "origin", branch)
+        if advance_main:
+            git("switch", "--quiet", "main")
+            (checkout / "main.txt").write_text("new main\n", encoding="utf-8")
+            git("add", "main.txt")
+            git("commit", "--quiet", "--no-gpg-sign", "-m", "test: advance main")
+            git("push", "--quiet", "origin", "main")
+            git("switch", "--quiet", branch)
+
+        pre_action_head = git("rev-parse", "HEAD").stdout.strip()
+        (checkout / "recovered.txt").write_text("recovered bytes\n", encoding="utf-8")
+        captured = pool._finalize_created_worktree(
+            created=checkout,
+            base_sha=None,
+            branch_name=branch,
+            repo_root=checkout,
+            repo="test/repo",
+            sync_to_remote=False,
+            pr_number=None,
+            timeout_s=60,
+        )
+        assert captured.ok is True and isinstance(captured.value, dict)
+
+        def commit_recovery(*_args: object, **_kwargs: object) -> bool:
+            git("add", "--all")
+            git("commit", "--quiet", "-S", "-s", "-m", "fix: recover dirty writer")
+            return True
+
+        remote_configuration = (os.environ.copy(), ())
+
+        def revalidate_remote() -> tuple[dict[str, str], tuple[str, ...]]:
+            return remote_configuration
+
+        recovery_job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(checkout),
+                "worktree_path": str(checkout),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": "COMMIT",
+                "pre_action_head": pre_action_head,
+                "expected_remote_head": pre_action_head,
+                "status": captured.value["status"],
+                "diff": captured.value["diff"],
+                "content_snapshot": captured.value["content_snapshot"],
+            },
+        )
+        with (
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=remote_configuration,
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=revalidate_remote,
+            ),
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                side_effect=commit_recovery,
+            ),
+        ):
+            recovery = pool._git_recover_dirty_worktree(recovery_job)
+        assert recovery.ok is True and isinstance(recovery.value, dict)
+        recovered_head = cast(str, recovery.value["current_head"])
+
+        signing = {
+            "user.name": "Test User",
+            "user.email": "test@example.invalid",
+            "gpg.format": "ssh",
+            "user.signingkey": str(signing_key),
+        }
+        rebase_job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="rebase",
+            timeout_s=60,
+            kwargs={
+                "cwd": checkout,
+                "base_branch": "main",
+                "remote": "origin",
+                "publish_rebased_head": True,
+                "branch": branch,
+                "expected_remote_sha": recovered_head,
+            },
+        )
+        with (
+            patch(f"{_WP}._read_host_git_signing_config", return_value=signing),
+            patch.object(
+                pool,
+                "_authenticated_remote_git_configuration",
+                return_value=remote_configuration,
+            ),
+            patch.object(
+                pool,
+                "_authenticated_remote_revalidator",
+                return_value=revalidate_remote,
+            ),
+        ):
+            rebase = pool._git_rebase(rebase_job)
+        return recovery, rebase, checkout, branch
+
+    @pytest.mark.usefixtures("require_git_path_format")
+    def test_dirty_recovery_commit_feeds_noop_writer_rebase(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A published recovery head is the exact lease for a no-op rebase."""
+        recovery, rebase, checkout, branch = self._exercise_real_dirty_recovery_rebase(
+            pool,
+            tmp_path,
+            advance_main=False,
+        )
+        recovered_head = recovery.value["current_head"]
+
+        assert rebase == JobResult(
+            ok=True,
+            value={"rebased": False, "published": False, "head_sha": recovered_head},
+        )
+        remote_head = subprocess.run(
+            ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()[0]
+        assert remote_head == recovered_head
+        assert (checkout / "recovered.txt").read_text(encoding="utf-8") == "recovered bytes\n"
+
+    @pytest.mark.usefixtures("require_git_path_format")
+    def test_dirty_recovery_commit_is_lease_for_required_rebase(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+    ) -> None:
+        """A required rebase publishes from the exact recovery-head lease."""
+        recovery, rebase, checkout, branch = self._exercise_real_dirty_recovery_rebase(
+            pool,
+            tmp_path,
+            advance_main=True,
+        )
+
+        assert rebase.ok is True
+        assert rebase.value["rebased"] is True
+        assert rebase.value["published"] is True
+        assert rebase.value["head_sha"] != recovery.value["current_head"]
+        remote_head = subprocess.run(
+            ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()[0]
+        assert remote_head == rebase.value["head_sha"]
+        assert (checkout / "recovered.txt").read_text(encoding="utf-8") == "recovered bytes\n"
+        assert (checkout / "main.txt").read_text(encoding="utf-8") == "new main\n"
+
+    def test_recover_dirty_worktree_stashes_untracked_content_and_proves_receipt(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """STASH preserves tracked and untracked changes without moving either head."""
+        repo = tmp_path / "repo"
+        worktree = repo / "build" / ".worktrees" / "issue-2920"
+        repo.mkdir()
+
+        def git(*args: str, cwd: Path = repo) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.name", "Test User")
+        git("config", "user.email", "test@example.com")
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git("add", "tracked.txt")
+        git("commit", "-q", "--no-gpg-sign", "-m", "test: base")
+        worktree.parent.mkdir(parents=True)
+        git("worktree", "add", "-q", "-b", "2920-auto-impl", str(worktree))
+        head = git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
+        (worktree / "tracked.txt").write_text("changed\n", encoding="utf-8")
+        (worktree / "untracked.txt").write_text("preserve me\n", encoding="utf-8")
+        status = git("status", "--short", cwd=worktree).stdout
+        diff = git("diff", cwd=worktree).stdout
+        content_snapshot = _dirty_worktree_content_snapshot(worktree, timeout=60)
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(repo),
+                "worktree_path": str(worktree),
+                "branch": "2920-auto-impl",
+                "issue_number": 2920,
+                "pr_number": 3000,
+                "action": "STASH",
+                "pre_action_head": head,
+                "expected_remote_head": head,
+                "status": status,
+                "diff": diff,
+                "content_snapshot": content_snapshot,
+            },
+        )
+
+        with patch.object(pool, "_read_remote_branch_head", return_value=head):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is True
+        assert result.value["outcome"] == "recovered"
+        assert result.value["action"] == "STASH"
+        assert result.value["action_applied"] is True
+        assert result.value["published"] is False
+        assert result.value["current_head"] == head
+        assert result.value["remote_head"] == head
+        assert result.value["final_clean"] is True
+        stash_object = result.value["stash_object"]
+        assert isinstance(stash_object, str) and len(stash_object) == 40
+        stashed_paths = git(
+            "stash", "show", "--include-untracked", "--name-only", "refs/stash", cwd=worktree
+        ).stdout.splitlines()
+        assert stashed_paths == ["tracked.txt", "untracked.txt"]
+
+    def test_recover_dirty_worktree_commit_uses_controlled_signing_and_exact_lease(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """COMMIT proves controlled creation, metadata, publication, and postflight."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        branch = "2920-auto-impl"
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+        status = " M changed.py\n"
+        diff = "+changed\n"
+        head_reads = iter((old_head, new_head))
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            outputs: dict[tuple[str, ...], str] = {
+                ("git", "worktree", "list", "--porcelain"): (
+                    f"worktree {worktree}\nHEAD {old_head}\nbranch refs/heads/{branch}\n"
+                ),
+                ("git", "branch", "--show-current"): f"{branch}\n",
+                ("git", "status", "--short"): status,
+                ("git", "diff"): diff,
+                ("git", "rev-parse", "HEAD^"): f"{old_head}\n",
+                ("git", "cat-file", "-p", new_head): (
+                    "tree deadbeef\ngpgsig signed\n\nfix\n\n"
+                    "Signed-off-by: Test User <test@example.com>\n"
+                ),
+            }
+            if args == ["git", "rev-parse", "HEAD"]:
+                output = f"{next(head_reads)}\n"
+            else:
+                output = outputs[tuple(args)]
+            return subprocess.CompletedProcess(args, 0, stdout=output)
+
+        job = GitJob(
+            repo="test/repo",
+            expected_repository="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(worktree),
+                "branch": branch,
+                "issue_number": 2920,
+                "pr_number": 3000,
+                "action": "COMMIT",
+                "pre_action_head": old_head,
+                "expected_remote_head": old_head,
+                "status": status,
+                "diff": diff,
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+                "agent": "codex",
+                "agent_model": "gpt-test",
+                "git_message_timeout": 123,
+            },
+        )
+        revalidate = MagicMock(return_value=({"AUTH": "1"}, ["-c", "credential.helper="]))
+
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(
+                pool, "_commit_if_changes_with_controlled_signing", return_value=True
+            ) as commit,
+            patch.object(pool, "_read_publish_head", return_value=new_head),
+            patch.object(pool, "_read_remote_branch_head", side_effect=[old_head, new_head]),
+            patch.object(pool, "_authenticated_remote_revalidator", return_value=revalidate),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is True
+        commit.assert_called_once_with(
+            job,
+            (2920, worktree, "codex"),
+            None,
+            "gpt-test",
+            123,
+        )
+        push.assert_called_once_with(
+            branch,
+            old_head,
+            worktree,
+            source_sha=new_head,
+            timeout=60,
+            env={"AUTH": "1"},
+            remote_config=["-c", "credential.helper="],
+            revalidate_remote=revalidate,
+        )
+        assert result.value == {
+            "outcome": "recovered",
+            "failure_kind": None,
+            "action": "COMMIT",
+            "branch": branch,
+            "worktree_path": str(worktree),
+            "pre_action_head": old_head,
+            "current_head": new_head,
+            "expected_remote_head": old_head,
+            "remote_head": new_head,
+            "published": True,
+            "stash_object": None,
+            "action_applied": True,
+            "final_clean": True,
+            "cause": "",
+        }
+
+    @pytest.mark.parametrize(
+        ("parent", "raw_commit"),
+        [
+            ("c" * 40, "tree x\ngpgsig signed\n\nSigned-off-by: Test <t@example.com>\n"),
+            ("a" * 40, "tree x\n\nSigned-off-by: Test <t@example.com>\n"),
+            ("a" * 40, "tree x\ngpgsig signed\n\nmissing trailer\n"),
+        ],
+    )
+    def test_recover_dirty_worktree_rejects_invalid_commit_metadata_before_push(
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        parent: str,
+        raw_commit: str,
+    ) -> None:
+        """Parent, signature, and DCO proof are each required before publication."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        branch = "2920-auto-impl"
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+        status = " M changed.py\n"
+        diff = "+changed\n"
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            outputs = {
+                ("git", "worktree", "list", "--porcelain"): (
+                    f"worktree {worktree}\nHEAD {old_head}\nbranch refs/heads/{branch}\n"
+                ),
+                ("git", "rev-parse", "HEAD"): f"{old_head}\n",
+                ("git", "branch", "--show-current"): f"{branch}\n",
+                ("git", "status", "--short"): status,
+                ("git", "diff"): diff,
+                ("git", "rev-parse", "HEAD^"): f"{parent}\n",
+                ("git", "cat-file", "-p", new_head): raw_commit,
+            }
+            return subprocess.CompletedProcess(args, 0, stdout=outputs[tuple(args)])
+
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(worktree),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": "COMMIT",
+                "pre_action_head": old_head,
+                "expected_remote_head": old_head,
+                "status": status,
+                "diff": diff,
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(pool, "_read_remote_branch_head", return_value=old_head),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing", return_value=True),
+            patch.object(pool, "_read_publish_head", return_value=new_head),
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["failure_kind"] == "commit_metadata_invalid"
+        assert result.value["action_applied"] is True
+        assert result.value["current_head"] == new_head
+        push.assert_not_called()
+
+    def test_recover_dirty_worktree_invalid_identity_does_not_mutate(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A registration mismatch stops before commit, stash, or publication."""
+        old_head = "a" * 40
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+        commands: list[list[str]] = []
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(args)
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=f"worktree {worktree}\nHEAD {'c' * 40}\nbranch refs/heads/other\n",
+            )
+
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(worktree),
+                "branch": "2920-auto-impl",
+                "issue_number": 2920,
+                "action": "COMMIT",
+                "pre_action_head": old_head,
+                "expected_remote_head": old_head,
+                "status": " M changed.py\n",
+                "diff": "+changed\n",
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing") as commit,
+            patch(f"{_WP}.git_utils.push_head_to_branch") as push,
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["failure_kind"] == "worktree_identity_drift"
+        assert result.value["action_applied"] is False
+        assert commands == [["git", "worktree", "list", "--porcelain"]]
+        commit.assert_not_called()
+        push.assert_not_called()
+
+    def test_recover_dirty_worktree_publication_failure_retains_local_commit_evidence(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A failed exact-lease push retains the created commit in its receipt."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        branch = "2920-auto-impl"
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+        status = " M changed.py\n"
+        diff = "+changed\n"
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            outputs = {
+                ("git", "worktree", "list", "--porcelain"): (
+                    f"worktree {worktree}\nHEAD {old_head}\nbranch refs/heads/{branch}\n"
+                ),
+                ("git", "rev-parse", "HEAD"): f"{old_head}\n",
+                ("git", "branch", "--show-current"): f"{branch}\n",
+                ("git", "status", "--short"): status,
+                ("git", "diff"): diff,
+                ("git", "rev-parse", "HEAD^"): f"{old_head}\n",
+                ("git", "cat-file", "-p", new_head): (
+                    "tree x\ngpgsig signed\n\nSigned-off-by: Test <t@example.com>\n"
+                ),
+            }
+            return subprocess.CompletedProcess(args, 0, stdout=outputs[tuple(args)])
+
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(worktree),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": "COMMIT",
+                "pre_action_head": old_head,
+                "expected_remote_head": old_head,
+                "status": status,
+                "diff": diff,
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            },
+        )
+        revalidate = MagicMock(return_value=({}, []))
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(pool, "_read_remote_branch_head", return_value=old_head),
+            patch.object(pool, "_commit_if_changes_with_controlled_signing", return_value=True),
+            patch.object(pool, "_read_publish_head", return_value=new_head),
+            patch.object(pool, "_authenticated_remote_revalidator", return_value=revalidate),
+            patch(
+                f"{_WP}.git_utils.push_head_to_branch",
+                side_effect=RuntimeError("lease rejected"),
+            ),
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["failure_kind"] == "operation_failed"
+        assert result.value["action_applied"] is True
+        assert result.value["current_head"] == new_head
+        assert result.value["published"] is False
+
+    def test_recover_dirty_worktree_poststash_failure_retains_stash_object(
+        self, pool: WorkerPool, tmp_path: Path
+    ) -> None:
+        """A postflight failure retains the new stash object as recovery evidence."""
+        old_head = "a" * 40
+        stash_object = "d" * 40
+        branch = "2920-auto-impl"
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / ".git").mkdir()
+        head_reads = iter((old_head, old_head))
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            outputs = {
+                ("git", "worktree", "list", "--porcelain"): (
+                    f"worktree {worktree}\nHEAD {old_head}\nbranch refs/heads/{branch}\n"
+                ),
+                ("git", "branch", "--show-current"): f"{branch}\n",
+                ("git", "status", "--short"): " M changed.py\n",
+                ("git", "diff"): "+changed\n",
+                ("git", "rev-parse", "--verify", "-q", "refs/stash"): "",
+                (
+                    "git",
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "-m",
+                    "hephaestus dirty recovery issue #2920",
+                ): "Saved\n",
+                ("git", "rev-parse", "--verify", "refs/stash"): f"{stash_object}\n",
+            }
+            output = (
+                f"{next(head_reads)}\n"
+                if args == ["git", "rev-parse", "HEAD"]
+                else outputs[tuple(args)]
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=output)
+
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(tmp_path),
+                "worktree_path": str(worktree),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": "STASH",
+                "pre_action_head": old_head,
+                "expected_remote_head": old_head,
+                "status": " M changed.py\n",
+                "diff": "+changed\n",
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            },
+        )
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(pool, "_read_remote_branch_head", side_effect=[old_head, "c" * 40]),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["failure_kind"] == "remote_postflight_drift"
+        assert result.value["action_applied"] is True
+        assert result.value["stash_object"] == stash_object
+        assert result.value["current_head"] == old_head
+
+    @pytest.mark.parametrize(
+        ("scenario", "failure_kind"),
+        [
+            ("invalid_request", "invalid_request"),
+            ("unavailable", "worktree_unavailable"),
+            ("unconfined", "worktree_unconfined"),
+            ("clean", "worktree_clean"),
+            ("content_drift", "worktree_content_drift"),
+            ("remote_probe", "remote_probe_failed"),
+            ("remote_drift", "remote_head_drift"),
+            ("commit_result", "commit_failed"),
+            ("commit_false", "commit_failed"),
+            ("commit_head", "commit_postflight_failed"),
+            ("stash_invalid", "stash_evidence_invalid"),
+            ("postflight_dirty", "postflight_dirty"),
+            ("remote_postflight_probe", "remote_postflight_failed"),
+            ("stash_head_drift", "stash_head_drift"),
+        ],
+    )
+    def test_recover_dirty_worktree_returns_structured_failure_at_each_boundary(  # noqa: C901
+        self,
+        pool: WorkerPool,
+        tmp_path: Path,
+        scenario: str,
+        failure_kind: str,
+    ) -> None:
+        """Each recovery boundary returns its named structured failure receipt."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        stash_object = "d" * 40
+        branch = "2920-auto-impl"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = repo / "worktree"
+        if scenario == "unavailable":
+            worktree = repo / "missing"
+        elif scenario == "unconfined":
+            worktree = tmp_path / "outside"
+            worktree.mkdir()
+            (worktree / ".git").mkdir()
+        else:
+            worktree.mkdir()
+            (worktree / ".git").mkdir()
+        action = (
+            "STASH"
+            if scenario.startswith("stash") or scenario == "remote_postflight_probe"
+            else "COMMIT"
+        )
+        expected_status = " M changed.py\n"
+        expected_diff = "+changed\n"
+        head_reads = 0
+
+        def run_git(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal head_reads
+            outputs = {
+                ("git", "worktree", "list", "--porcelain"): (
+                    f"worktree {worktree}\nHEAD {old_head}\nbranch refs/heads/{branch}\n"
+                ),
+                ("git", "branch", "--show-current"): f"{branch}\n",
+                ("git", "status", "--short"): "" if scenario == "clean" else expected_status,
+                ("git", "diff"): "different\n" if scenario == "content_drift" else expected_diff,
+                ("git", "rev-parse", "HEAD^"): f"{old_head}\n",
+                ("git", "cat-file", "-p", new_head): (
+                    "tree x\ngpgsig signed\n\nSigned-off-by: Test <t@example.com>\n"
+                ),
+                ("git", "rev-parse", "--verify", "-q", "refs/stash"): "",
+                (
+                    "git",
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "-m",
+                    "hephaestus dirty recovery issue #2920",
+                ): "Saved\n",
+                ("git", "rev-parse", "--verify", "refs/stash"): (
+                    "bad\n" if scenario == "stash_invalid" else f"{stash_object}\n"
+                ),
+            }
+            if args == ["git", "rev-parse", "HEAD"]:
+                head_reads += 1
+                if head_reads == 1:
+                    output = f"{old_head}\n"
+                elif action == "COMMIT":
+                    output = f"{new_head}\n"
+                elif scenario == "stash_head_drift":
+                    output = f"{'c' * 40}\n"
+                else:
+                    output = f"{old_head}\n"
+            else:
+                output = outputs[tuple(args)]
+            return subprocess.CompletedProcess(args, 0, stdout=output)
+
+        job = GitJob(
+            repo="test/repo",
+            op="recover_dirty_worktree",
+            timeout_s=60,
+            kwargs={
+                "repo_root": str(repo),
+                "worktree_path": str(worktree),
+                "branch": branch,
+                "issue_number": 2920,
+                "action": "BAD" if scenario == "invalid_request" else action,
+                "pre_action_head": old_head,
+                "expected_remote_head": old_head,
+                "status": expected_status,
+                "diff": expected_diff,
+                "content_snapshot": _DIRTY_CONTENT_SNAPSHOT,
+            },
+        )
+        if scenario == "remote_probe":
+            remote_results: list[str | JobResult] = [JobResult(ok=False, error="probe failed")]
+        elif scenario == "remote_drift":
+            remote_results = ["c" * 40]
+        elif scenario == "remote_postflight_probe":
+            remote_results = [old_head, JobResult(ok=False, error="probe failed")]
+        else:
+            remote_results = [old_head, new_head if action == "COMMIT" else old_head]
+        commit_result: bool | JobResult = True
+        if scenario == "commit_result":
+            commit_result = JobResult(ok=False, error="commit failed")
+        elif scenario == "commit_false":
+            commit_result = False
+        publish_head: str | JobResult = (
+            JobResult(ok=False, error="head failed") if scenario == "commit_head" else new_head
+        )
+        revalidate = MagicMock(return_value=({}, []))
+        with (
+            patch(f"{_WP}.git_utils.run", side_effect=run_git),
+            patch(
+                f"{_WP}._dirty_worktree_content_snapshot",
+                return_value=_DIRTY_CONTENT_SNAPSHOT,
+            ),
+            patch.object(pool, "_read_remote_branch_head", side_effect=remote_results),
+            patch.object(
+                pool,
+                "_commit_if_changes_with_controlled_signing",
+                return_value=commit_result,
+            ),
+            patch.object(pool, "_read_publish_head", return_value=publish_head),
+            patch.object(pool, "_authenticated_remote_revalidator", return_value=revalidate),
+            patch(f"{_WP}.git_utils.push_head_to_branch"),
+            patch(
+                f"{_WP}.git_utils.is_clean_working_tree",
+                return_value=scenario != "postflight_dirty",
+            ),
+        ):
+            result = pool._git_recover_dirty_worktree(job)
+
+        assert result.ok is False
+        assert result.value["outcome"] == "failed"
+        assert result.value["failure_kind"] == failure_kind
+        assert set(result.value) == {
+            "outcome",
+            "failure_kind",
+            "action",
+            "branch",
+            "worktree_path",
+            "pre_action_head",
+            "current_head",
+            "expected_remote_head",
+            "remote_head",
+            "published",
+            "stash_object",
+            "action_applied",
+            "final_clean",
+            "cause",
+        }
+
     def test_create_worktree_uses_canonical_repository_for_remote_validation(
         self,
         pool: WorkerPool,
@@ -2374,6 +3452,7 @@ class TestGitOps:
                 f"{_WP}.git_utils.run",
                 return_value=subprocess.CompletedProcess([], 0, stdout=pinned_sha + "\n"),
             ),
+            patch(f"{_WP}.git_utils.is_clean_working_tree", return_value=True),
             patch(f"{_WP}.git_utils.reserve_remote_branch_if_absent") as reserve,
         ):
             pool.submit(job, StageName.REPO)
