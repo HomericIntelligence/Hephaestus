@@ -624,12 +624,15 @@ class TestMain:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Unsupported inventory emits the standard JSON error envelope."""
+        log_error = MagicMock()
         monkeypatch.setattr(
             tidy_module,
             "run_git",
             MagicMock(return_value=subprocess.CompletedProcess([], 129, stdout="", stderr="usage")),
         )
         monkeypatch.setattr(tidy_module, "_configure_logging", lambda *_args: None)
+        monkeypatch.setattr(tidy_module.logger, "info", MagicMock())
+        monkeypatch.setattr(tidy_module.logger, "error", log_error)
         monkeypatch.setattr(
             tidy_module, "_validate_environment", lambda: ("owner/repo", "", tmp_path)
         )
@@ -654,6 +657,7 @@ class TestMain:
         assert "requires Git 2.36 or later" in payload["message"]
         assert "No cleanup change occurred" in payload["message"]
         assert "Traceback" not in captured.out + captured.err
+        log_error.assert_called_once()
 
     def test_git_executable_exit_129_is_actionable_and_non_mutating(
         self,
